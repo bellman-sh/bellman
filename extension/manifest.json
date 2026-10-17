@@ -106,7 +106,7 @@
     },
     {
       "name": "bellman_evict",
-      "description": "Creator-only: remove a member and retire their seat's code."
+      "description": "Creator-only: remove a member and retire their seat's expiring code."
     },
     {
       "name": "bellman_audit",

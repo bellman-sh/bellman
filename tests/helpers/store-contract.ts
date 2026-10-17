@@ -26,6 +26,7 @@ import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
 import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
+import { sendKeyFor } from "../../src/send-limit.js";
 import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
@@ -82,6 +83,12 @@ export interface StoreContractHarness {
    * alarm, so its caller runs the alarm here.
    */
   advance?: (sessionId: string) => Promise<void>;
+  /**
+   * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
+   * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
+   * nothing that can leave memory passes none, and the case that calls it then pins the count alone.
+   */
+  forgetMemory?: () => Promise<void>;
 }
 
 export function describeStoreContract(
@@ -3073,6 +3080,61 @@ export function describeStoreContract(
           expect.objectContaining({ orgId: "org_codenerd", actorUserId: HOST_USER_ID, action: "sent_message",
             detail: { chars: JSON.stringify(answer.payload).length, ref_id: "1" } }),
         ]);
+      });
+
+      // Spec section 2: the hosted seat is exempt. Its writes go through this method alone, which never reads the count.
+      it("writes past a full send count: the hosted seat is exempt from the limit", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        for (let i = 0; i < 2; i++) await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW());
+        expect(await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW()), "the premise: the count is full").toMatchObject({ ok: false });
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: true });
+      });
+    });
+
+    describe("the send count (abuse protections spec D5)", () => {
+      // A stranger's key is kept apart from a member's by a store that has storage to keep it in, so the same
+      // count is asked of both kinds of key.
+      const strangerKey = (userId: string) => sendKeyFor({ via: "permanent", userId, memberId: `m_${userId}` });
+      for (const [whose, one, another] of [
+        ["a member's", "m_creator", "m_peer"],
+        ["a stranger's", strangerKey("u_creator"), strangerKey("u_peer")],
+      ] as const) {
+        it(`admits sends under ${whose} key up to the limit in a minute, per key and per room`, async () => {
+          await store.createSession(session());
+          await store.createSession(session({ id: "qs_other" }));
+          for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", one, 3, 1_000 + i)).toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
+          expect(await store.admitSend("qs_test", another, 3, 2_000), "another key").toEqual({ ok: true });
+          expect(await store.admitSend("qs_other", one, 3, 2_000), "another room").toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 61_000), "a minute on").toEqual({ ok: true });
+        });
+      }
+
+      // Spec D5, amended for strangers: their count is stored, so a script cannot send 6, pause until the idle
+      // room object is evicted, and send 6 more.
+      it("keeps a stranger's count when the room object loses its memory", async () => {
+        await store.createSession(session());
+        const stranger = strangerKey("u_peer");
+        for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", stranger, 3, 1_000 + i)).toEqual({ ok: true });
+        await harness.forgetMemory?.();
+        expect(await store.admitSend("qs_test", stranger, 3, 2_000), "the count outlived the memory").toEqual({ ok: false, retryAfterMs: 59_000 });
+        expect(await store.admitSend("qs_test", stranger, 3, 61_000), "a minute on").toEqual({ ok: true });
+      });
+
+      // The count's limit is read from this field, so a store that dropped it would limit nobody as a stranger.
+      it("keeps how a seat was taken, on the pending connect and on the member it seats", async () => {
+        const s = session();
+        await store.createSession(s);
+        await store.putPendingConnect({
+          token: "qct_via", sessionId: s.id, userId: "u_peer", roomRole: "peer_b", via: "permanent",
+          createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
+        });
+        expect((await store.takePendingConnect("qct_via"))?.via).toBe("permanent");
+        const arriving = member({ memberId: "m_stranger", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b", via: "permanent" });
+        expect((await store.seatMember(s.id, arriving, 0, Date.now())).refused).toBeNull();
+        expect((await store.getMember(s.id, "m_stranger"))?.via).toBe("permanent");
+        expect((await store.getMember(s.id, "m_creator"))?.via, "the creator").toBeUndefined();
       });
     });
 

@@ -6,7 +6,7 @@
  * (the creator) and not `peer_b` (the joiner), which is the asymmetry most
  * cases lean on.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
@@ -15,13 +15,17 @@ import { MemoryStore } from "../../src/store.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
+import { SEND_LIMIT, SEND_WINDOW_MS } from "../../src/send-limit.js";
 import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS,
 } from "../../src/surface.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
-afterEach(async () => { await h.close(); });
+afterEach(async () => {
+  vi.useRealTimers();
+  await h.close();
+});
 
 const plan = (over: Record<string, unknown> = {}) =>
   ({ key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ...over });
@@ -332,8 +336,12 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
   });
 
   it("caps the room at 64 items, and a replace or a removal frees the way", async () => {
+    // 64 writes are more sends than a member gets in a minute (ADR 0022), so the clock steps past the
+    // window each time the allowance is spent. Only Date is faked; the transport runs on real timers.
+    vi.useFakeTimers({ toFake: ["Date"] });
     const p = await pairUp(h);
     for (let i = 0; i < MAX_SURFACE_ITEMS; i++) {
+      if (i > 0 && i % SEND_LIMIT === 0) vi.setSystemTime(Date.now() + SEND_WINDOW_MS + 1);
       const out = await write(p, { key: `k_${i}`, kind: "text", body: "x" });
       expect(out.isError, out.text).toBe(false);
     }

@@ -19,6 +19,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
   auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
@@ -1423,6 +1424,27 @@ export interface BellmanStore {
     extras?: AppendExtras
   ): Promise<EventWrite>;
   /**
+   * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
+   * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
+   * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
+   * it is given. The caller appends only when admitted; a refusal carries how long until the oldest send under
+   * the key leaves the window, and writes nothing to the log.
+   *
+   * A call of its own, made after a send's checks and before its append (ADR 0022), so both append methods
+   * keep their return types. A send that fails after it was admitted, such as one with a key conflict or one
+   * to a room that froze in the gap, still used its place.
+   *
+   * A stranger's count (a key `isStrangerKey` names) is stored, so it survives the room object leaving memory:
+   * an idle object is evicted after about 30 seconds, and a count kept only in memory would let a script send 6,
+   * pause, and send 6 more. `SessionDO` writes one row per stranger on each admission, holding the times still
+   * inside the minute, which is at most 6 small writes a minute per stranger and never more times than the
+   * limit. Every other key is memory only: `SessionDO` keeps those in the instance, so a room object that sleeps
+   * forgets them, which keeps a write off the busiest senders and costs a member at most a second 30 across an
+   * eviction. `MemoryStore` keeps both beside the room and drops them with it at the purge. The hosted seat is
+   * exempt by never being asked: its writes go through `appendHostEvent` alone.
+   */
+  admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission>;
+  /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
    * when a limit is given. The hosted seat's read (I4) and a public room's events route
    * are the bounded ones; every other caller reads the tail whole.
@@ -1680,6 +1702,8 @@ export class MemoryStore implements BellmanStore {
   private creatorBanned = new Map<string, CreatorBan[]>();
   /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
   private suspensions = new Map<string, Suspension>();
+  /** Recent sends, by session then by count key (`sendKeyFor`, spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
+  private sends = new Map<string, Map<string, number[]>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -2518,6 +2542,14 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "appended", event: detach(event) };
   }
 
+  async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
+    const room = this.sends.get(sessionId) ?? new Map<string, number[]>();
+    const counted = admitAt(room.get(key) ?? [], limit, now);
+    room.set(key, counted.times);
+    this.sends.set(sessionId, room);
+    return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
+  }
+
   /**
    * The append itself, with no awaits in it, so both public appenders can call
    * it without yielding between their guard and their write. Same rule, and
@@ -3000,6 +3032,7 @@ export class MemoryStore implements BellmanStore {
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
     this.roomBanned.delete(s.id);
+    this.sends.delete(s.id);
     this.surfaces.delete(s.id);
     this.sessions.delete(s.id);
   }

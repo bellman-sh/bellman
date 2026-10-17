@@ -102,6 +102,13 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         sessionId: session.id,
         userId: identity.userId,
         roomRole: role,
+        // A permanent code seats a stranger (abuse protections spec, section 2). The record the code
+        // resolved to says so: it has no expiry. Not when the room's creator redeems it, who is never a
+        // stranger, whichever handle they take. Kept beside `roomRole`, because bellman_confirm
+        // receives only the token.
+        ...(session.joinCodes[role]?.expiresAt === null && session.createdBy !== identity.userId
+          ? { via: "permanent" as const }
+          : {}),
         createdAt: Date.now(),
         expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       });

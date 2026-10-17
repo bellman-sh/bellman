@@ -76,11 +76,11 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   // leave every other path to the room routes.
   app.use("/rooms", serve(gated(async (request) => {
     const deps = { store, blobs, caller, panelOrigins: [] };
-    return (await moderationRoutes(request, { ...deps, mailReport })) ?? roomRoutes(request, deps);
+    return (await moderationRoutes(request, { ...deps, publicPageOrigins: [], mailReport })) ?? roomRoutes(request, deps);
   })));
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
-  app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [] }))));
+  app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [], publicPageOrigins: [] }))));
   // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of
   // them would make the local server the loose one. No overrides and no billing either, which is the truth
   // here: nothing on this server reads BELLMAN_USERS or BELLMAN_BILLING, and a plan here comes from the key

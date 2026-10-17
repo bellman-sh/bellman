@@ -130,6 +130,17 @@ BELLMAN_HOSTED_SEAT_USERS = "u_github_8698"
 # from anywhere.
 BELLMAN_PANEL_ORIGINS = "https://dash.bellman.sh"
 
+# The origins public room pages are served from: https://bellman.sh, where the
+# dash's Worker answers /r/*. Comma-separated bare origins, parsed as
+# BELLMAN_PANEL_ORIGINS is.
+#
+# What it grants, and nothing else: a script on a listed origin may file a
+# report as its reader (POST /rooms/:id/reports, with its preflight and its CSRF
+# check), and a sign-in started there returns there. Every other signed-in route
+# answers the panel's origins above alone, so a listed origin cannot read a
+# creator's reports, ban anyone or claim a handle. Unset or empty grants nothing.
+BELLMAN_PUBLIC_PAGE_ORIGINS = "https://bellman.sh"
+
 # BELLMAN_KEYS is a secret, never a var:
 #   npx wrangler secret put BELLMAN_KEYS
 # So is BELLMAN_OPERATORS, the user ids (u_…) that may release anyone's handle; unset, nobody may:

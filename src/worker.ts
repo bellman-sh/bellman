@@ -72,6 +72,15 @@ export interface WorkerEnv extends BellmanEnv {
    * rather than one that accepts a cookie from anywhere.
    */
   BELLMAN_PANEL_ORIGINS?: string;
+  /**
+   * Comma-separated origins public room pages are served from, e.g.
+   * "https://bellman.sh" (the dash's Worker answers `/r/*` there). Parsed as
+   * BELLMAN_PANEL_ORIGINS is. Honoured by `POST /rooms/:id/reports` (its CORS,
+   * its preflight and its CSRF check) and by the sign-in return, and by nothing
+   * else: every other signed-in route answers the panel's origins alone.
+   * Unset grants nothing.
+   */
+  BELLMAN_PUBLIC_PAGE_ORIGINS?: string;
   /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
   BELLMAN_BILLING?: string;
   /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
@@ -109,6 +118,7 @@ function oauthConfig(
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
     panelOrigins: parsePanelOrigins(env.BELLMAN_PANEL_ORIGINS),
+    publicPageOrigins: parsePanelOrigins(env.BELLMAN_PUBLIC_PAGE_ORIGINS, "BELLMAN_PUBLIC_PAGE_ORIGINS"),
     plans,
     operators: parseOperators(env.BELLMAN_OPERATORS),
     paymentLinks: billingSettings(env).paymentLinks,
@@ -261,7 +271,8 @@ export default {
     // guard /ws has covers them all — a deploy with neither a key map nor OAuth
     // serves no room. The moderation routes are asked first: they answer the paths
     // under /rooms/:id/bans and /rooms/:id/reports, and leave every other path to
-    // the room routes. Both report routes are behind the suspension gate here.
+    // the room routes. Both report routes are behind the suspension gate here. They
+    // alone take the public room pages' origins, for the report write.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
@@ -271,7 +282,8 @@ export default {
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       };
-      const handled = (await moderationRoutes(request, { ...deps, mailReport })) ?? (await roomRoutes(request, deps));
+      const handled = (await moderationRoutes(request, { ...deps, publicPageOrigins: oauth?.publicPageOrigins ?? [], mailReport }))
+        ?? (await roomRoutes(request, deps));
       if (handled) return handled;
     }
 
@@ -331,6 +343,7 @@ export default {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
+        publicPageOrigins: oauth?.publicPageOrigins ?? [],
       });
       if (handled) return handled;
     }

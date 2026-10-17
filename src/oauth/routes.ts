@@ -53,6 +53,14 @@ export interface OAuthConfig {
    */
   panelOrigins?: string[];
   /**
+   * Origins public room pages are served from, e.g. ["https://bellman.sh"] (BELLMAN_PUBLIC_PAGE_ORIGINS).
+   *
+   * This router reads it for the sign-in return alone (`panelDestination`): a sign-in started on one of these pages
+   * comes back to it. It adds nothing to what `panelOrigins` grants: sessions, CORS and the CSRF check here still read
+   * the panel's list. The Worker hands the same list to the report route, the one other thing that honours it.
+   */
+  publicPageOrigins?: string[];
+  /**
    * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
    * /upgrade/<name> signs the human in and sends them to the link tagged with
    * their user id, which is how the webhook knows whose plan to change.
@@ -436,7 +444,9 @@ function timingSafeEqual(a: string, b: string): boolean {
  * The open redirect. `returnTo` reaches us inside a signed state, so it cannot
  * have been altered mid-flow — but it was supplied by whoever started the flow,
  * and that is not necessarily the person finishing it. So it is validated here
- * too, on exact origin equality against the panel allowlist.
+ * too, on exact origin equality against the panel allowlist and the public room
+ * pages' (BELLMAN_PUBLIC_PAGE_ORIGINS), which a "Sign in to report" on a room's
+ * page comes back to.
  *
  * Exact equality, not a prefix test: startsWith("https://dash.bellman.sh")
  * admits "https://dash.bellman.sh.attacker.example".
@@ -448,7 +458,11 @@ function timingSafeEqual(a: string, b: string): boolean {
  * Anything unusable falls back to the first configured panel origin rather than
  * erroring: a sign-in that completed should end somewhere the human can use.
  */
-function panelDestination(returnTo: string | undefined, panelOrigins: string[]): string {
+function panelDestination(
+  returnTo: string | undefined,
+  panelOrigins: string[],
+  publicPageOrigins: readonly string[]
+): string {
   const fallback = panelOrigins[0];
   if (!returnTo) return fallback;
   let parsed: URL;
@@ -462,8 +476,8 @@ function panelDestination(returnTo: string | undefined, panelOrigins: string[]):
   // finishSession on the way out — and toString() normalises a bare origin to
   // origin + "/", so the second pass would rewrite the first pass's answer.
   // Returning the input makes it idempotent. The origin is what was validated;
-  // the path and query are the panel's business.
-  return panelOrigins.includes(parsed.origin) ? returnTo : fallback;
+  // the path and query are the destination's business.
+  return panelOrigins.includes(parsed.origin) || publicPageOrigins.includes(parsed.origin) ? returnTo : fallback;
 }
 
 /** Carried through the provider round trip when signing in to pay. */
@@ -628,7 +642,7 @@ async function finishSession(
   return ending(new Response(null, {
     status: 302,
     headers: {
-      location: panelDestination(pending.return_to, panels),
+      location: panelDestination(pending.return_to, panels, config.publicPageOrigins ?? []),
       "set-cookie": serializeSessionCookie(id, secure, Math.floor(SESSION_TTL_MS / 1000)),
       "cache-control": "no-store",
       // This response's own URL holds the provider's authorization code, and it
@@ -862,7 +876,7 @@ export async function handleOAuth(
     // into a signed blob and discovering it after the provider round trip is a
     // worse error message for the same outcome.
     const pending: SessionRequest = {
-      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
+      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels, config.publicPageOrigins ?? []),
       nonce,
     };
     const stateToken = await signJwt(

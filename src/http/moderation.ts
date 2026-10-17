@@ -20,6 +20,10 @@
  * A report is not the creator's alone to file, so it refuses in its own order: 401, the CSRF check, the body's bound
  * and shape, then `fileRoomReport`'s, whose 404 is the one answer for a missing room and for a private room the
  * caller has no handle in.
+ *
+ * A report is the one write the public room page's origin may make. `POST` and `OPTIONS` on `/rooms/:id/reports` also
+ * answer `publicPageOrigins` (https://bellman.sh): its CORS, its preflight and its CSRF check. Every other path and
+ * method here, the creator's list of reports included, answers the panel's origins alone.
  */
 import { banView, creatorBanView } from "../bans.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
@@ -28,6 +32,12 @@ import { evictMember, fileRoomReport, handlesOf } from "../rooms.js";
 import { STATUS, json, lengthRefusal, methodNotAllowed, problem, type RoomCaller, type RoomRouteDeps } from "./rooms.js";
 
 export type ModerationDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
+  /**
+   * The origins public room pages are served from (BELLMAN_PUBLIC_PAGE_ORIGINS), beside `panelOrigins` for `POST` and
+   * `OPTIONS` on `/rooms/:id/reports` and for nothing else this module serves. Required, so each caller says what it
+   * grants: the Node server passes none.
+   */
+  publicPageOrigins: readonly string[];
   /** What mails a filed report. Absent, it is `reportMailer(undefined)`: the report is stored and the log says no email went. */
   mailReport?: ReportMailer;
 };
@@ -52,7 +62,10 @@ export async function moderationRoutes(request: Request, deps: ModerationDeps): 
   const accountBan = ACCOUNT_BAN.exec(path);
   const roomReports = ROOM_REPORTS.exec(path);
   if (!roomBans && !roomBan && !accountBan && !roomReports && path !== ACCOUNT_BANS) return undefined;
-  const origin = allowedOrigin(request, deps.panelOrigins);
+  // A report is the one write the public room page's origin may make: `POST` files it and `OPTIONS` is its preflight. A
+  // `GET` on the same path is the creator's list, which like every other path here answers the panel's origins alone.
+  const reportWrite = roomReports !== null && (request.method === "POST" || request.method === "OPTIONS");
+  const origin = allowedOrigin(request, reportWrite ? [...deps.panelOrigins, ...deps.publicPageOrigins] : deps.panelOrigins);
   if (request.method === "OPTIONS") return preflightResponse(origin);
 
   // An unexpected throw is answered here, in this route's own JSON, as the room routes answer theirs.

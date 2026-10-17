@@ -124,7 +124,9 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     it is public, anyone signed in. `fileRoomReport` in `src/rooms.ts` is the one
     operation the tool and the route run. Both take a `member_id` or a `cursor`, or
     neither for the room, and a message target must be an event a member sent, so one from
-    `"system"` is refused.
+    `"system"` is refused. A caller may report a message exactly when it could read it: a
+    member removed from a room that is not public may report only what came before its
+    removal (its cut, #113), and in a public room, whose log anyone may read, no one is cut.
 18. **A report keeps whom it is about (R12).** The member id, user id and label
     (`subject`), so an operator can suspend the account. A creator's view carries the
     member id and label only, and never who filed the report. The reported person is not

@@ -6,8 +6,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief, manifestFixture, member } from "../helpers/fixtures.js";
-import { pairUp } from "../helpers/flows.js";
+import { brief, manifestFixture, member, pairVerbs } from "../helpers/fixtures.js";
+import { pairUp, seatAgain, startRoom } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
@@ -19,11 +19,14 @@ let h: Harness;
 beforeEach(() => { h = new Harness(); });
 afterEach(async () => { await h.close(); vi.useRealTimers(); });
 
+interface Seat { member_id: string; role: string; verbs: string[] }
+
 interface Room {
   session_id: string;
   status: string;
-  your_member_id: string;
-  room: { your_role: string };
+  your_member_id: string | null;
+  your_seats: Seat[];
+  room: { your_role: string | null; your_verbs: string[]; your_heartbeat_on: boolean };
   members: { member_id: string; room_role: string; beat: Record<string, unknown> }[];
   join_codes: Record<string, unknown>[];
   last_event: { cursor: number; type: string } | null;
@@ -64,6 +67,12 @@ describe("bellman_rooms", () => {
     expect(theirs.your_member_id).toBe(p.joinerMemberId);
     expect(theirs.room.your_role).toBe("peer_b");
     expect(theirs.members.map((m) => m.room_role).sort()).toEqual(["peer_a", "peer_b"]);
+
+    // One seat: the viewer fields speak for it as they always have, and your_seats holds just that seat.
+    expect(mine.room.your_verbs).toEqual(pairVerbs("peer_a"));
+    expect(mine.your_seats).toEqual([{ member_id: p.creatorMemberId, role: "peer_a", verbs: pairVerbs("peer_a") }]);
+    expect(theirs.room.your_verbs).toEqual(pairVerbs("peer_b"));
+    expect(theirs.your_seats).toEqual([{ member_id: p.joinerMemberId, role: "peer_b", verbs: pairVerbs("peer_b") }]);
   });
 
   it("lists a frozen room with its status, and omits a closed one", async () => {
@@ -154,18 +163,79 @@ describe("bellman_rooms", () => {
     });
   });
 
-  // Review Focus 1: one person, two machines, one room.
-  it("speaks for the newest live seat when one person holds two in a room", async () => {
-    const p = await pairUp(h, { manifest: SWARM });
-    const second = member({
-      memberId: "m_second", userId: p.creator.identity.userId, label: p.creator.identity.label,
-      roomRole: "helper", joinedAt: Date.now() + 1, lastSeenAt: Date.now() + 1,
-    });
-    expect(await h.store.addMember(p.sessionId, second)).toBe(true);
-    const rooms = await roomsOf(p.creator);
+  // One person, two machines, one room. The tool is called by the account, and nothing in the call says
+  // which seat is asking, so the answer lists every seat the account holds and does not pick one. It used
+  // to name the newest as "yours": a claude.ai session as peer_a beside a Claude Code session as peer_b was
+  // told it was peer_b, and could not see the join codes its peer_a seat could mint.
+  it("lists every seat one account holds in a room, oldest first", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(creator);
+    await seatAgain(h, creator, sessionId, "peer_b");
+
+    const rooms = await roomsOf(creator);
     expect(rooms).toHaveLength(1);
-    expect(rooms[0].your_member_id).toBe("m_second");
-    expect(rooms[0].room.your_role).toBe("helper");
+    expect(rooms[0].your_seats).toEqual([
+      { member_id: memberId, role: "peer_a", verbs: pairVerbs("peer_a") },
+      { member_id: "m_second", role: "peer_b", verbs: pairVerbs("peer_b") },
+    ]);
+  });
+
+  it("names none of them as yours, and leaves the room block's seat fields empty", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(creator, SWARM);
+    // One lead seat, which the cadence asks to report: the fields speak for it.
+    const [alone] = await roomsOf(creator);
+    expect(alone.your_member_id).toBe(memberId);
+    expect(alone.room).toMatchObject({ your_role: "lead", your_heartbeat_on: true });
+
+    await seatAgain(h, creator, sessionId, "lead");
+    const [room] = await roomsOf(creator);
+    expect(room.your_member_id).toBeNull();
+    expect(room.room).toMatchObject({ your_role: null, your_verbs: [], your_heartbeat_on: false });
+  });
+
+  it("shows a code's string and link when any of the seats holds invite, though the newest does not", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { started, sessionId } = await startRoom(creator);
+    // peer_a can invite and peer_b cannot, and the newer seat is the one that cannot.
+    await seatAgain(h, creator, sessionId, "peer_b");
+
+    const [room] = await roomsOf(creator);
+    expect(room.join_codes).toEqual([{
+      role: "peer_b",
+      code: started.data.join_code,
+      join_url: started.data.join_url,
+      expires_at: started.data.join_code_expires_at,
+    }]);
+  });
+
+  it("keeps a code's string and link hidden when none of the seats holds invite", async () => {
+    const p = await pairUp(h, { manifest: SWARM });
+    const issued = await p.creator.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, role: "observer",
+    });
+    expect(issued.isError, issued.text).toBe(false);
+    await seatAgain(h, p.joiner, p.sessionId, "helper");
+
+    const [room] = await roomsOf(p.joiner);
+    // Two helper seats of one account, so this is the several-seats path, and a helper cannot invite.
+    expect(room.members.map((m) => m.member_id)).toEqual(expect.arrayContaining([p.joinerMemberId, "m_second"]));
+    expect(room.join_codes.find((c) => c.role === "observer")).toEqual({
+      role: "observer", expires_at: issued.data.join_code_expires_at,
+    });
+    expect(room.join_codes.some((c) => "code" in c || "join_url" in c)).toBe(false);
+  });
+
+  it("does not count a seat that left", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(creator);
+    await seatAgain(h, creator, sessionId, "peer_b");
+    const gone = await creator.call("bellman_leave", { session_id: sessionId, member_id: "m_second" });
+    expect(gone.isError, gone.text).toBe(false);
+
+    const [room] = await roomsOf(creator);
+    expect(room.your_member_id).toBe(memberId);
+    expect(room.your_seats).toEqual([{ member_id: memberId, role: "peer_a", verbs: pairVerbs("peer_a") }]);
   });
 
   // The joined index lists every room a person ever held a handle in, closed
@@ -207,5 +277,16 @@ describe("bellman_rooms", () => {
     await roomsOf(p.creator);
     const me = (await h.store.getSession(p.sessionId))!.members.find((m) => m.memberId === p.creatorMemberId)!;
     expect(me.lastSeenAt).toBe(old);
+  });
+
+  // The listing is what a model reads to know what the result means, so a result that names every seat
+  // and an answer that says "yours" for one of several would be two stories about the same field.
+  it("tells a caller in its description what one seat and several seats mean, and who sees a code", async () => {
+    const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+    const doc = tools.find((t) => t.name === "bellman_rooms")!.description!.replace(/\s+/g, " ");
+
+    expect(doc).toContain("your_seats[]");
+    expect(doc).toContain("null when you hold several");
+    expect(doc).toContain("any of your seats holds invite");
   });
 });

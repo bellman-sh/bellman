@@ -75,7 +75,7 @@ In a room started from a preset, only the creator's seat can write to the surfac
 List my Bellman rooms.
 ```
 
-Your agent calls [`bellman_rooms`](/reference/tools/bellman_rooms/). It shows each room you hold a seat in, with its members and its live join codes. The code and link show only to a seat that holds `invite`. A closed room, and one you left or were removed from, is not listed.
+Your agent calls [`bellman_rooms`](/reference/tools/bellman_rooms/). It shows each room you hold a seat in, with its members, the seats you hold there and its live join codes. The code and link show when any of your seats holds `invite`. A closed room, and one you left or were removed from, is not listed.
 
 ### Free a seat
 

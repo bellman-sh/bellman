@@ -16,7 +16,7 @@
  * to a status, the way rooms.ts says a route should; `RoomFailure` is a closed
  * union, so a code the table below forgets is a compile error.
  */
-import { entitlementsFor } from "../auth.js";
+import { auditRefusal } from "../audit.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
@@ -453,8 +453,7 @@ const closedAtDescending = (a: StoredSession, b: StoredSession): number => {
  * team plan, which is what pays for the audit log, the admin role, and an org. A falsy org is no
  * org, as a falsy id names no stream anywhere else (ARCHITECTURE.md, runtime fact 4).
  */
-const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string } =>
-  identity.role === "admin" && entitlementsFor(identity).audit && Boolean(identity.orgId);
+const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string } => auditRefusal(identity) === null;
 
 /**
  * Whether the room admits this caller as the admin of an org that sat in it (#65, D4): the audit
@@ -638,7 +637,8 @@ async function deleteRoom(request: Request, sessionId: string, origin: string | 
     return problem(403, "forbidden", "only the room's creator or an admin of an org in it may delete it", origin);
   }
 
-  const scheduled = await deps.store.schedulePurge(sessionId, Date.now(), who.identity.userId);
+  const asker = { userId: who.identity.userId, label: who.identity.label, orgId: who.identity.orgId };
+  const scheduled = await deps.store.schedulePurge(sessionId, Date.now(), asker);
   if (!scheduled.ok) {
     return scheduled.reason === "open"
       ? problem(409, "conflict", "a room is deleted after it closes", origin)
@@ -738,13 +738,15 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   const cut = asAdmin ? undefined : cutFor(mine);
   const within = (e: SessionEvent) => cut === undefined || e.cursor <= cut;
   let read: SessionEvent[];
+  // Every read is bounded in the store (#208). `within` keeps a prefix of what it is handed, so a
+  // page filtered to the cut is the page the whole tail filtered and sliced used to give.
   if (after !== undefined) {
-    read = (await deps.store.eventsAfter(sessionId, after)).filter(within).slice(0, MAX_EVENTS_READ);
+    read = (await deps.store.eventsAfter(sessionId, after, MAX_EVENTS_READ)).filter(within);
   } else if (cut === undefined) {
     read = await deps.store.recentEvents(sessionId, MAX_EVENTS_READ);
   } else {
     // A removed member's newest are the ones before its cut, which the room's tail may not reach.
-    read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ))).filter(within).slice(-MAX_EVENTS_READ);
+    read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ), MAX_EVENTS_READ)).filter(within);
   }
   return json(200, {
     events: read.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),

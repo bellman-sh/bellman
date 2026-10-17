@@ -1,4 +1,4 @@
-import { countdown, duration, el, relative, text } from "./shared.js";
+import { countdown, duration, el, relative, seatsLine, text } from "./shared.js";
 import type { MemberRow, RoomSummary, RoomsResult } from "./types.js";
 
 function memberRow(m: MemberRow, now: number): HTMLTableRowElement {
@@ -43,7 +43,7 @@ function roomCard(room: RoomSummary, seen: Map<string, number>, now: number, onS
       el("span", { class: "chip" }, room.room.preset ?? room.room.mode),
       room.room.public ? el("span", { class: "chip" }, "public") : null),
     el("p", { class: "muted" },
-      `Your seat: ${room.room.your_role} (${room.room.your_verbs.join(", ") || "read only"}) · ` +
+      `${seatsLine(room.your_seats)} · ` +
         `${room.active_members} of ${room.max_members} seats · ` +
         `${fresh} new since you opened this`),
     el("table", {},

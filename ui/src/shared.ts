@@ -1,3 +1,5 @@
+import type { Seat } from "./types.js";
+
 /**
  * Build an element. String children become text nodes, so nothing passed here
  * is ever parsed as markup: this is the one way peer prose reaches the DOM
@@ -51,6 +53,18 @@ export function relative(iso: string | null, now = Date.now()): string {
 export function countdown(iso: string, now = Date.now()): string {
   const s = Math.round((Date.parse(iso) - now) / 1000);
   return s <= 0 ? "expired" : `${duration(s)} left`;
+}
+
+/** "lead (send, invite)": a seat's role and what it may do. */
+const seatText = (seat: Seat): string => `${seat.role} (${seat.verbs.join(", ") || "read only"})`;
+
+/**
+ * What the monitor and the canvas say of the viewer's seats. One seat reads "Your seat: lead (send, invite)". An
+ * account on two machines holds two, and reads "Your seats: lead (send, invite), helper (send)": no one of them is
+ * the seat that is asking.
+ */
+export function seatsLine(seats: readonly Seat[]): string {
+  return `${seats.length === 1 ? "Your seat" : "Your seats"}: ${seats.map(seatText).join(", ")}`;
 }
 
 /** A string for display, whatever the wire carried: peer payloads are not guaranteed any shape. */

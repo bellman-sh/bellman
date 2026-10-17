@@ -1318,7 +1318,7 @@ export async function handleOAuth(
       // same key in the gap, and write-then-audit let the record of a change
       // that already happened be lost with no way to retry it.
       if ((await config.plans.putGrantIfOwned(grant, identity.orgId,
-        { actorUserId: identity.userId })) === "conflict") {
+        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId })) === "conflict") {
         return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
       }
       return json({ granted: grant }, 201);
@@ -1334,7 +1334,7 @@ export async function handleOAuth(
       // the grant carried on applying. The store records plan_revoked only for
       // a delete that removed something, so a refusal leaves no entry either.
       const outcome = await config.plans.deleteGrantIfOwned(key, identity.orgId,
-        { actorUserId: identity.userId });
+        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId });
       if (outcome !== "deleted") {
         return oauthError("insufficient_scope", "no such grant in your org", 403);
       }

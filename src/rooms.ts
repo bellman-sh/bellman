@@ -22,13 +22,14 @@ import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
-  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
+  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
+import { auditRows, partiesOf } from "./audit.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -234,9 +235,9 @@ export async function announceReclaimed(
       },
       refId: null,
     });
-    // `alsoOrgs` for the reason evictMember passes it: the member losing access
-    // may be in neither the room's org nor the joiner's, and that org's admins
-    // are the ones who need to see their engineer leave a room.
+    // `alsoOrgs` for the reason evictMember passes it: the roster may no longer
+    // count the member losing access, and that org's admins are the ones who
+    // need to see their engineer leave a room.
     //
     // `actor` is the joiner that took the seat, because an audit row has to name
     // a real identity — but the action is `member_timed_out`, not
@@ -372,46 +373,46 @@ export async function readSurface(
 }
 
 /**
- * Which orgs get a row for this action, and what it says. One rule, in one
- * place, for the callers that write it themselves and the ones that hand it to
+ * Which orgs get a row for this action, and what it says (audit trail spec, D1 and D2). One
+ * rule, in one place, for the callers that write it themselves and the ones that hand it to
  * a store operation to commit with the mutation it records.
  *
- * Enterprise audit trail. Cross-org sessions write one entry per involved org
- * so each org's admins see the crossings that touched THEIR boundary —
- * without being able to read the other org's unrelated activity.
+ * The parties are the room's org, the actor's, any named in `alsoOrgs`, and the org of every
+ * person still in the room. The last is what makes a crossing visible from both sides: when a
+ * member of org A sends in A's room while a member of org B is in it, A's context reaches B, so
+ * B's stream records it too. `alsoOrgs` is for an actor acting on someone else: an eviction
+ * touches the evicted member's org, which need be neither the room's nor the creator's, and
+ * that member may already have left the room, where the roster no longer counts them. The
+ * hosted seat is not a party; it acts for the room. A person with no org is a party with no
+ * stream: the room is cross-org for everyone else, and no row is written for them.
  *
- * The involved orgs are the room's and the actor's, and that is enough while
- * the actor is the person the entry is about: a member joining or leaving
- * writes a row for their own org. It is not enough when the actor acts on
- * someone else. An eviction touches the evicted member's org, which need be
- * neither the room's nor the creator's, so that caller names it in `alsoOrgs`
- * and the entry reaches the org whose member lost access. The parameter only
- * adds: the room's and the actor's rows are always written, an org named twice
- * gets one row, and an org-less member gets none.
+ * `roster` is the room as it stands for this action: the session's members unless a caller holds
+ * a newer roster, and none for an act nobody in the room sees, such as a preview before joining.
  *
- * It lives here rather than in a transport because a transport that writes its
- * own row is a transport that will one day write it for one org and not the
- * other.
+ * It lives here rather than in a transport because a transport that writes its own row is a
+ * transport that will one day write it for one org and not the other.
  */
 export function auditEntries(
   session: StoredSession,
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): AuditEntry[] {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
-  const at = Date.now();
-  return [...orgs]
-    .filter((orgId): orgId is string => orgId !== null)
-    .map((orgId) => ({
-      at, orgId, sessionId: session.id, actorUserId: actor.userId, action, detail,
-    }));
+  const parties = partiesOf([
+    session.orgId, actor.orgId, ...alsoOrgs, ...roster.filter(isActivePerson).map((m) => m.orgId),
+  ]);
+  return auditRows(
+    parties,
+    { at: Date.now(), sessionId: session.id, action, roomName: session.manifest.room, detail },
+    { userId: actor.userId, label: actor.label, orgId: actor.orgId },
+  );
 }
 
 /**
- * Write what `auditEntries` builds, one row per org, for a caller that has no
- * store operation to commit it with.
+ * Write what `auditEntries` builds, one row per org and all at once, for a caller
+ * that has no store operation to commit it with. Any one failing fails the call.
  */
 export async function audit(
   store: BellmanStore,
@@ -419,11 +420,11 @@ export async function audit(
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): Promise<void> {
-  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs)) {
-    await store.appendAudit(entry);
-  }
+  const entries = auditEntries(session, actor, action, detail, alsoOrgs, roster);
+  await Promise.all(entries.map((e) => store.appendAudit(e)));
 }
 
 /**
@@ -1119,10 +1120,13 @@ export async function evictMember(
     // above and the removal. And it could only describe a removal this call made,
     // so the doors an eviction shut would sit in two places, a field for members who
     // were present and a row for those who had already left, and a query for
-    // `invite_revoked` would find half of them. The row goes to the room's org and
-    // the creator's, as revokeInvite writes it, and no more: it names a role and no
-    // person, so the departed member's org could not tell whom it concerned, and a
-    // row an org cannot resolve to anyone is worse than none.
+    // `invite_revoked` would find half of them. The row goes where revokeInvite's
+    // goes, to the orgs `auditEntries` names. Those include the evicted member's
+    // org while they are still in the room, since the door shuts as they leave and
+    // their org's `member_evicted` row beside it names them. A member who had
+    // already left is no party to it, and their org is not added: the row names a
+    // role and no person, so that org could not tell whom it concerned, and a row
+    // an org cannot resolve to anyone is worse than none.
     //
     // Except a public room's permanent code, which an eviction leaves open (see above). Read from
     // the room as this call found it, so a code replaced since is the next eviction's to shut.
@@ -1149,8 +1153,8 @@ export async function evictMember(
         // event above never carries it: the log is public in a public room.
         ...(ban ? { ban } : {}),
       },
-      // The evicted member's org as well. The actor here is the creator, not the
-      // member, so unless that org is also the room's it would get no row.
+      // The evicted member's org as well. The roster counts them only while they are
+      // still in the room, and a target who has already left still needs this row.
       [m.orgId],
     ),
   });

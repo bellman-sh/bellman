@@ -143,10 +143,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         payload: { member: storedMember({ ...member, agent: member.brief.agent }), brief },
         refId: null,
       });
+      // The roster after the seat, not the one read before it: a member this seat displaced
+      // is out of the room, and was never shown the joiner's brief.
       await audit(s, session, identity, "brief_exchanged", {
         joiner: identity.userId,
         agent: brief.agent,
-      });
+      }, [], joined.members);
 
       // The briefs of the members heard from most recently, not everyone's (ADR 0018): a room
       // seats thousands, and a joiner's agent reads all it is handed. A member who has left

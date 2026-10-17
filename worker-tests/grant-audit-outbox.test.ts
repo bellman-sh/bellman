@@ -35,6 +35,8 @@ interface Hold {
 
 const holds: Hold[] = [];
 const inFlight: Promise<unknown>[] = [];
+/** Patches on a class's prototype, undone after each case. */
+const undo: (() => void)[] = [];
 
 function newHold(): Hold {
   const hold: Hold = { held: false, released: false, release: () => { hold.released = true; } };
@@ -70,6 +72,7 @@ async function answeredWhileHeld<T>(call: Promise<T>, what: string): Promise<T> 
 afterEach(async () => {
   for (const hold of holds.splice(0)) hold.release();
   await Promise.race([Promise.allSettled(inFlight.splice(0)), sleep(2_000)]);
+  for (const restore of undo.splice(0)) restore();
   await reset();
   await abortAllDurableObjects();
 });
@@ -665,18 +668,20 @@ it("drops a queued entry that names no org, instead of filing it under a name", 
 });
 
 /**
- * Make an org's audit object slow, or unable to take an entry, from the inside: its
- * every append opens a transaction, so that is where it is held up or refused. A `hold`
- * makes it wait for the test instead of for a time: the append arrives, sets `held`, and
- * goes through once the test releases it.
+ * Make an org's audit object slow, or unable to take an entry, from the inside. An append
+ * is one synchronous transaction, which nothing inside it can hold up or refuse, so the
+ * hook sits in front of the call. It patches the class's prototype, because a Durable
+ * Object answers RPC from its prototype and an override set on the instance is never
+ * called, and answers only for this instance. A `hold` makes it wait for the test instead
+ * of for a time: the append arrives, sets `held`, and goes through once the test releases
+ * it.
  */
 const misbehaving = (orgId: string, how: { down: boolean; delayMs: number; hold?: Hold }) =>
-  runInDurableObject(auditStream(orgId), async (_i: AuditDO, ctx) => {
-    type Call = (...args: unknown[]) => Promise<unknown>;
-    const open = (ctx.storage as unknown as { transaction: Call }).transaction.bind(ctx.storage);
-    Object.defineProperty(ctx.storage, "transaction", {
-      configurable: true,
-      value: async (...args: unknown[]) => {
+  runInDurableObject<AuditDO, void>(auditStream(orgId), (self) => {
+    const proto = Object.getPrototypeOf(self) as { append: (...args: unknown[]) => Promise<void> };
+    const append = proto.append;
+    proto.append = async function (this: AuditDO, ...args: unknown[]) {
+      if (this === self) {
         const { hold } = how;
         if (hold) {
           hold.held = true;
@@ -684,9 +689,10 @@ const misbehaving = (orgId: string, how: { down: boolean; delayMs: number; hold?
         }
         if (how.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, how.delayMs));
         if (how.down) throw new Error("audit object down");
-        return open(...args);
-      },
-    });
+      }
+      return append.apply(this, args);
+    };
+    undo.push(() => { proto.append = append; });
   });
 
 /**

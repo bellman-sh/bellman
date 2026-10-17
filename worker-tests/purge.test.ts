@@ -14,7 +14,7 @@ import { OUTBOX_HANDLER, OUTBOX_SEQ, dueKey, outboxKey } from "../src/outbox.js"
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
 import type { Session, SurfaceItem } from "../src/types.js";
-import { member, session } from "../tests/helpers/fixtures.js";
+import { jesseActor, member, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -200,7 +200,7 @@ it("keeps a row closed before the window existed, and lets a delete reach it", a
     closed: true, closedAt: null, retainAfterCloseMs: null, purgeAt: null, blobsSwept: false,
   });
 
-  expect(await store.schedulePurge("qs_legacy", Date.now(), "u_jesse")).toMatchObject({ ok: true });
+  expect(await store.schedulePurge("qs_legacy", Date.now(), jesseActor)).toMatchObject({ ok: true });
   await runAlarm("qs_legacy");
 
   expect(await rowCount("qs_legacy")).toBe(0);
@@ -212,7 +212,7 @@ it("answers open for a room that has not closed, and arms and queues nothing", a
   await store.createSession(room("qs_open"));
   const before = { alarm: await armedAlarm("qs_open"), rows: await rowCount("qs_open") };
 
-  expect(await store.schedulePurge("qs_open", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
+  expect(await store.schedulePurge("qs_open", Date.now(), jesseActor)).toEqual({ ok: false, reason: "open" });
 
   expect({ alarm: await armedAlarm("qs_open"), rows: await rowCount("qs_open") }).toEqual(before);
 });
@@ -225,7 +225,7 @@ it("arms the purge at the time a delete asked for, files who asked, and purges t
   expect(await armedAlarm("qs_asked")).toBeGreaterThan(Date.now() + 80 * 24 * HOUR);
   const at = Date.now() + HOUR;
 
-  expect(await store.schedulePurge("qs_asked", at, "u_jesse")).toEqual({ ok: true, purgeAt: at });
+  expect(await store.schedulePurge("qs_asked", at, jesseActor)).toEqual({ ok: true, purgeAt: at });
 
   await vi.waitFor(async () => expect(await armedAlarm("qs_asked")).toBe(at), { timeout: 2_000 });
   expect(await store.getSession("qs_asked"), "an hour out, the room is still there").toBeDefined();

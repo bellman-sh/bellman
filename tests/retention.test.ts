@@ -85,20 +85,26 @@ describe("orgsOnRoster", () => {
 describe("the entries a purge files", () => {
   const room = session({ id: "qs_entry" });
   const detail = { session_id: "qs_entry", room: room.manifest.room };
+  const parties = ["org_codenerd", "org_other"];
+  const said = { roomName: room.manifest.room, parties, crossing: "cross_org" };
 
-  it("room_purged says the window ran out, and names the system as the actor", () => {
-    expect(roomPurgedEntry(room, "org_codenerd", 7)).toEqual({
+  it("room_purged says the window ran out, and names the system as the actor, with no direction", () => {
+    expect(roomPurgedEntry(room, "org_codenerd", parties, 7)).toEqual({
       at: 7, orgId: "org_codenerd", sessionId: "qs_entry", actorUserId: "system", action: "room_purged", detail,
+      actorLabel: null, actorOrgId: null, direction: null, ...said,
     });
   });
 
-  it("room_deleted names who asked", () => {
-    expect(roomDeletedEntry(room, "org_codenerd", "u_jesse", 7)).toEqual({
+  it("room_deleted names who asked: outbound for the asker's org, inbound for the others", () => {
+    const jesse = { userId: "u_jesse", label: "jesse@codenerd", orgId: "org_codenerd" };
+    expect(roomDeletedEntry(room, "org_codenerd", parties, jesse, 7)).toEqual({
       at: 7, orgId: "org_codenerd", sessionId: "qs_entry", actorUserId: "u_jesse", action: "room_deleted", detail,
+      actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd", direction: "outbound", ...said,
     });
+    expect(roomDeletedEntry(room, "org_other", parties, jesse, 7).direction).toBe("inbound");
   });
 
   it("room_deleted names the system when nobody did", () => {
-    expect(roomDeletedEntry(room, "org_codenerd", null, 7).actorUserId).toBe("system");
+    expect(roomDeletedEntry(room, "org_codenerd", parties, null, 7)).toMatchObject({ actorUserId: "system", direction: null });
   });
 });

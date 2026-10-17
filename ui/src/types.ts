@@ -65,13 +65,29 @@ export interface MemberRow {
   beat: Beat;
 }
 
+/** One seat an account holds in a room, as bellman_rooms lists it. */
+export interface Seat {
+  member_id: string;
+  role: string;
+  verbs: string[];
+}
+
+/**
+ * The room block as bellman_rooms and bellman_surface send it. They are called by the account, so with
+ * several seats the block names none of them and `your_role` is null.
+ */
+export type SeatedRoomBlock = Omit<RoomBlock, "your_role"> & { your_role: string | null };
+
 export interface RoomSummary {
   session_id: string;
   status: string;
   max_members: number;
   active_members: number;
-  your_member_id: string;
-  room: RoomBlock;
+  /** The seat's id when the account holds one; null when it holds several, which name none of them as its own. */
+  your_member_id: string | null;
+  /** Every seat the account holds in the room, oldest first. */
+  your_seats: Seat[];
+  room: SeatedRoomBlock;
   members: MemberRow[];
   /** `expires_at` is null for a public room's permanent code (ADR 0020). */
   join_codes: { role: string; expires_at: string | null; code?: string; join_url?: string }[];
@@ -129,6 +145,8 @@ export interface SurfaceBlock {
 /** bellman_surface's structuredContent, and the part of bellman_confirm's the canvas reads. */
 export interface SurfaceResult {
   session_id: string;
-  room: RoomBlock;
+  /** Every seat the account holds in the room, oldest first. Absent from bellman_confirm's result, which speaks for the seat it just made. */
+  your_seats?: Seat[];
+  room: SeatedRoomBlock;
   surface: SurfaceBlock;
 }

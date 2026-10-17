@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import type { Brief } from "../../src/types.js";
-import { brief, manifestFixture, openaiAgent } from "./fixtures.js";
+import { brief, manifestFixture, member, openaiAgent } from "./fixtures.js";
 import { DEV_KEY, type Harness, type Outcome, type Peer } from "./harness.js";
 
 export interface PairedSession {
@@ -98,4 +98,21 @@ export async function joinWith(peer: Peer, code: string): Promise<Outcome> {
   return peer.call("bellman_confirm", {
     connect_token: String(preview.data.connect_token), brief: brief(), capabilities: ["read_context", "receive_messages"],
   });
+}
+
+/** A room its creator just started, with nobody else in it: the creator holds its one seat. */
+export async function startRoom(peer: Peer, manifest: Record<string, unknown> = manifestFixture()) {
+  const started = await peer.call("bellman_start", { manifest, brief: brief() });
+  expect(started.isError, started.text).toBe(false);
+  return { started, sessionId: String(started.data.session_id), memberId: String(started.data.member_id) };
+}
+
+/**
+ * Another seat for the same account in a room, newer than every seat the room holds: a Claude Code
+ * session beside the claude.ai one. A tool is called by the account, so nothing in a call says which.
+ */
+export async function seatAgain(h: Harness, peer: Peer, sessionId: string, roomRole: string, memberId = "m_second") {
+  const at = Date.now() + 1;
+  const seat = member({ memberId, userId: peer.identity.userId, label: peer.identity.label, roomRole, joinedAt: at, lastSeenAt: at });
+  expect(await h.store.addMember(sessionId, seat)).toBe(true);
 }

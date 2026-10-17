@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
-  clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickPlan, tickStep,
+  clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickBroughtForward, tickPlan, tickStep,
 } from "../src/heartbeat.js";
 import { hostMember } from "../src/host.js";
 import { MemoryStore, NO_SOCKETS } from "../src/store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { StoredSession } from "../src/stored-session.js";
+import type { Member } from "../src/types.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");
 const FIVE_MIN = 300_000;
@@ -61,10 +62,13 @@ describe("nextTickAt", () => {
    * is AFTER the slept-through tick — a member that joined since the last firing
    * and is not due yet, however long ago that firing was. Arming in the past for it
    * would wake the object to ask a member that had just arrived.
+   *
+   * Overdue by less than the three cadences a silent member is asked for (#208), or the
+   * firing below would be its last and arm nothing after it.
    */
   it("returns a past time at most once, and converges after one firing", () => {
-    const members = [lead({ joinedAt: T0 - 20 * FIVE_MIN, lastReportAt: undefined })];
-    const asleep = stored({ members, lastTickAt: T0 - 10 * FIVE_MIN });
+    const members = [lead({ joinedAt: T0 - 5 * FIVE_MIN / 2, lastReportAt: undefined })];
+    const asleep = stored({ members, lastTickAt: T0 - 3 * FIVE_MIN / 2 });
     expect(nextTickAt(asleep)).toBeLessThan(T0);
     const woken = stored({ members, lastTickAt: T0 });
     expect(nextTickAt(woken)).toBe(T0 + FIVE_MIN);
@@ -159,7 +163,8 @@ describe("nextTickAt, the two scheduling properties", () => {
     const reportedAt = T0 + 1_000;
     const roster = [
       lead({ memberId: "m_prompt", lastReportAt: reportedAt }),
-      lead({ memberId: "m_overdue", joinedAt: T0 - 10 * FIVE_MIN, lastReportAt: undefined }),
+      // Two cadences overdue, so still asked (#208).
+      lead({ memberId: "m_overdue", joinedAt: T0 - 2 * FIVE_MIN, lastReportAt: undefined }),
     ];
 
     // The overdue member is asked first: it was due before the last tick, so it is
@@ -196,25 +201,22 @@ describe("nextTickAt, the two scheduling properties", () => {
    */
   it("arms a cadence out, not in the past, when the whole roster is overdue", () => {
     const members = [
-      lead({ memberId: "m_a", joinedAt: T0 - 20 * FIVE_MIN, lastReportAt: undefined }),
-      lead({ memberId: "m_b", joinedAt: T0 - 11 * FIVE_MIN, lastReportAt: undefined }),
+      lead({ memberId: "m_a", joinedAt: T0 - 2 * FIVE_MIN, lastReportAt: undefined }),
+      lead({ memberId: "m_b", joinedAt: T0 - 3 * FIVE_MIN / 2, lastReportAt: undefined }),
     ];
     expect(nextTickAt(stored({ members, lastTickAt: T0 }))).toBe(T0 + FIVE_MIN);
 
-    // And it keeps advancing, firing by firing, with nobody ever answering.
-    let clock = T0;
-    for (let n = 0; n < 5; n++) {
-      const next = nextTickAt(stored({ members, lastTickAt: clock }))!;
-      expect(next).toBe(clock + FIVE_MIN);
-      clock = next;
-    }
+    // And it keeps advancing, firing by firing, with nobody ever answering, until each has
+    // been asked for three cadences (#208): m_a at the first firing, m_b at the second.
+    expect(nextTickAt(stored({ members, lastTickAt: T0 + FIVE_MIN }))).toBe(T0 + 2 * FIVE_MIN);
+    expect(nextTickAt(stored({ members, lastTickAt: T0 + 2 * FIVE_MIN }))).toBeNull();
   });
 
   /** P2 as the bare predicate, across every shape of roster a room can hold. */
   it("never arms at or before lastTickAt", () => {
     const rosters = [
       [lead({ lastReportAt: T0 + 1_000 })],
-      [lead({ lastReportAt: T0 - 50 * FIVE_MIN })],
+      [lead({ lastReportAt: T0 - 2 * FIVE_MIN })],
       [lead({ memberId: "m_a", lastReportAt: T0 }), lead({ memberId: "m_b", lastReportAt: T0 - FIVE_MIN })],
       [lead({ memberId: "m_a", lastReportAt: T0 + FIVE_MIN }), lead({ memberId: "m_b", lastReportAt: 0 })],
     ];
@@ -247,7 +249,7 @@ describe("nextTickAt, the two scheduling properties", () => {
    * sets `lastTickAt`, and the floor applies from then on.
    */
   it("converges after one firing in a room already overdue when it first ticked", () => {
-    const members = [lead({ joinedAt: T0 - 10 * FIVE_MIN, lastReportAt: undefined })];
+    const members = [lead({ joinedAt: T0 - 2 * FIVE_MIN, lastReportAt: undefined })];
     expect(nextTickAt(stored({ members, lastTickAt: undefined }))).toBeLessThan(T0);
     expect(nextTickAt(stored({ members, lastTickAt: T0 }))).toBe(T0 + FIVE_MIN);
   });
@@ -289,6 +291,91 @@ describe("nextTickAt, the two scheduling properties", () => {
       const s = stored({ members, lastTickAt: T0 });
       expect(dueMembers(s, nextTickAt(s)!).length).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * #208. A member that never reports was asked every cadence until the room was abandoned:
+ * 2,880 ticks a day at the 30-second floor, for up to 90 days, in a room nobody was reading.
+ * Now it is asked for three cadences and not again until it reports. What stops is the room
+ * ticking ON ITS ACCOUNT: a tick another member's deadline writes still lists it, silent, and
+ * the monitor's beat reads its silence off the roster with no tick at all.
+ */
+describe("a member that does not report (#208)", () => {
+  /** The alarm as SessionDO runs it: fire at the armed time and move `lastTickAt` there, until nothing is armed. */
+  function asked(members: Member[], firings = 10): number[] {
+    const at: number[] = [];
+    let lastTickAt: number | undefined;
+    for (let n = 0; n < firings; n++) {
+      const next = nextTickAt(stored({ members, lastTickAt }));
+      if (next === null) break;
+      if (dueMembers(stored({ members, lastTickAt }), next).length > 0) at.push(next);
+      lastTickAt = next;
+    }
+    return at;
+  }
+
+  it("asks a member that never reports at one, two and three cadences, and then arms nothing", () => {
+    expect(asked([lead()])).toEqual([T0 + FIVE_MIN, T0 + 2 * FIVE_MIN, T0 + 3 * FIVE_MIN]);
+  });
+
+  it("is not due, and arms nothing, once the last tick came three cadences after its report", () => {
+    const stopped = stored({ members: [lead({ lastReportAt: T0 })], lastTickAt: T0 + 3 * FIVE_MIN });
+    expect(dueMembers(stopped, T0 + 4 * FIVE_MIN)).toEqual([]);
+    expect(nextTickAt(stopped)).toBeNull();
+
+    // The control, one firing earlier: due, and armed a cadence after that firing.
+    const asking = stored({ members: [lead({ lastReportAt: T0 })], lastTickAt: T0 + 2 * FIVE_MIN });
+    expect(dueMembers(asking, T0 + 3 * FIVE_MIN).map((m) => m.memberId)).toEqual(["m_lead"]);
+    expect(nextTickAt(asking)).toBe(T0 + 3 * FIVE_MIN);
+  });
+
+  it("is asked again a cadence after it next reports", () => {
+    const back = stored({ members: [lead({ lastReportAt: T0 + 10 * FIVE_MIN })], lastTickAt: T0 + 3 * FIVE_MIN });
+    expect(nextTickAt(back)).toBe(T0 + 11 * FIVE_MIN);
+  });
+
+  it("leaves the room ticking for a member still reporting, and that member's ticks still name the silent one", () => {
+    const quiet = lead({ memberId: "m_quiet", lastReportAt: T0 });
+    const prompt = lead({ memberId: "m_prompt", lastReportAt: T0 + 3 * FIVE_MIN });
+    const s = stored({ members: [quiet, prompt], lastTickAt: T0 + 3 * FIVE_MIN + 1_000 });
+    const next = T0 + 4 * FIVE_MIN;
+    expect(nextTickAt(s)).toBe(next);
+    expect(dueMembers(s, next).map((m) => m.memberId)).toEqual(["m_prompt"]);
+    expect(snapshotOf(s, next).members.find((m) => m.member_id === "m_quiet")).toMatchObject({ silent: true });
+  });
+});
+
+/**
+ * A report used to move a deadline only ever later, so no append re-armed the alarm for one
+ * (`updateMember`'s comment in store-do.ts). A member the room has stopped asking has no
+ * deadline at all, and its report gives it one: that is the write the store must re-arm for.
+ */
+describe("tickBroughtForward", () => {
+  it("is true for a report from a member the room had stopped asking, when nothing else was armed", () => {
+    const before = stored({ members: [lead({ lastReportAt: T0 })], lastTickAt: T0 + 3 * FIVE_MIN });
+    const after = stored({ members: [lead({ lastReportAt: T0 + 4 * FIVE_MIN })], lastTickAt: T0 + 3 * FIVE_MIN });
+    expect(tickBroughtForward(before, after)).toBe(true);
+  });
+
+  it("is true when that report's deadline comes before the one armed for another member", () => {
+    const tick = T0 + 3 * FIVE_MIN + 1_000;
+    const later = lead({ memberId: "m_later", lastReportAt: T0 + 3 * FIVE_MIN + 2_000 });
+    const before = stored({ members: [lead({ lastReportAt: T0 }), later], lastTickAt: tick });
+    const after = stored({ members: [lead({ lastReportAt: T0 + 3 * FIVE_MIN + 1_500 }), later], lastTickAt: tick });
+    expect(tickBroughtForward(before, after)).toBe(true);
+  });
+
+  it("is false for a report that moves a deadline later, which is every report from a member still asked", () => {
+    const before = stored({ members: [lead({ lastReportAt: T0 })], lastTickAt: T0 });
+    const after = stored({ members: [lead({ lastReportAt: T0 + 1_000 })], lastTickAt: T0 });
+    expect(tickBroughtForward(before, after)).toBe(false);
+  });
+
+  it("is false when the write leaves nothing armed, or changes nothing", () => {
+    const before = stored({ members: [lead({ lastReportAt: T0 })], lastTickAt: T0 });
+    expect(tickBroughtForward(before, { ...before, closed: true })).toBe(false);
+    expect(tickBroughtForward(before, before)).toBe(false);
   });
 });
 

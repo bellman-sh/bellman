@@ -40,6 +40,22 @@ export const lastReport = (m: Member): number => m.lastReportAt ?? m.joinedAt;
 const reporting = (s: StoredSession): Member[] => s.members.filter((m) => asked(s, m));
 
 /**
+ * How many cadences a member that does not report keeps the room asking (#208): at one, two
+ * and three after its last report, its peers reading it `silent` from the second, and then
+ * nothing until it reports again. Before this an unattended room wrote a tick every cadence
+ * until it was abandoned, 2,880 a day at the 30-second floor for up to 90 days.
+ *
+ * Counted in time and not in asks, so nothing new is stored. What stops is the room ticking
+ * on the member's account: a tick another member's deadline writes still lists it, silent,
+ * and the monitor's beat reads its silence off the roster without any tick.
+ */
+export const ASKS = 3;
+
+/** Whether the room still asks this member: no tick yet, or the last came under ASKS cadences after its report. */
+const stillAsked = (m: Member, every: number, tick: number | undefined): boolean =>
+  tick === undefined || tick < lastReport(m) + ASKS * every;
+
+/**
  * When this member should next be asked, given when the room last ticked.
  *
  * **The anchor is per member, and `lastTickAt` is a floor rather than the
@@ -61,8 +77,12 @@ const reporting = (s: StoredSession): Member[] => s.members.filter((m) => asked(
  *
  * A room with no `lastTickAt` has no floor: nothing has been asked yet, so every
  * member's deadline is simply its own.
+ *
+ * And null for a member the room has stopped asking (`ASKS`), until a report moves
+ * its `lastReport` and with it the deadline.
  */
-const askAt = (m: Member, every: number, tick: number | undefined): number => {
+const askAt = (m: Member, every: number, tick: number | undefined): number | null => {
+  if (!stillAsked(m, every, tick)) return null;
   const deadline = lastReport(m) + every;
   if (tick === undefined || deadline > tick) return deadline;
   return tick + every;
@@ -104,7 +124,7 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
  * Takes no `now`: every anchor is stored state, and a parameter nothing reads
  * would suggest the answer depends on the clock.
  *
- * Null for a room with no cadence, no member to ask and no host, or that cannot be
+ * Null for a room with no cadence, no member it still asks (`ASKS`) and no host, or that cannot be
  * answered — a frozen or closed room. Deriving a time for a closed session would re-arm
  * the alarm to a moment already past and fire for as long as the object lived,
  * which is the reason `derivedDue` already gives about abandonment.
@@ -117,7 +137,7 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
 export function nextTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
   if (every === null || s.closed || s.frozenAt !== null) return null;
-  const times = reporting(s).map((m) => askAt(m, every, s.lastTickAt));
+  const times = reporting(s).map((m) => askAt(m, every, s.lastTickAt)).filter((t) => t !== null);
   const hosted = hostedTickAt(s);
   if (hosted !== null) times.push(hosted);
   if (times.length === 0) return null;
@@ -226,11 +246,28 @@ export function tickStep(s: StoredSession, now: number): TickStep {
   };
 }
 
-/** Members that have gone a full cadence without reporting. The tick asks these. */
+/**
+ * Members that have gone a full cadence without reporting and that the room still asks
+ * (`ASKS`). The tick is written for these.
+ */
 export function dueMembers(s: StoredSession, now: number): Member[] {
   const every = s.manifest.heartbeatOnMs;
   if (every === null) return [];
-  return reporting(s).filter((m) => now - lastReport(m) >= every);
+  return reporting(s).filter((m) => stillAsked(m, every, s.lastTickAt) && now - lastReport(m) >= every);
+}
+
+/**
+ * Whether a write moved the room's next tick earlier, from the record before it to the record
+ * it wrote (#208). A report from a member the room still asks only moves that member's deadline
+ * later, which is why no report re-armed the alarm; one from a member past `ASKS` gives it a
+ * deadline where it had none. The store re-arms after the commit when this is true, as it does
+ * for housekeeping's `bringsForward`, whose shape this is.
+ */
+export function tickBroughtForward(before: StoredSession, after: StoredSession): boolean {
+  const next = nextTickAt(after);
+  if (next === null) return false;
+  const was = nextTickAt(before);
+  return was === null || next < was;
 }
 
 export interface ReportRow {

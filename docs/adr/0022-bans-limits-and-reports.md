@@ -74,7 +74,7 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     effect within a minute, for one registry read per active identity per isolate per
     minute. The Node server asks each time.
 11. **A suspension refuses every call that reads or writes the store as the caller
-    (R8).** That is `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/account/handle`,
+    (R8).** That is `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`, `/account/handle`,
     `/account/bans*` and `/operator/stats`, each answered 403 with `This account is suspended.` The
     authorization server's paths (`/auth/*`, the `/account` page, `/token`, `/authorize`,
     `/upgrade` and `/admin/*`) are not gated, so a suspended person can still sign out.

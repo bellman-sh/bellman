@@ -184,14 +184,14 @@ export interface Session {
   id: string;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
-  manifest: RoomManifest; // immutable after createSession — the store has no way to change it
+  manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it
   createdBy: string;
   orgId: string | null;
   orgOnly: boolean;
   /**
    * Live join codes, one per role. The map key IS the one-per-role invariant:
    * two live codes for the same seat are unrepresentable rather than prevented
-   * by a check. Bounded by the manifest, which is immutable after createSession.
+   * by a check. Bounded by the manifest's roles, which are immutable after createSession.
    *
    * There is no `joinCode` beside this, for the reason the `mode` comment above
    * gives: two fields for one fact could disagree.
@@ -434,7 +434,9 @@ export type HostModelName = "haiku" | "sonnet" | "opus";
 /**
  * The one hosted seat a room may declare (hosted seat spec, D1). `role` names a
  * declared role holding exactly `send`; `instructions` is creator prose bounded
- * like `purpose`, and null means Bellman's defaults alone.
+ * like `purpose`, and null means Bellman's defaults alone. It is the one field of
+ * a manifest that changes after the room starts: the creator sets it with
+ * `PUT /rooms/:id/host`, and the seat reads it on every wake.
  */
 export interface HostConfig {
   role: string;
@@ -485,8 +487,9 @@ export interface RoomManifest {
   preset: PresetName | null;
   /**
    * How often the server appends a `heartbeat` tick, or null for a room that
-   * expects no reports. Immutable with the rest of the manifest, so a peer
-   * reading silence reads it against the same number every member was given.
+   * expects no reports. Immutable like the manifest's other fields, the host's
+   * instructions aside, so a peer reading silence reads it against the same
+   * number every member was given.
    */
   heartbeatOnMs: number | null;
   /**
@@ -504,7 +507,7 @@ export interface RoomManifest {
     idleAfterMs: number | null;
     repeatAfterMs: number | null;
   } | null;
-  /** The hosted seat, or null for a room with none. Immutable with the rest. */
+  /** The hosted seat, or null for a room with none. Immutable with the rest, bar its `instructions` (`HostConfig`). */
   host: HostConfig | null;
   /**
    * Whether anyone with the room's link may read it (public rooms spec D1): chosen when the

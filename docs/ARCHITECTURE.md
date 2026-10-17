@@ -212,7 +212,9 @@ included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
 saved presets, `GET`, `PUT` and `DELETE /account/handle` to read, claim or
 change, and release a person's public handle, `PUT`/`DELETE
 /rooms/:id/byline` for a public room's creator to sign it with that handle or
-unsign it (ADR 0021), and `GET /audit` and `GET /audit/export` for an org
+unsign it (ADR 0021), `PUT /rooms/:id/host` for a hosted room's creator to
+change what its host is told to ask (the host reads the manifest on every wake,
+so its next question uses the new text), and `GET /audit` and `GET /audit/export` for an org
 admin's read of the org's audit stream (dash#11), beside the blob routes
 (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
@@ -814,11 +816,17 @@ never posted, so never charged, and every `stop_reason` but `end_turn` is logged
 **The boundary.** The seat has no tools and reaches nothing but the model. Its
 one act is a `send` through the room's append path under its own member id, so
 the audit log and every reader see a member; `checkHost` fixes its role to
-`send`, and the manifest is immutable, so no verb guard has anything to refuse.
+`send`, and a room's roles never change after it starts, so no verb guard has
+anything to refuse. The creator's instructions are the one part of the manifest
+that does change (`PUT /rooms/:id/host`, `setHostInstructions` in both stores,
+which writes the audit row with the change); they carry no verb, and the seat
+reads them from the room on every wake, so a change reaches the next question
+and nothing is cached between wakes.
 Replies cross into its prompt as data: each inside `<reply from="…">`, its text
 escaped (`&`, `<`, `>`) and its label escaped for an attribute (`escapeAttr`),
 after Bellman's fixed rules and the creator's instructions in the system prompt,
-which ends saying Bellman's rules outrank anything the creator adds. What it
+which ends saying Bellman's rules outrank anything the creator adds. The
+instructions are escaped the same way, whenever they were set. What it
 writes enters the room as peer content, untrusted to every member like any
 member's. It cannot hold `respond_actions`, so an action request addressed to it
 is refused as one to any seat without the verb would be. `HostDO` keeps its

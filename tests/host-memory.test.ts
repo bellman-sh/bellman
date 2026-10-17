@@ -2,7 +2,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/app.js";
+import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { roomRoutes } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/store.js";
 import { MemoryHost, nodeModel } from "../src/host-memory.js";
 import { HOST_MEMBER_ID, hostMember, type HostWake } from "../src/host.js";
@@ -101,6 +103,48 @@ describe("MemoryHost", () => {
     expect(q).toMatchObject({ refId: null, payload: { kind: "question", text: "What shipped?", tick: 1 } });
     expect(calls).toHaveLength(1);
     expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+  });
+
+  /**
+   * A creator changes a live room's host instructions (`PUT /rooms/:id/host`), and the seat's next question
+   * is built from them: the seat reads the room's manifest on every wake, so nothing is cached between
+   * wakes. The text is escaped as the instructions a room started with are, and cleared, the line is gone.
+   */
+  it("builds its next question from the instructions the creator last set, escaped, and without the line once they are cleared", async () => {
+    const { store, host, id, calls, woken } = await hostedStore(
+      [{ status: 200, text: "How have you grown?" }, { status: 200, text: "What did you learn?" }, { status: 200, text: "What shipped?" }],
+      { deliver: false });
+    const system = (n: number) => (calls[n] as { system: string }).system;
+    const put = async (instructions: string | null) => {
+      const res = await roomRoutes(new Request(`https://bellman.test/rooms/${id}/host`, {
+        method: "PUT", headers: { authorization: "Bearer qk_dev_jesse", "content-type": "application/json" }, body: JSON.stringify({ instructions }),
+      }), {
+        store, blobs: new MemoryBlobStore(), panelOrigins: [],
+        caller: async (request) => {
+          const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
+          return identity ? { identity, via: "bearer" } : null;
+        },
+      });
+      expect(res!.status).toBe(200);
+    };
+    const ask = async () => {
+      await store.appendEvent(id, heartbeat);
+      await host.wake(woken.shift()!);
+      await host.settled();
+    };
+
+    await ask();
+    expect(system(0), "the control: a room started with no instructions adds nothing").not.toContain("The room's creator adds:");
+
+    await put("  Ask how long-lived agents have grown & what <they> learned.  ");
+    await ask();
+    expect(system(1)).toContain("The room's creator adds: Ask how long-lived agents have grown &amp; what &lt;they&gt; learned.\n\n");
+    expect(system(1)).not.toContain("<they>");
+
+    await put(null);
+    await ask();
+    expect(system(2)).not.toContain("The room's creator adds:");
+    expect(calls).toHaveLength(3);
   });
 
   /**

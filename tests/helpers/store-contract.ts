@@ -3092,6 +3092,102 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------------ a live room's host instructions
+    /**
+     * A room's creator can change what its hosted seat is told to ask after the room has started
+     * (`PUT /rooms/:id/host`). The store's part is one write: the instructions on the manifest's
+     * `host`, and the audit rows the change owes, together or not at all. The seat reads the room's
+     * manifest on every wake, so what this stores is what the next question is built from.
+     */
+    describe("setHostInstructions", () => {
+      const NOW = () => Date.now();
+      const hostedRoom = (over: Partial<Session> = {}) => {
+        const m = hostedManifest();
+        return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, lastTickAt: NOW(), lastHostTickAt: NOW(), ...over });
+      };
+      const hostRow = (sessionId: string, chars: number): AuditEntry => ({
+        at: NOW(), orgId: "org_codenerd", sessionId, actorUserId: "u_jesse", action: "host_instructions_changed", detail: { chars },
+      });
+      const instructionsOf = async (id: string) => (await store.getSession(id))!.manifest.host?.instructions;
+
+      it("sets the instructions, changes them and clears them, answering with what is stored", async () => {
+        const s = hostedRoom({ id: "qs_hi_set" });
+        await store.createSession(s);
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [])).toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+        expect(await store.setHostInstructions(s.id, "Ask what they have learned.", [])).toEqual({ ok: true, instructions: "Ask what they have learned." });
+        expect(await instructionsOf(s.id)).toBe("Ask what they have learned.");
+        expect(await store.setHostInstructions(s.id, null, [])).toEqual({ ok: true, instructions: null });
+        expect(await instructionsOf(s.id)).toBeNull();
+      });
+
+      it("changes the instructions and nothing else in the room", async () => {
+        const s = hostedRoom({ id: "qs_hi_only" });
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!;
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", []);
+        const after = (await store.getSession(s.id))!;
+        expect(after.manifest).toEqual({ ...before.manifest, host: { ...before.manifest.host!, instructions: "Ask how agents have grown." } });
+        expect({ ...after, manifest: before.manifest }).toEqual(before);
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      });
+
+      it("refuses a room whose manifest has no host, and leaves the room as it was", async () => {
+        const s = session({ id: "qs_hi_nohost" });
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!;
+        expect(before.manifest.host).toBeNull();
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)])).toEqual({ ok: false, reason: "no_host" });
+        expect(await store.getSession(s.id)).toEqual(before);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("refuses a closed room and a missing one, and leaves the closed room as it was", async () => {
+        const s = hostedRoom({ id: "qs_hi_closed" });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        const before = (await store.getSession(s.id))!;
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)])).toEqual({ ok: false, reason: "closed" });
+        expect(await store.getSession(s.id)).toEqual(before);
+        expect(await store.setHostInstructions("qs_nobody", "Ask how agents have grown.", [])).toEqual({ ok: false, reason: "not_found" });
+        expect(await store.getSession("qs_nobody")).toBeUndefined();
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("files the audit rows it was given with the change, and files none for a repeat of the value it already holds", async () => {
+        const s = hostedRoom({ id: "qs_hi_audit" });
+        await store.createSession(s);
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)]);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id))
+          .toEqual([expect.objectContaining({ orgId: "org_codenerd", actorUserId: "u_jesse", action: "host_instructions_changed", detail: { chars: 26 } })]);
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)]))
+          .toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id), "a repeat is no change").toHaveLength(1);
+        await store.setHostInstructions(s.id, null, [hostRow(s.id, 0)]);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id).map((a) => a.detail)).toEqual([{ chars: 26 }, { chars: 0 }]);
+        expect(await store.setHostInstructions(s.id, null, [hostRow(s.id, 0)]), "clearing what is already clear").toEqual({ ok: true, instructions: null });
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toHaveLength(2);
+      });
+
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9, runtime fact 4); both stores drop such a row.
+      it("drops an audit row addressed to no org, as every audit write does", async () => {
+        const s = hostedRoom({ id: "qs_hi_noorg" });
+        await store.createSession(s);
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", [{ ...hostRow(s.id, 26), orgId: "" }]);
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("takes a frozen room's change, as the creator's setting is not a send", async () => {
+        const s = hostedRoom({ id: "qs_hi_frozen" });
+        await store.createSession(s);
+        await store.freezeSession(s.id, NOW());
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [])).toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+      });
+    });
+
     describe("the send count (abuse protections spec D5)", () => {
       // A stranger's key is kept apart from a member's by a store that has storage to keep it in, so the same
       // count is asked of both kinds of key.

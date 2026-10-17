@@ -22,11 +22,12 @@ import {
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
   sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
+import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { auditEntries, cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -68,6 +69,11 @@ const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
+const HOST = /^\/rooms\/([^/]+)\/host$/;
+
+// ponytail: 4 KB, not tuned. A text of at most 300 characters is under 2 KB even with every character written as
+// a six-byte \uXXXX escape, so this leaves room for the braces and for the whitespace that trimming removes.
+export const MAX_HOST_INSTRUCTIONS_BYTES = 4096;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
@@ -206,6 +212,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (unpublish) {
       if (request.method !== "POST") return methodNotAllowed("POST", origin);
       return await unpublishRoom(request, unpublish[1], origin, deps);
+    }
+    const hostRoute = HOST.exec(path);
+    if (hostRoute) {
+      if (request.method !== "PUT") return methodNotAllowed("PUT", origin);
+      return await writeHostInstructions(request, hostRoute[1], origin, deps);
     }
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
@@ -697,6 +708,53 @@ async function writeByline(request: Request, sessionId: string, origin: string |
   const handle = await deps.store.signRoom(userId, sessionId, Date.now());
   if (handle === undefined) return problem(409, "no_handle", "claim a handle in Settings first", origin);
   return json(200, { handle }, origin);
+}
+
+/**
+ * Change what a hosted room's seat is told to ask, after the room has started (`PUT /rooms/:id/host`). The
+ * creator's alone, admitted as the ban routes admit them: 401 with no caller, the CSRF check for a cookie, one
+ * 404 for a person with no handle in the room and for a room that is not there, then 403 for a member who is not
+ * the creator, all before the body is read. The text is trimmed and an empty one is stored as null, which leaves
+ * the host Bellman's rules alone; what is stored is held to the manifest's own bound (`HostInstructionsShape`),
+ * and any other shape is a 400. Then the store decides, and refuses a room with no host and a closed one with a
+ * 409, in the same transaction as the write.
+ *
+ * The seat reads the manifest on every wake, so the next question it asks is built from what this stored.
+ * A change files an audit row for each org in the room, as an eviction does; it names the creator and the
+ * length, and leaves the text out. Setting what the room already holds files none.
+ */
+async function writeHostInstructions(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  if (session.createdBy !== who.identity.userId) {
+    return problem(403, "forbidden", "only the room's creator may change its host's instructions", origin);
+  }
+  const tooLong = lengthRefusal(request, MAX_HOST_INSTRUCTIONS_BYTES, "a host instructions request", origin);
+  if (tooLong) return tooLong;
+
+  // A body that is not JSON, `null`, an array, a scalar, or an object with any key but `instructions` is the one 400.
+  const body: unknown = await request.json().catch(() => null);
+  if (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).join() !== "instructions") {
+    return problem(400, "invalid_request", 'send {"instructions": a string, or null to clear them}', origin);
+  }
+  const raw = (body as { instructions: unknown }).instructions;
+  const parsed = HostInstructionsShape.nullable().safeParse(typeof raw === "string" ? raw.trim() || null : raw);
+  if (!parsed.success) return problem(400, "invalid_request", `instructions: ${parsed.error.issues[0].message}`, origin);
+  const instructions = parsed.data;
+
+  const set = await deps.store.setHostInstructions(
+    sessionId, instructions,
+    auditEntries(session, who.identity, "host_instructions_changed", { chars: instructions?.length ?? 0 }),
+  );
+  if (set.ok) return json(200, { instructions: set.instructions }, origin);
+  if (set.reason === "not_found") return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  return problem(409, set.reason, set.reason === "closed" ? "the room is closed" : "this room has no hosted seat to instruct", origin);
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */

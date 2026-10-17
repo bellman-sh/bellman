@@ -5,6 +5,7 @@ import type { HostDO } from "../src/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
 import type { SessionEvent } from "../src/types.js";
+import worker from "../src/worker.js";
 import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -27,6 +28,8 @@ const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 
 type Reply = { status: number; text: string; held?: boolean; asked?: boolean };
 const replies: Reply[] = [];
 const stray: string[] = [];
+/** The prompt of each model call the stub answered, in order: what the seat sent. */
+const asked: { system: string }[] = [];
 const modelAnswers = (text: string, status = 200) => { replies.push({ status, text }); };
 
 /** A reply the model gives only once `release` is called. `asked()` waits until the seat has called for it. */
@@ -48,6 +51,7 @@ beforeEach(() => {
       throw new Error(`the model stub has no reply for ${req.method} ${req.url}`);
     }
     reply.asked = true;
+    asked.push((await req.clone().json()) as { system: string });
     while (reply.held) await new Promise((r) => setTimeout(r, 5));
     return Response.json(reply.status === 200 ? { content: [{ type: "text", text: reply.text }] } : { error: { type: "rate_limit" } },
       { status: reply.status });
@@ -57,6 +61,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   const unread = replies.splice(0);
   const calls = stray.splice(0);
+  asked.splice(0);
   await reset();
   await abortAllDurableObjects();
   expect(calls, "model calls no case queued a reply for").toEqual([]);
@@ -174,6 +179,41 @@ it("backs off on a 429 and asks on the retry; a redelivered wake asks nothing tw
   await host.wake({ sessionId: id, cause: "tick", cursor: heartbeat.cursor }, "host:tick:redelivered");
   await seatIdle(host);
   expect((await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toHaveLength(1);
+});
+
+/**
+ * A creator changes the host's instructions on a live room through the Worker (`PUT /rooms/:id/host`),
+ * and the seat's next question is built from them. The seat is HostDO, which reads the room from its
+ * SessionDO on every wake, so what the route stored is what the next prompt carries. The text is escaped
+ * as a room's own instructions are, and cleared, the line is gone.
+ */
+it("asks its next question with the instructions the creator set through the Worker, escaped, and without the line once they are cleared", async () => {
+  const { id, stub, host } = await hostedRoom("qs_hosted_put");
+  const put = async (instructions: string | null) => {
+    const res = await worker.fetch(new Request(`https://mcp.example.test/rooms/${id}/host`, {
+      method: "PUT", headers: { authorization: "Bearer qk_ws_test", "content-type": "application/json" }, body: JSON.stringify({ instructions }),
+    }), env as unknown as Parameters<typeof worker.fetch>[1], { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext);
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await res.json()).toEqual({ instructions: instructions?.trim() || null });
+  };
+
+  modelAnswers("How have you grown?");
+  await tick(stub);
+  await seatIdle(host);
+  expect(asked[0].system, "the control: a room started with no instructions adds nothing").not.toContain("The room's creator adds:");
+
+  await put("  Ask how long-lived agents have grown & what <they> learned.  ");
+  modelAnswers("What did you learn?");
+  await tick(stub);
+  await seatIdle(host);
+  expect(asked[1].system).toContain("The room's creator adds: Ask how long-lived agents have grown &amp; what &lt;they&gt; learned.\n\n");
+  expect(asked[1].system).not.toContain("<they>");
+
+  await put(null);
+  modelAnswers("What shipped?");
+  await tick(stub);
+  await seatIdle(host);
+  expect(asked[2].system).not.toContain("The room's creator adds:");
 });
 
 /**

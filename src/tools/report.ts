@@ -12,7 +12,7 @@ export function registerReport(server: McpServer, identity: Identity, s: Bellman
     "bellman_report",
     {
       title: "Report a room, a member or a message",
-      description: `Report the room, or with member_id (theirs) a member, or with cursor a message, to Bellman's operators. The room's creator also sees a report about a member or a message, never who filed it. The person reported is not told.
+      description: `Report the room, or with member_id (theirs) a member, or with cursor a message, to Bellman's operators. The room's creator also sees a report about a member or a message other than its own, never who filed it. The person reported is not told.
 
 Args: session_id, member_id or cursor, reason, note
 Returns: { report_id, folded } — folded: true when you reported this already and it is still open; nothing new was filed.

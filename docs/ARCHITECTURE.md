@@ -1956,12 +1956,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,433** | every request, whether or not you are in a room |
+| Tool definitions | **~9,437** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-17 for the section 1C fix pass, by the method below: 4 tokens over the 9,433
+that the section's tip (`75b5d5d7`) measures, all of them `bellman_report`'s, which went from 321 to 325
+when its description said that the creator sees a report about a member or a message other than its own.
+That is 9,437. The tip, rebuilt in a scratch copy as the control, reproduced 9,433 and `bellman_report`'s
+321 before the new figure was read. No other tool changed.
 
 Re-measured on 2026-10-16 for reports, by the method below: 321 tokens over the 9,112 that
 main (`144f0327`) measures, all of them `bellman_report`'s, which is new. That is 9,433. The

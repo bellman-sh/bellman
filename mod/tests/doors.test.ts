@@ -58,6 +58,27 @@ test("a turn's start or its end asks again too, and no hook asks while every doo
   expect(asked(w)).toBe(3);
 });
 
+test("a bridge whose bellman_whoami never answers holds the person's prompt, and a turn's start and end, 1.5 s at most", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  // The bridge restarts and hangs: the tick that finds its old socket refusing leaves the asking to the next hook.
+  w.door = "/tmp/bellman-door-2.sock";
+  await tick(w);
+  w.asking = new Promise(() => undefined);
+  const typed = types($);
+  await w.clock.advance(1_499);
+  expect(w.submitted).toEqual([]);
+  await w.clock.advance(1);
+  expect(w.submitted).toEqual(["hello"]);
+  await typed;
+  const passed: string[] = [];
+  void startTurn($, "t1").then(() => passed.push("turn.start"));
+  await w.clock.advance(1_500);
+  void endTurn($, "t1").then(() => passed.push("turn.complete"));
+  await w.clock.advance(1_500);
+  expect(passed).toEqual(["turn.start", "turn.complete"]);
+});
+
 test("a bridge older than the door is kept with no socket, no door is read for it, and it is not asked again", async ($, on) => {
   const w = await world($, on, { door: null });
   await tick(w);

@@ -156,6 +156,17 @@ test("only the person's own prompt resumes waking", async ($, on) => {
   expect(w.submitted.filter((text) => text === WAKE_TEXT)).toHaveLength(4);
 });
 
+test("the person's prompt through Remote Control resumes waking, as the composer's does", async ($, on) => {
+  // R13: origin "bridge" is the person's message from a phone or web client.
+  const w = await world($, on);
+  for (let i = 0; i < 4; i++) await batch(w);
+  expect(w.state.wake).toEqual({ paused: true });
+  await $.prompt.submit({ text: "from my phone", origin: { kind: "bridge" }, wait: false });
+  await batch(w);
+  expect(w.submitted.filter((text) => text === WAKE_TEXT)).toHaveLength(4);
+  expect(w.state.wake).toEqual({ paused: false });
+});
+
 test("a subagent's turn does not make the session busy", async ($, on) => {
   const w = await world($, on);
   await startTurn($, "t2", "agent-1");

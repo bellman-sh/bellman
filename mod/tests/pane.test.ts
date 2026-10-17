@@ -271,8 +271,9 @@ test("members show role and presence", async ($, on) => {
   const room = await opened($, w);
   await room.press({ key: "tab-members" });
   const text = await shown(room);
-  for (const part of ["ada", "builder", "◌ pip", "you", "silent 12 min", "on step 2"]) expect(text).toContain(part);
-  expect(text).toMatch(/● me lead · you/);
+  // The role before the label, as the band and the sidebar name a member (L8).
+  for (const part of ["● builder ada", "◌ builder pip", "you", "silent 12 min", "on step 2"]) expect(text).toContain(part);
+  expect(text).toMatch(/● lead me · you/);
 });
 
 test("a hostile label, request and note are cleaned in the Log, Members and Approve tabs", async ($, on) => {
@@ -372,6 +373,51 @@ test("keeps the newest 500 events of a room's log", async ($, on) => {
   await tick(w);
   expect(w.state.logs?.qs_room1).toHaveLength(500);
   expect(w.state.logs?.qs_room1?.[0]?.cursor).toBe(101);
+});
+
+/**
+ * `bellman_rooms` for an account holding two seats in qs_room1 (L9): no seat speaks for it in `your_member_id` or
+ * `room`, and each seat's verbs are in `your_seats`.
+ */
+function twoSeats(w: World): void {
+  Object.assign(w.rooms[0]!, {
+    your_member_id: null,
+    your_seats: [
+      { member_id: "m-me", role: "lead", verbs: ["send", "request_actions", "respond_actions"] },
+      { member_id: "m-me-too", role: "helper", verbs: ["send"] },
+    ],
+  });
+  Object.assign(w.rooms[0]!.room, { your_role: null, your_verbs: [] });
+}
+
+test("an account with two seats in the room: the door's seat that may respond has the request to approve", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  twoSeats(w);
+  const room = await opened($, w);
+  expect((await (await band($)).find({ key: "open-approve" }))?.props.label).toBe("Approve 1");
+  await room.press({ key: "tab-approve" });
+  expect(await room.find({ key: "approve-5" })).toBeDefined();
+  expect(await shown(room)).toContain("ada asks: run the migration");
+});
+
+test("an account with two seats in the room: a request is not the door's seat's to approve because another seat may", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  twoSeats(w);
+  // The door's seat is the account's helper, which may not respond.
+  w.status.seats = [{ session_id: "qs_room1", member_id: "m-me-too", retrying: false }];
+  const room = await opened($, w);
+  expect(await room.find({ key: "approve-5" })).toBeUndefined();
+  expect((await room.find({ key: "tab-approve" }))?.props.label).toBe("Approve 0");
+});
+
+test("the room pane's header is marked by the word Bellman, not one row of the bell", async ($, on) => {
+  // L11: one row of the bell read as a dark bar with one gold cell.
+  const w = await world($, on);
+  const text = await shown(await opened($, w));
+  expect(text.startsWith("Bellman ")).toBe(true);
+  expect(text).not.toContain("▀");
 });
 
 test("a seat that may not respond has nothing to approve", async ($, on) => {

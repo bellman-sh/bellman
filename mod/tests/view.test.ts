@@ -138,6 +138,61 @@ test("with no seat, only the status line speaks", async ($, on) => {
   expect(w.statuses.at(-1)).toBeUndefined();
 });
 
+test("the status line speaks for the best bridge: an older bridge beside a door that answers says not in a room", async ($, on) => {
+  // L6: the `bellman` bridge is older than the door; the second's door answers and lists no seat.
+  const w = await world($, on, {
+    door: null,
+    second: { server: "plugin_bellman_bellman", door: "/tmp/bellman-door-9.sock", status: { ...structuredClone(STATUS), seats: [] }, rooms: [] },
+  });
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: not in a room");
+  // Down the ladder, as the better bridge fares worse; the older bridge speaks only once no other does.
+  w.second!.status.signed_in = false;
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: the bridge is not signed in");
+  w.doorDown = true;
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: cannot reach the bridge");
+  w.second = undefined;
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: update the bridge to see your rooms here");
+});
+
+test("a door that answers signed in speaks over one that answers signed out", async ($, on) => {
+  const w = await world($, on, {
+    second: { server: "plugin_bellman_bellman", door: "/tmp/bellman-door-9.sock", status: { ...structuredClone(STATUS), seats: [], signed_in: false }, rooms: [] },
+  });
+  w.status.seats = [];
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: not in a room");
+});
+
+test("no row of the bell carries a hotkey, so its four rows line up; the Log button carries it", async ($, on) => {
+  // L7: a plain Button with a hotkey is drawn "b: " before its row. The kit draws no hotkey, so this reads the tree.
+  const w = await world($, on);
+  await tick(w);
+  for (const drawing of [await band($), await pane($, SIDEBAR_COLUMNS)]) {
+    const bell = (await drawing.findAll({ type: "Button" })).filter((b) => b.key?.startsWith("bell-"));
+    expect(bell.map((b) => b.key)).toEqual(["bell-0", "bell-1", "bell-2", "bell-3"]);
+    for (const row of bell) expect(row.props.hotkey).toBeUndefined();
+    expect((await drawing.find({ key: "open-log" }))?.props.hotkey).toBe("b");
+  }
+});
+
+/** What a row drawn `wrap="truncate-end"` shows in `columns` cells. The kit draws no width, so the test cuts as the terminal does. */
+const cut = (row: string, columns: number): string => (row.length <= columns ? row : `${row.slice(0, columns - 1)}…`);
+
+test("two members of one account read apart in the sidebar: the role comes before the label", async ($, on) => {
+  // L8: the label is the account's, so two of its seats share it, and a 22-column row cuts the end of the line.
+  const w = await world($, on);
+  for (const m of w.rooms[0]!.members.slice(1, 3)) m.label = "sam.rivera@example.com";
+  await tick(w);
+  const sidebar = await pane($, SIDEBAR_COLUMNS);
+  const rows = (await sidebar.findAll({ type: "Text" })).map((t) => t.text).filter((t) => t.includes("sam.rivera"));
+  expect(rows).toEqual(["● builder sam.rivera@example.com", "● reviewer sam.rivera@example.com"]);
+  expect(new Set(rows.map((row) => cut(row, SIDEBAR_COLUMNS))).size).toBe(2);
+});
+
 test("no toast while the pane shows the room's Log, and none later for what it showed", async ($, on) => {
   const w = await world($, on);
   await tick(w);

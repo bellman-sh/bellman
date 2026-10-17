@@ -41,11 +41,47 @@ function cleanText(text, max = 200) {
 function cleanBlock(text, max = 8e3) {
   return cut(withoutSequences(text).replace(BLOCK_CONTROLS, ""), max);
 }
+function field(of, key) {
+  const value = typeof of === "object" && of !== null ? of[key] : void 0;
+  return typeof value === "string" ? cleanText(value) : "";
+}
 function eventLine(e) {
-  const payload = e.payload;
-  if (payload == null) return "";
-  const text = typeof payload === "string" ? payload : payload.text;
-  return cleanText(typeof text === "string" ? text : JSON.stringify(payload));
+  return cleanText(lineOf(e));
+}
+function lineOf(e) {
+  const p = e.payload;
+  switch (e.type) {
+    case "member_joined": {
+      const role = field(p?.member, "room_role");
+      return role ? `joined as ${role}` : "joined";
+    }
+    case "member_left":
+      return "left";
+    case "member_evicted":
+      return `removed ${field(p, "label") || "a member"}`;
+    case "invite_issued": {
+      const role = field(p, "role");
+      return role ? `invited ${/^[aeiou]/i.test(role) ? "an" : "a"} ${role}` : "invited a member";
+    }
+    case "invite_revoked": {
+      const listed = p?.roles;
+      const roles = (Array.isArray(listed) ? listed : []).map((r) => typeof r === "string" ? cleanText(r) : "").filter(Boolean);
+      return roles.length === 0 ? "retired a code" : `retired the ${roles.join(", ")} code${roles.length > 1 ? "s" : ""}`;
+    }
+    case "action_response": {
+      const approved2 = p?.approved;
+      const said = approved2 === true ? "approved" : approved2 === false ? "declined" : "answered";
+      return e.ref_id ? `${said} request ${e.ref_id}` : said;
+    }
+    case "surface":
+      return `\u270E canvas: ${field(p, "title") || field(p, "key")}`;
+    case "brief_update":
+      return "updated their brief";
+    case "progress":
+      return field(p, "note") || "progress";
+  }
+  const text = typeof p === "string" ? cleanText(p) : field(p, "text");
+  return text || (e.type === "action_request" && p != null ? JSON.stringify(p) : e.type);
 }
 
 // src/mod/view.ts
@@ -119,6 +155,7 @@ function pendingRequests(log, p) {
   }
   return pending2;
 }
+var memberLine = (m) => [m.presence === "present" ? "\u25CF" : "\u25CC", cleanText(m.room_role, NAME_MAX), cleanText(m.label, NAME_MAX)].filter(Boolean).join(" ");
 var PRESET_MAX = 31;
 function roomLabel(room2) {
   const name = cleanText(room2.public_name ?? "", NAME_MAX);
@@ -205,7 +242,14 @@ async function ask($, server) {
 async function bridges($) {
   return (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
 }
+var FIND_WAIT_MS = 1500;
 async function findDoors($) {
+  const asking = askBridges($).catch((error) => $.ui.log(`bellman-mod: finding the doors: ${message(error)}`, { to: "debug" }));
+  let timer;
+  await Promise.race([asking, new Promise((resolve) => timer = $.clock.after(FIND_WAIT_MS, resolve))]);
+  timer?.cancel();
+}
+async function askBridges($) {
   const known = await read2($, doors);
   const unasked = (await bridges($)).filter((server) => !known.some((d) => d.server === server && d.error === null));
   if (unasked.length === 0) return;
@@ -265,6 +309,10 @@ function seatedRooms(list) {
   return seated;
 }
 var seatIn = (list, sessionId) => seatedRooms(list).get(sessionId);
+function verbsOf(view, memberId) {
+  if (view?.your_seats) return view.your_seats.find((s) => s.member_id === memberId)?.verbs ?? [];
+  return view?.room.your_verbs ?? [];
+}
 var LOG_KEPT = 500;
 async function fetchLog($, socketPath, sessionId, after) {
   const page = after === void 0 ? "" : `?after=${after}`;
@@ -306,7 +354,7 @@ async function readLogs($, list, ids, newer) {
         pendingRequests(kept[id] ?? [], {
           sessionId: id,
           seatMemberId: seat.member_id,
-          canRespond: views.find((r) => r.session_id === id)?.room.your_verbs.includes("respond_actions") ?? false,
+          canRespond: verbsOf(views.find((r) => r.session_id === id), seat.member_id).includes("respond_actions"),
           now
         })
       ])
@@ -504,7 +552,7 @@ function turnEnded(e) {
   if (e.agentId === void 0) turnRunning = false;
 }
 function promptSubmitted(e) {
-  if (e.origin.kind === "composer") person();
+  if (e.origin.kind === "composer" || e.origin.kind === "bridge") person();
 }
 function registerWake() {
   onPerson(person);
@@ -676,7 +724,7 @@ async function drawPane($, ui, site, s, p) {
     body = (view?.members ?? []).map((m) => {
       const beat = m.beat.silent && m.beat.silent_for_seconds !== null ? `silent ${Math.round(m.beat.silent_for_seconds / 60)} min` : "";
       const line = [
-        `${m.presence === "present" ? "\u25CF" : "\u25CC"} ${cleanText(m.label, NAME_MAX)} ${cleanText(m.room_role, NAME_MAX)}`,
+        memberLine(m),
         mine.has(m.member_id) ? "you" : "",
         beat,
         noteOf(m.beat.note)
@@ -687,7 +735,7 @@ async function drawPane($, ui, site, s, p) {
     const now = await $.clock.now();
     body = waiting.length === 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing waits on you.")] : waiting.map((r) => /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Text, null, `${r.from_label} asks: ${r.text}`), /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, { dimColor: true }, `${Math.max(0, Math.ceil((r.expires_at - now) / 6e4))} min left`), answers(r))));
   }
-  return /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Box, null, (bellRows()[0] ?? []).map((cell) => /* @__PURE__ */ h(Text, { color: cell.top, backgroundColor: cell.bottom }, "\u2580"))), p.picker, p.connection, p.about, site.placement === "dock" ? /* @__PURE__ */ h(Button, { key: "narrow", label: "\u203A", onPress: act(() => $.ui.open({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS })) }) : /* @__PURE__ */ h(Button, { key: "close", label: "\xD7", onPress: act(() => $.ui.close({ id: PANE_ID })) })), /* @__PURE__ */ h(Box, { columnGap: 1 }, tabs.map(([to, label]) => /* @__PURE__ */ h(Button, { key: `tab-${to}`, label, variant: to === shown ? "primary" : void 0, onPress: act(() => turnTo($, to)) }))), body);
+  return /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, { bold: true }, "Bellman"), p.picker, p.connection, p.about, site.placement === "dock" ? /* @__PURE__ */ h(Button, { key: "narrow", label: "\u203A", onPress: act(() => $.ui.open({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS })) }) : /* @__PURE__ */ h(Button, { key: "close", label: "\xD7", onPress: act(() => $.ui.close({ id: PANE_ID })) })), /* @__PURE__ */ h(Box, { columnGap: 1 }, tabs.map(([to, label]) => /* @__PURE__ */ h(Button, { key: `tab-${to}`, label, variant: to === shown ? "primary" : void 0, onPress: act(() => turnTo($, to)) }))), body);
 }
 
 // mod/src/view.tsx
@@ -700,11 +748,13 @@ function labelOf(id, views) {
   return roomLabel({ session_id: id, preset: view?.room.preset, public_name: view?.room.public_name });
 }
 function statusLine(list) {
-  if (list.length === 0 || seatsOf(list).length > 0) return void 0;
-  if (list.some((d) => d.socketPath === null && d.error === null)) return "Bellman: update the bridge to see your rooms here";
+  if (seatsOf(list).length > 0) return void 0;
+  const answering = list.filter((d) => d.socketPath !== null && d.error === null);
+  if (answering.some((d) => d.status?.signed_in !== false)) return "Bellman: not in a room";
+  if (answering.length > 0) return "Bellman: the bridge is not signed in";
   if (list.some((d) => d.error !== null)) return "Bellman: cannot reach the bridge";
-  if (list.some((d) => d.status?.signed_in === false)) return "Bellman: the bridge is not signed in";
-  return "Bellman: not in a room";
+  if (list.length > 0) return "Bellman: update the bridge to see your rooms here";
+  return void 0;
 }
 async function openPane($, to) {
   refused = false;
@@ -761,7 +811,7 @@ async function shownOf($, list, seats) {
     label: labelOf(picked, views),
     about: [preset, view ? `${view.active_members} of ${view.max_members}` : ""].filter(Boolean).join(" \xB7 "),
     // Peers: every member but the session's own seats.
-    peers: (view?.members ?? []).filter((m) => !mine.some((s) => s.member_id === m.member_id)).map((m) => `${m.presence === "present" ? "\u25CF" : "\u25CC"} ${cleanText(m.label, NAME_MAX)} ${m.presence === "present" ? cleanText(m.room_role, NAME_MAX) : "stale"}`),
+    peers: (view?.members ?? []).filter((m) => !mine.some((s) => s.member_id === m.member_id)).map(memberLine),
     unread: unreadCount(
       list.flatMap((d) => d.status?.recent ?? []),
       { sessionId: picked, seatMemberId: mine[0].member_id, openedThrough: (await read5($, openedThrough))[picked] ?? -1 }
@@ -785,7 +835,9 @@ function pieces($, ui, s) {
     picker: s.options.length > 1 ? /* @__PURE__ */ h(Select, { key: "room", options: s.options, value: s.picked, onSelect: pick }) : /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, s.label),
     about: s.about !== "" && /* @__PURE__ */ h(Text, { dimColor: true, wrap: "truncate-end" }, s.about),
     buttons: [
-      /* @__PURE__ */ h(Button, { key: "open-log", label: "Log", onPress: press("log") }),
+      // `b` presses it while the band or the sidebar holds the keys. A bracketed Button draws no hotkey; on the bell's
+      // first row, a plain one, it drew "b: " and pushed that row out of line with the other three (L7).
+      /* @__PURE__ */ h(Button, { key: "open-log", label: "Log", hotkey: "b", onPress: press("log") }),
       /* @__PURE__ */ h(Button, { key: "open-canvas", label: "Canvas", onPress: press("canvas") }),
       s.approve > 0 && /* @__PURE__ */ h(Button, { key: "open-approve", label: `Approve ${s.approve}`, onPress: press("approve") })
     ],
@@ -794,7 +846,7 @@ function pieces($, ui, s) {
     waiting: s.approve > 0 && /* @__PURE__ */ h(Text, { color: "warning" }, `${s.approve} to approve`),
     paused: s.paused && /* @__PURE__ */ h(Text, { color: "warning" }, "paused"),
     // The bell: each row a Button of half-block cells, the upper pixel the color and the lower the ground.
-    bell: bellRows().map((row, i) => /* @__PURE__ */ h(Button, { key: `bell-${i}`, plain: true, hotkey: i === 0 ? "b" : void 0, onPress: press("log") }, row.map((cell) => /* @__PURE__ */ h(Text, { color: cell.top, backgroundColor: cell.bottom }, "\u2580"))))
+    bell: bellRows().map((row, i) => /* @__PURE__ */ h(Button, { key: `bell-${i}`, plain: true, onPress: press("log") }, row.map((cell) => /* @__PURE__ */ h(Text, { color: cell.top, backgroundColor: cell.bottom }, "\u2580"))))
   };
 }
 function startView(on) {

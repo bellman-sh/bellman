@@ -119,10 +119,56 @@ export function cleanBlock(text: string, max = 8_000): string {
   return cut(withoutSequences(text).replace(BLOCK_CONTROLS, ""), max);
 }
 
-/** The one line an event reads as: a string payload, a payload's `text`, else the payload as JSON. */
-export function eventLine(e: Pick<DoorEvent, "type" | "payload">): string {
-  const payload = e.payload;
-  if (payload == null) return "";
-  const text = typeof payload === "string" ? payload : (payload as { text?: unknown }).text;
-  return cleanText(typeof text === "string" ? text : JSON.stringify(payload));
+/** `of[key]` as one clean line, or "" when it is not a string. */
+function field(of: unknown, key: string): string {
+  const value = typeof of === "object" && of !== null ? (of as Record<string, unknown>)[key] : undefined;
+  return typeof value === "string" ? cleanText(value) : "";
+}
+
+/**
+ * The one line an event reads as, after the label of the member it is from, cleaned: what the room's own events did
+ * (L10); for any other, a string payload or a payload's `text`, else the event's type, never its JSON. Save for an
+ * action request with no text: it is what the person is asked to approve, so it reads as its payload, whole.
+ */
+export function eventLine(e: Pick<DoorEvent, "type" | "payload"> & { ref_id?: string | null }): string {
+  return cleanText(lineOf(e));
+}
+
+/** `eventLine`'s line before its last cleaning: every field in it a peer wrote is cleaned already. */
+function lineOf(e: Pick<DoorEvent, "type" | "payload"> & { ref_id?: string | null }): string {
+  const p = e.payload;
+  switch (e.type) {
+    case "member_joined": {
+      const role = field((p as { member?: unknown } | null)?.member, "room_role");
+      return role ? `joined as ${role}` : "joined";
+    }
+    case "member_left":
+      return "left";
+    case "member_evicted":
+      // From the member who removed them, so the line names who was removed.
+      return `removed ${field(p, "label") || "a member"}`;
+    case "invite_issued": {
+      const role = field(p, "role");
+      return role ? `invited ${/^[aeiou]/i.test(role) ? "an" : "a"} ${role}` : "invited a member";
+    }
+    case "invite_revoked": {
+      const listed = (p as { roles?: unknown } | null)?.roles;
+      const roles = (Array.isArray(listed) ? listed : []).map((r: unknown) => (typeof r === "string" ? cleanText(r) : "")).filter(Boolean);
+      return roles.length === 0 ? "retired a code" : `retired the ${roles.join(", ")} code${roles.length > 1 ? "s" : ""}`;
+    }
+    case "action_response": {
+      // Read from `approved` alone: a peer's text cannot make a refusal read as an approval.
+      const approved = (p as { approved?: unknown } | null)?.approved;
+      const said = approved === true ? "approved" : approved === false ? "declined" : "answered";
+      return e.ref_id ? `${said} request ${e.ref_id}` : said;
+    }
+    case "surface":
+      return `✎ canvas: ${field(p, "title") || field(p, "key")}`;
+    case "brief_update":
+      return "updated their brief";
+    case "progress":
+      return field(p, "note") || "progress";
+  }
+  const text = typeof p === "string" ? cleanText(p) : field(p, "text");
+  return text || (e.type === "action_request" && p != null ? JSON.stringify(p) : e.type);
 }

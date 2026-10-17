@@ -36,7 +36,7 @@ export const IDLE_WAKE: WakeState = { nudged: false, inARow: 0 };
 export type WakeInput =
   /** `interrupting` is the events waiting that should interrupt (the door's count); `turnRunning` is whether a turn is under way. */
   | { kind: "tick"; interrupting: number; turnRunning: boolean }
-  /** The person acted: a prompt typed in the composer, or a press on one of the mod's buttons. */
+  /** The person acted: a prompt of theirs (the composer's, or Remote Control's), or a press on one of the mod's buttons. */
   | { kind: "person" };
 
 /** `submit` starts a turn in an idle session, `append` adds a row to the turn that is running, `none` does neither. */

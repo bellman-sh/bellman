@@ -12,7 +12,7 @@ import { read, update } from "claude-code";
 import type { Elements, EngineInterface, RenderElement } from "claude-code";
 import { cleanBlock, cleanText, eventLine } from "../../src/door-protocol.js";
 import { approvalKey } from "../../src/mod/gate.js";
-import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, bellRows, safeLinks } from "../../src/mod/view.js";
+import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, memberLine, safeLinks } from "../../src/mod/view.js";
 import type { DoorEvent, PendingRequest, RoomView, Tab } from "../types";
 import { decline, readCanvas, seatIn } from "./doors";
 import { personActed } from "./person";
@@ -195,6 +195,9 @@ const CHROME_ROWS = 2;
  * The room pane drawn wide (view.tsx's `Pane` hook, at `COMPACT_BELOW` body columns or more), from what the band
  * and the sidebar show (`s`, `p`) and what the reads keep in `$.state`. Every press is the person's, so each says so
  * first.
+ *
+ * The header is marked by the word: the engine draws no pane's title while it is the only pane, and one row of the
+ * bell read as a dark bar with one gold cell (L11).
  */
 export async function drawPane(
   $: EngineInterface,
@@ -252,7 +255,7 @@ export async function drawPane(
     body = (view?.members ?? []).map((m) => {
       const beat = m.beat.silent && m.beat.silent_for_seconds !== null ? `silent ${Math.round(m.beat.silent_for_seconds / 60)} min` : "";
       const line = [
-        `${m.presence === "present" ? "●" : "◌"} ${cleanText(m.label, NAME_MAX)} ${cleanText(m.room_role, NAME_MAX)}`,
+        memberLine(m),
         mine.has(m.member_id) ? "you" : "",
         beat,
         noteOf(m.beat.note),
@@ -278,13 +281,7 @@ export async function drawPane(
   return (
     <Box flexDirection="column">
       <Box columnGap={1}>
-        <Box>
-          {(bellRows()[0] ?? []).map((cell) => (
-            <Text color={cell.top} backgroundColor={cell.bottom}>
-              ▀
-            </Text>
-          ))}
-        </Box>
+        <Text bold>Bellman</Text>
         {p.picker}
         {p.connection}
         {p.about}

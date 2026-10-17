@@ -64,9 +64,15 @@ export type RoomMember = {
   beat: { asked: boolean; last_report_at: string | null; silent_for_seconds: number | null; silent: boolean; note: unknown };
 };
 
+/** One of the account's seats in a room, as `bellman_rooms` lists them in `your_seats`, oldest first. */
+export type YourSeat = { member_id: string; role: string; verbs: string[] };
+
 /**
  * A room the session holds a seat in, as the door's `/rooms` lists it (`bellman_rooms`', `roomSummary` in
  * src/projections.ts), with the fields the mod reads, and `server`: the bridge whose door lists the seat and served it.
+ *
+ * An account holding several seats in the room gets `your_member_id` null and `room` from no seat (`your_role` null,
+ * `your_verbs` empty): each seat's verbs are in `your_seats`, which a server older than it does not send.
  */
 export type RoomView = {
   server: string;
@@ -74,7 +80,8 @@ export type RoomView = {
   status: string;
   max_members: number;
   active_members: number;
-  your_member_id: string;
+  your_seats?: YourSeat[];
+  your_member_id: string | null;
   room: { preset: string | null; public_name: string | null; your_role: string | null; your_verbs: string[] };
   members: RoomMember[];
   last_event: { cursor: number; type: string; at: string } | null;

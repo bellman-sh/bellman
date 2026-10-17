@@ -19,7 +19,7 @@
  * Canvas. Nothing here calls `bellman_sync` or takes from an inbox: those belong to Claude.
  */
 import { read, update } from "claude-code";
-import type { EngineInterface, HttpInit } from "claude-code";
+import type { EngineInterface, HttpInit, Timer } from "claude-code";
 import { resultData } from "../../src/mod/calls.js";
 import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
 import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
@@ -48,13 +48,28 @@ async function bridges($: EngineInterface): Promise<string[]> {
   return (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
 }
 
+/** How long one of the mod's hooks waits for the bridges to name their doors before it lets its event go on. */
+const FIND_WAIT_MS = 1_500;
+
 /**
  * From inside one of the mod's own hooks, where Claude Code allows the mod's call (register.tsx: `session.start`, and
  * `turn.start`, `turn.complete` and `prompt.submit`): each bridge listed now that the mod has not asked, or whose door
  * failed, is asked for its door. A tick cannot ask, so a door it finds failing keeps its error until the next of these.
+ *
+ * The asking starts inside the hook, where the call is allowed, and the hook waits for it `FIND_WAIT_MS` at most: a
+ * bridge that never answers must not hold the person's prompt or the turn. An answer slower than that still lands in
+ * `doors`, for the next tick.
  * ponytail: a bridge older than the door is asked once, so one updated mid-session shows at the next session's start.
+ * ponytail: a hung bridge is asked again at each of these hooks, its calls left pending; one asking at a time, the day that shows.
  */
 export async function findDoors($: EngineInterface): Promise<void> {
+  const asking = askBridges($).catch((error: unknown) => $.ui.log(`bellman-mod: finding the doors: ${message(error)}`, { to: "debug" }));
+  let timer: Timer | undefined;
+  await Promise.race([asking, new Promise<void>((resolve) => (timer = $.clock.after(FIND_WAIT_MS, resolve)))]);
+  timer?.cancel();
+}
+
+async function askBridges($: EngineInterface): Promise<void> {
   const known = await read($, doors);
   const unasked = (await bridges($)).filter((server) => !known.some((d) => d.server === server && d.error === null));
   if (unasked.length === 0) return;
@@ -143,6 +158,15 @@ function seatedRooms(list: readonly DoorView[]): Map<string, SeatAt> {
 /** The session's seat in `sessionId`, as the doors list it now. */
 export const seatIn = (list: readonly DoorView[], sessionId: string): SeatAt | undefined => seatedRooms(list).get(sessionId);
 
+/**
+ * What the seat `memberId` may do in the room `view`: its entry in `your_seats`. `room.your_verbs` speaks for no seat
+ * when the account holds several there (it is empty, L9), so it is read only from a server older than `your_seats`.
+ */
+function verbsOf(view: RoomView | undefined, memberId: string): readonly string[] {
+  if (view?.your_seats) return view.your_seats.find((s) => s.member_id === memberId)?.verbs ?? [];
+  return view?.room.your_verbs ?? [];
+}
+
 /** How many of a room's events `logs` keeps: the newest. */
 const LOG_KEPT = 500;
 
@@ -192,7 +216,7 @@ async function readLogs($: EngineInterface, list: readonly DoorView[], ids: read
         pendingRequests(kept[id] ?? [], {
           sessionId: id,
           seatMemberId: seat.member_id,
-          canRespond: views.find((r) => r.session_id === id)?.room.your_verbs.includes("respond_actions") ?? false,
+          canRespond: verbsOf(views.find((r) => r.session_id === id), seat.member_id).includes("respond_actions"),
           now,
         }),
       ]),

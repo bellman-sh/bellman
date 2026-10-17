@@ -5,9 +5,9 @@
  * session never hears its room. Each door tick tells this file how many interrupting events wait (the door's counts,
  * which take nothing from the inbox), and `stepWake` (src/mod/wake.ts) decides: submit a prompt to start a turn in an
  * idle session, append a row to the turn that is running, or leave it alone. Three wakes in a row with nothing from
- * the person pause waking until they type in the composer or press one of the mod's buttons. When a turn runs and
- * when the person types, this file learns from the hooks register.tsx owns (they look for the doors as well), which
- * call `turnStarted`, `turnEnded` and `promptSubmitted`.
+ * the person pause waking until they send a prompt (in the composer, or through Remote Control) or press one of the
+ * mod's buttons. When a turn runs and when the person types, this file learns from the hooks register.tsx owns (they
+ * look for the doors as well), which call `turnStarted`, `turnEnded` and `promptSubmitted`.
  *
  * What the model is handed is `WAKE_TEXT` and nothing else. Nothing a peer wrote reaches `$.prompt.submit` or
  * `$.session.append`: not a label, a room's name or a message. The model reads the events through the bridge's own
@@ -48,11 +48,12 @@ export function turnEnded(e: { agentId?: string }): void {
 }
 
 /**
- * At `prompt.submit`: only the person's own Enter in the composer is the person. A peer's message, another plugin's
- * prompt (the wake's own included) and a task's notification are prompts, but not input from the person.
+ * At `prompt.submit`: the person's own prompt is the person, typed in the composer or sent through Remote Control
+ * (`bridge`: a phone or web client, R13). A peer's message, another plugin's prompt (the wake's own included) and a
+ * task's notification are prompts, but not input from the person.
  */
 export function promptSubmitted(e: { origin: { kind: string } }): void {
-  if (e.origin.kind === "composer") person();
+  if (e.origin.kind === "composer" || e.origin.kind === "bridge") person();
 }
 
 /** A press on one of the mod's buttons or a pick in its room picker is the person too. */

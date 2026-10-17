@@ -4,7 +4,7 @@
  * the same pane at full width as the room pane, which pane.tsx draws; a toast for a peer's message; and, while the
  * session holds no seat, the status line alone.
  *
- * Every string a peer controls reaches the screen through src/mod/view.ts (`roomLabel`, `toastFor`) or
+ * Every string a peer controls reaches the screen through src/mod/view.ts (`roomLabel`, `memberLine`, `toastFor`) or
  * `cleanText`. The render hooks draw on the terminal and answer `next(e)` on every other surface (spec D11).
  */
 import { read, update } from "claude-code";
@@ -20,6 +20,7 @@ import {
   SIDEBAR_COLUMNS,
   bellRows,
   chooseLayout,
+  memberLine,
   roomLabel,
   sidebarMove,
   toastFor,
@@ -50,13 +51,20 @@ function labelOf(id: string, views: readonly RoomView[]): string {
   return roomLabel({ session_id: id, preset: view?.room.preset, public_name: view?.room.public_name });
 }
 
-/** The status line while the session holds no seat (spec D4); none with a seat, or with no Bellman bridge at all. */
+/**
+ * The status line while the session holds no seat (spec D4), said for the best bridge there is (L6): a door that
+ * answers, signed in, says the session is in no room; one that answers signed out, that the bridge is not signed in;
+ * then a door that could not be read; and a bridge older than the door only when no bridge has a door. None with a
+ * seat, or with no Bellman bridge at all.
+ */
 function statusLine(list: readonly DoorView[]): string | undefined {
-  if (list.length === 0 || seatsOf(list).length > 0) return undefined;
-  if (list.some((d) => d.socketPath === null && d.error === null)) return "Bellman: update the bridge to see your rooms here";
+  if (seatsOf(list).length > 0) return undefined;
+  const answering = list.filter((d) => d.socketPath !== null && d.error === null);
+  if (answering.some((d) => d.status?.signed_in !== false)) return "Bellman: not in a room";
+  if (answering.length > 0) return "Bellman: the bridge is not signed in";
   if (list.some((d) => d.error !== null)) return "Bellman: cannot reach the bridge";
-  if (list.some((d) => d.status?.signed_in === false)) return "Bellman: the bridge is not signed in";
-  return "Bellman: not in a room";
+  if (list.length > 0) return "Bellman: update the bridge to see your rooms here";
+  return undefined;
 }
 
 /** Opens the room pane on `to`, wide. The person's press is behind every call, so it is placed at any width. */
@@ -138,9 +146,7 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
     label: labelOf(picked, views),
     about: [preset, view ? `${view.active_members} of ${view.max_members}` : ""].filter(Boolean).join(" · "),
     // Peers: every member but the session's own seats.
-    peers: (view?.members ?? [])
-      .filter((m) => !mine.some((s) => s.member_id === m.member_id))
-      .map((m) => `${m.presence === "present" ? "●" : "◌"} ${cleanText(m.label, NAME_MAX)} ${m.presence === "present" ? cleanText(m.room_role, NAME_MAX) : "stale"}`),
+    peers: (view?.members ?? []).filter((m) => !mine.some((s) => s.member_id === m.member_id)).map(memberLine),
     unread: unreadCount(
       list.flatMap((d) => d.status?.recent ?? []),
       { sessionId: picked, seatMemberId: mine[0]!.member_id, openedThrough: (await read($, openedThrough))[picked] ?? -1 },
@@ -182,7 +188,9 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
       </Text>
     ),
     buttons: [
-      <Button key="open-log" label="Log" onPress={press("log")} />,
+      // `b` presses it while the band or the sidebar holds the keys. A bracketed Button draws no hotkey; on the bell's
+      // first row, a plain one, it drew "b: " and pushed that row out of line with the other three (L7).
+      <Button key="open-log" label="Log" hotkey="b" onPress={press("log")} />,
       <Button key="open-canvas" label="Canvas" onPress={press("canvas")} />,
       s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve")} />,
     ],
@@ -192,7 +200,7 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
     paused: s.paused && <Text color="warning">paused</Text>,
     // The bell: each row a Button of half-block cells, the upper pixel the color and the lower the ground.
     bell: bellRows().map((row, i) => (
-      <Button key={`bell-${i}`} plain hotkey={i === 0 ? "b" : undefined} onPress={press("log")}>
+      <Button key={`bell-${i}`} plain onPress={press("log")}>
         {row.map((cell) => (
           <Text color={cell.top} backgroundColor={cell.bottom}>
             ▀

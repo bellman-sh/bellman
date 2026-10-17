@@ -1243,9 +1243,11 @@ export async function evictMember(
  * (an eviction, a door shut), and those are not messages. The report keeps whom it is about (R12), read from the
  * member or from the event's sender, so an operator can act on the account.
  *
- * A removed member read the room up to its cut and no further (#113), so a cursor past the cut names an event it was
- * never shown, and is refused as one that does not exist: a report must not tell it what the room holds after it was
- * out. A member who left keeps the open feed, and so the open cursors.
+ * A caller may report a message exactly when it could read it. A removed member read a room that is not public up to
+ * its cut and no further (#113), so a cursor past the cut names an event it was never shown, and is refused as one that
+ * does not exist: a report must not tell it what the room holds after it was out. A public room's log is public to
+ * anyone, so while the room is public there is no cut, and someone removed from it may still report what is said about
+ * them afterwards. A member who left keeps the open feed, and so the open cursors.
  *
  * The shape of the request is checked first, because it reads nothing from the room. A note is trimmed and an empty
  * one is none, and the limit applies to the trimmed length. The note is untrusted text and is kept as written.
@@ -1289,8 +1291,9 @@ export async function fileRoomReport(
     if (!Number.isInteger(input.cursor) || input.cursor < 1) {
       return refuse("invalid", "cursor must be a positive whole number.");
     }
-    // `cutFor` of no handles is -Infinity, so it is asked only of someone who held one.
-    const cut = handles.length > 0 ? cutFor(handles) : undefined;
+    // A caller may report what it could read. A public room's log is public, so it has no cut to keep. Past the access
+    // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
+    const cut = isPublic(session) ? undefined : cutFor(handles);
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
     if (!event || event.fromMemberId === "system") return refuse("invalid", "no message at that cursor.");
     target = { kind: "message", cursor: event.cursor };

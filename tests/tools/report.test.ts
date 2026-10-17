@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { reportMail, type Report } from "../../src/reports.js";
 import { fileRoomReport } from "../../src/rooms.js";
 import { NEED_ROOM } from "../../src/tools/kit.js";
-import { pairUp, publicRoom, type PairedSession } from "../helpers/flows.js";
+import { joinWith, pairUp, publicRoom, type PairedSession } from "../helpers/flows.js";
 import { DEV_KEY, Harness } from "../helpers/harness.js";
 
 let h: Harness;
@@ -166,7 +166,25 @@ describe("bellman_report (spec §3)", () => {
     expect((await h.store.listReports(10)).map((r) => r.target.kind).sort()).toEqual(["message", "room"]);
   });
 
-  it("lets a removed member report what it was shown and nothing past its cut, as if there were nothing there", async () => {
+  it("lets a member removed from a public room report what was said past its cut, since the room's log is public", async () => {
+    const room = await publicRoom(harness());
+    const joiner = await h.connect(DEV_KEY.peer);
+    const joined = await joinWith(joiner, room.code);
+    expect(joined.isError, joined.text).toBe(false);
+    const joinerMemberId = String(joined.data.member_id);
+    const removed = await room.creator.call("bellman_evict", { session_id: room.sessionId, member_id: joinerMemberId });
+    expect(removed.isError, removed.text).toBe(false);
+    const past = await post(room.sessionId, room.memberId, "said about them once they were out");
+    // The cut is real, so the report below is refused in a room that is not public (the test after this one).
+    const cut = (await h.store.getMember(room.sessionId, joinerMemberId))?.removedAtCursor;
+    expect(cut, "the eviction recorded a cut").toBeDefined();
+    expect(past).toBeGreaterThan(cut!);
+    const out = await joiner.call("bellman_report", { session_id: room.sessionId, cursor: past, reason: "harassment" });
+    expect(out.isError, out.text).toBe(false);
+    expect(mailed.map((r) => r.target)).toEqual([{ kind: "message", cursor: past }]);
+  });
+
+  it("lets a removed member report what it was shown and nothing past its cut, as if there were nothing there, in a room that is not public", async () => {
     const s = await pairUp(harness());
     const shown = await say(s, "before the removal");
     const removed = await s.creator.call("bellman_evict", { session_id: s.sessionId, member_id: s.joinerMemberId });

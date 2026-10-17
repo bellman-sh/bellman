@@ -475,8 +475,8 @@ describe("OutboxDriver", () => {
 
   /**
    * A row that commits with nothing scheduled to read it is the window this module
-   * exists to close, and RegistryDO has no other alarm to come back for it, so
-   * enqueue arms one itself, a grace period behind the inline delivery. Both facts
+   * exists to close, and RegistryDO's only other alarm is `report_purge`, 180 days
+   * out, which would not come back for it in time, so enqueue arms one itself, a grace period behind the inline delivery. Both facts
    * are asserted, so the test fails if either the arm or the marker goes missing.
    */
   it("enqueue arms the alarm, alongside the marker it returns", async () => {

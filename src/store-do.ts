@@ -34,7 +34,11 @@ import {
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import {
+  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
+  type FiledReport, type NewReport, type Report,
+} from "./reports.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import {
   PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
@@ -64,7 +68,7 @@ import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
  *   RegistryDO  singleton. What resolves without a room in hand: join codes,
  *               pending connect tokens, plan grants, create counts, the creator,
  *               joined-rooms and org-rooms indexes, saved presets, hosted-room
- *               slots and creator-wide bans.
+ *               slots, creator-wide bans, suspensions and the report queue.
  *   AuditDO     one per org, so an org's audit stream is physically its own
  *               object. A cross-org room writes to each, and neither org's
  *               DO is reachable from the other.
@@ -72,7 +76,8 @@ import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
  * On sweep(): MemoryStore scans every session on a timer. There is no cheap
  * global iteration across a DO namespace, so abandonment is enforced by a
  * per-object alarm and connect tokens expire lazily on read. sweep() is
- * therefore a no-op — see the comment on the method.
+ * therefore a no-op — see the comment on the method. The registry's alarm
+ * deletes a resolved report on a date it keeps (`report_purge`).
  */
 
 const CURSOR_PAD = 12;
@@ -2968,6 +2973,41 @@ const creatorBanKey = (creatorId: string, userId: string): string =>
 /** `su:<user>` is a suspended account (abuse protections spec, section 1), its id percent-encoded as `cb:`'s are. */
 const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userId)}`;
 
+/**
+ * Reports (abuse protections spec, section 3) are six kinds of row and a due row, all in the registry:
+ * - `rp:<id>` is the report. An id sorts in filing order, so a listing of the prefix is the queue.
+ * - `ro:<id>` holds the id of a report while it is open: written when it is filed, deleted when it is resolved. The
+ *   operator's queue lists open reports first, and this is how it reads them without reading every report there is.
+ * - `rf:<reporter>:<sessionId>:<targetKey>` holds the id of the open report that account filed about that target:
+ *   what a repeat folds into (R9). Resolving the report deletes it.
+ * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`. It only serves
+ *   that limit, so the purge deletes it once its newest time has left the day.
+ * - `rc:<creator>:<sessionId>:<id>` holds the id of a report that reaches the creator (`reachesCreator`: about a member
+ *   or a message, and not about the creator's own account), so a creator's view of one room is a listing of a prefix.
+ * - `rr:<purgeAt>:<id>` holds the id of a resolved report, dated for its deletion, the time padded to 15 digits so
+ *   string order is time order. `due:report_purge` is the earliest of those dates.
+ * The reporter and the creator are percent-encoded, as `cb:`'s segments are: an operator-issued user id may hold a
+ * colon, and unencoded one account's prefix would cover the rows of another whose id extends it.
+ */
+const REPORT_PREFIX = "rp:";
+const reportKey = (id: string): string => `${REPORT_PREFIX}${id}`;
+const reportFoldKey = (reporterId: string, sessionId: string, target: string): string =>
+  `rf:${encodeURIComponent(reporterId)}:${sessionId}:${target}`;
+const REPORT_OPEN_PREFIX = "ro:";
+const reportOpenKey = (id: string): string => `${REPORT_OPEN_PREFIX}${id}`;
+const REPORT_TIMES_PREFIX = "rl:";
+const reportTimesKey = (reporterId: string): string => `${REPORT_TIMES_PREFIX}${encodeURIComponent(reporterId)}`;
+const reportCreatorPrefix = (creatorId: string, sessionId: string): string =>
+  `rc:${encodeURIComponent(creatorId)}:${sessionId}:`;
+const reportCreatorKey = (creatorId: string, sessionId: string, id: string): string =>
+  `${reportCreatorPrefix(creatorId, sessionId)}${id}`;
+const REPORT_PURGE_PREFIX = "rr:";
+const reportPurgeAt = (at: number): string => `${REPORT_PURGE_PREFIX}${String(at).padStart(15, "0")}`;
+const reportPurgeKey = (purgeAt: number, id: string): string => `${reportPurgeAt(purgeAt)}:${id}`;
+/** The date a `rr:` key is for. */
+const purgeAtOf = (key: string): number =>
+  Number(key.slice(REPORT_PURGE_PREFIX.length, REPORT_PURGE_PREFIX.length + 15));
+
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
 
@@ -3105,20 +3145,76 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * The backstop for the inline delivery. It fires after OUTBOX_GRACE_MS, finds
-   * an empty queue and does nothing, unless the inline attempt never ran or is
-   * still waiting on an audit object that has stopped answering.
+   * The backstop for the inline delivery, and the deletion of resolved reports.
+   *
+   * The outbox's: it fires after OUTBOX_GRACE_MS, finds an empty queue and does nothing, unless the inline attempt
+   * never ran or is still waiting on an audit object that has stopped answering.
+   *
+   * `report_purge` (R15) is the other name a `due:` row carries here. Every name the driver can report needs a
+   * branch below: a name with none is never consumed, and the closing reArm() points the alarm straight back at
+   * its due time, so the alarm fires back to back for good. `now` is read once, as SessionDO.alarm reads it, so the
+   * handlers due and the reports purged are judged on one clock. A handler that throws is logged by name and
+   * rethrown, as SessionDO.alarm does, so the runtime retries and one line says which handler failed.
    *
    * The closing reArm() is the safety net SessionDO.alarm has too: a fired alarm is
    * consumed, so whatever is still due must have one scheduled before this returns.
-   * The drain re-arms for itself after a failed delivery, so this covers a path
-   * that returns without having done so; nothing reaches it today.
+   * The drain re-arms for itself after a failed delivery, so for the outbox this covers a path
+   * that returns without having done so; nothing reaches it today. For reports it is the one
+   * arming: `#purgeReports` leaves the next date in the due row, and this points the alarm at it.
    */
   async alarm(): Promise<void> {
-    for (const name of await this.driver.dueNow()) {
-      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+    const now = Date.now();
+    for (const name of await this.driver.dueNow(now)) {
+      try {
+        if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+        if (name === REPORT_PURGE_HANDLER) await this.#purgeReports(now);
+      } catch (error) {
+        // The runtime retries a throwing alarm a few times and then leaves it with nothing armed (the next
+        // `resolveReport`, or the next intent queued, arms it again), and it says nothing of which handler it gave up
+        // on. This line is the one record. Rethrown, so the runtime still retries, as SessionDO.alarm does.
+        console.error(`alarm handler "${name}" failed for the registry:`, error);
+        throw error;
+      }
     }
     await this.driver.reArm();
+  }
+
+  /**
+   * `report_purge` (R15): in one transaction, delete every resolved report whose 180 days are up, with its creator
+   * row and its `rr:` row, and every reporter's filing-times row whose times have all left the day, then point the
+   * due row at the next `rr:` row, or delete it when none is left. Without that last step the name stays due and the
+   * alarm fires back to back. The reports are listed up to `now` and not the whole prefix, because the prefix holds
+   * every report resolved in the last 180 days and a firing needs the due ones.
+   *
+   * `#private`, for the reason `#deliver` gives: it deletes reports, and a method on a Durable Object's class is
+   * reachable by anything holding the REGISTRY binding.
+   *
+   * ponytail: every report due is deleted in this one transaction, so a backlog is one large firing. Bound it per
+   * firing if one ever gets that large: the due row would stay due, and the next firing would finish the rest.
+   */
+  async #purgeReports(now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const due = await txn.list<string>({ prefix: REPORT_PURGE_PREFIX, end: reportPurgeAt(now + 1) });
+      const reports = await getRows<Report>(txn, [...due.values()].map(reportKey));
+      const keys = [...due.keys()];
+      for (const id of due.values()) {
+        const report = reports.get(reportKey(id));
+        if (report === undefined) continue;
+        keys.push(reportKey(id));
+        if (report.target.kind !== "room") keys.push(reportCreatorKey(report.creatorId, report.sessionId, id));
+      }
+      // A reporter's filing times only serve the day's limit (R10), so a row whose times have all left the day goes too,
+      // and an account is not kept for good. Listed whole: the rows are those of whoever filed in the last day, and of
+      // whoever filed since the last purge.
+      for (const [key, times] of await txn.list<number[]>({ prefix: REPORT_TIMES_PREFIX })) {
+        if (withinWindow(times, now).length === 0) keys.push(key);
+      }
+      // A delete takes at most KEYS_PER_CALL keys.
+      for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
+      const [next] = await txn.list<string>({ prefix: REPORT_PURGE_PREFIX, limit: 1 });
+      if (next) await txn.put(dueKey(REPORT_PURGE_HANDLER), purgeAtOf(next[0]));
+      else await txn.delete(dueKey(REPORT_PURGE_HANDLER));
+    });
   }
 
   /**
@@ -3732,6 +3828,87 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async isSuspended(userId: string): Promise<boolean> {
     return (await this.ctx.storage.get(suspensionKey(userId))) !== undefined;
   }
+
+  /**
+   * `BellmanStore.fileReport`, in one transaction: the fold's read, the day's count and the writes are one step, so
+   * two filings cannot both pass the limit or both miss each other's fold. A fold and a refusal write nothing. The
+   * filer's times are pruned to the day on the write that adds one, so a row never holds more than the limit.
+   */
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    return this.ctx.storage.transaction(async (txn): Promise<FiledReport> => {
+      const foldKey = reportFoldKey(r.reporterUserId, r.sessionId, targetKey(r.target));
+      const foldedId = await txn.get<string>(foldKey);
+      const open = foldedId === undefined ? undefined : await txn.get<Report>(reportKey(foldedId));
+      if (open?.resolvedAt === null) return { outcome: "folded", report: open };
+      const timesKey = reportTimesKey(r.reporterUserId);
+      const kept = withinWindow((await txn.get<number[]>(timesKey)) ?? [], now);
+      if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
+      const report: Report = { ...r, id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
+      await txn.put<unknown>({
+        [reportKey(report.id)]: report,
+        [foldKey]: report.id,
+        [timesKey]: [...kept, now],
+        [reportOpenKey(report.id)]: report.id,
+        ...(reachesCreator(r) ? { [reportCreatorKey(r.creatorId, r.sessionId, report.id)]: report.id } : {}),
+      });
+      return { outcome: "filed", report };
+    });
+  }
+
+  /**
+   * This creator's rows for this room, newest first. The prefix ends at the colon after the room's id, so it reaches no
+   * other room's.
+   *
+   * ponytail: a room's reports are read whole. A limit and a cursor if a public room ever gathers thousands.
+   */
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    const ids = [...(await this.ctx.storage.list<string>({
+      prefix: reportCreatorPrefix(creatorId, sessionId), reverse: true,
+    })).values()];
+    const rows = await getRows<Report>(this.ctx.storage, ids.map(reportKey));
+    return ids.flatMap((id) => rows.get(reportKey(id)) ?? []);
+  }
+
+  /**
+   * `BellmanStore.listReports`: the open reports, from the `ro:` rows, newest first and at most `limit`, then the resolved
+   * ones to fill what is left, which is none when the open ones fill the cut. When the open reports are fewer than `limit`
+   * these are all of them, so at most that many of the newest `limit` reports are open and the rest of those are resolved:
+   * reading `limit` rows of the queue finds every resolved report the cut needs. Neither read is more than `limit` rows,
+   * however many reports the registry holds.
+   */
+  async listReports(limit: number): Promise<Report[]> {
+    const openIds = [...(await this.ctx.storage.list<string>({ prefix: REPORT_OPEN_PREFIX, reverse: true, limit })).values()];
+    const rows = await getRows<Report>(this.ctx.storage, openIds.map(reportKey));
+    const open = openIds.flatMap((id) => rows.get(reportKey(id)) ?? []);
+    const newest = [...(await this.ctx.storage.list<Report>({ prefix: REPORT_PREFIX, reverse: true, limit })).values()];
+    return [...open, ...newest.filter((r) => r.resolvedAt !== null).slice(0, limit - open.length)];
+  }
+
+  /**
+   * `BellmanStore.resolveReport`, in one transaction: the stamp, the end of the fold and the date of the deletion
+   * land together. The due row takes the earlier of what it holds and this report's date, so a report resolved after
+   * another never moves the alarm back; `#purgeReports` sets it to the next date when it runs. The alarm is pointed
+   * at it after the commit, because `reArm()` reads the due rows the commit wrote.
+   */
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    const outcome = await this.ctx.storage.transaction(async (txn) => {
+      const report = await txn.get<Report>(reportKey(id));
+      // An unknown id answers nothing, and a resolved report is answered as it is: the first resolution stands.
+      if (report === undefined || report.resolvedAt !== null) return { report, scheduled: false };
+      const done: Report = { ...report, resolvedAt: now, resolution: resolution.note, resolvedBy: resolution.by };
+      const purgeAt = now + REPORT_RETENTION_MS;
+      const due = await txn.get<number>(dueKey(REPORT_PURGE_HANDLER));
+      await txn.delete([reportFoldKey(report.reporterUserId, report.sessionId, targetKey(report.target)), reportOpenKey(id)]);
+      await txn.put<unknown>({
+        [reportKey(id)]: done,
+        [reportPurgeKey(purgeAt, id)]: id,
+        [dueKey(REPORT_PURGE_HANDLER)]: due === undefined ? purgeAt : Math.min(due, purgeAt),
+      });
+      return { report: done, scheduled: true };
+    });
+    if (outcome.scheduled) await this.driver.reArm();
+    return outcome.report;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4147,6 +4324,22 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.isSuspended(userId);
   }
 
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    return this.registry.fileReport(r, now);
+  }
+
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    return this.registry.roomReports(creatorId, sessionId);
+  }
+
+  async listReports(limit: number): Promise<Report[]> {
+    return this.registry.listReports(limit);
+  }
+
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    return this.registry.resolveReport(id, resolution, now);
+  }
+
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {
     return new Set(await this.session(sessionId).connectedMembers());
   }
@@ -4538,8 +4731,9 @@ export class DurableObjectStore implements BellmanStore {
    * No-op by design. MemoryStore sweeps on a timer because it can iterate every
    * session cheaply; a DO namespace cannot. Abandonment is enforced by the
    * per-object alarm set in SessionDO.createSession, the sweep and the purge of a
-   * closed room (#65) by the same alarm, and connect tokens are checked for expiry
-   * when taken. Nothing is left for a sweep to do.
+   * closed room (#65) by the same alarm, a resolved report by the registry's
+   * (`report_purge`), and connect tokens are checked for expiry when taken.
+   * Nothing is left for a sweep to do.
    */
   async sweep(_now: number): Promise<void> {}
 }

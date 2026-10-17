@@ -113,20 +113,37 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 16. **Reports (D6).** A member files one with `bellman_report`, and a signed-in reader of
     a public room through the dash, which posts to `POST /rooms/:id/reports`. The reason
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most
-    500 characters. The registry queues them. A creator reads those about members and
-    messages in their rooms at `GET /rooms/:id/reports`, and an operator reads and closes
-    every one at `GET /admin/reports` and `POST /admin/reports/:id/resolve`.
-    `src/reports.ts` holds the types, the email and the views, `src/tools/report.ts` the
-    tool, and `extension/manifest.json` lists it.
+    500 characters. The registry queues them. A creator reads those about the other
+    members and messages in their rooms at `GET /rooms/:id/reports`, and an operator
+    reads and closes every one at `GET /admin/reports` and
+    `POST /admin/reports/:id/resolve`. The queue lists the open reports first and then
+    the resolved ones, newest first in each, 200 in all, so an open report is never
+    behind newer resolved ones that fill the cut. `src/reports.ts` holds the types, the
+    email and the views, `src/tools/report.ts` the tool, and `extension/manifest.json`
+    lists it.
 17. **Who may report a room (R11).** Anyone who holds or held a handle in it, and, while
     it is public, anyone signed in. `fileRoomReport` in `src/rooms.ts` is the one
     operation the tool and the route run. Both take a `member_id` or a `cursor`, or
-    neither for the room, and a message target must be an event a member sent, so one from
-    `"system"` is refused.
+    neither for the room, and a message target must be an event of a kind a member sends
+    (`SEND_KINDS`, the kinds `bellman_send` accepts). Every notice the room writes itself is
+    refused as no message, whether it is written under `"system"` (an eviction, a timeout,
+    an expiry, a tick, a proposal) or under the member it names (a join, a leave, a code
+    issued or revoked): a report of one would be a report about that member. A caller
+    may report a message exactly when it could read it: a member removed from a room
+    that is not public may report only what came before its removal (its cut, #113),
+    and in a public room, whose log anyone may read, no one is cut.
 18. **A report keeps whom it is about (R12).** The member id, user id and label
     (`subject`), so an operator can suspend the account. A creator's view carries the
-    member id and label only, and never who filed the report. The reported person is not
-    told.
+    member id and label only, and never who filed the report. Its time is to the hour (the
+    minutes, seconds and milliseconds zeroed), so a creator cannot match a report to one
+    member's activity in the room; the operator's view keeps the exact time. The reported
+    person is not told. A report about the creator's own account, a seat they hold or a
+    message they sent, is not in the creator's list at all (`reachesCreator`, decided at
+    the source by both stores): it reaches the operators alone. The hosted seat is
+    Bellman's account (`u_bellman_host`), so a report about it reaches the creator, who
+    sets its instructions. In a small private room who filed a report may be evident by
+    elimination: the creator reads a report about one member, did not file it, and the
+    room holds few others.
 19. **Limits on filing (D6, R9, R10).** An account files 10 reports a day, over a rolling
     24 hours. A repeat of the same target by the same account folds into the first, but
     only into an open one: the fold writes nothing, sends no email and does not count
@@ -134,12 +151,21 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     email.
 20. **The email uses the builder form of `send_email` (R13).** `{ from:
     "reports@bellman.sh", to: "support@bellman.sh", subject, text }`, sent by the tool and
-    the route after the store answers `filed`. The subject is built from closed sets, and
-    the note, which is untrusted text, goes only in the body, as written. The dash shows
+    the route after the store answers `filed`. The subject is built from closed sets. The
+    email is a notice (the owner's decision of 2026-10-17, amending R13's copy, which put
+    the reporter and the note in it): its body carries the report's id and filing time,
+    the room's id, what the report is about (the room, a member or a message), the
+    reason, and the two routes of the queue. It carries no reporter, no note, no label or
+    id of the person reported and no creator, so nothing the privacy page promises to
+    delete 180 days after resolution sits in an inbox with no expiry. The queue holds the
+    rest, and an operator works from it. The note is untrusted text, and the dash shows
     it as text.
 21. **A resolved report is deleted by a named handler (R15).** `report_purge`, on the
     registry's one alarm, deletes a report 180 days after it was resolved. Unresolved
-    reports stay. `MemoryStore` deletes in `sweep`.
+    reports stay. The same firing deletes each reporter's filing-times row
+    (`rl:<reporter>`) once its newest time has left the 24 hours of decision 19's limit,
+    because that row serves nothing else and the privacy page promises a reporter's
+    account is kept 180 days after resolution. `MemoryStore` does both in `sweep`.
 22. **An eviction no longer retires a public room's permanent code.** This supersedes ADR
     0020, decision 5, on that point. An expiring code is still retired, as ADR 0010,
     decision 4, has it. Retiring the permanent code closed the link for every newcomer,
@@ -169,6 +195,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 - A ban keeps the account's user id and label, which for most people is an email address,
   and when it was made. A suspension keeps the operator's note, which operator wrote it and
   when. A report keeps its reporter's account and note for 180 days after it is resolved.
+  A reporter's filing times go with the first purge after the newest is a day old. A
+  purge runs when a resolved report's 180 days are up, so a spent row can wait for one,
+  and only while the report behind its newest time is still in the queue, which keeps
+  the account anyway.
 - `creator_ban` is a new outbox kind and `report_purge` a new handler name on the
   registry's alarm. A build rolled back past `creator_ban` throws `outbox: unknown kind`,
   and the queue holds every row behind it (ADR 0006), so deployments roll forward.

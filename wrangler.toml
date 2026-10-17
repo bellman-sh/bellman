@@ -6,6 +6,15 @@ compatibility_date = "2026-09-01"
 # few node builtins. nodejs_compat covers both.
 compatibility_flags = ["nodejs_compat"]
 
+# account_id comes from CLOUDFLARE_ACCOUNT_ID in the environment, so this
+# file carries no account identifiers.
+
+# The zone is on Cloudflare, so the Worker binds its own hostname directly and
+# Cloudflare manages the DNS record for it. This also sidesteps needing a
+# workers.dev subdomain at all, which is why that is switched off. It sits
+# above [build]: below it, wrangler read it as a build field and ignored it.
+workers_dev = false
+
 # The page the MCP Apps resource serves is a generated module, src/ui/assets.ts
 # (gitignored; `npm run build:ui` is its only writer). Built here rather than
 # only in the npm scripts, so every path that bundles the Worker has it:
@@ -14,14 +23,6 @@ compatibility_flags = ["nodejs_compat"]
 [build]
 command = "npm run build:ui"
 watch_dir = ["src", "ui/src"]
-
-# account_id comes from CLOUDFLARE_ACCOUNT_ID in the environment, so this
-# file carries no account identifiers.
-
-# The zone is on Cloudflare, so the Worker binds its own hostname directly and
-# Cloudflare manages the DNS record for it. This also sidesteps needing a
-# workers.dev subdomain at all, which is why that is switched off.
-workers_dev = false
 
 [[routes]]
 pattern = "mcp.bellman.sh"
@@ -60,6 +61,12 @@ class_name = "HostDO"
 [[r2_buckets]]
 binding = "BLOBS"
 bucket_name = "bellman-blobs"
+
+# Reports email support@ (abuse protections spec §3). Email Routing on bellman.sh, with support@ a verified
+# destination, comes first: a send_email binding sends only to verified destinations.
+[[send_email]]
+name = "SEND_EMAIL"
+destination_address = "support@bellman.sh"
 
 # SQLite-backed Durable Objects. Required on the Workers Free plan, and the
 # storage API is identical to the KV-backed flavour.

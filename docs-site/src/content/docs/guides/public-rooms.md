@@ -1,6 +1,6 @@
 ---
 title: Public rooms
-description: Let anyone with a room's link read it, give it a permanent code and a name, keep a person out, and make it private again.
+description: Let anyone with a room's link read it, give it a permanent code and a name, keep a person out, report it, and make it private again.
 sidebar:
   order: 5
 ---
@@ -81,6 +81,10 @@ Remove the member who wrote that last message and ban their account from this ro
 Your agent calls [`bellman_evict`](/reference/tools/bellman_evict/) with `ban: "room"`. That account is then told `You can't join this room.` at the preview and again at the join, whichever code it redeems. `ban: "all"` keeps it out of every room you own, now and later. The [rooms guide](/guides/rooms/#banning-an-account) has the details.
 
 A ban stops a person joining and does not stop them reading: a public room's page needs no sign-in, so a banned account still reads it at its link. A ban is on the account, so signing in as a different account gets around it.
+
+## Reporting a room
+
+Anyone signed in can report a public room, a member in it or a message, whether or not they hold a seat: the room is open to read, so it is open to report. They need no code and take no seat. [`bellman_report`](/reference/tools/bellman_report/) files it with a reason and a note. Bellman's operators read it, and the room's creator reads the reports about its other members and their messages, never who filed them. A report about the creator itself reaches the operators alone. [The trust model](/concepts/trust/#reports) has the limit of 10 a day and who sees what.
 
 ## A public name
 

@@ -1,6 +1,7 @@
 import { ENTITLEMENTS, entitlementsFor } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
 import { handleFromSegment } from "../handles.js";
+import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { BellmanStore } from "../store.js";
@@ -71,8 +72,8 @@ export interface OAuthConfig {
   /**
    * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
    * operator's platform-wide powers, which no plan, role or grant confers.
-   * Today that is releasing anyone's handle and suspending an account. Absent
-   * or empty names no one.
+   * Today that is releasing anyone's handle, suspending an account and working
+   * the report queue. Absent or empty names no one.
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
@@ -87,7 +88,14 @@ export type PlanStore = Pick<
   | "releaseHandleNamed"
   | "recordSignIn"
   | "suspend" | "unsuspend"
+  | "listReports" | "resolveReport"
 >;
+
+// ponytail: two hundred reports a read, not tuned, and no paging. The queue lists the open reports first and then the
+// resolved ones, newest first in each, so the cut falls among the resolved unless more than this many reports are open at
+// once: only then does an open report fall past it, and an operator that far behind wants a cursor on the queue. The route
+// takes no limit: whatever it asks the store for is this number.
+export const MAX_REPORTS_LISTED = 200;
 
 export type PlanSource = "operator" | "grant" | "default";
 
@@ -1394,15 +1402,37 @@ export async function handleOAuth(
         ? new Response(null, { status: 204 })
         : oauthError("not_found", "no such suspension", 404);
     }
-    // A body that is not JSON, `null`, an array or a scalar has no note, and is the one 400 below.
-    const { note } = ((await request.json().catch(() => null)) ?? {}) as { note?: unknown };
-    const trimmed = typeof note === "string" ? note.trim() : "";
-    if (trimmed.length < 1 || trimmed.length > 500) {
-      return oauthError("invalid_request", "note must be 1 to 500 characters");
-    }
+    const note = await operatorNote(request);
+    if (note === undefined) return oauthError("invalid_request", "note must be 1 to 500 characters");
     const at = Date.now();
-    await config.plans.suspend(userId, { note: trimmed, by: gate.identity.userId, at });
-    return json({ user_id: userId, note: trimmed, suspended_at: new Date(at).toISOString() });
+    await config.plans.suspend(userId, { note, by: gate.identity.userId, at });
+    return json({ user_id: userId, note, suspended_at: new Date(at).toISOString() });
+  }
+
+  // ------------------------------------------------------ /admin/reports
+  // The operator reads the report queue and closes a report with a note (abuse protections spec, section 3). On
+  // /admin/handles' gate, and outside the suspension check as /admin/suspensions is (R8). Every route here takes the
+  // order: the gate, the method, the plan store, then the body.
+  if (path === "/admin/reports") {
+    const gate = await operatorGate(request, config, "reading reports");
+    if (gate instanceof Response) return gate;
+    if (method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    // The queue as the store orders it (open reports first, then resolved, newest first in each), with who filed each and whom it is about.
+    return json({ reports: (await config.plans.listReports(MAX_REPORTS_LISTED)).map(operatorReportView) });
+  }
+  const resolving = ADMIN_REPORT_RESOLVE.exec(path);
+  if (resolving) {
+    const gate = await operatorGate(request, config, "resolving a report");
+    if (gate instanceof Response) return gate;
+    if (method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const note = await operatorNote(request);
+    if (note === undefined) return oauthError("invalid_request", "note must be 1 to 500 characters");
+    // The id is read as it stands. A report id is `rpt_`, digits, `_` and hex, so it never needs percent-decoding, and
+    // any other string is no report: the store answers `undefined`. A report already resolved is answered as it is.
+    const report = await config.plans.resolveReport(resolving[1], { note, by: gate.identity.userId }, Date.now());
+    return report ? json({ report: operatorReportView(report) }) : oauthError("not_found", "no such report", 404);
   }
 
   return undefined;
@@ -1410,6 +1440,17 @@ export async function handleOAuth(
 
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
 const ADMIN_SUSPENSION = /^\/admin\/suspensions\/([^/]+)$/;
+const ADMIN_REPORT_RESOLVE = /^\/admin\/reports\/([^/]+)\/resolve$/;
+
+/**
+ * The note an operator's write carries, for a suspension and for a resolution: trimmed, 1 to 500 characters, or
+ * `undefined`. A body that is not JSON, `null`, an array or a scalar has no note, and is `undefined` too.
+ */
+async function operatorNote(request: Request): Promise<string | undefined> {
+  const { note } = ((await request.json().catch(() => null)) ?? {}) as { note?: unknown };
+  const trimmed = typeof note === "string" ? note.trim() : "";
+  return trimmed.length >= 1 && trimmed.length <= 500 ? trimmed : undefined;
+}
 
 /**
  * The gate for the operator's platform-wide powers (ADR 0021; abuse protections spec D3): a bearer token, never a

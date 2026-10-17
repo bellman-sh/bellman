@@ -13,10 +13,15 @@ import { member, roomManifest, session, type SeededSession } from "./helpers/fix
 // A fresh blob store for each case, handed both to the store, which purges from it, and to the cases,
 // which put objects in it: a purge that missed the bucket the store was built over is seen.
 let blobs = new MemoryBlobStore();
+let memory = new MemoryStore();
 describeStoreContract(
   "MemoryStore",
-  () => { blobs = new MemoryBlobStore(); return new MemoryStore({ blobs }); },
-  { blobsFor: () => blobs },
+  () => { blobs = new MemoryBlobStore(); memory = new MemoryStore({ blobs }); return memory; },
+  {
+    blobsFor: () => blobs,
+    // The filing times a report's limit counts from are in a private map, and BellmanStore cannot show whose are still held.
+    reporterRows: async () => [...(memory as unknown as { filings: Map<string, number[]> }).filings.keys()],
+  },
 );
 
 /**

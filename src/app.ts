@@ -10,6 +10,7 @@ import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes } from "./http/rooms.js";
 import { statsRoutes } from "./http/stats.js";
+import { reportMailer } from "./reports.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
 import { SUSPENDED } from "./suspension.js";
@@ -60,6 +61,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
     return identity ? { identity, via: "bearer" as const } : null;
   };
+  // This server has no send_email binding, so a report is stored and the log says no email went. The queue is where it is read.
+  const mailReport = reportMailer(undefined);
   /**
    * A route module behind the suspension check the Worker makes (plan ruling R8): a suspended account is refused
    * before the module reads or writes anything as it. The store is read each time, with no cache: MemoryStore
@@ -69,11 +72,11 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     const who = await caller(request);
     return who && (await store.isSuspended(who.identity.userId)) ? problem(403, "suspended", SUSPENDED, undefined) : routes(request);
   };
-  // The bans routes are asked first: they answer the paths under /rooms/:id/bans, and leave every other
-  // path to the room routes.
+  // The moderation routes are asked first: they answer the paths under /rooms/:id/bans and /rooms/:id/reports, and
+  // leave every other path to the room routes.
   app.use("/rooms", serve(gated(async (request) => {
     const deps = { store, blobs, caller, panelOrigins: [] };
-    return (await moderationRoutes(request, deps)) ?? roomRoutes(request, deps);
+    return (await moderationRoutes(request, { ...deps, mailReport })) ?? roomRoutes(request, deps);
   })));
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
@@ -124,7 +127,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
       return;
     }
     try {
-      const server = buildServer(identity, store, blobs, features);
+      const server = buildServer(identity, store, blobs, { ...features, mailReport });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

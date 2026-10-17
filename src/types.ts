@@ -129,6 +129,17 @@ export type EventType =
   /** A proposal the server raises from the room's own thresholds (#66). Never sent by a member. */
   | "housekeeping";
 
+/**
+ * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
+ * `EventType` is a notice the room writes itself, whether it names a member (`member_joined`, `member_left`, a code issued or
+ * revoked) or "system" (an eviction, a timeout, an expiry, a heartbeat tick, a housekeeping proposal). A report's message
+ * target must be one of these kinds: a notice is not something a member said. `satisfies` keeps each name an `EventType`.
+ */
+export const SEND_KINDS = [
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface",
+] as const satisfies readonly EventType[];
+export type SendKind = (typeof SEND_KINDS)[number];
+
 /** What a housekeeping proposal is about (#66). */
 export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
 

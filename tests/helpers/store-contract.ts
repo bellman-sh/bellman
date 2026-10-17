@@ -27,6 +27,7 @@ import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
+import type { NewReport, Report } from "../../src/reports.js";
 import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
@@ -83,6 +84,19 @@ export interface StoreContractHarness {
    * alarm, so its caller runs the alarm here.
    */
   advance?: (sessionId: string) => Promise<void>;
+  /**
+   * Called after a case's `sweep`, for the registry. `MemoryStore` deletes a resolved report in `sweep` and
+   * passes nothing. `DurableObjectStore.sweep` is a no-op, because the registry deletes a report on its own
+   * alarm (`report_purge`), so its caller runs the alarm here.
+   */
+  advanceRegistry?: () => Promise<void>;
+  /**
+   * The accounts whose filing times the store still holds: what `fileReport` counts the day's limit from. The
+   * harness reads it because `BellmanStore` cannot show it, since a row whose times have all left the day counts
+   * as no row. The purge deletes such a row, which only serves the limit, because the privacy page promises a
+   * reporter's account is kept 180 days after resolution and not for good.
+   */
+  reporterRows: () => Promise<string[]>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -4309,6 +4323,238 @@ export function describeStoreContract(
         expect(await store.unsuspend("u_peer")).toBe(true);
         expect(await store.unsuspend("u_peer")).toBe(false);
         expect(await store.isSuspended("u_peer")).toBe(false);
+      });
+    });
+
+    describe("reports (abuse protections spec \u{A7}3)", () => {
+      const filed = (over: Partial<NewReport> = {}): NewReport => ({
+        sessionId: "qs_test", creatorId: "u_jesse",
+        target: { kind: "member", memberId: "m_peer" },
+        subject: { memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" },
+        reason: "harassment", note: "called names", reporterUserId: "u_reader", reporterLabel: "reader@x", ...over,
+      });
+      const file = async (over: Partial<NewReport> = {}) => (await store.fileReport(filed(over), Date.now())) as { outcome: string; report: Report };
+      const sweepRegistry = async () => {
+        await store.sweep(Date.now());
+        await harness.advanceRegistry?.();
+      };
+
+      it("files a report, and lists the queue newest first", async () => {
+        const first = await file();
+        vi.advanceTimersByTime(1_000);
+        const second = await file({ target: { kind: "room" }, subject: null });
+        expect(first).toMatchObject({ outcome: "filed", report: { reason: "harassment", note: "called names", resolvedAt: null } });
+        expect((await store.listReports(10)).map((r) => r.id)).toEqual([second.report.id, first.report.id]);
+      });
+
+      it("folds a second report of one target by one account into the open first", async () => {
+        const first = await file();
+        expect(await store.fileReport(filed({ reason: "spam", note: "again" }), Date.now())).toEqual({ outcome: "folded", report: first.report });
+        expect(await store.listReports(10)).toHaveLength(1);
+        expect((await file({ reporterUserId: "u_other" })).outcome, "another account").toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 3 } })).outcome, "another target").toBe("filed");
+      });
+
+      /** Review Focus 5. */
+      it("files anew once the first is resolved, rather than folding into a closed report", async () => {
+        const first = await file();
+        await store.resolveReport(first.report.id, { note: "warned", by: "u_operator" }, Date.now());
+        expect((await file()).outcome).toBe("filed");
+      });
+
+      it("takes 10 reports from an account a day, counts no fold, and takes the next once a day has passed", async () => {
+        for (let i = 0; i < 10; i++) expect((await file({ target: { kind: "message", cursor: i + 1 } })).outcome).toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 1 } })).outcome, "a repeat still folds").toBe("folded");
+        expect(await store.fileReport(filed({ target: { kind: "room" }, subject: null }), Date.now()))
+          .toEqual({ outcome: "limited", retryAfterMs: 24 * 3_600_000 });
+        vi.advanceTimersByTime(24 * 3_600_000);
+        expect((await file({ target: { kind: "room" }, subject: null })).outcome).toBe("filed");
+      });
+
+      it("lists for a room's creator its reports about members and messages, and none about the room", async () => {
+        await file();
+        await file({ target: { kind: "message", cursor: 4 } });
+        await file({ target: { kind: "room" }, subject: null });
+        await file({ sessionId: "qs_elsewhere" });
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.target.kind).sort()).toEqual(["member", "message"]);
+        expect(await store.roomReports("u_someone_else", "qs_test")).toEqual([]);
+      });
+
+      /**
+       * Section 1C review, Critical 1. A creator who read a report about themself learned one had been filed, and in a small
+       * room which of the others filed it. A report about the creator's own seats and messages reaches the operators alone.
+       * It is told by the account, so every seat the creator holds and every message it sent is covered, a second handle
+       * included.
+       */
+      it("leaves out of a creator's list every report about the creator's own seats and messages, and keeps it in the queue", async () => {
+        const creator = { memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd" };
+        const own = [
+          (await file({ target: { kind: "member", memberId: "m_creator" }, subject: creator })).report,
+          (await file({ target: { kind: "member", memberId: "m_creator_2" }, subject: { ...creator, memberId: "m_creator_2" } })).report,
+          (await file({ target: { kind: "message", cursor: 5 }, subject: creator })).report,
+        ];
+        vi.advanceTimersByTime(1_000);
+        const aboutPeer = (await file()).report;
+        vi.advanceTimersByTime(1_000);
+        const aboutPeersMessage = (await file({ target: { kind: "message", cursor: 6 } })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id), "the creator reads the others' alone")
+          .toEqual([aboutPeersMessage.id, aboutPeer.id]);
+        expect((await store.listReports(10)).map((r) => r.id).sort(), "the operators read all five")
+          .toEqual([...own, aboutPeer, aboutPeersMessage].map((r) => r.id).sort());
+      });
+
+      /**
+       * The hosted seat is Bellman's account and not the creator's, and the creator is who sets its instructions, so a report
+       * about what it said is the creator's to read. The rule above is the account's and covers it not at all.
+       */
+      it("lists for a creator a report about the hosted seat, which is not the creator's account", async () => {
+        const host = { memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: "host@bellman" };
+        const seat = (await file({ target: { kind: "member", memberId: HOST_MEMBER_ID }, subject: host })).report;
+        const said = (await file({ target: { kind: "message", cursor: 7 }, subject: host })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id).sort()).toEqual([seat.id, said.id].sort());
+      });
+
+      it("resolves once with a note, keeps the first resolution, and answers nothing for an unknown id", async () => {
+        const { report } = await file();
+        const at = Date.now();
+        const done = await store.resolveReport(report.id, { note: "warned", by: "u_operator" }, at);
+        expect(done).toMatchObject({ id: report.id, resolvedAt: at, resolution: "warned", resolvedBy: "u_operator" });
+        expect(await store.resolveReport(report.id, { note: "again", by: "u_x" }, at + 1_000)).toEqual(done);
+        expect(await store.resolveReport("rpt_000000000000000_00000000", { note: "x", by: "u_x" }, at)).toBeUndefined();
+      });
+
+      /**
+       * Section 1C review, Minor 3, re-graded Important: an open report an operator cannot find is a report never acted on.
+       * Newest first alone cut the queue at its limit with the oldest open report past it, behind however many newer ones
+       * had been resolved. Open reports come first, newest first, then resolved ones, newest first, `limit` in all.
+       */
+      it("lists the open reports first and the resolved after, newest first in each, so an old open one survives any number of newer resolved", async () => {
+        const oldOpen = (await file({ reporterUserId: "u_a", target: { kind: "message", cursor: 1 } })).report;
+        vi.advanceTimersByTime(1_000);
+        const resolved: Report[] = [];
+        for (let i = 0; i < 5; i++) {
+          const r = (await file({ reporterUserId: `u_r${i}`, target: { kind: "message", cursor: 10 + i } })).report;
+          await store.resolveReport(r.id, { note: "done", by: "u_operator" }, Date.now());
+          resolved.push(r);
+          vi.advanceTimersByTime(1_000);
+        }
+        const newOpen = (await file({ reporterUserId: "u_b", target: { kind: "message", cursor: 2 } })).report;
+        const ids = async (limit: number) => (await store.listReports(limit)).map((r) => r.id);
+        expect(await ids(10), "open first, then resolved, newest first in each")
+          .toEqual([newOpen.id, oldOpen.id, ...resolved.map((r) => r.id).reverse()]);
+        expect(await ids(3), "the old open report is inside a cut that five newer resolved ones would have filled")
+          .toEqual([newOpen.id, oldOpen.id, resolved[4].id]);
+        expect(await ids(2), "the open reports fill the cut before any resolved one").toEqual([newOpen.id, oldOpen.id]);
+        expect(await ids(1), "and the newest open one comes first").toEqual([newOpen.id]);
+        // Resolving the old one moves it among the resolved, by when it was filed: the oldest of them, last.
+        await store.resolveReport(oldOpen.id, { note: "done", by: "u_operator" }, Date.now());
+        expect(await ids(10)).toEqual([newOpen.id, ...resolved.map((r) => r.id).reverse(), oldOpen.id]);
+      });
+
+      it("deletes a report 180 days after it is resolved, from every list, and keeps an open one", async () => {
+        const done = (await file()).report;
+        const open = (await file({ target: { kind: "message", cursor: 2 } })).report;
+        await store.resolveReport(done.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(180 * 24 * 3_600_000 - 1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id).sort(), "a millisecond before").toEqual([done.id, open.id].sort());
+        vi.advanceTimersByTime(1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id)).toEqual([open.id]);
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id)).toEqual([open.id]);
+      });
+
+      // The cases below are not the plan's. Each closes a mutation the plan's cases left green, found in Task 9's controls.
+
+      /** The count is per account. Filled by one, then asked by another: a count shared across accounts reads full to the second. */
+      it("counts each account's filings apart: one at its limit leaves another's first admitted", async () => {
+        for (let i = 0; i < 10; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        expect((await file({ target: { kind: "message", cursor: 11 } })).outcome, "the account at its limit").toBe("limited");
+        expect((await file({ reporterUserId: "u_other", target: { kind: "message", cursor: 11 } })).outcome, "another account's first").toBe("filed");
+      });
+
+      /** R9. The plan's case folds after the account is already full, which a fold that counted would not change. */
+      it("keeps a fold out of the day's count: nine filed and five repeats leave a tenth admitted", async () => {
+        for (let i = 0; i < 9; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        for (let i = 0; i < 5; i++) expect((await file({ target: { kind: "message", cursor: 1 } })).outcome).toBe("folded");
+        expect((await file({ target: { kind: "message", cursor: 10 } })).outcome, "the tenth new report").toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 11 } })).outcome, "the eleventh").toBe("limited");
+      });
+
+      /** The retry_after a refusal gives must hold. A refusal that counted would push a client that waited it out into another. */
+      it("counts no refusal, so a filing after the retry it was told is admitted", async () => {
+        for (let i = 0; i < 10; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        vi.advanceTimersByTime(12 * 3_600_000);
+        for (let i = 0; i < 10; i++) {
+          expect(await store.fileReport(filed({ target: { kind: "message", cursor: 100 + i } }), Date.now()))
+            .toEqual({ outcome: "limited", retryAfterMs: 12 * 3_600_000 });
+        }
+        vi.advanceTimersByTime(12 * 3_600_000);
+        expect((await file({ target: { kind: "message", cursor: 200 } })).outcome).toBe("filed");
+      });
+
+      /** A room's target is the string "room" in every room, so a fold that left the room out would fold across rooms. */
+      it("keeps an account's open reports of two rooms apart", async () => {
+        const room = { target: { kind: "room" }, subject: null } as const;
+        expect((await file(room)).outcome).toBe("filed");
+        expect((await file({ ...room, sessionId: "qs_elsewhere" })).outcome, "the same target in another room").toBe("filed");
+        expect((await file(room)).outcome, "a repeat in the first room still folds").toBe("folded");
+      });
+
+      it("lists at most the limit, and gives a creator theirs, newest first", async () => {
+        const ids: string[] = [];
+        for (let i = 0; i < 3; i++) {
+          ids.push((await file({ target: { kind: "message", cursor: i + 1 } })).report.id);
+          vi.advanceTimersByTime(1_000);
+        }
+        expect((await store.listReports(2)).map((r) => r.id)).toEqual([ids[2], ids[1]]);
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id)).toEqual([ids[2], ids[1], ids[0]]);
+      });
+
+      /** R15. Filed together and resolved ten days apart, so the date is told from the resolution and each report keeps its own. */
+      it("deletes each report 180 days after its own resolution, not its filing and not another's", async () => {
+        const day = 24 * 3_600_000;
+        const first = (await file()).report;
+        const second = (await file({ target: { kind: "message", cursor: 2 } })).report;
+        await store.resolveReport(first.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(10 * day);
+        await store.resolveReport(second.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(170 * day);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id), "the first is gone, the second has ten days left").toEqual([second.id]);
+        vi.advanceTimersByTime(10 * day - 1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id), "a millisecond before the second's day").toEqual([second.id]);
+        vi.advanceTimersByTime(1);
+        await sweepRegistry();
+        expect(await store.listReports(10)).toEqual([]);
+      });
+
+      /**
+       * R10's rows only serve the day's count. u_old filed long ago, u_edge a day before the purge to the millisecond, and
+       * u_late twice, the first just over a day before it and the second an hour before: its row holds both times, so the
+       * newest is the one that keeps it.
+       */
+      it("forgets a reporter's filing times at the purge once the newest is a day old, and keeps them while one is inside the day", async () => {
+        const hour = 3_600_000;
+        const day = 24 * hour;
+        const old = (await file({ reporterUserId: "u_old" })).report;
+        await store.resolveReport(old.id, { note: "warned", by: "u_operator" }, Date.now());
+        const purgeAt = Date.now() + 180 * day;
+        vi.advanceTimersByTime(179 * day - 10 * 60_000);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 3 } });
+        vi.advanceTimersByTime(10 * 60_000);
+        await file({ reporterUserId: "u_edge", target: { kind: "message", cursor: 2 } });
+        vi.advanceTimersByTime(day - hour);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 4 } });
+        expect((await harness.reporterRows()).sort(), "before the purge").toEqual(["u_edge", "u_late", "u_old"]);
+        vi.advanceTimersByTime(hour);
+        expect(Date.now()).toBe(purgeAt);
+        await sweepRegistry();
+        const left = (await store.listReports(10)).map((r) => r.id);
+        expect(left, "the purge ran and deleted u_old's report").not.toContain(old.id);
+        expect(left, "and left the three open ones").toHaveLength(3);
+        expect((await harness.reporterRows()).sort(), "u_edge's time is a day old exactly, u_late's newest an hour").toEqual(["u_late"]);
       });
     });
 

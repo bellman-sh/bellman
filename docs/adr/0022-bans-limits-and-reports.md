@@ -114,12 +114,13 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     a public room through the dash, which posts to `POST /rooms/:id/reports`. The reason
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most
     500 characters. The registry queues them. A creator reads those about the other
-    members and messages in their rooms at `GET /rooms/:id/reports`, and an operator reads and closes
-    every one at `GET /admin/reports` and `POST /admin/reports/:id/resolve`. The queue lists
-    the open reports first and then the resolved ones, newest first in each, 200 in all, so an
-    open report is never behind newer resolved ones that fill the cut.
-    `src/reports.ts` holds the types, the email and the views, `src/tools/report.ts` the
-    tool, and `extension/manifest.json` lists it.
+    members and messages in their rooms at `GET /rooms/:id/reports`, and an operator
+    reads and closes every one at `GET /admin/reports` and
+    `POST /admin/reports/:id/resolve`. The queue lists the open reports first and then
+    the resolved ones, newest first in each, 200 in all, so an open report is never
+    behind newer resolved ones that fill the cut. `src/reports.ts` holds the types, the
+    email and the views, `src/tools/report.ts` the tool, and `extension/manifest.json`
+    lists it.
 17. **Who may report a room (R11).** Anyone who holds or held a handle in it, and, while
     it is public, anyone signed in. `fileRoomReport` in `src/rooms.ts` is the one
     operation the tool and the route run. Both take a `member_id` or a `cursor`, or
@@ -127,19 +128,20 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     (`SEND_KINDS`, the kinds `bellman_send` accepts). Every notice the room writes itself is
     refused as no message, whether it is written under `"system"` (an eviction, a timeout,
     an expiry, a tick, a proposal) or under the member it names (a join, a leave, a code
-    issued or revoked): a report of one would be a report about that member. A caller may report a message exactly when it could read it: a
-    member removed from a room that is not public may report only what came before its
-    removal (its cut, #113), and in a public room, whose log anyone may read, no one is cut.
+    issued or revoked): a report of one would be a report about that member. A caller
+    may report a message exactly when it could read it: a member removed from a room
+    that is not public may report only what came before its removal (its cut, #113),
+    and in a public room, whose log anyone may read, no one is cut.
 18. **A report keeps whom it is about (R12).** The member id, user id and label
     (`subject`), so an operator can suspend the account. A creator's view carries the
     member id and label only, and never who filed the report. Its time is to the hour (the
     minutes, seconds and milliseconds zeroed), so a creator cannot match a report to one
     member's activity in the room; the operator's view keeps the exact time. The reported
-    person is not told. A report about the creator's own account, a seat they hold or a message they
-    sent, is not in the creator's list at all (`reachesCreator`, decided at the source by
-    both stores): it reaches the operators alone. The hosted seat is Bellman's account
-    (`u_bellman_host`), so a report about it reaches the creator, who sets its
-    instructions. In a small private room who filed a report may be evident by
+    person is not told. A report about the creator's own account, a seat they hold or a
+    message they sent, is not in the creator's list at all (`reachesCreator`, decided at
+    the source by both stores): it reaches the operators alone. The hosted seat is
+    Bellman's account (`u_bellman_host`), so a report about it reaches the creator, who
+    sets its instructions. In a small private room who filed a report may be evident by
     elimination: the creator reads a report about one member, did not file it, and the
     room holds few others.
 19. **Limits on filing (D6, R9, R10).** An account files 10 reports a day, over a rolling

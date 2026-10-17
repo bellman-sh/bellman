@@ -1281,14 +1281,15 @@ loud:
   resolved. Every word of it is the server's, and the email's subject is built from
   the report's id, its reason and the kind of target, which the server made or a
   closed set holds, so a note or a label that carries CR/LF or a `Subject:` line
-  cannot reach a header or the body. What a room's creator
-  reads of a report is built field by field (`creatorReportView`), never names
-  who filed it and gives the time to the hour, so a field added to a report reaches no
-  creator until that function names it. A report about the creator's own seats or messages is not in the creator's
-  list at all: both stores decide it at the source (`reachesCreator`), and it reaches
-  the operators alone. A report about the hosted seat is about Bellman's account, so
-  the creator, who sets its instructions, does read it. In a small private room who
-  filed a report may be evident by elimination, which no view can prevent.
+  cannot reach a header or the body. What a room's creator reads of a report is built
+  field by field (`creatorReportView`), never names who filed it and gives the time
+  to the hour, so a field added to a report reaches no creator until that function
+  names it. A report about the creator's own seats or messages is not in the
+  creator's list at all: both stores decide it at the source (`reachesCreator`), and
+  it reaches the operators alone. A report about the hosted seat is about Bellman's
+  account, so the creator, who sets its instructions, does read it. In a small
+  private room who filed a report may be evident by elimination, which no view can
+  prevent.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both

@@ -1,0 +1,16 @@
+# docs.bellman.sh: static pages and no script. `npm run build` writes ./dist; `npx wrangler deploy`
+# uploads it. account_id comes from CLOUDFLARE_ACCOUNT_ID, as for the server.
+name = "bellman-docs"
+compatibility_date = "2026-09-01"
+
+# The zone is on Cloudflare, so the custom domain brings its own DNS record; no workers.dev address.
+workers_dev = false
+
+[assets]
+directory = "./dist"
+# Starlight's 404 page, with a 404 status, for any path the build did not write.
+not_found_handling = "404-page"
+
+[[routes]]
+pattern = "docs.bellman.sh"
+custom_domain = true

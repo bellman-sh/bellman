@@ -15,21 +15,12 @@
  * Names, not descriptions. The manifest's one-liners are deliberately shorter than the
  * tool descriptions the model is shown; holding them identical would force marketing
  * copy into a tool schema. Sibling of tests/tools/surface.test.ts, which pins the
- * server's eleven.
+ * server's twelve.
  */
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import { resolveIdentity } from "../src/auth.js";
-import { createBridge, deliveryOf, installOf, type Remote } from "../src/bridge.js";
-import { buildServer } from "../src/server.js";
-import { MemoryBlobStore } from "../src/blobs.js";
-import { MemoryStore } from "../src/store.js";
-import { DEV_KEY } from "./helpers/harness.js";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { deliveryOf, installOf } from "../src/bridge.js";
+import { listBridge } from "./helpers/tool-lists.js";
 
 interface ExtensionManifest {
   version: string;
@@ -49,54 +40,11 @@ const pkg: { version: string } = JSON.parse(
 const declared = () => manifest.tools.map((t) => t.name).sort();
 
 /**
- * The bundle as Desktop meets it: a bridge over the real tool handlers, in the delivery
- * manifest.json's mcp_config asks for, read as src/channel.ts reads it — exactly what
- * node server/channel.js launches. Nothing is stubbed, so a tool added to either side
- * shows up here without this file being told about it.
+ * The bundle as Desktop meets it: the bridge in the delivery manifest.json's mcp_config asks
+ * for, read as src/channel.ts reads it — what node server/channel.js launches.
  */
 const delivery = deliveryOf(manifest.server.mcp_config.env.BELLMAN_DELIVERY);
-const temps: string[] = [];
-
-async function bundle(): Promise<{ tools: Tool[]; instructions: string }> {
-  const store = new MemoryStore();
-  const identity = resolveIdentity(`Bearer ${DEV_KEY.jesse}`);
-  if (!identity) throw new Error(`dev key ${DEV_KEY.jesse} no longer resolves`);
-
-  const inboxDir = mkdtempSync(join(tmpdir(), "bellman-extension-"));
-  temps.push(inboxDir);
-
-  const bridge = createBridge({
-    delivery,
-    inboxDir,
-    remote: async (): Promise<Remote> => {
-      const server = buildServer(identity, store, new MemoryBlobStore(), { hostedSeat: true });
-      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-      const client = new Client({ name: "bridge-remote", version: "0.0.1" });
-      await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
-      return {
-        listTools: () => client.listTools(),
-        callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
-        close: () => client.close(),
-      };
-    },
-  });
-
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-desktop", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
-
-  try {
-    const { tools } = await client.listTools();
-    return { tools, instructions: client.getInstructions() ?? "" };
-  } finally {
-    await bridge.close();
-    await client.close();
-  }
-}
-
-afterEach(() => {
-  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const bundle = () => listBridge(delivery);
 
 describe("the Claude Desktop bundle manifest", () => {
   it("declares every tool the bundle exposes, and no others", async () => {

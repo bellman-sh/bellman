@@ -387,6 +387,9 @@ describe("bellman_invite permanent", () => {
       expect(r.isError, r.text).toBe(false);
       expect(r.data).toMatchObject({ role: "helper", permanent: true, join_code_expires_at: null });
       expect(String(r.data.share_instructions)).toContain("does not expire");
+      // An eviction leaves this code working (ADR 0022, decision 22); the human who pastes this link is told.
+      expect(String(r.data.share_instructions)).toContain("Evicting a member of its seat does not end it");
+      expect(String(r.data.share_instructions), "an eviction is not listed among what ends it").not.toContain("a member of its seat is evicted");
     }
   });
 

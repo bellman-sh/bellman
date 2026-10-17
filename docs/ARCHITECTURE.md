@@ -63,7 +63,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>eleven MCP tools,<br/>one UI resource"]
+        MCP["/mcp<br/>twelve MCP tools,<br/>one UI resource"]
         WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants<br/>/admin/handles"]
@@ -1899,12 +1899,21 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,940** | every request, whether or not you are in a room |
+| Tool definitions | **~8,993** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for the bans branch merged into the send limit, by the method below:
+8,993, which the script reached after reproducing the 8,694 that main (`c34d089`) measures.
+That is bans' 200 (`bellman_evict`, 513 to 713), the send limit's 46 (`bellman_send`, 1,379 to
+1,425) and 53 more from the bans branch's last commit. `bellman_connect` is up 23, to 761, for
+two clauses saying a seat's code ends when one of its members is evicted, and a permanent
+code does not, and for the swarm ceiling read from its constant, 5000 where the text said 100.
+`bellman_invite` is up 30, to 845, for the sentence saying the same of a permanent code and
+pointing to `ban`. No tool was added.
 
 Re-measured on 2026-10-16 for the send limit, by the method below: 46 tokens over the
 8,894 the branch measured before it, which is main's 8,694 and bans' 200. `bellman_send`

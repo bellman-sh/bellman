@@ -11,6 +11,7 @@
 import { read, update } from "claude-code";
 import type { Elements, EngineInterface, RenderElement } from "claude-code";
 import { cleanBlock, cleanText, eventLine } from "../../src/door-protocol.js";
+import { resultData } from "../../src/mod/calls.js";
 import { approvalKey } from "../../src/mod/gate.js";
 import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, bellRows, safeLinks } from "../../src/mod/view.js";
 import type { DoorEvent, PendingRequest, RoomView, Tab } from "../types";
@@ -84,7 +85,8 @@ async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
         ref_id: String(r.cursor),
         payload: { approved: false },
       });
-      answered = !result.isError;
+      // Answered once the bridge says so: a result that holds the send's own answer, and no error.
+      answered = resultData(result) !== null;
     } catch (error) {
       $.ui.log(`bellman-mod: Deny: ${message(error)}`, { to: "debug" });
     } finally {

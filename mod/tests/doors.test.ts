@@ -26,6 +26,15 @@ test("a bridge older than the door is kept with no socket, and no door is read f
   expect(w.state.doors).toEqual([{ server: "bellman", socketPath: null, status: null, error: null }]);
 });
 
+test("the model's own calls of the mod's tools keep their permission check", async ($, on) => {
+  await world($, on);
+  for (const tool of ["bellman_whoami", "bellman_rooms", "bellman_surface", "bellman_send"]) {
+    const name = `mcp__bellman__${tool}`;
+    // Asked from the test's `$`, the engine's own: the mod allows only the calls it makes, and leaves this to the verdict beneath.
+    expect(await $.tool.check({ tool: name, input: {} })).toEqual({ decision: "ask", reason: `the person is asked about ${name}` });
+  }
+});
+
 test("a bridge that connects later is found on the next tick, and each door is read through its own socket", async ($, on) => {
   const w = await world($, on);
   await tick(w);

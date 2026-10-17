@@ -5,6 +5,7 @@
  * exported from a `const` (esbuild writes that as `var register = ...`).
  */
 import type { On } from "claude-code";
+import { isOwnCall } from "../../src/mod/calls.js";
 import { onTick, readShownLog, startDoors } from "./doors";
 import { registerGate } from "./gate";
 import { startView, viewTick } from "./view";
@@ -28,6 +29,11 @@ export function register(on: On): void {
     await startDoors($);
     return next(e);
   });
+  // The engine checks the mod's own `$.mcp.call` as it checks the model's call, and in auto mode refuses it unasked.
+  // This allows the mod's own calls of its four tools and nothing else: the model's own call of them, and another
+  // plugin's, go on to the verdict beneath and keep their prompt. No `.catch`: a guard that fails is skipped and
+  // leaves the verdict beneath, the engine's own, so a failure here costs only the mod's own calls their allow.
+  on("tool.check", ($, e, next) => (isOwnCall(e.tool, next.origin) ? { decision: "allow", reason: "bellman-mod's own call" } : next(e)));
   startView(on);
   registerGate(on);
   registerWake(on);

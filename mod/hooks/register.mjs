@@ -1,3 +1,21 @@
+// src/mod/calls.ts
+function resultData(result) {
+  if (result.isError) return null;
+  const data = result.structuredContent ?? parsed(result.content.find((block) => block.type === "text")?.text);
+  return typeof data === "object" && data !== null && !Array.isArray(data) ? data : null;
+}
+function parsed(text) {
+  if (text === void 0) return null;
+  const blank = text.lastIndexOf("\n\n");
+  try {
+    return JSON.parse(blank === -1 ? text : text.slice(blank + 2));
+  } catch {
+    return null;
+  }
+}
+var OWN_TOOL = /^mcp__.+__bellman_(whoami|rooms|surface|send)$/;
+var isOwnCall = (tool, origin) => OWN_TOOL.test(tool) && origin?.plugin === "bellman-mod";
+
 // mod/src/doors.ts
 import { read as read2, update } from "claude-code";
 
@@ -179,7 +197,7 @@ async function ask($, server) {
   try {
     const result = await $.mcp.call(server, "bellman_whoami");
     if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_whoami failed");
-    const door = result.structuredContent?.door;
+    const door = resultData(result)?.door;
     return { server, socketPath: typeof door === "string" ? door : null, status: null, error: null };
   } catch (error) {
     return { server, socketPath: null, status: null, error: message(error) };
@@ -211,7 +229,7 @@ async function readRooms($, list, known) {
       try {
         const result = await $.mcp.call(door.server, "bellman_rooms");
         if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_rooms failed");
-        const listed = result.structuredContent?.rooms ?? [];
+        const listed = resultData(result)?.rooms ?? [];
         return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
       } catch (error) {
         $.ui.log(`bellman-mod: bellman_rooms on ${door.server}: ${message(error)}`, { to: "debug" });
@@ -313,7 +331,7 @@ async function readCanvas($) {
   try {
     const result = await $.mcp.call(at.door.server, "bellman_surface", { session_id: id });
     if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_surface failed");
-    await update($, canvas, (was) => ({ ...was, [id]: result.structuredContent ?? null }));
+    await update($, canvas, (was) => ({ ...was, [id]: resultData(result) }));
   } catch (error) {
     $.ui.log(`bellman-mod: bellman_surface on ${at.door.server}: ${message(error)}`, { to: "debug" });
   }
@@ -537,7 +555,7 @@ async function deny($, r) {
         ref_id: String(r.cursor),
         payload: { approved: false }
       });
-      answered = !result.isError;
+      answered = resultData(result) !== null;
     } catch (error) {
       $.ui.log(`bellman-mod: Deny: ${message2(error)}`, { to: "debug" });
     } finally {
@@ -823,6 +841,7 @@ function register(on) {
     await startDoors($);
     return next(e);
   });
+  on("tool.check", ($, e, next) => isOwnCall(e.tool, next.origin) ? { decision: "allow", reason: "bellman-mod's own call" } : next(e));
   startView(on);
   registerGate(on);
   registerWake(on);

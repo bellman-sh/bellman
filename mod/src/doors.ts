@@ -18,6 +18,7 @@
  */
 import { read, update } from "claude-code";
 import type { EngineInterface } from "claude-code";
+import { resultData } from "../../src/mod/calls.js";
 import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
 import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
 import { shownTab } from "./drawn";
@@ -33,7 +34,7 @@ async function ask($: EngineInterface, server: string): Promise<DoorView> {
   try {
     const result = await $.mcp.call(server, "bellman_whoami");
     if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_whoami failed");
-    const door = (result.structuredContent as { door?: unknown } | undefined)?.door;
+    const door = resultData(result)?.door;
     return { server, socketPath: typeof door === "string" ? door : null, status: null, error: null };
   } catch (error) {
     return { server, socketPath: null, status: null, error: message(error) };
@@ -83,7 +84,7 @@ export async function readRooms($: EngineInterface, list: readonly DoorView[], k
         const result = await $.mcp.call(door.server, "bellman_rooms");
         if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_rooms failed");
         // ponytail: read as roomSummary's shape unchecked; it is our own server's answer.
-        const listed = (result.structuredContent as { rooms?: Omit<RoomView, "server">[] } | undefined)?.rooms ?? [];
+        const listed = (resultData(result) as { rooms?: Omit<RoomView, "server">[] } | null)?.rooms ?? [];
         return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
       } catch (error) {
         $.ui.log(`bellman-mod: bellman_rooms on ${door.server}: ${message(error)}`, { to: "debug" });
@@ -218,7 +219,7 @@ export async function readCanvas($: EngineInterface): Promise<void> {
   try {
     const result = await $.mcp.call(at.door.server, "bellman_surface", { session_id: id });
     if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_surface failed");
-    await update($, canvas, (was) => ({ ...was, [id]: result.structuredContent ?? null }));
+    await update($, canvas, (was) => ({ ...was, [id]: resultData(result) }));
   } catch (error) {
     $.ui.log(`bellman-mod: bellman_surface on ${at.door.server}: ${message(error)}`, { to: "debug" });
   }

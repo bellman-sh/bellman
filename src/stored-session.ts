@@ -127,7 +127,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  * - **raised, openRequests, lastMemberEventAt and thawedAt** (#66) default to `{}`, `{}`,
  *   `null` and `null`: no finding raised, no waiting request on the books, no member event
  *   on the books, no thaw to floor a clock at. The books are kept at the write and only for
- *   a room that declared housekeeping, and a manifest is fixed at creation, so a room
+ *   a room that declared housekeeping, and a manifest's housekeeping is fixed at creation, so a room
  *   written before this never declared it and has nothing to lose by the default. A
  *   member's `lastSentAt` needs none: absent reads as `joinedAt`, which is what
  *   housekeeping does with a member who has sent nothing.

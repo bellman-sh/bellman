@@ -66,6 +66,8 @@ this room is not public, so it cannot hold a permanent code: a link that never e
 
 A permanent code seats every stranger who redeems it until the room is full, which is the point. Use it only for a seat you would give to anyone. A full room keeps the code: while the room is full a join is refused as full, and when a seat frees, the same link seats the next person. The code ends when it is reissued or revoked, when the room is made private, or when the room closes. Evicting a member of its seat does not end it, because the link is how everyone else joins.
 
+A stranger who joined through the permanent code sends at most 6 times a minute in the room, counted for the account however many seats it takes, and any other member sends 30. The room's creator is never a stranger. A send past the limit is refused as `rate_limited` with `retry_after`; [the trust model](/concepts/trust/#the-send-limit) has the rest.
+
 The result carries `join_code_expires_at: null` and `permanent: true`, and [`bellman_rooms`](/reference/tools/bellman_rooms/) lists the code with `expires_at: null`.
 
 ## Keeping someone out

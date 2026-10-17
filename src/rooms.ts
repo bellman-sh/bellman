@@ -18,6 +18,7 @@ import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } f
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
+import { MAX_REPORT_NOTE_CHARS, REPORTS_PER_DAY, REPORT_REASONS, type NewReport, type ReportMailer, type ReportTarget } from "./reports.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
@@ -46,8 +47,8 @@ import { auditRows, partiesOf } from "./audit.js";
  * room itself or a member of it, and a route answers 400 from the one and 404
  * from the other.
  *
- * `"rate_limited"` is a send past its member's minute (ADR 0022). It is the one refusal that carries
- * a number, `retryAfter`, and a route answers it 429.
+ * `"rate_limited"` is a send past its member's minute (ADR 0022), or a report past its account's day. It is
+ * the one refusal that carries a number, `retryAfter`, and a route answers it 429.
  */
 export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited";
 
@@ -771,8 +772,7 @@ export async function revokeInvite(
  * still used it (R7). A keyed retry is a send like any other, so at the limit it is refused before its key
  * is looked up, and the same key replays once the minute has room again (R6).
  *
- * `retryAfter` is rounded up to whole seconds. The store answers in milliseconds, and a client that waited
- * the rounded-down second would be refused again.
+ * `retryAfter` is `waitRefusal`'s: whole seconds, rounded up.
  */
 export async function admitSend(
   store: BellmanStore,
@@ -783,11 +783,19 @@ export async function admitSend(
   const limit = sendLimitFor(member);
   const admission = await store.admitSend(sessionId, sendKeyFor(member), limit, now);
   if (admission.ok) return succeed(null);
-  const retryAfter = Math.ceil(admission.retryAfterMs / 1000);
+  return waitRefusal(`this seat has used its ${limit} sends for the minute, and nothing was sent`, admission.retryAfterMs);
+}
+
+/**
+ * The refusal of a limit that carries a wait: a send's minute and an account's reports in a day. The store answers
+ * in milliseconds and a refusal in whole seconds, rounded up, because a client that waited the rounded-down second
+ * would be refused again. One function, so the two limits cannot come to round differently.
+ */
+function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
+  const retryAfter = Math.ceil(retryAfterMs / 1000);
   return refuse(
     "rate_limited",
-    `rate_limited: this seat has used its ${limit} sends for the minute, and nothing was sent. ` +
-      `Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`,
+    `rate_limited: ${spent}. Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`,
     { retryAfter },
   );
 }
@@ -1219,4 +1227,86 @@ export async function evictMember(
     banned: ban ?? null,
     alsoRemovedFrom,
   });
+}
+
+/**
+ * File a report (abuse protections spec section 3, R11), for both transports: who may report, what a target must
+ * be, the store's fold and daily limit, and the email once a report is filed, never for a fold or a refusal.
+ *
+ * Anyone who holds or held a handle in the room may report it, and while the room is public so may anyone signed in.
+ * A room that is neither is refused as a room that is not there, before the target is read, so a stranger learns
+ * nothing about the member ids or cursors it holds. A frozen room can be reported, and so can a closed one until it
+ * is purged: a report is how the people who were in a room tell the operators what happened there.
+ *
+ * The target is the room, a member (`memberId`) or a message (`cursor`), never two. A member is anyone the room ever
+ * seated, one who left included. A message is an event a member sent: the server writes its own events as "system"
+ * (an eviction, a door shut), and those are not messages. The report keeps whom it is about (R12), read from the
+ * member or from the event's sender, so an operator can act on the account.
+ *
+ * A removed member read the room up to its cut and no further (#113), so a cursor past the cut names an event it was
+ * never shown, and is refused as one that does not exist: a report must not tell it what the room holds after it was
+ * out. A member who left keeps the open feed, and so the open cursors.
+ *
+ * The shape of the request is checked first, because it reads nothing from the room. A note is trimmed and an empty
+ * one is none, and the limit applies to the trimmed length. The note is untrusted text and is kept as written.
+ *
+ * `mail` runs once the store has answered `filed`, and a `ReportMailer` never rejects, so a failed email cannot undo a
+ * filing. A repeat of a report still open answers `folded` and mails nothing (R9). Past 10 filings in a rolling day
+ * (R10) the store answers `limited`, and the refusal is `rate_limited` with the wait, as a send's is.
+ */
+export async function fileRoomReport(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  input: { memberId?: string; cursor?: number; reason: string; note?: string | null },
+  mail: ReportMailer,
+  now: number = Date.now(),
+): Promise<RoomResult<{ reportId: string; folded: boolean }>> {
+  const reason = REPORT_REASONS.find((r) => r === input.reason);
+  if (reason === undefined) return refuse("invalid", `reason must be one of ${REPORT_REASONS.join(", ")}.`);
+  if (input.memberId !== undefined && input.cursor !== undefined) {
+    return refuse("invalid", "name a member or a message, not both; name neither to report the room.");
+  }
+  const note = input.note?.trim() || null;
+  if (note !== null && note.length > MAX_REPORT_NOTE_CHARS) {
+    return refuse("invalid", `a note is at most ${MAX_REPORT_NOTE_CHARS} characters.`);
+  }
+
+  const session = await store.getSession(sessionId);
+  const handles = session ? await handlesOf(store, session, actor) : [];
+  if (!session || (handles.length === 0 && !isPublic(session))) {
+    return refuse("not_found", "no such room, or no member of yours in it");
+  }
+
+  let target: ReportTarget = { kind: "room" };
+  let subject: NewReport["subject"] = null;
+  if (input.memberId !== undefined) {
+    const seated = await store.getMember(session.id, input.memberId);
+    if (!seated) return refuse("invalid", "no member with that member_id has been in this room.");
+    target = { kind: "member", memberId: seated.memberId };
+    subject = { memberId: seated.memberId, userId: seated.userId, label: seated.label };
+  } else if (input.cursor !== undefined) {
+    if (!Number.isInteger(input.cursor) || input.cursor < 1) {
+      return refuse("invalid", "cursor must be a positive whole number.");
+    }
+    // `cutFor` of no handles is -Infinity, so it is asked only of someone who held one.
+    const cut = handles.length > 0 ? cutFor(handles) : undefined;
+    const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
+    if (!event || event.fromMemberId === "system") return refuse("invalid", "no message at that cursor.");
+    target = { kind: "message", cursor: event.cursor };
+    subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
+  }
+
+  const filed = await store.fileReport(
+    {
+      sessionId: session.id, creatorId: session.createdBy, target, subject, reason, note,
+      reporterUserId: actor.userId, reporterLabel: actor.label,
+    },
+    now,
+  );
+  if (filed.outcome === "limited") {
+    return waitRefusal(`this account has filed ${REPORTS_PER_DAY} reports in the last day, and nothing was filed`, filed.retryAfterMs);
+  }
+  if (filed.outcome === "filed") await mail(filed.report);
+  return succeed({ reportId: filed.report.id, folded: filed.outcome === "folded" });
 }

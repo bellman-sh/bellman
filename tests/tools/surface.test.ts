@@ -1,5 +1,5 @@
 /**
- * INVARIANT 9: the tool surface stays at 12. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 13. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: tools first — every tool's text result stands alone; one UI
@@ -16,6 +16,7 @@ import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
   "bellman_public_name",
+  "bellman_report",
   "bellman_start",
   "bellman_connect",
   "bellman_confirm",
@@ -48,7 +49,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(12);
+    expect(EXPECTED_TOOLS).toHaveLength(13);
   });
 
   it("gives every tool a description and an input schema", async () => {

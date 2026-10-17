@@ -15,7 +15,7 @@ import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { text } from "./helpers/blob-bytes.js";
-import { brief, manifestFixture, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
+import { brief, manifestFixture, member, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
 
 let http: Server;
 let store: BellmanStore;
@@ -69,6 +69,62 @@ describe("HTTP surface", () => {
     expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
   });
 
+  it("serves the ban routes beside the room routes", async () => {
+    await store.createSession(session({
+      id: "qs_http_bans",
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+    const headers = { authorization: "Bearer qk_dev_jesse", "content-type": "application/json" };
+    // A room ban, not "all": this file's one store serves every test, and a ban from every room jesse owns
+    // would refuse the peer at the pairing tests below. The account list's rows are pinned in tests/http-moderation.test.ts.
+    const banned = await fetch(`${base}/rooms/qs_http_bans/bans`, { method: "POST", headers, body: JSON.stringify({ member_id: "m_peer", scope: "room" }) });
+    expect(banned.status).toBe(200);
+    const room = await fetch(`${base}/rooms/qs_http_bans/bans`, { headers });
+    const account = await fetch(`${base}/account/bans`, { headers });
+    expect([room.status, account.status]).toEqual([200, 200]);
+    expect(((await room.json()) as { bans: { label: string }[] }).bans.map((b) => b.label)).toEqual(["peer@codenerd"]);
+    expect(Array.isArray(((await account.json()) as { bans: unknown }).bans)).toBe(true);
+  });
+
+  // This server has no send_email binding, so a report is stored and the log says no email went. The route's own cases are in
+  // tests/http-moderation.test.ts.
+  it("serves the report routes beside the room routes, and says in the log that this server sends no email", async () => {
+    await store.createSession(session({
+      id: "qs_http_reports",
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = async (key: string, memberId: string) => {
+        const res = await fetch(`${base}/rooms/qs_http_reports/reports`, {
+          method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ member_id: memberId, reason: "spam" }),
+        });
+        expect(res.status).toBe(201);
+        return ((await res.json()) as { report_id: string }).report_id;
+      };
+      // The peer reports the creator, and the creator reports the peer. The creator's list holds the second alone: a report
+      // about the creator reaches the operators, not the creator.
+      const aboutCreator = await file("qk_dev_peer", "m_creator");
+      const aboutPeer = await file("qk_dev_jesse", "m_peer");
+      expect(logged.mock.calls.flat().join(" ")).toContain(`report ${aboutCreator}: no send_email binding`);
+      const listed = await fetch(`${base}/rooms/qs_http_reports/reports`, { headers: { authorization: "Bearer qk_dev_jesse" } });
+      expect(((await listed.json()) as { reports: { id: string }[] }).reports.map((r) => r.id)).toEqual([aboutPeer]);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.
+  // It mounts the stats with no operators, so even the team admin is refused. The route's own cases are in tests/stats.test.ts.
+  it("serves /operator/stats to no one, the dev team admin included", async () => {
+    expect((await fetch(`${base}/operator/stats`)).status).toBe(401);
+    for (const key of ["qk_dev_jesse", "qk_dev_peer", "qk_dev_outsider"]) {
+      const res = await fetch(`${base}/operator/stats`, { headers: { authorization: `Bearer ${key}` } });
+      expect([key, res.status]).toEqual([key, 403]);
+    }
+  });
+
   it("serves a health check without auth", async () => {
     const res = await fetch(`${base}/healthz`);
     expect(res.status).toBe(200);
@@ -99,10 +155,10 @@ describe("HTTP surface", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists the 12 tools over HTTP", async () => {
+  it("lists the 13 tools over HTTP", async () => {
     const client = await mcpClient("qk_dev_jesse");
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(13);
     await client.close();
   });
 });

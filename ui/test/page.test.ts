@@ -116,6 +116,28 @@ describe("createPage", () => {
     [...h.root.querySelectorAll("button")].find((b) => b.textContent === "Surface")!.click();
     expect(h.calls.at(-1)).toEqual({ name: "bellman_surface", args: { session_id: "qs_1" } });
   });
+
+  // The model opens the canvas with its own bellman_surface call, and that call lists every seat the account holds:
+  // the header says so from the result in hand, on the first draw and again after each poll.
+  it("names the seats a bellman_surface result lists, on the first draw and after a poll", async () => {
+    const h = host(); pages.push(h.page);
+    const several = surfaceFixture();
+    several.your_seats = [
+      { member_id: "m_lead", role: "lead", verbs: ["send", "invite"] },
+      { member_id: "m_second", role: "helper", verbs: ["send"] },
+    ];
+    Object.assign(several.room, { your_role: null, your_verbs: [], your_heartbeat_on: false });
+    h.page.render({ structuredContent: several });
+    await settle();
+    const header = () => h.root.querySelector(".canvas-screen h1")?.textContent;
+    expect(header()).toContain("Your seats: lead (send, invite), helper (send)");
+
+    const poll = h.page.surface("qs_1");
+    h.answer({ structuredContent: surfaceFixture() });
+    await poll; await settle();
+    expect(header()).not.toContain("Your seats");
+    expect(h.root.querySelector(".canvas-screen h1 .chip")?.textContent).toBe("lead");
+  });
 });
 
 describe("the room card on the page", () => {

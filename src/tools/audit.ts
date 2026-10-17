@@ -3,7 +3,7 @@ import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
-import { entitlementsFor } from "../auth.js";
+import { auditRefusal } from "../audit.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerAudit(server: McpServer, identity: Identity, s: BellmanStore): void {
@@ -11,7 +11,7 @@ export function registerAudit(server: McpServer, identity: Identity, s: BellmanS
     "bellman_audit",
     {
       title: "Bellman org audit log",
-      description: `Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving, and the end of a room's record: room_deleted when its creator or an org admin asked for it to be deleted, room_purged when it was purged. Cross-org sessions appear in BOTH orgs' logs.
+      description: `Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving, and the end of a room's record: room_deleted when its creator or an org admin asked for it to be deleted, room_purged when it was purged. Cross-org sessions appear in the logs of every org with a person in the room.
 
 Requires: team plan + admin role. Args: limit (default 50).
 Returns: { entries: [{ at, session_id, actor, action, detail }] }`,
@@ -21,19 +21,18 @@ Returns: { entries: [{ at, session_id, actor, action, detail }] }`,
       },
     },
     async ({ limit }): Promise<ToolResult> => {
-      const ent = entitlementsFor(identity);
-      if (!ent.audit) return fail(`the audit log requires the team plan (you are on "${identity.plan}").`);
-      if (identity.role !== "admin") return fail("the audit log requires the admin role.");
-      if (!identity.orgId) return fail("your identity has no org.");
+      const refused = auditRefusal(identity);
+      if (refused) return fail(refused);
+      const orgId = identity.orgId as string; // auditRefusal refuses an identity with no org
 
-      const entries = (await s.auditForOrg(identity.orgId, limit)).map((a) => ({
+      const entries = (await s.auditForOrg(orgId, limit)).map((a) => ({
         at: new Date(a.at).toISOString(),
         session_id: a.sessionId,
         actor: a.actorUserId,
         action: a.action,
         detail: a.detail,
       }));
-      return ok({ org_id: identity.orgId, count: entries.length, entries });
+      return ok({ org_id: orgId, count: entries.length, entries });
     }
   );
 }

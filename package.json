@@ -1,6 +1,6 @@
 {
   "name": "@bellman-sh/mcp-server",
-  "version": "0.3.3",
+  "version": "0.3.5",
   "description": "Cross-session, cross-provider agent collaboration over MCP",
   "author": "mcfearsome",
   "license": "MIT",
@@ -47,6 +47,7 @@
     "build:plugin": "tsx scripts/build-plugin.ts",
     "build:mod": "tsx scripts/build-mod.ts",
     "test:mod": "tsx scripts/test-mod.ts",
+    "docs:gen": "npm run build:ui && tsx scripts/docs-gen.ts",
     "start": "node dist/index.js",
     "dev": "npm run build:ui && tsx src/index.ts",
     "test": "npm run build:ui && vitest run",

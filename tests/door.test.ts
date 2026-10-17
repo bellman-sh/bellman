@@ -122,7 +122,7 @@ describe("where the door is", () => {
 });
 
 describe("statusOf", () => {
-  it("counts waiting events per room in hook delivery, and none in channel delivery", () => {
+  it("counts waiting events per room in hook and queue delivery, and none in channel delivery", () => {
     const inboxDir = join(root, "inbox");
     enqueue(inboxDir, event({ member_id: "m1", cursor: 1 }));
     enqueue(inboxDir, event({ member_id: "m-gone", cursor: 2 }));
@@ -130,6 +130,11 @@ describe("statusOf", () => {
     expect(statusOf(source({ delivery: "hook", inboxDir, seats })).waiting).toEqual([
       { session_id: "qs_room1", interrupting: 1, ambient: 0 },
     ]);
+    // Queue delivery keeps the same inbox as hook (the Claude Desktop bundle's, #241), and says which it is.
+    expect(statusOf(source({ delivery: "queue", inboxDir, seats }))).toMatchObject({
+      delivery: "queue",
+      waiting: [{ session_id: "qs_room1", interrupting: 1, ambient: 0 }],
+    });
     expect(statusOf(source({ delivery: "channel", inboxDir, seats })).waiting).toEqual([]);
   });
 

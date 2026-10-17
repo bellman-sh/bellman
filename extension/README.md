@@ -75,15 +75,18 @@ imports of the staged server from `server/channel.js` and refuses to pack if
 any package is missing from the stage's `node_modules`. The npm package was
 never affected; it declares `yaml` and always did.
 
-**2. `BELLMAN_DELIVERY` is set to `hook`, not `channel`.** The bridge has two
-delivery modes. `channel` pushes peer events into the session as
+**2. `BELLMAN_DELIVERY` is set to `queue`, not `channel` or `hook`.** The bridge
+has three delivery modes. `channel` pushes peer events into the session as
 `notifications/claude/channel`, which only Claude Code understands; in Claude
 Desktop those notifications go nowhere *and* the mode's instructions tell the
-agent it does not need to poll — which would be wrong. `hook` mode queues
-incoming events and exposes `bellman_wait`, so the agent can block on the
-queue and drain it. The Stop hook that Claude Code uses to flush that queue at
-the end of a turn does not exist in Desktop, so nothing arrives unprompted —
-but nothing is lost either.
+agent it does not need to poll — which would be wrong. `hook` and `queue` both
+queue incoming events and expose `bellman_wait`, so the agent can block on the
+queue and drain it; they differ in what they tell the agent. `hook` says the
+Stop hook hands the queue over when a turn ends, and that hook is Claude
+Code's: Desktop runs none, and the bundle ran `hook` until #241. `queue` says
+nothing arrives unprompted, so the agent calls `bellman_sync` for each room
+when a turn starts and `bellman_wait` when it expects a reply. Nothing is lost
+either way.
 
 **3. There is no key to paste.** The bridge signs itself in: with `BELLMAN_KEY`
 unset, `src/channel.ts` opens a browser and caches the credential under
@@ -111,10 +114,10 @@ bridge over the real tool handlers and asserts the manifest names exactly what
 that bridge lists. It found the bug it was written for: the list had been
 missing `bellman_whoami` since the bridge grew it.
 
-That surface is the server's eleven tools plus the bridge's own three, and *which*
+That surface is the server's thirteen tools plus the bridge's own three, and *which*
 of its own depends on the delivery mode — `bellman_wait` exists under `hook`
-and not under `channel`, while `bellman_whoami` and `bellman_upload` exist
-under both. So the test asserts the declared mode as well; without that, the
+and `queue` and not under `channel`, while `bellman_whoami` and `bellman_upload`
+exist under all three. So the test asserts the declared mode as well; without that, the
 comparison would be circular.
 
 Descriptions are not compared. The manifest's one-liners are deliberately

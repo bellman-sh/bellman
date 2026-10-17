@@ -18,7 +18,7 @@ export function registerInvite(server: McpServer, identity: Identity, s: Bellman
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
-\`permanent: true\` is the exception, for a public room's default seat and no other: a code with no expiry, for a link put on a page. It works until it is revoked, the room is made private, or the room closes, and a full room keeps it for when a seat frees.
+\`permanent: true\` is the exception, for a public room's default seat and no other: a code with no expiry, for a link put on a page. It works until it is revoked, the room is made private, or the room closes, and a full room keeps it for when a seat frees. Evicting a member of its seat does not end it: \`bellman_evict\` with \`ban\` is what keeps that person out.
 
 A room mints one live code per role, and roles are independent — you can hand a reviewer code and a contributor code to different people. Issuing for a role with NO live code opens that door. Issuing for one that has a live code retires the code someone may be holding, so that needs the \`revoke\` verb as well as \`invite\`; without it the call is refused and the live code stands. An expired code is not live, so minting over one is only ever opening.
 
@@ -66,7 +66,7 @@ Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replac
             : `Share this link with the joining session's human: ${url} — the page tells them what to say to their agent. `) +
           `The code in it, ${r.value.code}, seats them as "${r.value.role}". ` +
           (expiresAt === null
-            ? `It does not expire: it works until it is revoked, the room is made private, or the room closes, and while the room is full it seats no one. `
+            ? `It does not expire: it works until it is revoked, the room is made private, or the room closes, and while the room is full it seats no one. Evicting a member of its seat does not end it; banning the account is what keeps that person out. `
             : "") +
           `Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });

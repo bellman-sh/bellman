@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { SessionEvent, Verb } from "../types.js";
+import { SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
 import { FROZEN } from "../rooms.js";
 import type { AppendExtras, BellmanStore } from "../store.js";
 
@@ -10,11 +10,11 @@ import type { AppendExtras, BellmanStore } from "../store.js";
 
 export const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeouts
 
-/** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
-export const SEND_KINDS = [
-  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface",
-] as const;
-export type SendKind = (typeof SEND_KINDS)[number];
+/**
+ * The kinds bellman_send accepts. The tool's `type` enum is built from this list, which lives in src/types.ts beside
+ * `EventType` so that `src/rooms.ts` can read the same list (a report's message target) without importing a tool.
+ */
+export { SEND_KINDS, type SendKind };
 
 /**
  * Which verb each send kind needs. A Record rather than a ternary with a default
@@ -143,6 +143,19 @@ export function ok(output: Record<string, unknown>, preamble?: string): ToolResu
 
 export function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
+}
+
+/**
+ * A room operation's refusal as a tool result; rate_limited also carries { error: "rate_limited",
+ * retry_after } as structuredContent.
+ *
+ * The text already names the wait, for a client that shows only text. The structured form is for one that
+ * backs off on its own, and it is the only refusal with one: every other code is read from its sentence.
+ */
+export function refusal(r: { code: string; reason: string; retryAfter?: number }): ToolResult {
+  const out = fail(r.reason);
+  if (r.code !== "rate_limited") return out;
+  return { ...out, structuredContent: { error: "rate_limited", retry_after: r.retryAfter } };
 }
 
 

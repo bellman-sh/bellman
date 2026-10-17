@@ -5,8 +5,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { pairUp, type PairedSession } from "../helpers/flows.js";
-import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
+import { pairVerbs } from "../helpers/fixtures.js";
+import { pairUp, seatAgain, startRoom, type PairedSession } from "../helpers/flows.js";
+import { UNTRUSTED_PREAMBLE, roomPreview } from "../../src/projections.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 let h: Harness;
@@ -35,6 +36,51 @@ describe("bellman_surface", () => {
     expect(theirs.data.surface).toEqual(synced.data.surface);
     expect((theirs.data.room as { your_role: string }).your_role).toBe("peer_b");
     expect((theirs.data.surface as Block).items.map((e) => e.data.key).sort()).toEqual(["plan", "spec"]);
+
+    // One seat: the block speaks for it as it always has, and your_seats holds just that seat.
+    expect((mine.data.room as { your_verbs: string[] }).your_verbs).toEqual(pairVerbs("peer_a"));
+    expect(mine.data.your_seats).toEqual([{ member_id: p.creatorMemberId, role: "peer_a", verbs: pairVerbs("peer_a") }]);
+    expect((theirs.data.room as { your_verbs: string[] }).your_verbs).toEqual(pairVerbs("peer_b"));
+    expect(theirs.data.your_seats).toEqual([{ member_id: p.joinerMemberId, role: "peer_b", verbs: pairVerbs("peer_b") }]);
+  });
+
+  // One person, two machines, one room. A tool is called by the account, and nothing in the call says which seat is
+  // asking, so the answer lists every seat the account holds and names none as the asker. It used to name the first
+  // live one: a Claude Code session as peer_b beside a claude.ai session as peer_a was shown the canvas as peer_a.
+  it("lists every seat one account holds in the room, oldest first", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(creator);
+    await seatAgain(h, creator, sessionId, "peer_b");
+
+    const out = await read(creator, sessionId);
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data.your_seats).toEqual([
+      { member_id: memberId, role: "peer_a", verbs: pairVerbs("peer_a") },
+      { member_id: "m_second", role: "peer_b", verbs: pairVerbs("peer_b") },
+    ]);
+  });
+
+  it("gives the room block no seat when the account holds several: the block it gives a reader with none", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId } = await startRoom(creator);
+    await seatAgain(h, creator, sessionId, "peer_b");
+
+    const room = (await read(creator, sessionId)).data.room;
+    expect(room).toMatchObject({ your_role: null, your_verbs: [], your_heartbeat_on: false });
+    const stored = (await h.store.getSession(sessionId))!;
+    expect(room).toEqual(JSON.parse(JSON.stringify(roomPreview(stored, null))));
+  });
+
+  it("does not count a seat that left", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(creator);
+    await seatAgain(h, creator, sessionId, "peer_b");
+    const gone = await creator.call("bellman_leave", { session_id: sessionId, member_id: "m_second" });
+    expect(gone.isError, gone.text).toBe(false);
+
+    const out = await read(creator, sessionId);
+    expect(out.data.your_seats).toEqual([{ member_id: memberId, role: "peer_a", verbs: pairVerbs("peer_a") }]);
+    expect((out.data.room as { your_role: string }).your_role).toBe("peer_a");
   });
 
   it("refuses a stranger and an unknown room with the same words", async () => {
@@ -59,6 +105,11 @@ describe("bellman_surface", () => {
     const mine = (await read(p.creator, p.sessionId)).data.surface as Block;
     expect(mine.items.map((e) => e.data.key).sort()).toEqual(["after", "before"]);
     expect(theirs.cursor).toBeLessThan(mine.cursor);
+
+    // Removed, the joiner holds no seat now: the block still reads as of its cut, from the handle it held.
+    const removed = (await read(p.joiner, p.sessionId)).data;
+    expect(removed.your_seats).toEqual([]);
+    expect((removed.room as { your_role: string }).your_role).toBe("peer_b");
   });
 
   it("still reads a frozen room and a closed one", async () => {
@@ -90,5 +141,13 @@ describe("bellman_surface", () => {
     expect(tool.description).toMatch(/not a liveness signal/i);
     expect(tool.description).not.toMatch(/verbs/i);
     expect((await read(p.creator, p.sessionId)).text.startsWith(UNTRUSTED_PREAMBLE)).toBe(true);
+  });
+
+  it("tells a caller in its description where its seats are, and what several mean", async () => {
+    const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+    const doc = tools.find((t) => t.name === "bellman_surface")!.description!.replace(/\s+/g, " ");
+
+    expect(doc).toContain("your_seats[]");
+    expect(doc).toContain("null when you hold several");
   });
 });

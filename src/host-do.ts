@@ -57,6 +57,9 @@ export class HostDO extends DurableObject<HostEnv> {
     },
     callModel: (body) =>
       callMessages((url, init) => fetch(url, init), this.env.MODEL_URL ?? ANTHROPIC_MESSAGES_URL, this.env.ANTHROPIC_API_KEY, body),
+    // The method the Worker's public routes call, on the store they use: the numbers the prompt names senders by
+    // are the numbers a public page shows.
+    publicNumbers: (sessionId, labels) => new DurableObjectStore(this.env).publicNumbers(sessionId, labels),
     // Read as the store's union, as the facade's appendHostEvent returns it: the RPC
     // stub's mapped result does not narrow on `ok`.
     write: async (sessionId, e, units, now, key) => (await this.#room(sessionId).appendHostEvent(e, units, now, key)) as HostAppend,

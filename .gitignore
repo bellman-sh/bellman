@@ -35,6 +35,9 @@ extension/build/
 # ui/dist/ is already covered by `dist/` above.
 src/ui/assets.ts
 
+# The docs site's generated types; its node_modules and dist/ are covered above.
+docs-site/.astro/
+
 # The SDD executor's per-plan scratch (ledger, briefs). Never committed.
 .superpowers/
 

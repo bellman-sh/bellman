@@ -1,4 +1,5 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
+import type { AuditActor } from "../../src/audit.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { monthKey } from "../../src/stored-session.js";
@@ -37,6 +38,9 @@ export function manifestFixture(over: Record<string, unknown> = {}) {
 export function roomManifest(over: Partial<RoomManifest> = {}): RoomManifest {
   return { ...resolveManifest(manifestFixture()), ...over };
 }
+
+/** What the pair preset lets a role do, read off the manifest a room is made from and not off the code under test. */
+export const pairVerbs = (role: string) => roomManifest().roles[role]!.can;
 
 /**
  * A member as the tests seat one: the fields the room's record keeps, `agent` among them, and
@@ -143,3 +147,7 @@ export function session(seed: SessionSeed = {}): SeededSession {
 export function swarmSession(over: SessionSeed = {}): SeededSession {
   return session({ manifest: roomManifest({ mode: "swarm", preset: null }), ...over });
 }
+
+/** The fixture people as an audit row names an actor: who asked for a delete, in the purge tests. */
+export const jesseActor: AuditActor = { userId: "u_jesse", label: "jesse@codenerd", orgId: "org_codenerd" };
+export const peerActor: AuditActor = { userId: "u_peer", label: "peer@other", orgId: "org_other" };

@@ -1,3 +1,4 @@
+import { auditRow } from "./audit.js";
 import type { AuditEntry, PlanGrant } from "./types.js";
 
 /**
@@ -17,6 +18,9 @@ import type { AuditEntry, PlanGrant } from "./types.js";
 /** What a caller contributes: who is acting, and anything extra to record. */
 export interface AuditIntent {
   actorUserId: string;
+  /** The acting admin's name and org (audit trail spec, D2). Billing acts as `stripe`, which has neither. */
+  actorLabel?: string;
+  actorOrgId?: string | null;
   detail?: Record<string, unknown>;
 }
 
@@ -76,14 +80,10 @@ function entry(
   detail: Record<string, unknown>,
   now: number
 ): AuditEntry {
-  return {
-    at: now,
-    orgId,
-    sessionId: `grant:${key}`,
-    actorUserId: intent.actorUserId,
-    action,
-    detail: { ...detail, ...intent.detail, key },
-  };
+  // An org's own plan: its only party is the org, so the row is internal and has no room (D2).
+  return auditRow(orgId, [orgId], {
+    at: now, sessionId: `grant:${key}`, action, roomName: null, detail: { ...detail, ...intent.detail, key },
+  }, { userId: intent.actorUserId, label: intent.actorLabel ?? null, orgId: intent.actorOrgId ?? null });
 }
 
 /**

@@ -2,17 +2,22 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { auditRoutes } from "./http/audit.js";
 import { handleRoutes } from "./http/handles.js";
+import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
-import { roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { statsRoutes } from "./http/stats.js";
+import { reportMailer } from "./reports.js";
 import { buildServer } from "./server.js";
+import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
-import { parsePanelOrigins } from "./oauth/browser.js";
+import { allowedOrigin, parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
@@ -40,6 +45,11 @@ export interface WorkerEnv extends BellmanEnv {
   AUTH: DurableObjectNamespace<AuthDO>;
   /** The room blob store (#183): one private bucket, keyed by room. */
   BLOBS: R2Bucket;
+  /**
+   * The `send_email` binding (wrangler.toml `[[send_email]]`) a report's email goes through. Absent, in a deploy whose
+   * Email Routing is not set up, a report is stored and the log says no email went.
+   */
+  SEND_EMAIL?: SendEmail;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
   GITHUB_CLIENT_ID?: string;
@@ -184,12 +194,43 @@ async function roomCaller(request: Request, env: WorkerEnv, oauth?: OAuthConfig)
   return who ? { identity: who.identity, via: who.via } : null;
 }
 
+/**
+ * Which accounts are suspended (abuse protections spec, section 1), as this isolate last read the
+ * registry: an answer is kept a minute (spec D4), so a suspension or a lift reaches every path within one.
+ */
+const suspensions = new SuspensionCache();
+
+/** The first call's promise, kept: whatever asks again shares the one answer. */
+function once<T>(f: () => Promise<T>): () => Promise<T> {
+  let kept: Promise<T> | undefined;
+  return () => (kept ??= f());
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     const store = new DurableObjectStore(env);
     const oauth = oauthConfig(request, env, store);
     const blobs = new R2BlobStore(env.BLOBS);
+    // What mails a filed report, for the `bellman_report` tool and the report route alike.
+    const mailReport = reportMailer(env.SEND_EMAIL);
+    const suspended = (userId: string) => suspensions.check(userId, () => store.isSuspended(userId));
+
+    // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
+    // session is touched once. `routeGate` asks first, and refuses a suspended account before a module reads
+    // or writes anything as it (plan ruling R8). /public takes no credential, so it has no gate. A throw in
+    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it.
+    const who = once(() => roomCaller(request, env, oauth));
+    const routeGate = async (): Promise<Response | undefined> => {
+      const origin = allowedOrigin(request, oauth?.panelOrigins ?? []);
+      try {
+        const them = await who();
+        return them && (await suspended(them.identity.userId)) ? problem(403, "suspended", SUSPENDED, origin) : undefined;
+      } catch (err) {
+        console.error(`${request.method} ${url.pathname} failed:`, err);
+        return problem(500, "internal", "the request failed on the server; repeating it is safe", origin);
+      }
+    };
 
     // Ahead of the OAuth routes: Stripe signs its own requests and carries no
     // bearer token, so it must not fall through anything expecting one.
@@ -218,16 +259,19 @@ export default {
     // The room routes (#183, #184), ahead of the OAuth routes: /rooms/ is that
     // module's prefix, and /rooms with no slash is the list. The fail-closed
     // guard /ws has covers them all — a deploy with neither a key map nor OAuth
-    // serves no room.
+    // serves no room. The moderation routes are asked first: they answer the paths
+    // under /rooms/:id/bans and /rooms/:id/reports, and leave every other path to
+    // the room routes. Both report routes are behind the suspension gate here.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
-      const handled = await roomRoutes(request, {
+      const deps = {
         store,
         blobs,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
-      });
+      };
+      const handled = (await moderationRoutes(request, { ...deps, mailReport })) ?? (await roomRoutes(request, deps));
       if (handled) return handled;
     }
 
@@ -243,11 +287,23 @@ export default {
 
     // The saved presets (designer spec D5), on the room routes' rules and behind the same guard.
     if (url.pathname === "/presets" || url.pathname.startsWith("/presets/")) {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await presetRoutes(request, {
         store,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The org's audit stream (audit trail spec, D7 and D8), on the room routes' rules and behind the same guard.
+    if (url.pathname === "/audit" || url.pathname.startsWith("/audit/")) {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await auditRoutes(request, {
+        store,
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       });
       if (handled) return handled;
@@ -256,12 +312,45 @@ export default {
     // A person's public handle (bylines spec D6), ahead of the OAuth routes, which serve /account and
     // have no store (plan ruling R1). The room routes' rules and the same guard.
     if (url.pathname === "/account/handle" || url.pathname === "/account/handle/") {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await handleRoutes(request, {
         store,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // A creator's bans across their rooms (abuse protections spec, section 1): beside the handle, for the
+    // same reason, and behind the same guard.
+    if (url.pathname === "/account/bans" || url.pathname.startsWith("/account/bans/")) {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await moderationRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The operator's platform stats (operator stats spec D1), on the room routes' rules and behind the
+    // same guard. Gated on the operators set, which is why it takes `operators` where the others take only
+    // `panelOrigins`. `paid` follows sign-in on two points that come from config, so it also takes
+    // `overrides` (BELLMAN_USERS outranks a grant) and `honourPurchases` (a purchase grant counts only
+    // with applyPlans), off the same OAuth config. The route requires all three keys; it cannot check the
+    // values, so worker-tests/stats-routes.test.ts reads the count through each.
+    if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await statsRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+        operators: oauth?.operators,
+        overrides: oauth?.overrides,
+        honourPurchases: oauth?.honourPurchases,
       });
       if (handled) return handled;
     }
@@ -330,6 +419,16 @@ export default {
 
       const identity = await resolveCaller(request, env, oauth);
       if (!identity) return unauthorized(oauth);
+      // A socket already open stays open (plan ruling R8); this refuses the next one. A registry that
+      // cannot say is a 500 rather than workerd's error page, and opens no socket either.
+      let refused: boolean;
+      try {
+        refused = await suspended(identity.userId);
+      } catch (err) {
+        console.error("/ws suspension read failed:", err);
+        return new Response("Internal server error", { status: 500 });
+      }
+      if (refused) return new Response(SUSPENDED, { status: 403 });
 
       const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
       const { memberIds, closed } = await stub.membersOf(identity.userId);
@@ -368,7 +467,15 @@ export default {
     if (!identity) return unauthorized(oauth);
 
     try {
-      const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS) });
+      // Inside the try: a registry that cannot say is JSON-RPC's internal error below, which an MCP
+      // client can parse, and serves nobody.
+      if (await suspended(identity.userId)) {
+        return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
+      }
+      const server = buildServer(identity, store, blobs, {
+        hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS),
+        mailReport,
+      });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

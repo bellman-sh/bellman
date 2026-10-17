@@ -91,6 +91,14 @@ export interface Member {
    * person (ADR 0019, D6).
    */
   publicNumber: number | null;
+  /**
+   * How this seat was taken: through a public room's permanent code (abuse protections spec, section 2);
+   * absent for every other seat, the creator's included. A member who has it is a stranger, and the send limit
+   * counts fewer sends a minute for one (`sendLimitFor`), under the account and not the seat (`sendKeyFor`).
+   * Given at confirm from the pending connect, which took it at the preview, and never changed after. Absent
+   * on rows stored before the field existed, which read as not a stranger.
+   */
+  via?: "permanent";
 }
 
 /**
@@ -120,6 +128,17 @@ export type EventType =
   | "surface"
   /** A proposal the server raises from the room's own thresholds (#66). Never sent by a member. */
   | "housekeeping";
+
+/**
+ * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
+ * `EventType` is a notice the room writes itself, whether it names a member (`member_joined`, `member_left`, a code issued or
+ * revoked) or "system" (an eviction, a timeout, an expiry, a heartbeat tick, a housekeeping proposal). A report's message
+ * target must be one of these kinds: a notice is not something a member said. `satisfies` keeps each name an `EventType`.
+ */
+export const SEND_KINDS = [
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface",
+] as const satisfies readonly EventType[];
+export type SendKind = (typeof SEND_KINDS)[number];
 
 /** What a housekeeping proposal is about (#66). */
 export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
@@ -298,6 +317,12 @@ export interface PendingConnect {
    * a joiner who previewed legitimately would be bumped by an unrelated reissue.
    */
   roomRole: string;
+  /**
+   * How this seat was taken: through a public room's permanent code (abuse protections spec, section 2);
+   * absent for every other seat. Captured here for `roomRole`'s reason, because bellman_confirm receives only
+   * the token, and copied onto the member it seats as `Member.via`.
+   */
+  via?: "permanent";
   createdAt: number;
   expiresAt: number;
 }
@@ -309,6 +334,21 @@ export interface AuditEntry {
   actorUserId: string;
   action: string;
   detail: Record<string, unknown>;
+  /**
+   * What the row was about, as of the action (audit trail spec, D2). The six are absent
+   * together on a row written before they existed and present together on every row
+   * written since, so `crossing` is the one to test. `actorOrgId` null is an actor with
+   * no org; absent is a row that never said.
+   */
+  actorLabel?: string | null;
+  actorOrgId?: string | null;
+  roomName?: string | null;
+  /** The orgs the action involved (D1), sorted, with null last for a person with no org. */
+  parties?: (string | null)[];
+  /** From this row's stream (D3): whether a party other than this org was involved. */
+  crossing?: "internal" | "cross_org";
+  /** From this row's stream (D3): this org acted, or another did. Null on an internal row and for the system. */
+  direction?: "outbound" | "inbound" | null;
 }
 
 /**
@@ -376,6 +416,11 @@ export interface Entitlements {
    * D1): null keeps them until a creator or an org admin deletes the room.
    */
   retainAfterCloseMs: number | null;
+  /**
+   * How long an org's audit rows are kept (audit trail spec, D9): null keeps them with no
+   * expiry, which is what happens today. `/account` sends it, and the panel's Audit page says it.
+   */
+  auditRetentionMs: number | null;
   /**
    * Whether a room this plan creates may be public (public rooms spec, D10): a paid
    * plan's. Checked at creation, the only time a room becomes public.

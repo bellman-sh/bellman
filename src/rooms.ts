@@ -14,19 +14,23 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } from "./types.js";
+import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
+import type { BanScope } from "./bans.js";
+import { MAX_REPORT_NOTE_CHARS, REPORTS_PER_DAY, REPORT_REASONS, type NewReport, type ReportMailer, type ReportTarget } from "./reports.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
+import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
-  type AppendExtras, type BellmanStore, type EventBody,
+  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
+  type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
+import { auditRows, partiesOf } from "./audit.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -42,23 +46,28 @@ import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./
  * named something the room does not have. It is not `"not_found"`, which is the
  * room itself or a member of it, and a route answers 400 from the one and 404
  * from the other.
+ *
+ * `"rate_limited"` is a send past its member's minute (ADR 0022), or a report past its account's day. It is
+ * the one refusal that carries a number, `retryAfter`, and a route answers it 429.
  */
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
+export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited";
 
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not
  * exceptional. Not a ToolResult, because that shape is MCP's and a route has
  * no use for a `content` array.
+ *
+ * `retryAfter` is whole seconds, and only a `rate_limited` refusal has one.
  */
 export type RoomResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: RoomFailure; reason: string };
+  | { ok: false; code: RoomFailure; reason: string; retryAfter?: number };
 
 export const succeed = <T>(value: T): RoomResult<T> => ({ ok: true, value });
 
 /** `RoomResult<never>` so a refusal is assignable to any operation's result. */
-export const refuse = (code: RoomFailure, reason: string): RoomResult<never> =>
-  ({ ok: false, code, reason });
+export const refuse = (code: RoomFailure, reason: string, extra?: { retryAfter: number }): RoomResult<never> =>
+  ({ ok: false, code, reason, ...extra });
 
 // ---------------------------------------------------------------------------
 // Room primitives
@@ -227,9 +236,9 @@ export async function announceReclaimed(
       },
       refId: null,
     });
-    // `alsoOrgs` for the reason evictMember passes it: the member losing access
-    // may be in neither the room's org nor the joiner's, and that org's admins
-    // are the ones who need to see their engineer leave a room.
+    // `alsoOrgs` for the reason evictMember passes it: the roster may no longer
+    // count the member losing access, and that org's admins are the ones who
+    // need to see their engineer leave a room.
     //
     // `actor` is the joiner that took the seat, because an audit row has to name
     // a real identity — but the action is `member_timed_out`, not
@@ -365,46 +374,46 @@ export async function readSurface(
 }
 
 /**
- * Which orgs get a row for this action, and what it says. One rule, in one
- * place, for the callers that write it themselves and the ones that hand it to
+ * Which orgs get a row for this action, and what it says (audit trail spec, D1 and D2). One
+ * rule, in one place, for the callers that write it themselves and the ones that hand it to
  * a store operation to commit with the mutation it records.
  *
- * Enterprise audit trail. Cross-org sessions write one entry per involved org
- * so each org's admins see the crossings that touched THEIR boundary —
- * without being able to read the other org's unrelated activity.
+ * The parties are the room's org, the actor's, any named in `alsoOrgs`, and the org of every
+ * person still in the room. The last is what makes a crossing visible from both sides: when a
+ * member of org A sends in A's room while a member of org B is in it, A's context reaches B, so
+ * B's stream records it too. `alsoOrgs` is for an actor acting on someone else: an eviction
+ * touches the evicted member's org, which need be neither the room's nor the creator's, and
+ * that member may already have left the room, where the roster no longer counts them. The
+ * hosted seat is not a party; it acts for the room. A person with no org is a party with no
+ * stream: the room is cross-org for everyone else, and no row is written for them.
  *
- * The involved orgs are the room's and the actor's, and that is enough while
- * the actor is the person the entry is about: a member joining or leaving
- * writes a row for their own org. It is not enough when the actor acts on
- * someone else. An eviction touches the evicted member's org, which need be
- * neither the room's nor the creator's, so that caller names it in `alsoOrgs`
- * and the entry reaches the org whose member lost access. The parameter only
- * adds: the room's and the actor's rows are always written, an org named twice
- * gets one row, and an org-less member gets none.
+ * `roster` is the room as it stands for this action: the session's members unless a caller holds
+ * a newer roster, and none for an act nobody in the room sees, such as a preview before joining.
  *
- * It lives here rather than in a transport because a transport that writes its
- * own row is a transport that will one day write it for one org and not the
- * other.
+ * It lives here rather than in a transport because a transport that writes its own row is a
+ * transport that will one day write it for one org and not the other.
  */
 export function auditEntries(
   session: StoredSession,
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): AuditEntry[] {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
-  const at = Date.now();
-  return [...orgs]
-    .filter((orgId): orgId is string => orgId !== null)
-    .map((orgId) => ({
-      at, orgId, sessionId: session.id, actorUserId: actor.userId, action, detail,
-    }));
+  const parties = partiesOf([
+    session.orgId, actor.orgId, ...alsoOrgs, ...roster.filter(isActivePerson).map((m) => m.orgId),
+  ]);
+  return auditRows(
+    parties,
+    { at: Date.now(), sessionId: session.id, action, roomName: session.manifest.room, detail },
+    { userId: actor.userId, label: actor.label, orgId: actor.orgId },
+  );
 }
 
 /**
- * Write what `auditEntries` builds, one row per org, for a caller that has no
- * store operation to commit it with.
+ * Write what `auditEntries` builds, one row per org and all at once, for a caller
+ * that has no store operation to commit it with. Any one failing fails the call.
  */
 export async function audit(
   store: BellmanStore,
@@ -412,11 +421,11 @@ export async function audit(
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): Promise<void> {
-  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs)) {
-    await store.appendAudit(entry);
-  }
+  const entries = auditEntries(session, actor, action, detail, alsoOrgs, roster);
+  await Promise.all(entries.map((e) => store.appendAudit(e)));
 }
 
 /**
@@ -750,6 +759,48 @@ export async function revokeInvite(
 }
 
 /**
+ * Count one bellman_send against its sender's minute (spec D5), or refuse it. Called after every check
+ * that can refuse the send and before its append.
+ *
+ * Whose minute is `sendKeyFor`'s: a stranger's belongs to the account within this room, so a second handle
+ * taken through the permanent code, or a leave and a rejoin, does not start it again; anyone else's belongs
+ * to the seat.
+ *
+ * Last of the checks and ahead of the first write, so a send refused for its verb, its payload or a frozen
+ * room spends no place, and a refusal here leaves the log as it was. Once the count says yes the place is
+ * spent whatever the append then does: a send that meets a key conflict, or a room that froze in the gap,
+ * still used it (R7). A keyed retry is a send like any other, so at the limit it is refused before its key
+ * is looked up, and the same key replays once the minute has room again (R6).
+ *
+ * `retryAfter` is `waitRefusal`'s: whole seconds, rounded up.
+ */
+export async function admitSend(
+  store: BellmanStore,
+  sessionId: string,
+  member: Member,
+  now: number = Date.now(),
+): Promise<RoomResult<null>> {
+  const limit = sendLimitFor(member);
+  const admission = await store.admitSend(sessionId, sendKeyFor(member), limit, now);
+  if (admission.ok) return succeed(null);
+  return waitRefusal(`this seat has used its ${limit} sends for the minute, and nothing was sent`, admission.retryAfterMs);
+}
+
+/**
+ * The refusal of a limit that carries a wait: a send's minute and an account's reports in a day. The store answers
+ * in milliseconds and a refusal in whole seconds, rounded up, because a client that waited the rounded-down second
+ * would be refused again. One function, so the two limits cannot come to round differently.
+ */
+function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
+  const retryAfter = Math.ceil(retryAfterMs / 1000);
+  return refuse(
+    "rate_limited",
+    `rate_limited: ${spent}. Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`,
+    { retryAfter },
+  );
+}
+
+/**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
  * One operation for both transports — `bellman_send type: "surface"` and
@@ -767,6 +818,10 @@ export async function revokeInvite(
  * state the spec declares a reader handles — so neither moves into the store.
  * The verb guard, the frozen guard and the row's write are not courtesies, and
  * each is where it has to be.
+ *
+ * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
+ * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
+ * dash's group drag writes one PUT per card and would pass 30.
  */
 export async function writeSurface(
   store: BellmanStore,
@@ -776,6 +831,7 @@ export async function writeSurface(
   memberId: string,
   payload: unknown,
   idempotencyKey?: string,
+  countSend = false,
 ): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
   if (!gate.ok) return gate;
@@ -835,6 +891,13 @@ export async function writeSurface(
         }
       }
     }
+  }
+
+  if (countSend) {
+    const me = await findMember(store, session, memberId, actor);
+    if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
+    const admitted = await admitSend(store, sessionId, me);
+    if (!admitted.ok) return admitted;
   }
 
   const draft: EventBody = {
@@ -944,13 +1007,36 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
  * seat free, and evicting them shuts that door. Only the removal is not said a
  * second time: the store writes the departure for a member it removes, and the
  * door's closing whenever a code is live.
+ *
+ * A public room's permanent code is the one door an eviction leaves open. This departs from
+ * ADR 0020 section 5, which has an eviction shut it. It is the link everyone else uses, and a
+ * stranger came in through it, so shutting it on every removal would make the creator reissue
+ * and republish it each time. Keeping someone out of a room that publishes one is what `ban` is for.
+ *
+ * `ban` also bars the account from joining again (spec section 1): from this room, or from every
+ * room the creator owns. The store writes it with the removal, in the transaction that records the
+ * member out, and it is not an event: a public room's log is public, and the person banned is told
+ * only that they can't join. The audit row of the eviction carries `ban`, and the store files that
+ * row for a ban on a member who already left too. A ban is on the account and a member_id is per
+ * connection, so every other handle the account still holds in the room is removed as well, each by
+ * a removal of its own with its own event, door and rows. Their outcomes are not reported: a refusal
+ * partway is finished by repeating the eviction, which finds the target out and removes the rest.
+ *
+ * `"all"` covers the creator's rooms now as well as later: every other room they own where the account
+ * holds a handle loses it too, each handle by the removal an eviction makes there, under that room's own
+ * code rules, and with no room ban, since the creator-wide one keeps the account out. `alsoRemovedFrom`
+ * counts the rooms this call removed it from. They are found through the joined-rooms index, so a seat
+ * the index lost (`BellmanStore.sessionsJoinedBy`) stays, and only the account's next join there is refused.
  */
 export async function evictMember(
   store: BellmanStore,
   actor: Identity,
   sessionId: string,
   targetMemberId: string,
-): Promise<RoomResult<{ evicted: boolean; codeRetired: string | null; sessionStatus: string }>> {
+  ban?: BanScope,
+): Promise<RoomResult<{
+  evicted: boolean; codeRetired: string | null; sessionStatus: string; banned: BanScope | null; alsoRemovedFrom: number;
+}>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
 
@@ -986,7 +1072,13 @@ export async function evictMember(
     return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
   }
 
-  const outcome = await store.removeMember(sessionId, targetMemberId, {
+  // One removal's request, built from the member it removes. A ban takes every handle the account
+  // holds in the room (below), and each is a member of its own, with its own seat, door and org, so
+  // each gets its own event, door and audit rows. With no ban, and no permanent code behind the seat,
+  // for one handle it is the request this function has always made. `room` is the room the member is
+  // removed from, whose codes and orgs the request reads; `stored` is the ban the store is asked to
+  // write, and the audit row carries the call's `ban` whatever it is.
+  const request = (room: StoredSession, m: Member, stored: BanScope | undefined): RemovalRequest => ({
     now: Date.now(),
     frozen: "refuse",
     // An eviction cuts the feed (#113): the target is recorded out at the
@@ -1014,7 +1106,7 @@ export async function evictMember(
       fromMemberId: "system",
       fromUserId: actor.userId,
       fromLabel: actor.label,
-      payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
+      payload: { member_id: m.memberId, label: m.label, room_role: m.roomRole },
       refId: null,
     },
     // The door and the member go together now. Under the old shape the door shut
@@ -1036,17 +1128,26 @@ export async function evictMember(
     // above and the removal. And it could only describe a removal this call made,
     // so the doors an eviction shut would sit in two places, a field for members who
     // were present and a row for those who had already left, and a query for
-    // `invite_revoked` would find half of them. The row goes to the room's org and
-    // the creator's, as revokeInvite writes it, and no more: it names a role and no
-    // person, so the departed member's org could not tell whom it concerned, and a
-    // row an org cannot resolve to anyone is worse than none.
-    retire: {
-      role: target.roomRole,
-      event: doorShutEvent(actor, target.roomRole),
-      audit: auditEntries(session, actor, "invite_revoked", { roles: [target.roomRole] }),
-    },
+    // `invite_revoked` would find half of them. The row goes where revokeInvite's
+    // goes, to the orgs `auditEntries` names. Those include the evicted member's
+    // org while they are still in the room, since the door shuts as they leave and
+    // their org's `member_evicted` row beside it names them. A member who had
+    // already left is no party to it, and their org is not added: the row names a
+    // role and no person, so that org could not tell whom it concerned, and a row
+    // an org cannot resolve to anyone is worse than none.
+    //
+    // Except a public room's permanent code, which an eviction leaves open (see above). Read from
+    // the room as this call found it, so a code replaced since is the next eviction's to shut.
+    ...(room.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
+      retire: {
+        role: m.roomRole,
+        event: doorShutEvent(actor, m.roomRole),
+        audit: auditEntries(room, actor, "invite_revoked", { roles: [m.roomRole] }),
+      },
+    }),
+    ...(stored ? { ban: stored } : {}),
     audit: auditEntries(
-      session, actor, "member_evicted",
+      room, actor, "member_evicted",
       {
         // The seat and the person. member_id is per connection and only resolves
         // inside the room, so user_id is what lets an org reading its own log see
@@ -1055,13 +1156,18 @@ export async function evictMember(
         // No `code_retired`: whether a door shut is the store's answer, and this
         // row is built before the store gives it. The door has its own row, see
         // `retire`.
-        member_id: targetMemberId, user_id: target.userId, room_role: target.roomRole,
+        member_id: m.memberId, user_id: m.userId, room_role: m.roomRole,
+        // The ban, when the call asked for one, so an org reading its log finds every ban there. The
+        // event above never carries it: the log is public in a public room.
+        ...(ban ? { ban } : {}),
       },
-      // The evicted member's org as well. The actor here is the creator, not the
-      // member, so unless that org is also the room's it would get no row.
-      [target.orgId],
+      // The evicted member's org as well. The roster counts them only while they are
+      // still in the room, and a target who has already left still needs this row.
+      [m.orgId],
     ),
   });
+
+  const outcome = await store.removeMember(sessionId, targetMemberId, request(session, target, ban));
 
   if (outcome.refused === "closed") return refuse("closed", "session is closed.");
   if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
@@ -1069,6 +1175,40 @@ export async function evictMember(
     return refuse("forbidden", "only the person who created this room can remove a member from it.");
   }
   if (outcome.refused !== null) return refuse("not_found", "session not found.");
+
+  // A ban is on the account and a member_id is per connection, so the person's other handles in
+  // the room go too, or one of them keeps sending. Each is removed by a removal of its own, and
+  // the outcomes are not read: a refusal partway, such as a freeze landing between two of them,
+  // is finished by repeating the eviction. That finds the target out and the ban kept, and removes
+  // whoever is left. Each asks the store for the room's ban alone: the target's removal queued the
+  // creator-wide one, and a second row the outbox delivered after a lift would bring it back.
+  if (ban) {
+    for (const other of await handlesOf(store, session, target)) {
+      if (other.memberId !== targetMemberId && isActiveMember(other)) {
+        await store.removeMember(sessionId, other.memberId, request(session, other, "room"));
+      }
+    }
+  }
+
+  // "all" now: the account's handles in the creator's other rooms go as well, each by the removal an
+  // eviction makes in that room, read from that room, with no ban of the room's own. A room that refuses,
+  // frozen say, is finished by repeating the ban, as above. Each room that loses its last person closes,
+  // the rule every removal ends on. The scan is bounded by JOINED_SCAN, whose note gives the cost.
+  let alsoRemovedFrom = 0;
+  if (ban === "all") {
+    for (const id of await store.sessionsJoinedBy(target.userId, JOINED_SCAN)) {
+      const room = id === sessionId ? undefined : await store.getSession(id);
+      if (!room || room.closed || room.createdBy !== session.createdBy) continue;
+      let removed = false;
+      for (const m of room.members.filter((mm) => mm.userId === target.userId && isActiveMember(mm))) {
+        removed = (await store.removeMember(id, m.memberId, request(room, m, undefined))).removed || removed;
+      }
+      if (removed) {
+        alsoRemovedFrom++;
+        await store.closeSessionIfEmpty(id);
+      }
+    }
+  }
 
   // `removed: false` with no refusal is a member who was already out. The store
   // did not say the departure again, and shut their seat's door if it was still
@@ -1081,5 +1221,100 @@ export async function evictMember(
     // Last, as before: whatever came after the close would be lost, because
     // every later call refuses on "closed".
     sessionStatus: await closeIfEmpty(store, session),
+    // What the call asked for, and the target's removal has committed it: the room's ban in its
+    // own transaction, and for "all" the registry's, queued in that transaction for the outbox
+    // to deliver. A refusal returned above, so none of this is claimed for one.
+    banned: ban ?? null,
+    alsoRemovedFrom,
   });
+}
+
+/**
+ * File a report (abuse protections spec section 3, R11), for both transports: who may report, what a target must
+ * be, the store's fold and daily limit, and the email once a report is filed, never for a fold or a refusal.
+ *
+ * Anyone who holds or held a handle in the room may report it, and while the room is public so may anyone signed in.
+ * A room that is neither is refused as a room that is not there, before the target is read, so a stranger learns
+ * nothing about the member ids or cursors it holds. A frozen room can be reported, and so can a closed one until it
+ * is purged: a report is how the people who were in a room tell the operators what happened there.
+ *
+ * The target is the room, a member (`memberId`) or a message (`cursor`), never two. A member is anyone the room ever
+ * seated, one who left included. A message is an event of a kind a member sends (`SEND_KINDS`). The room writes notices
+ * of its own, some as "system" (an eviction, a timeout, a heartbeat tick) and some under the member they are about (a
+ * join, a leave, a code issued or revoked), and none of those is a message: a report of one would be a report about
+ * whoever it names. The report keeps whom it is about (R12), read from the member or from the event's sender, so an
+ * operator can act on the account.
+ *
+ * A caller may report a message exactly when it could read it. A removed member read a room that is not public up to
+ * its cut and no further (#113), so a cursor past the cut names an event it was never shown, and is refused as one that
+ * does not exist: a report must not tell it what the room holds after it was out. A public room's log is public to
+ * anyone, so while the room is public there is no cut, and someone removed from it may still report what is said about
+ * them afterwards. A member who left keeps the open feed, and so the open cursors.
+ *
+ * The shape of the request is checked first, because it reads nothing from the room. The limit on a note applies to what
+ * was sent, before it is trimmed, which is what the tool's schema bounds, so the tool and the route agree. A note is then
+ * trimmed and an empty one is none. The note is untrusted text and is kept as written.
+ *
+ * `mail` runs once the store has answered `filed`, and a `ReportMailer` never rejects, so a failed email cannot undo a
+ * filing. A repeat of a report still open answers `folded` and mails nothing (R9). Past 10 filings in a rolling day
+ * (R10) the store answers `limited`, and the refusal is `rate_limited` with the wait, as a send's is.
+ */
+export async function fileRoomReport(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  input: { memberId?: string; cursor?: number; reason: string; note?: string | null },
+  mail: ReportMailer,
+  now: number = Date.now(),
+): Promise<RoomResult<{ reportId: string; folded: boolean }>> {
+  const reason = REPORT_REASONS.find((r) => r === input.reason);
+  if (reason === undefined) return refuse("invalid", `reason must be one of ${REPORT_REASONS.join(", ")}.`);
+  if (input.memberId !== undefined && input.cursor !== undefined) {
+    return refuse("invalid", "name a member or a message, not both; name neither to report the room.");
+  }
+  // The bound is on the note as sent, before it is trimmed, as the tool's schema has it, so the tool and the route refuse the
+  // same notes. Trimming only shortens, so a note that passes here is within it after the trim as well.
+  if (input.note != null && input.note.length > MAX_REPORT_NOTE_CHARS) {
+    return refuse("invalid", `a note is at most ${MAX_REPORT_NOTE_CHARS} characters.`);
+  }
+  const note = input.note?.trim() || null;
+
+  const session = await store.getSession(sessionId);
+  const handles = session ? await handlesOf(store, session, actor) : [];
+  if (!session || (handles.length === 0 && !isPublic(session))) {
+    return refuse("not_found", "no such room, or no member of yours in it");
+  }
+
+  let target: ReportTarget = { kind: "room" };
+  let subject: NewReport["subject"] = null;
+  if (input.memberId !== undefined) {
+    const seated = await store.getMember(session.id, input.memberId);
+    if (!seated) return refuse("invalid", "no member with that member_id has been in this room.");
+    target = { kind: "member", memberId: seated.memberId };
+    subject = { memberId: seated.memberId, userId: seated.userId, label: seated.label };
+  } else if (input.cursor !== undefined) {
+    if (!Number.isInteger(input.cursor) || input.cursor < 1) {
+      return refuse("invalid", "cursor must be a positive whole number.");
+    }
+    // A caller may report what it could read. A public room's log is public, so it has no cut to keep. Past the access
+    // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
+    const cut = isPublic(session) ? undefined : cutFor(handles);
+    const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
+    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", "no message at that cursor.");
+    target = { kind: "message", cursor: event.cursor };
+    subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
+  }
+
+  const filed = await store.fileReport(
+    {
+      sessionId: session.id, creatorId: session.createdBy, target, subject, reason, note,
+      reporterUserId: actor.userId, reporterLabel: actor.label,
+    },
+    now,
+  );
+  if (filed.outcome === "limited") {
+    return waitRefusal(`this account has filed ${REPORTS_PER_DAY} reports in the last day, and nothing was filed`, filed.retryAfterMs);
+  }
+  if (filed.outcome === "filed") await mail(filed.report);
+  return succeed({ reportId: filed.report.id, folded: filed.outcome === "folded" });
 }

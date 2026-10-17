@@ -22,10 +22,13 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
+import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
-import { brief, member, oneCode, openaiAgent, roomManifest, session, swarmSession } from "./fixtures.js";
+import { sendKeyFor } from "../../src/send-limit.js";
+import type { NewReport, Report } from "../../src/reports.js";
+import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
 const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -81,6 +84,25 @@ export interface StoreContractHarness {
    * alarm, so its caller runs the alarm here.
    */
   advance?: (sessionId: string) => Promise<void>;
+  /**
+   * Called after a case's `sweep`, for the registry. `MemoryStore` deletes a resolved report in `sweep` and
+   * passes nothing. `DurableObjectStore.sweep` is a no-op, because the registry deletes a report on its own
+   * alarm (`report_purge`), so its caller runs the alarm here.
+   */
+  advanceRegistry?: () => Promise<void>;
+  /**
+   * The accounts whose filing times the store still holds: what `fileReport` counts the day's limit from. The
+   * harness reads it because `BellmanStore` cannot show it, since a row whose times have all left the day counts
+   * as no row. The purge deletes such a row, which only serves the limit, because the privacy page promises a
+   * reporter's account is kept 180 days after resolution and not for good.
+   */
+  reporterRows: () => Promise<string[]>;
+  /**
+   * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
+   * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
+   * nothing that can leave memory passes none, and the case that calls it then pins the count alone.
+   */
+  forgetMemory?: () => Promise<void>;
 }
 
 export function describeStoreContract(
@@ -3073,6 +3095,61 @@ export function describeStoreContract(
             detail: { chars: JSON.stringify(answer.payload).length, ref_id: "1" } }),
         ]);
       });
+
+      // Spec section 2: the hosted seat is exempt. Its writes go through this method alone, which never reads the count.
+      it("writes past a full send count: the hosted seat is exempt from the limit", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        for (let i = 0; i < 2; i++) await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW());
+        expect(await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW()), "the premise: the count is full").toMatchObject({ ok: false });
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: true });
+      });
+    });
+
+    describe("the send count (abuse protections spec D5)", () => {
+      // A stranger's key is kept apart from a member's by a store that has storage to keep it in, so the same
+      // count is asked of both kinds of key.
+      const strangerKey = (userId: string) => sendKeyFor({ via: "permanent", userId, memberId: `m_${userId}` });
+      for (const [whose, one, another] of [
+        ["a member's", "m_creator", "m_peer"],
+        ["a stranger's", strangerKey("u_creator"), strangerKey("u_peer")],
+      ] as const) {
+        it(`admits sends under ${whose} key up to the limit in a minute, per key and per room`, async () => {
+          await store.createSession(session());
+          await store.createSession(session({ id: "qs_other" }));
+          for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", one, 3, 1_000 + i)).toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
+          expect(await store.admitSend("qs_test", another, 3, 2_000), "another key").toEqual({ ok: true });
+          expect(await store.admitSend("qs_other", one, 3, 2_000), "another room").toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 61_000), "a minute on").toEqual({ ok: true });
+        });
+      }
+
+      // Spec D5, amended for strangers: their count is stored, so a script cannot send 6, pause until the idle
+      // room object is evicted, and send 6 more.
+      it("keeps a stranger's count when the room object loses its memory", async () => {
+        await store.createSession(session());
+        const stranger = strangerKey("u_peer");
+        for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", stranger, 3, 1_000 + i)).toEqual({ ok: true });
+        await harness.forgetMemory?.();
+        expect(await store.admitSend("qs_test", stranger, 3, 2_000), "the count outlived the memory").toEqual({ ok: false, retryAfterMs: 59_000 });
+        expect(await store.admitSend("qs_test", stranger, 3, 61_000), "a minute on").toEqual({ ok: true });
+      });
+
+      // The count's limit is read from this field, so a store that dropped it would limit nobody as a stranger.
+      it("keeps how a seat was taken, on the pending connect and on the member it seats", async () => {
+        const s = session();
+        await store.createSession(s);
+        await store.putPendingConnect({
+          token: "qct_via", sessionId: s.id, userId: "u_peer", roomRole: "peer_b", via: "permanent",
+          createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
+        });
+        expect((await store.takePendingConnect("qct_via"))?.via).toBe("permanent");
+        const arriving = member({ memberId: "m_stranger", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b", via: "permanent" });
+        expect((await store.seatMember(s.id, arriving, 0, Date.now())).refused).toBeNull();
+        expect((await store.getMember(s.id, "m_stranger"))?.via).toBe("permanent");
+        expect((await store.getMember(s.id, "m_creator"))?.via, "the creator").toBeUndefined();
+      });
     });
 
     /**
@@ -3439,6 +3516,19 @@ export function describeStoreContract(
       }));
 
       await expect(store.waitForEvents(s.id, 0, 10_000)).resolves.toHaveLength(1);
+    });
+
+    // bellman_sync's page (#208): a poll from far behind reads the earliest `limit`, the next poll the rest.
+    it("waitForEvents returns at most `limit` events when given one, the earliest after the cursor", async () => {
+      const s = session();
+      await store.createSession(s);
+      for (const text of ["one", "two", "three"]) {
+        await store.appendEvent(s.id, {
+          type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse", payload: { text }, refId: null,
+        });
+      }
+      expect((await store.waitForEvents(s.id, 0, 10_000, 2)).map((e) => e.cursor)).toEqual([1, 2]);
+      expect((await store.waitForEvents(s.id, 2, 10_000, 2)).map((e) => e.cursor)).toEqual([3]);
     });
 
     it("waitForEvents resolves early when an event arrives", async () => {
@@ -4224,6 +4314,250 @@ export function describeStoreContract(
       });
     });
 
+    describe("suspensions (abuse protections spec \u{A7}1)", () => {
+      it("suspends an account, says so for it alone, and lifts it once", async () => {
+        expect(await store.isSuspended("u_peer")).toBe(false);
+        await store.suspend("u_peer", { note: "spam in three rooms", by: "u_operator", at: 1_000 });
+        expect(await store.isSuspended("u_peer")).toBe(true);
+        expect(await store.isSuspended("u_pee")).toBe(false);
+        expect(await store.unsuspend("u_peer")).toBe(true);
+        expect(await store.unsuspend("u_peer")).toBe(false);
+        expect(await store.isSuspended("u_peer")).toBe(false);
+      });
+    });
+
+    describe("reports (abuse protections spec \u{A7}3)", () => {
+      const filed = (over: Partial<NewReport> = {}): NewReport => ({
+        sessionId: "qs_test", creatorId: "u_jesse",
+        target: { kind: "member", memberId: "m_peer" },
+        subject: { memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" },
+        reason: "harassment", note: "called names", reporterUserId: "u_reader", reporterLabel: "reader@x", ...over,
+      });
+      const file = async (over: Partial<NewReport> = {}) => (await store.fileReport(filed(over), Date.now())) as { outcome: string; report: Report };
+      const sweepRegistry = async () => {
+        await store.sweep(Date.now());
+        await harness.advanceRegistry?.();
+      };
+
+      it("files a report, and lists the queue newest first", async () => {
+        const first = await file();
+        vi.advanceTimersByTime(1_000);
+        const second = await file({ target: { kind: "room" }, subject: null });
+        expect(first).toMatchObject({ outcome: "filed", report: { reason: "harassment", note: "called names", resolvedAt: null } });
+        expect((await store.listReports(10)).map((r) => r.id)).toEqual([second.report.id, first.report.id]);
+      });
+
+      it("folds a second report of one target by one account into the open first", async () => {
+        const first = await file();
+        expect(await store.fileReport(filed({ reason: "spam", note: "again" }), Date.now())).toEqual({ outcome: "folded", report: first.report });
+        expect(await store.listReports(10)).toHaveLength(1);
+        expect((await file({ reporterUserId: "u_other" })).outcome, "another account").toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 3 } })).outcome, "another target").toBe("filed");
+      });
+
+      /** Review Focus 5. */
+      it("files anew once the first is resolved, rather than folding into a closed report", async () => {
+        const first = await file();
+        await store.resolveReport(first.report.id, { note: "warned", by: "u_operator" }, Date.now());
+        expect((await file()).outcome).toBe("filed");
+      });
+
+      it("takes 10 reports from an account a day, counts no fold, and takes the next once a day has passed", async () => {
+        for (let i = 0; i < 10; i++) expect((await file({ target: { kind: "message", cursor: i + 1 } })).outcome).toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 1 } })).outcome, "a repeat still folds").toBe("folded");
+        expect(await store.fileReport(filed({ target: { kind: "room" }, subject: null }), Date.now()))
+          .toEqual({ outcome: "limited", retryAfterMs: 24 * 3_600_000 });
+        vi.advanceTimersByTime(24 * 3_600_000);
+        expect((await file({ target: { kind: "room" }, subject: null })).outcome).toBe("filed");
+      });
+
+      it("lists for a room's creator its reports about members and messages, and none about the room", async () => {
+        await file();
+        await file({ target: { kind: "message", cursor: 4 } });
+        await file({ target: { kind: "room" }, subject: null });
+        await file({ sessionId: "qs_elsewhere" });
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.target.kind).sort()).toEqual(["member", "message"]);
+        expect(await store.roomReports("u_someone_else", "qs_test")).toEqual([]);
+      });
+
+      /**
+       * Section 1C review, Critical 1. A creator who read a report about themself learned one had been filed, and in a small
+       * room which of the others filed it. A report about the creator's own seats and messages reaches the operators alone.
+       * It is told by the account, so every seat the creator holds and every message it sent is covered, a second handle
+       * included.
+       */
+      it("leaves out of a creator's list every report about the creator's own seats and messages, and keeps it in the queue", async () => {
+        const creator = { memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd" };
+        const own = [
+          (await file({ target: { kind: "member", memberId: "m_creator" }, subject: creator })).report,
+          (await file({ target: { kind: "member", memberId: "m_creator_2" }, subject: { ...creator, memberId: "m_creator_2" } })).report,
+          (await file({ target: { kind: "message", cursor: 5 }, subject: creator })).report,
+        ];
+        vi.advanceTimersByTime(1_000);
+        const aboutPeer = (await file()).report;
+        vi.advanceTimersByTime(1_000);
+        const aboutPeersMessage = (await file({ target: { kind: "message", cursor: 6 } })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id), "the creator reads the others' alone")
+          .toEqual([aboutPeersMessage.id, aboutPeer.id]);
+        expect((await store.listReports(10)).map((r) => r.id).sort(), "the operators read all five")
+          .toEqual([...own, aboutPeer, aboutPeersMessage].map((r) => r.id).sort());
+      });
+
+      /**
+       * The hosted seat is Bellman's account and not the creator's, and the creator is who sets its instructions, so a report
+       * about what it said is the creator's to read. The rule above is the account's and covers it not at all.
+       */
+      it("lists for a creator a report about the hosted seat, which is not the creator's account", async () => {
+        const host = { memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: "host@bellman" };
+        const seat = (await file({ target: { kind: "member", memberId: HOST_MEMBER_ID }, subject: host })).report;
+        const said = (await file({ target: { kind: "message", cursor: 7 }, subject: host })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id).sort()).toEqual([seat.id, said.id].sort());
+      });
+
+      it("resolves once with a note, keeps the first resolution, and answers nothing for an unknown id", async () => {
+        const { report } = await file();
+        const at = Date.now();
+        const done = await store.resolveReport(report.id, { note: "warned", by: "u_operator" }, at);
+        expect(done).toMatchObject({ id: report.id, resolvedAt: at, resolution: "warned", resolvedBy: "u_operator" });
+        expect(await store.resolveReport(report.id, { note: "again", by: "u_x" }, at + 1_000)).toEqual(done);
+        expect(await store.resolveReport("rpt_000000000000000_00000000", { note: "x", by: "u_x" }, at)).toBeUndefined();
+      });
+
+      /**
+       * Section 1C review, Minor 3, re-graded Important: an open report an operator cannot find is a report never acted on.
+       * Newest first alone cut the queue at its limit with the oldest open report past it, behind however many newer ones
+       * had been resolved. Open reports come first, newest first, then resolved ones, newest first, `limit` in all.
+       */
+      it("lists the open reports first and the resolved after, newest first in each, so an old open one survives any number of newer resolved", async () => {
+        const oldOpen = (await file({ reporterUserId: "u_a", target: { kind: "message", cursor: 1 } })).report;
+        vi.advanceTimersByTime(1_000);
+        const resolved: Report[] = [];
+        for (let i = 0; i < 5; i++) {
+          const r = (await file({ reporterUserId: `u_r${i}`, target: { kind: "message", cursor: 10 + i } })).report;
+          await store.resolveReport(r.id, { note: "done", by: "u_operator" }, Date.now());
+          resolved.push(r);
+          vi.advanceTimersByTime(1_000);
+        }
+        const newOpen = (await file({ reporterUserId: "u_b", target: { kind: "message", cursor: 2 } })).report;
+        const ids = async (limit: number) => (await store.listReports(limit)).map((r) => r.id);
+        expect(await ids(10), "open first, then resolved, newest first in each")
+          .toEqual([newOpen.id, oldOpen.id, ...resolved.map((r) => r.id).reverse()]);
+        expect(await ids(3), "the old open report is inside a cut that five newer resolved ones would have filled")
+          .toEqual([newOpen.id, oldOpen.id, resolved[4].id]);
+        expect(await ids(2), "the open reports fill the cut before any resolved one").toEqual([newOpen.id, oldOpen.id]);
+        expect(await ids(1), "and the newest open one comes first").toEqual([newOpen.id]);
+        // Resolving the old one moves it among the resolved, by when it was filed: the oldest of them, last.
+        await store.resolveReport(oldOpen.id, { note: "done", by: "u_operator" }, Date.now());
+        expect(await ids(10)).toEqual([newOpen.id, ...resolved.map((r) => r.id).reverse(), oldOpen.id]);
+      });
+
+      it("deletes a report 180 days after it is resolved, from every list, and keeps an open one", async () => {
+        const done = (await file()).report;
+        const open = (await file({ target: { kind: "message", cursor: 2 } })).report;
+        await store.resolveReport(done.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(180 * 24 * 3_600_000 - 1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id).sort(), "a millisecond before").toEqual([done.id, open.id].sort());
+        vi.advanceTimersByTime(1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id)).toEqual([open.id]);
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id)).toEqual([open.id]);
+      });
+
+      // The cases below are not the plan's. Each closes a mutation the plan's cases left green, found in Task 9's controls.
+
+      /** The count is per account. Filled by one, then asked by another: a count shared across accounts reads full to the second. */
+      it("counts each account's filings apart: one at its limit leaves another's first admitted", async () => {
+        for (let i = 0; i < 10; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        expect((await file({ target: { kind: "message", cursor: 11 } })).outcome, "the account at its limit").toBe("limited");
+        expect((await file({ reporterUserId: "u_other", target: { kind: "message", cursor: 11 } })).outcome, "another account's first").toBe("filed");
+      });
+
+      /** R9. The plan's case folds after the account is already full, which a fold that counted would not change. */
+      it("keeps a fold out of the day's count: nine filed and five repeats leave a tenth admitted", async () => {
+        for (let i = 0; i < 9; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        for (let i = 0; i < 5; i++) expect((await file({ target: { kind: "message", cursor: 1 } })).outcome).toBe("folded");
+        expect((await file({ target: { kind: "message", cursor: 10 } })).outcome, "the tenth new report").toBe("filed");
+        expect((await file({ target: { kind: "message", cursor: 11 } })).outcome, "the eleventh").toBe("limited");
+      });
+
+      /** The retry_after a refusal gives must hold. A refusal that counted would push a client that waited it out into another. */
+      it("counts no refusal, so a filing after the retry it was told is admitted", async () => {
+        for (let i = 0; i < 10; i++) await file({ target: { kind: "message", cursor: i + 1 } });
+        vi.advanceTimersByTime(12 * 3_600_000);
+        for (let i = 0; i < 10; i++) {
+          expect(await store.fileReport(filed({ target: { kind: "message", cursor: 100 + i } }), Date.now()))
+            .toEqual({ outcome: "limited", retryAfterMs: 12 * 3_600_000 });
+        }
+        vi.advanceTimersByTime(12 * 3_600_000);
+        expect((await file({ target: { kind: "message", cursor: 200 } })).outcome).toBe("filed");
+      });
+
+      /** A room's target is the string "room" in every room, so a fold that left the room out would fold across rooms. */
+      it("keeps an account's open reports of two rooms apart", async () => {
+        const room = { target: { kind: "room" }, subject: null } as const;
+        expect((await file(room)).outcome).toBe("filed");
+        expect((await file({ ...room, sessionId: "qs_elsewhere" })).outcome, "the same target in another room").toBe("filed");
+        expect((await file(room)).outcome, "a repeat in the first room still folds").toBe("folded");
+      });
+
+      it("lists at most the limit, and gives a creator theirs, newest first", async () => {
+        const ids: string[] = [];
+        for (let i = 0; i < 3; i++) {
+          ids.push((await file({ target: { kind: "message", cursor: i + 1 } })).report.id);
+          vi.advanceTimersByTime(1_000);
+        }
+        expect((await store.listReports(2)).map((r) => r.id)).toEqual([ids[2], ids[1]]);
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id)).toEqual([ids[2], ids[1], ids[0]]);
+      });
+
+      /** R15. Filed together and resolved ten days apart, so the date is told from the resolution and each report keeps its own. */
+      it("deletes each report 180 days after its own resolution, not its filing and not another's", async () => {
+        const day = 24 * 3_600_000;
+        const first = (await file()).report;
+        const second = (await file({ target: { kind: "message", cursor: 2 } })).report;
+        await store.resolveReport(first.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(10 * day);
+        await store.resolveReport(second.id, { note: "warned", by: "u_operator" }, Date.now());
+        vi.advanceTimersByTime(170 * day);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id), "the first is gone, the second has ten days left").toEqual([second.id]);
+        vi.advanceTimersByTime(10 * day - 1);
+        await sweepRegistry();
+        expect((await store.listReports(10)).map((r) => r.id), "a millisecond before the second's day").toEqual([second.id]);
+        vi.advanceTimersByTime(1);
+        await sweepRegistry();
+        expect(await store.listReports(10)).toEqual([]);
+      });
+
+      /**
+       * R10's rows only serve the day's count. u_old filed long ago, u_edge a day before the purge to the millisecond, and
+       * u_late twice, the first just over a day before it and the second an hour before: its row holds both times, so the
+       * newest is the one that keeps it.
+       */
+      it("forgets a reporter's filing times at the purge once the newest is a day old, and keeps them while one is inside the day", async () => {
+        const hour = 3_600_000;
+        const day = 24 * hour;
+        const old = (await file({ reporterUserId: "u_old" })).report;
+        await store.resolveReport(old.id, { note: "warned", by: "u_operator" }, Date.now());
+        const purgeAt = Date.now() + 180 * day;
+        vi.advanceTimersByTime(179 * day - 10 * 60_000);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 3 } });
+        vi.advanceTimersByTime(10 * 60_000);
+        await file({ reporterUserId: "u_edge", target: { kind: "message", cursor: 2 } });
+        vi.advanceTimersByTime(day - hour);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 4 } });
+        expect((await harness.reporterRows()).sort(), "before the purge").toEqual(["u_edge", "u_late", "u_old"]);
+        vi.advanceTimersByTime(hour);
+        expect(Date.now()).toBe(purgeAt);
+        await sweepRegistry();
+        const left = (await store.listReports(10)).map((r) => r.id);
+        expect(left, "the purge ran and deleted u_old's report").not.toContain(old.id);
+        expect(left, "and left the three open ones").toHaveLength(3);
+        expect((await harness.reporterRows()).sort(), "u_edge's time is a day old exactly, u_late's newest an hour").toEqual(["u_late"]);
+      });
+    });
+
     describe("handles and bylines", () => {
       it("claims a handle once, refuses it to a second user, and answers claimed on a repeat", async () => {
         expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
@@ -4356,6 +4690,12 @@ export function describeStoreContract(
       expect((await store.auditForOrg("org_c", 50))).toHaveLength(0);
     });
 
+    // A falsy org is no org (ARCHITECTURE.md section 9, runtime fact 4): no stream named "" is written.
+    it("writes no audit row for an entry whose org is empty", async () => {
+      await store.appendAudit({ at: Date.now(), orgId: "", sessionId: "qs_1", actorUserId: "u_a", action: "session_created", detail: {} });
+      expect(await store.auditForOrg("", 50)).toEqual([]);
+    });
+
     it("returns the most recent audit entries up to the limit", async () => {
       for (let i = 0; i < 10; i++) {
         (await store.appendAudit({
@@ -4366,6 +4706,125 @@ export function describeStoreContract(
       const recent = (await store.auditForOrg("org_a", 3));
       expect(recent).toHaveLength(3);
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
+    });
+
+    // ------------------------------------------------------------- the audit query (audit trail spec, D6)
+    describe("the audit query", () => {
+      const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);
+      const row = (over: Partial<AuditEntry> = {}): AuditEntry => ({
+        at: Date.now(), orgId: "org_a", sessionId: "qs_q3", actorUserId: "u_ana", action: "sent_message", detail: {},
+        actorLabel: "Ana", actorOrgId: "org_a", roomName: "q3-plan", parties: ["org_a"], crossing: "internal", direction: null,
+        ...over,
+      });
+      const legacy = (over: Partial<AuditEntry> = {}): AuditEntry => ({
+        at: Date.now(), orgId: "org_a", sessionId: "qs_old", actorUserId: "u_old", action: "member_left", detail: {}, ...over,
+      });
+      const boInbound = { actorUserId: "u_bo", actorLabel: "Bo", actorOrgId: "org_b", parties: ["org_a", "org_b"], crossing: "cross_org", direction: "inbound" } satisfies Partial<AuditEntry>;
+      /** Six rows in org A's stream, seq 1 to 6, and one in org B's that no read of A's may see. */
+      const fill = async () => {
+        await store.appendAudit(legacy({ at: day("10") }));                                              // 1
+        await store.appendAudit(row({ at: day("11") }));                                                 // 2
+        await store.appendAudit(row({ at: day("12"), ...boInbound }));                                   // 3
+        await store.appendAudit(row({ at: day("13"), sessionId: "qs_other", roomName: "other",
+          parties: ["org_a", "org_c", null], crossing: "cross_org", direction: "outbound" }));           // 4
+        await store.appendAudit(row({ at: day("14"), action: "invite_issued" }));                        // 5
+        await store.appendAudit(row({ at: day("15"), sessionId: "grant:github:1", roomName: null,
+          action: "plan_granted", actorUserId: "stripe", actorLabel: null, actorOrgId: null }));         // 6
+        await store.appendAudit(row({ orgId: "org_b", parties: ["org_a", "org_b"], crossing: "cross_org", direction: "outbound" }));
+      };
+      const q = (over: Partial<AuditQuery> = {}): AuditQuery => ({ limit: 100, ...over });
+      const seqs = (page: AuditPage) => page.entries.map((e) => e.seq);
+      const read = async (over: Partial<AuditQuery>) => seqs(await store.queryAudit("org_a", q(over)));
+
+      it("reads one org's stream newest first, covering it up to its newest row", async () => {
+        await fill();
+        const page = await store.queryAudit("org_a", q());
+        expect(seqs(page)).toEqual([6, 5, 4, 3, 2, 1]);
+        expect(page).toMatchObject({ next: null, through: 6, total: 6, unrecorded: 0 });
+      });
+
+      it("answers an empty stream with nothing, and no seq to pin", async () => {
+        expect(await store.queryAudit("org_none", q())).toEqual({ entries: [], next: null, through: null, total: 0, unrecorded: 0 });
+      });
+
+      it("filters by each field, and combines filters with AND", async () => {
+        await fill();
+        expect(await read({ from: day("12"), to: day("14") })).toEqual([4, 3]);
+        expect(await read({ actor: "u_bo" })).toEqual([3]);
+        expect(await read({ room: "qs_other" })).toEqual([4]);
+        expect(await read({ action: "invite_issued" })).toEqual([5]);
+        expect(await read({ org: "org_c" })).toEqual([4]);
+        expect(await read({ scope: "cross_org" })).toEqual([4, 3]);
+        expect(await read({ scope: "internal" })).toEqual([6, 5, 2]);
+        expect(await read({ scope: "cross_org", room: "qs_q3" })).toEqual([3]);
+        expect(await read({ scope: "internal", from: day("14") })).toEqual([6, 5]);
+      });
+
+      it("counts the rows a scope filter left out because they record no crossing", async () => {
+        await fill();
+        expect((await store.queryAudit("org_a", q({ scope: "cross_org" }))).unrecorded).toBe(1);
+        expect((await store.queryAudit("org_a", q({ scope: "cross_org", from: day("11") }))).unrecorded).toBe(0);
+        expect((await store.queryAudit("org_a", q())).unrecorded).toBe(0);
+      });
+
+      // A row from before D2 names no parties either, so an org filter cannot judge it any more than a scope can.
+      it("counts the rows an org filter left out because they record no crossing", async () => {
+        await fill();
+        expect((await store.queryAudit("org_a", q({ org: "org_c" }))).unrecorded).toBe(1);
+      });
+
+      it("pages with before and through: no row twice, none skipped, and none written after through", async () => {
+        await fill();
+        const first = await store.queryAudit("org_a", q({ limit: 4 }));
+        expect(seqs(first)).toEqual([6, 5, 4, 3]);
+        expect(first).toMatchObject({ next: 3, through: 6, total: 6 });
+        await store.appendAudit(row()); // 7, written after the first page
+        const second = await store.queryAudit("org_a", q({ limit: 4, before: first.next!, through: first.through! }));
+        expect(seqs(second)).toEqual([2, 1]);
+        expect(second).toMatchObject({ next: null, through: 6, total: 6 });
+        expect(await read({ through: 6 })).not.toContain(7);
+      });
+
+      it("hands back a recorded row with its fields, and a row from before them without", async () => {
+        await fill();
+        const entries = (await store.queryAudit("org_a", q())).entries;
+        expect(entries[3]).toEqual({ seq: 3, ...row({ at: day("12"), ...boInbound }) });
+        expect(entries[5]).toEqual({ seq: 1, ...legacy({ at: day("10") }) });
+      });
+
+      it("offers the stream's actors, rooms, other orgs and actions, newest first", async () => {
+        await fill();
+        expect(await store.auditFacets("org_a")).toEqual({
+          actors: [{ id: "stripe", label: null }, { id: "u_ana", label: "Ana" }, { id: "u_bo", label: "Bo" }, { id: "u_old", label: null }],
+          rooms: [{ id: "qs_q3", name: "q3-plan" }, { id: "qs_other", name: "other" }, { id: "qs_old", name: null }],
+          orgs: ["org_c", "org_b"],
+          actions: ["plan_granted", "invite_issued", "sent_message", "member_left"],
+        } satisfies AuditFacets);
+      });
+
+      // Review Focus 1: a value is bound, never spliced, so SQL in it is only text.
+      it("matches a filter value literally, whatever SQL it spells", async () => {
+        await fill();
+        for (const actor of ["' OR 1=1 --", "%", "_", "u_%"]) expect(await read({ actor }), actor).toEqual([]);
+      });
+
+      // Review Focus 2.
+      it("answers a range that holds nothing, or ends before it starts, with an empty page", async () => {
+        await fill();
+        expect(await store.queryAudit("org_a", q({ from: day("14"), to: day("12") })))
+          .toEqual({ entries: [], next: null, through: 6, total: 0, unrecorded: 0 });
+      });
+
+      // Review Focus 3: the outbox can land a row after newer ones.
+      it("filters by when a row happened and pages by when it landed, when the two disagree", async () => {
+        await fill();
+        await store.appendAudit(row({ at: Date.parse("2026-03-11T12:00:00Z"), action: "late" })); // 7
+        const range = { from: day("11"), to: day("12") };
+        expect(await read(range)).toEqual([7, 2]);
+        const first = await store.queryAudit("org_a", q({ ...range, limit: 1 }));
+        expect(seqs(first)).toEqual([7]);
+        expect(await read({ ...range, limit: 1, before: first.next!, through: first.through! })).toEqual([2]);
+      });
     });
 
     // ------------------------------------------------------- abandonment (#18)
@@ -4567,7 +5026,7 @@ export function describeStoreContract(
         expect(await blobs.list(s.id)).toEqual([]);
         const audit = await store.auditForOrg("org_codenerd", 50);
         expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });
-        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was")
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor), "a purged room is a room that never was")
           .toEqual({ ok: false, reason: "missing" });
       });
 
@@ -4598,7 +5057,7 @@ export function describeStoreContract(
 
         const asked = Date.now();
         for (const s of [kept, legacy]) {
-          expect(await store.schedulePurge(s.id, asked, "u_jesse"), s.id).toEqual({ ok: true, purgeAt: asked });
+          expect(await store.schedulePurge(s.id, asked, jesseActor), s.id).toEqual({ ok: true, purgeAt: asked });
         }
         for (const s of [kept, legacy]) await sweepRoom(s.id);
         for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeUndefined();
@@ -4607,8 +5066,8 @@ export function describeStoreContract(
       it("refuses to schedule a purge of an open room, and says so for a missing one", async () => {
         const open = session({ id: "qs_open" });
         await store.createSession(open);
-        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
-        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "missing" });
+        expect(await store.schedulePurge(open.id, Date.now(), jesseActor)).toEqual({ ok: false, reason: "open" });
+        expect(await store.schedulePurge("qs_nope", Date.now(), jesseActor)).toEqual({ ok: false, reason: "missing" });
         // The refusal wrote nothing: the room is still open, and a sweep leaves it alone.
         await sweepRoom(open.id);
         expect((await store.getSession(open.id))?.closed).toBe(false);
@@ -4632,6 +5091,8 @@ export function describeStoreContract(
           expect(filed, org).toEqual([{
             at: expect.any(Number), orgId: org, sessionId: s.id, actorUserId: "system",
             action: "room_purged", detail: { session_id: s.id, room: s.manifest.room },
+            actorLabel: null, actorOrgId: null, roomName: s.manifest.room,
+            parties: ["org_codenerd", "org_other", null], crossing: "cross_org", direction: null,
           }]);
         }
       });
@@ -4642,12 +5103,40 @@ export function describeStoreContract(
         await store.closeSession(s.id);
 
         // A minute out, so the room is still there for the second ask: this is about the record of asking.
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toMatchObject({ ok: true });
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, jesseActor)).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, peerActor)).toMatchObject({ ok: true });
 
         for (const org of ["org_codenerd", "org_other"]) {
           const asked = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
-          expect(asked, org).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+          expect(asked, org).toEqual([expect.objectContaining({
+            action: "room_deleted", actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd",
+            parties: ["org_codenerd", "org_other"], crossing: "cross_org",
+            direction: org === "org_codenerd" ? "outbound" : "inbound",
+          })]);
+        }
+      });
+
+      // The record holds only the members in the room (ADR 0019), and a delete's and a purge's parties are the
+      // roster all the same: a member who left sat in the room, with an org or with none (audit trail spec, D2).
+      it("names the members who left among a delete's and a purge's parties", async () => {
+        const s = session({
+          id: "qs_left", joinCodes: {},
+          members: [member(), peer(), peer({ memberId: "m_solo", userId: "u_solo", orgId: null })],
+        });
+        await store.createSession(s);
+        await store.updateMember(s.id, "m_peer", { leftAt: Date.now() });
+        await store.updateMember(s.id, "m_solo", { leftAt: Date.now() });
+        await store.closeSession(s.id);
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor)).toMatchObject({ ok: true });
+        await sweepRoom(s.id);
+
+        expect(await store.getSession(s.id)).toBeUndefined();
+        for (const org of ["org_codenerd", "org_other"]) {
+          const filed = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
+          expect(filed.map((a) => [a.action, a.parties]), org).toEqual([
+            ["room_deleted", ["org_codenerd", "org_other", null]],
+            ["room_purged", ["org_codenerd", "org_other", null]],
+          ]);
         }
       });
 
@@ -4660,8 +5149,8 @@ export function describeStoreContract(
         const first = Date.now() + 60_000;
         const second = Date.now() + 120_000;
 
-        expect(await store.schedulePurge(s.id, first, "u_jesse")).toEqual({ ok: true, purgeAt: first });
-        expect(await store.schedulePurge(s.id, second, "u_jesse"), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, first, jesseActor)).toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, second, jesseActor), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
         expect((await store.getSession(s.id))!.purgeAt, "and the record holds it").toBe(first);
       });
 
@@ -5405,12 +5894,11 @@ export function describeStoreContract(
     });
 
     it("removeMember files no row for an org-less entry, in audit or in retire.audit", async () => {
-      // A falsy org names a stream nobody reads. MemoryStore would file the row there
-      // all the same, and a Durable Object namespace takes "" as a name and would
-      // deliver into it, so the entry is dropped before it is queued. Both defences
-      // sit behind this answer in the Durable Object store (the producer's filter and
-      // the outbox's delivery guard), so what this pins there is the result; the
-      // producer's filter alone is what MemoryStore leaves to hold it.
+      // A falsy org names a stream nobody reads. A Durable Object namespace takes "" as
+      // a name and would deliver into it, so the entry is dropped before it is queued.
+      // Both defences sit behind this answer in the Durable Object store (the producer's
+      // filter and the outbox's delivery guard), so what this pins there is the result.
+      // MemoryStore's recordAudit drops such a row as well, behind the producer's filter.
       const s = session({
         joinCodes: oneCode("BELL-LIVE-01"),
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
@@ -5430,6 +5918,267 @@ export function describeStoreContract(
       expect(await store.auditForOrg("", 10)).toEqual([]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
         .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    /**
+     * Strings that are not ban ids: ones near enough to `banId` to be taken for it, and two past 2 KiB, the
+     * limit on a Durable Object storage key. A ban id is `ban_` and 16 hex characters, so a store answers all
+     * of these without reading storage. The local workerd enforces no key limit, so these cases cannot see a
+     * lift read one: worker-tests/ban-id-guard.test.ts counts the storage a lift opens.
+     */
+    const notBanIds = (banId: string) => ["", "ban_", banId.slice(0, -1), `${banId}0`, "x".repeat(3_000), `ban_${"0".repeat(3_000)}`];
+
+    describe("room bans (abuse protections spec \u{A7}1)", () => {
+      const twoInRoom = () => session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+      });
+      const back = (memberId = "m_peer_2", roomRole = "peer_b") =>
+        member({ memberId, userId: "u_peer", label: "peer@codenerd", roomRole });
+
+      it("records the account on an eviction that asks, and refuses its next seating in any seat", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        expect(await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" }))
+          .toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+        expect(await store.roomBans(s.id)).toEqual([
+          { banId: expect.stringMatching(/^ban_[0-9a-f]{16}$/), userId: "u_peer", label: "peer@codenerd", at: 9_000_000 },
+        ]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBe("banned");
+        expect((await store.seatMember(s.id, back("m_peer_3", "peer_a"), 1, 9_100_000)).refused).toBe("banned");
+        expect((await store.seatMember(s.id, member({ memberId: "m_other", userId: "u_other", label: "other@x" }), 1, 9_100_000)).refused,
+          "the control: another account seats").toBeNull();
+      });
+
+      it("refuses a banned account as banned and not as full, when the room has no seat free", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const seat = (memberId: string, userId: string) =>
+          store.seatMember(s.id, member({ memberId, userId, label: `${userId}@x` }), 1, 9_100_000);
+        expect((await seat("m_other", "u_other")).refused, "the other account takes the free seat").toBeNull();
+        expect((await seat("m_third", "u_third")).refused, "the control: the room is full").toBe("full");
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBe("banned");
+      });
+
+      it("writes no ban for a removal that does not ask, and the account seats again", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", eviction());
+        expect(await store.roomBans(s.id)).toEqual([]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBeNull();
+      });
+
+      /** Review Focus 1. */
+      it("bans a member who already left, behind no live door, writing no event and moving no cursor", async () => {
+        const s = session({
+          joinCodes: {},
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+        });
+        await store.createSession(s);
+        expect(await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" }))
+          .toEqual({ refused: null, removed: false, codeRetired: null });
+        expect((await store.roomBans(s.id)).map((b) => b.userId)).toEqual(["u_peer"]);
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+        expect((await store.appendEvent(s.id, leaveEvent("m_creator")))?.cursor).toBe(1);
+      });
+
+      // The audit log is where an org reads every ban. One on someone who already left is the eviction's
+      // row all the same, carrying the scope, and it is filed once: the call that wrote the ban files it,
+      // and a repeat, which writes none, does not. "all" is the case that tells the stores apart on a
+      // repeat, since the Durable Objects store queues the registry's write each time it is asked.
+      for (const scope of ["room", "all"] as const) {
+        it(`files the eviction's audit row for a ban on a member who already left, and only once (${scope})`, async () => {
+          const s = session({
+            joinCodes: {},
+            members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+          });
+          await store.createSession(s);
+          const asked = (now: number): RemovalRequest => ({
+            ...eviction(now), ban: scope, audit: [{ ...auditRow("member_evicted"), detail: { ban: scope } }],
+          });
+          const filed = async () => (await store.auditForOrg("org_codenerd", 10)).map((a) => [a.action, a.detail]);
+
+          expect(await store.removeMember(s.id, "m_peer", asked(9_000_000)))
+            .toEqual({ refused: null, removed: false, codeRetired: null });
+          expect(await filed()).toEqual([["member_evicted", { ban: scope }]]);
+
+          await store.removeMember(s.id, "m_peer", asked(9_500_000));
+          expect(await filed(), "a repeat files no second row").toEqual([["member_evicted", { ban: scope }]]);
+        });
+      }
+
+      it("keeps one ban per account: a repeat records nothing new", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const first = await store.roomBans(s.id);
+        await store.removeMember(s.id, "m_peer", { ...eviction(9_500_000), ban: "room" });
+        expect(await store.roomBans(s.id)).toEqual(first);
+      });
+
+      it("writes no ban when the removal is refused", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), byUserId: "u_someone_else", ban: "room" });
+        expect(await store.roomBans(s.id)).toEqual([]);
+      });
+
+      it("lifts a ban by its id, once, and the account seats again", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const [ban] = await store.roomBans(s.id);
+        expect(await store.liftRoomBan(s.id, "ban_0000000000000000")).toBe(false);
+        expect(await store.liftRoomBan(s.id, ban.banId)).toBe(true);
+        expect(await store.liftRoomBan(s.id, ban.banId)).toBe(false);
+        expect(await store.roomBans(s.id)).toEqual([]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBeNull();
+      });
+
+      // The preview's check: `bellman_connect` asks it before it describes the room.
+      it("says whether the room bans an account, for that account and room alone, until the ban is lifted", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "the control: not yet banned").toBe(false);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        expect(await store.isBannedFromRoom(s.id, "u_peer")).toBe(true);
+        expect(await store.isBannedFromRoom(s.id, "u_pee"), "another account").toBe(false);
+        expect(await store.isBannedFromRoom("qs_nowhere", "u_peer"), "an unknown room").toBe(false);
+        const [ban] = await store.roomBans(s.id);
+        await store.liftRoomBan(s.id, ban.banId);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "lifted").toBe(false);
+      });
+
+      it("lists bans oldest first by when each was made, not in the order they were written", async () => {
+        const s = swarmSession({
+          members: [
+            member({ memberId: "m_creator" }),
+            ...["a", "b", "c", "d"].map((n) => member({ memberId: `m_${n}`, userId: `u_${n}`, label: `${n}@x` })),
+          ],
+        });
+        await store.createSession(s);
+        for (const [n, at] of [["a", 9_300_000], ["b", 9_100_000], ["c", 9_400_000], ["d", 9_200_000]] as const) {
+          await store.removeMember(s.id, `m_${n}`, { ...eviction(at), ban: "room" });
+        }
+        expect((await store.roomBans(s.id)).map((b) => b.userId)).toEqual(["u_b", "u_d", "u_a", "u_c"]);
+      });
+
+      it("forgets a room's bans when the room is purged", async () => {
+        const s = session({
+          id: "qs_ban_purge",
+          retainAfterCloseMs: 60_000,
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+        });
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        expect((await store.roomBans(s.id)).map((b) => b.userId), "the control: the ban is there").toEqual(["u_peer"]);
+        await store.closeSession(s.id);
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id), "the room is purged").toBeUndefined();
+        expect(await store.roomBans(s.id)).toEqual([]);
+      });
+
+      it("answers no bans for an unknown room", async () => {
+        expect(await store.roomBans("qs_nowhere")).toEqual([]);
+        expect(await store.liftRoomBan("qs_nowhere", "ban_0000000000000000")).toBe(false);
+      });
+
+      it("lifts nothing for an id that is not a ban id, and does not throw", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const [ban] = await store.roomBans(s.id);
+        for (const id of notBanIds(ban.banId)) expect(await store.liftRoomBan(s.id, id), id.slice(0, 24)).toBe(false);
+        expect((await store.roomBans(s.id)).map((b) => b.banId), "the control: the ban is still there").toEqual([ban.banId]);
+      });
+    });
+
+    describe("creator-wide bans (abuse protections spec \u{A7}1)", () => {
+      const room = (id: string, createdBy = "u_jesse") => session({
+        id, createdBy,
+        members: [member({ memberId: "m_creator", userId: createdBy }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+      });
+
+      it("bans the account from every room the creator owns and from no one else's, and from this room too", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+        expect(await store.isBannedByCreator("u_someone_else", "u_peer")).toBe(false);
+        expect(await store.isBannedByCreator("u_jesse", "u_other")).toBe(false);
+        expect((await store.roomBans("qs_a")).map((b) => b.userId)).toEqual(["u_peer"]);
+        expect(await store.creatorBans("u_jesse")).toEqual([
+          { banId: expect.stringMatching(/^ban_[0-9a-f]{16}$/), userId: "u_peer", label: "peer@codenerd", at: 9_000_000, sessionId: "qs_a" },
+        ]);
+      });
+
+      it("writes nothing creator-wide for a room ban", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "room" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(false);
+        expect(await store.creatorBans("u_jesse")).toEqual([]);
+      });
+
+      it("bans creator-wide a member who already left, and keeps the first ban on a repeat", async () => {
+        await store.createSession(session({
+          id: "qs_a", joinCodes: {},
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+        }));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const first = await store.creatorBans("u_jesse");
+        expect(first.map((b) => b.userId)).toEqual(["u_peer"]);
+        await store.removeMember("qs_a", "m_peer", { ...eviction(9_500_000), ban: "all" });
+        expect(await store.creatorBans("u_jesse")).toEqual(first);
+      });
+
+      it("widens a room ban to every room on a later eviction that asks for all", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "room" });
+        await store.removeMember("qs_a", "m_peer", { ...eviction(9_500_000), ban: "all" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+      });
+
+      it("lifts by id for its creator only, and leaves the room ban that came with it", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const [ban] = await store.creatorBans("u_jesse");
+        expect(await store.liftCreatorBan("u_someone_else", ban.banId)).toBe(false);
+        expect(await store.liftCreatorBan("u_jesse", ban.banId)).toBe(true);
+        expect(await store.liftCreatorBan("u_jesse", ban.banId)).toBe(false);
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(false);
+        expect((await store.roomBans("qs_a")).map((b) => b.userId)).toEqual(["u_peer"]);
+      });
+
+      // Operator-issued user ids may hold a colon, so one creator's id can begin another's past the key's separator.
+      it("keeps creators whose ids share a prefix apart", async () => {
+        await store.createSession(room("qs_xy", "u_x:y"));
+        await store.removeMember("qs_xy", "m_peer", { ...eviction(), byUserId: "u_x:y", ban: "all" });
+        expect(await store.creatorBans("u_x")).toEqual([]);
+        expect(await store.isBannedByCreator("u_x", "u_peer")).toBe(false);
+        expect((await store.creatorBans("u_x:y")).map((b) => b.userId)).toEqual(["u_peer"]);
+      });
+
+      it("lists bans oldest first by when each was made, not in the order they were written", async () => {
+        const s = swarmSession({
+          members: [
+            member({ memberId: "m_creator" }),
+            ...["a", "b", "c", "d"].map((n) => member({ memberId: `m_${n}`, userId: `u_${n}`, label: `${n}@x` })),
+          ],
+        });
+        await store.createSession(s);
+        for (const [n, at] of [["a", 9_300_000], ["b", 9_100_000], ["c", 9_400_000], ["d", 9_200_000]] as const) {
+          await store.removeMember(s.id, `m_${n}`, { ...eviction(at), ban: "all" });
+        }
+        expect((await store.creatorBans("u_jesse")).map((b) => b.userId)).toEqual(["u_b", "u_d", "u_a", "u_c"]);
+      });
+
+      it("lifts nothing for an id that is not a ban id, and does not throw", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const [ban] = await store.creatorBans("u_jesse");
+        for (const id of notBanIds(ban.banId)) expect(await store.liftCreatorBan("u_jesse", id), id.slice(0, 24)).toBe(false);
+        expect((await store.creatorBans("u_jesse")).map((b) => b.banId), "the control: the ban is still there").toEqual([ban.banId]);
+      });
     });
 
     describe("signing in (#258)", () => {

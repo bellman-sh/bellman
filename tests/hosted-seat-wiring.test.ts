@@ -28,7 +28,8 @@ describe("the Worker's /mcp", () => {
     const bound = {
       BELLMAN_KEYS: KEYS,
       SESSION: { idFromName: (n: string) => n, get: () => ({}) },
-      REGISTRY: { idFromName: (n: string) => n, get: () => ({}) },
+      // Nobody here is suspended: /mcp asks the registry before it serves anyone.
+      REGISTRY: { idFromName: (n: string) => n, get: () => ({ isSuspended: async () => false }) },
       ...env,
     } as never;
     const res = await worker.fetch(new Request("https://b/mcp", {

@@ -34,7 +34,7 @@ export type DoorWaiting = { session_id: string; interrupting: number; ambient: n
 /** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
 export type DoorStatus = {
   version: 1;
-  delivery: "hook" | "channel";
+  delivery: "hook" | "channel" | "queue";
   signed_in: boolean;
   seats: DoorSeat[];
   waiting: DoorWaiting[];

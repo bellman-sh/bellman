@@ -1,6 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
+import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
@@ -14,7 +16,8 @@ import type {
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, seatInOrder, seatVictims, stampSeen,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
+  stampSeen,
 } from "./store.js";
 import {
   BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
@@ -26,19 +29,28 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
+import {
+  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
+  type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
+} from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import {
+  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
+  type FiledReport, type NewReport, type Report,
+} from "./reports.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import {
   PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
-import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
+import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
 import { presetInNewWords } from "./presets.js";
+import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -48,14 +60,15 @@ import { presetInNewWords } from "./presets.js";
  * real scope in the data:
  *
  *   SessionDO   one per room. Holds the session record, its events, its surface
- *               rows and outbox, the live long-poll waiters and the room's
- *               sockets. Every request for a room routes to the same instance,
+ *               rows, bans and outbox, the live long-poll waiters, each member's
+ *               send count and the room's sockets. Every request for a room
+ *               routes to the same instance,
  *               which is what makes an in-memory waiter list correct here and
  *               what gives read-then-register its atomicity.
  *   RegistryDO  singleton. What resolves without a room in hand: join codes,
  *               pending connect tokens, plan grants, create counts, the creator,
- *               joined-rooms and org-rooms indexes, saved presets and hosted-room
- *               slots.
+ *               joined-rooms and org-rooms indexes, saved presets, hosted-room
+ *               slots, creator-wide bans, suspensions and the report queue.
  *   AuditDO     one per org, so an org's audit stream is physically its own
  *               object. A cross-org room writes to each, and neither org's
  *               DO is reachable from the other.
@@ -63,7 +76,8 @@ import { presetInNewWords } from "./presets.js";
  * On sweep(): MemoryStore scans every session on a timer. There is no cheap
  * global iteration across a DO namespace, so abandonment is enforced by a
  * per-object alarm and connect tokens expire lazily on read. sweep() is
- * therefore a no-op — see the comment on the method.
+ * therefore a no-op — see the comment on the method. The registry's alarm
+ * deletes a resolved report on a date it keeps (`report_purge`).
  */
 
 const CURSOR_PAD = 12;
@@ -71,6 +85,21 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/**
+ * One row per ban, `bn:<banId>` (abuse protections spec, section 1), and a row from the person to
+ * their ban's id, `bu:<user>`, so a seating asks one `get` and not a listing. The user segment is
+ * percent-encoded, for the reason `userPrefix` gives.
+ */
+const BAN_PREFIX = "bn:";
+const banKey = (banId: string) => `${BAN_PREFIX}${banId}`;
+const banUserKey = (userId: string) => `bu:${encodeURIComponent(userId)}`;
+/**
+ * A stranger's recent sends (abuse protections spec D5, amended): one row per count key, `sn:<key>`, holding the
+ * times still inside the minute, so the count outlives an idle object's eviction. A member's are not rows (see
+ * `SessionDO.#sends`). The key is `sendKeyFor`'s whole answer and nothing lists by this prefix, so the mapping
+ * is injective as it stands.
+ */
+const sendCountKey = (key: string) => `sn:${key}`;
 /**
  * `rows` with the `session` draft it may carry written as the record and the member rows that
  * draft owes (ADR 0019, D4): every write of the session goes through `memberRows`, and an append
@@ -80,13 +109,6 @@ function asRows(read: StoredSession, rows: Record<string, unknown>): Record<stri
   const { session, ...rest } = rows;
   return session === undefined ? rest : { ...rest, ...memberRows(read, session as StoredSession) };
 }
-const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
-/**
- * Delivered intent ids, so a redelivered audit entry is applied once.
- * One row per entry that arrives with an id, and nothing prunes them, as
- * nothing prunes the entries.
- */
-const deliveredKey = (intentId: string) => `d:${intentId}`;
 /**
  * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
  * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
@@ -145,6 +167,14 @@ const WS_CLOSING = 2;
 const WS_CLOSED = 3;
 
 /**
+ * The most events a socket is replayed when it connects (#208). A client further behind is
+ * refused with 410, which today's bridges take as any refusal they do not know: they poll
+ * `bellman_sync`, which pages, and the socket they keep retrying is accepted once the gap is
+ * under this. A socket never carries the whole log.
+ */
+export const REPLAY_LIMIT = 1_000;
+
+/**
  * Whether a socket the runtime lists is one a peer can still be reached on.
  * Exactly CLOSING and CLOSED are not, so a reading nobody expected counts as
  * open: wake() would rather send to it than go silent, and presence would
@@ -170,6 +200,16 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 });
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
+});
+
+/**
+ * The creator-wide ban an eviction owes the registry (abuse protections spec, section 1), as an outbox
+ * intent. The ban is made by the transaction that queues it, so a redelivery carries the first one's id.
+ * The registry writes it only when the creator holds no ban on the account yet, so a row handed over
+ * twice leaves one ban, as one delivery would.
+ */
+const creatorBanIntent = (creatorId: string, ban: CreatorBan): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "creator_ban", payload: { creatorId, ban },
 });
 
 /**
@@ -290,6 +330,17 @@ const readsClosed = (s: StoredSession | undefined, now: number, connected: Reado
 export class SessionDO extends DurableObject<BellmanEnv> {
   /** Live long-polls. In-memory is correct: one instance serves this session. */
   private waiters: Waiter[] = [];
+
+  /**
+   * A member's recent sends for the send limit (abuse protections spec D5): count key (`sendKeyFor`, the seat's)
+   * to the times of the sends still inside the minute. In the instance and never in storage, so an object that
+   * sleeps forgets them, which keeps a write off every send of the busiest senders and costs a member at most a
+   * second 30 in a minute across an eviction. A stranger's are rows instead (`sendCountKey`), where the same
+   * trade would let a script send 6, pause, and send 6 more. One instance serves the room, as it does for
+   * `waiters`, so this is the room's one count of members. An entry stays until the instance goes and holds no
+   * more times than the limit allows.
+   */
+  #sends = new Map<string, number[]>();
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
@@ -426,10 +477,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * put is atomic as long as every await between them is storage, and nothing in
    * the code says so. The transaction does, and it keeps holding if a later edit
    * puts an await on anything else in between (a fetch, a timer), the one case the
-   * gate does not cover; AuditDO.append gives the same reason. That is a net under a
-   * mistake and not a licence for one: the closure holds every other call to this
-   * object until it commits (docs/ARCHITECTURE.md section 9, runtime fact 2), so
-   * what goes inside it is storage and nothing slower.
+   * gate does not cover. That is a net under a mistake and not a licence for one: the
+   * closure holds every other call to this object until it commits
+   * (docs/ARCHITECTURE.md section 9, runtime fact 2), so what goes inside it is
+   * storage and nothing slower.
    * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
    *
    * Not every mutator has been converted. updateMember and the two stamps (a socket's
@@ -558,8 +609,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * tick's clock, which a books row built from `s` alone would overwrite. Nothing is added
    * to the put when the room keeps no books, or the event moves none.
    *
-   * **It answers whether the write brought housekeeping's soonest time forward** (I1): the
-   * record it put against the record the caller read, by `bringsForward`. The two public
+   * **It answers whether the write brought housekeeping's soonest time or the next tick
+   * forward** (I1, #208): the record it put against the record the caller read, by
+   * `bringsForward` and `tickBroughtForward`. The two public
    * member appends re-arm the alarm after their commit when it is true, so the rule is
    * "the soonest time moved earlier" and not a list of the event kinds that can do it. The
    * hosted seat's append and the alarm's own writers ignore it: the books do nothing for the
@@ -587,7 +639,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
     for (const key of deletes) await txn.delete(key);
-    return kept !== s && bringsForward(s, kept, e.at);
+    return kept !== s && (bringsForward(s, kept, e.at) || tickBroughtForward(s, kept));
   }
 
   async createSession(s: NewSession): Promise<void> {
@@ -889,7 +941,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
     // The last await, and every one before it is a storage read, so the gate
     // holds from the first recheck to the return. From here nothing yields.
-    const missed = await this.events(cursor);
+    const missed = await this.events(cursor, REPLAY_LIMIT + 1);
+    if (missed.length > REPLAY_LIMIT) {
+      return new Response(
+        `More than ${REPLAY_LIMIT} events since cursor ${cursor}: catch up with bellman_sync, then reconnect`,
+        { status: 410 },
+      );
+    }
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();
@@ -1143,13 +1201,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * once: a write that can flip `nextTickAt` from null to non-null must `reArm()`
    * once it has committed.**
    *
-   * `nextTickAt` returns null for four reasons — no cadence, the room is closed,
-   * the room is frozen, or no active member holds a reporting seat. While it is
+   * `nextTickAt` returns null for five reasons — no cadence, the room is closed,
+   * the room is frozen, no active member holds a reporting seat, or every member
+   * that holds one has gone `ASKS` cadences without reporting (#208). While it is
    * null nothing is armed for the tick, so there is no firing left to notice the
    * state that made it non-null: the answer cannot correct itself. Adding a member
-   * is one such write (this and `seatMember`), and so is clearing `frozenAt`
-   * (`freezeSession`). The other direction needs nothing: the armed alarm fires
-   * once, finds nobody due, and the reArm() that ends `alarm()` drops the tick.
+   * is one such write (this and `seatMember`), so is clearing `frozenAt`
+   * (`freezeSession`), and so is a report from a member the room had stopped asking,
+   * which the appends re-arm for by `tickBroughtForward`. The other direction needs
+   * nothing: the armed alarm fires once, finds nobody due, and the reArm() that ends
+   * `alarm()` drops the tick.
    *
    * After the transaction has COMMITTED, never inside its closure.
    * ARCHITECTURE.md §9: everything awaited in a closure holds every other call to
@@ -1230,6 +1291,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) return { refused: "not_found" as const, ...no };
       if (s.closed) return { refused: "closed" as const, ...no };
       if (s.frozenAt !== null) return { refused: "frozen" as const, ...no };
+      // Read in this transaction and before any seat is counted: a ban landing between a caller's
+      // read and this write cannot be missed, and a banned account is never told the room is full.
+      if ((await txn.get<string>(banUserKey(member.userId))) !== undefined) {
+        return { refused: "banned" as const, ...no };
+      }
 
       // The sockets as they are now, read here and not passed in. They are read
       // inside the transaction, and the one await in it is a storage read of the
@@ -1304,11 +1370,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<RemovalOutcome> {
     // `written` rides out of the closure so the wake can happen after the
     // commit, the way appendEvent does it: nobody hears of an event that did
-    // not land. It is stripped before the result goes back over RPC.
+    // not land. `queued` rides with it, for the delivery: rows can be owed with
+    // no event written. Both are stripped before the result goes back over RPC.
     const outcome = await this.ctx.storage.transaction<
-      RemovalOutcome & { written: SessionEvent[] }
+      RemovalOutcome & { written: SessionEvent[]; queued: boolean }
     >(async (txn) => {
-      const no = { removed: false, codeRetired: null, written: [] };
+      const no = { removed: false, codeRetired: null, written: [], queued: false };
       const s = await this.stored(txn);
       if (!s) return { refused: "not_found" as const, ...no };
       if (s.closed) return { refused: "closed" as const, ...no };
@@ -1332,13 +1399,28 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
         : null;
 
+      // The ban this call owes: asked for, and not yet on the room. One ban per account, so a repeat
+      // keeps the first and owes nothing. Decided before the member's state is looked at, for the
+      // door's reason: a ban is owed to one who is already out as much as to one who is not.
+      const banning: Ban | null = req.ban !== undefined && (await txn.get<string>(banUserKey(m.userId))) === undefined
+        ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
+        : null;
+      // The creator-wide ban that "all" also asks for. It lives in the registry, which this transaction
+      // cannot write, so it is queued for the outbox below. Owed whenever it is asked for, and not only
+      // while this room holds no ban: the registry cannot be read from here, and its write keeps
+      // whichever ban came first, so a repeat costs one row and changes nothing. The id is made here, so
+      // a redelivery carries the same one.
+      const widening: CreatorBan | null = req.ban === "all"
+        ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now, sessionId: s.id }
+        : null;
+
       // Already out: the idempotent path. The departure is not said again, and
       // queueing nothing for it is the half an idempotency key could not cover. A
-      // live door behind them is a different matter: it was never shut, so shutting
-      // it is a write that has not happened yet and not a duplicate. With neither
-      // owed, nothing is written and nothing is queued.
+      // live door behind them, or a ban not yet on the room, is a different matter:
+      // it was never done, so doing it is a write that has not happened yet and not a
+      // duplicate. With none owed, nothing is written and nothing is queued.
       const leaving = isActiveMember(m);
-      if (!leaving && !retiring) return { refused: null, ...no };
+      if (!leaving && !retiring && !banning && !widening) return { refused: null, ...no };
 
       const joinCodes = { ...s.joinCodes };
       if (retiring) delete joinCodes[retiring.role];
@@ -1387,12 +1469,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // runtime fact 4). It is filtered here, so a dead row never enters the
       // queue, and again in #deliver, so one that arrives another way is dropped
       // instead of misfiled. The door's rows get the same filter as the member's,
-      // and go in the same order as the events: the outbox delivers in order.
-      const intents = [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])]
+      // and go in the same order as the events: the outbox delivers in order. The member's
+      // rows are for a call that removed them or wrote this room's ban, as MemoryStore files
+      // them: a ban on someone who already left is the eviction's row all the same. Not for
+      // `widening`, which is owed on every ask here because the registry cannot be read from
+      // this transaction, so a retry of "all" would file the row again.
+      const intents = [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])]
         .filter((e) => e.orgId)
         .map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
-      const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
+      // The registry's writes, the code's and the ban's, ahead of the audit rows: one enqueue, in order.
+      const banRows = widening ? [creatorBanIntent(s.createdBy, widening)] : [];
+      const queue = [...codeRows, ...banRows, ...intents];
+      const rows = await this.driver.enqueue(txn, queue);
 
       // Housekeeping's books (#66), for each event this removal wrote. These events go in
       // the put below and not through `#writeEvent`, so its step does not cover them, and a
@@ -1406,19 +1495,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...memberRows(s, kept),
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
         // The cursor row ends at the LAST event written, or the next append takes
-        // that event's cursor and overwrites it (#120).
-        cursor: written[written.length - 1].cursor,
+        // that event's cursor and overwrites it (#120). A ban on a member who was already out,
+        // behind no live door, writes no event: the row stays where it is, because the last
+        // of no events does not exist to read, and any other value would move the cursor.
+        ...(written.length > 0 ? { cursor: written[written.length - 1].cursor } : {}),
+        // The ban's two rows commit with whatever else this removal wrote, or not at all.
+        ...(banning ? { [banKey(banning.banId)]: banning, [banUserKey(banning.userId)]: banning.banId } : {}),
         ...rows,
       });
-      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written };
+      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written, queued: queue.length > 0 };
     });
 
-    const { written, ...result } = outcome;
+    const { written, queued, ...result } = outcome;
     // After the commit, never inside the closure: everything awaited in there
     // holds every other call to this object until it commits, and reArm() reads
-    // stored(). `written` is empty exactly when nothing was done: a refusal, or a
-    // member who was already out behind no live door. A door shut on its own
-    // queues rows that want delivering, and moves nothing else.
+    // stored(). `written` is empty when no event was written: a refusal, or a
+    // member who was already out behind no live door, with a ban to record or none.
+    // A door shut on its own queues rows that want delivering, and moves nothing else,
+    // and so does a creator-wide ban on a member who left long ago.
     for (const e of written) this.#wake(e);
     // After the wake, as appendEvent does it: the member removed is sent the
     // frame announcing it before their socket goes, so the notice is the last
@@ -1426,11 +1520,39 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // roster, which is a storage read no other removal should pay, and a leave
     // cuts nobody so it has no socket to close.
     if (result.removed && req.cut) await this.#closeCutSockets();
-    if (written.length > 0) await this.driver.deliverNow();
+    // Whenever a row was queued, and not only when an event was written: a creator-wide ban on a member
+    // who already left queues one and writes none, and nothing else would deliver it before the alarm.
+    if (written.length > 0 || queued) await this.driver.deliverNow();
     // A member leaving can take the last reporting seat with them, so the derived
     // tick may have moved.
     if (result.removed) await this.driver.reArm();
     return result;
+  }
+
+  /** Whether this room bans the account: one `get` of its `bu:` row. An unknown room holds none. */
+  async isBanned(userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get<string>(banUserKey(userId))) !== undefined;
+  }
+
+  /** The bans on this room, oldest first (spec section 1). An object with no ban rows lists none, an unknown room's included. */
+  async roomBans(): Promise<Ban[]> {
+    const rows = await this.ctx.storage.list<Ban>({ prefix: BAN_PREFIX });
+    return [...rows.values()].sort(oldestFirst);
+  }
+
+  /**
+   * Both of a ban's rows go in one transaction, and the answer is whether there was a ban to lift. An id
+   * that is not shaped like one is answered before the transaction opens: it arrives from outside, and
+   * Durable Object storage limits a key to 2 KiB.
+   */
+  async liftRoomBan(banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      const ban = await txn.get<Ban>(banKey(banId));
+      if (ban === undefined) return false;
+      await txn.delete([banKey(banId), banUserKey(ban.userId)]);
+      return true;
+    });
   }
 
   /**
@@ -1472,6 +1594,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return departures([...rows.values()], opts);
   }
 
+  /**
+   * Every member the room has seated, in it or gone from it, from their rows: the roster whose
+   * orgs a purge's and a delete's audit rows name as their parties (audit trail spec, D2), as
+   * MemoryStore's record holds it. The record keeps only the members in the room (ADR 0019).
+   * Read through `from`, so a caller inside a transaction reads them in it.
+   */
+  async #everyone(
+    from: { list<T>(options: { prefix: string }): Promise<Map<string, T>> } = this.ctx.storage,
+  ): Promise<Member[]> {
+    // ponytail: lists every member row, as departedMembers does; once per delete and per purge.
+    return [...(await from.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+  }
+
   /** `BellmanStore.publicNumbers`, for this room: each label's number, from its `lb:` row. */
   async publicNumbers(labels: string[]): Promise<Record<string, number>> {
     const unique = [...new Set(labels)];
@@ -1504,8 +1639,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       ...memberRows(s, { ...s, members }),
       ...(patch.brief !== undefined ? { [briefKey(memberId)]: patch.brief } : {}),
     });
-    // addMember's rule, and `leftAt` is the only field in MemberPatch that can
-    // flip nextTickAt off null: clearing it returns a departed member to the
+    // addMember's rule. `leftAt` can flip nextTickAt off null, and so can
+    // `lastReportAt` (below): clearing `leftAt` returns a departed member to the
     // roster. Nothing calls it that way today — every caller sets a time — but
     // MemberPatch permits it, and the predicate is about what a write CAN do.
     //
@@ -1513,15 +1648,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
     // here, and that one reaches nextTickAt not at all.
     //
-    // `lastReportAt` DOES reach it, since each member's deadline is its own
-    // report plus the cadence — and it still needs no reArm, because a fresh
-    // stamp only ever moves that deadline LATER. The armed alarm is then early:
-    // it fires, finds nobody due, advances `lastTickAt`, and the closing reArm()
-    // points it at the right time. One wake spent, and the tick that comes out of
-    // it is correct — the same self-healing path a member leaving takes. Arming
-    // here would save that wake and cost a storage read on every sync, which is
-    // a trade about cost and not about correctness.
-    if (patch.leftAt === null) await this.driver.reArm();
+    // `lastReportAt` reaches it too, since each member's deadline is its own report
+    // plus the cadence, and for a member the room has stopped asking (`ASKS`, #208)
+    // a fresh stamp brings a deadline back where there was none. No caller patches
+    // it today; reports ride the append, which re-arms by `tickBroughtForward`. It
+    // is not the hot path, so it re-arms unconditionally.
+    if (patch.leftAt === null || patch.lastReportAt !== undefined) await this.driver.reArm();
   }
 
   async closeSession(): Promise<void> {
@@ -1599,16 +1731,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * process that died between the commit and them left an alarm only if there was an
    * entry to queue, and the retry is what points it at the purge.
    */
-  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "missing" };
       if (!s.closed) return { ok: false, reason: "open" };
       if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
-      // Every org that sat in the room, those of members who have left included (ADR 0019).
+      // Every org that sat in the room, those of members who have left included (ADR 0019), and for
+      // the rows' parties the whole roster, which only the member rows still hold (`#everyone`).
+      const parties = rosterParties({ members: await this.#everyone(txn) });
       const rows = await this.driver.enqueue(
-        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
+        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, parties, by, now))),
       );
       await putRows(txn, { ...memberRows(s, { ...s, purgeAt: at }), ...rows });
       return { ok: true, purgeAt: at };
@@ -1746,15 +1880,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * the wake, so the member removed is sent the frame announcing it before the
    * socket goes and the notice is the last thing they receive.
    *
-   * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
-   * ever moves a member's deadline LATER, and a removal only takes a member off
-   * the roster, which cannot bring the soonest one forward either. An alarm
-   * already armed is then early — it fires, finds nobody due, advances
-   * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
-   * spent, and the tick it produces is correct.
+   * No `reArm()` as a rule: a credit to a member the room still asks only moves its
+   * deadline LATER, and a removal only takes a member off the roster, which cannot
+   * bring the soonest one forward either. An alarm already armed is then early — it
+   * fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()` points it
+   * at the right time. One wake spent, and the tick it produces is correct.
    *
-   * **One exception, and it is a rule and not a list of event kinds (#66, I1): an append
-   * that brings housekeeping's soonest time forward re-arms after its commit.**
+   * **The exception is a rule and not a list of event kinds (#66, I1; #208): an append
+   * that brings housekeeping's soonest time or the next tick forward re-arms after its
+   * commit.** The tick comes forward when a member the room had stopped asking (`ASKS`)
+   * reports, since it armed nothing until then (`tickBroughtForward`).
    * `#writeEvent` compares that time for the record it wrote against the record this
    * transaction read (`bringsForward`), and a null before counts as later. An
    * `action_request` in a room that declares `answer_within` adds an anchor, the
@@ -1876,9 +2011,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reliable there. The wake comes after the commit, so nobody hears of an event that
    * did not land.
    *
-   * An append that brings housekeeping's soonest time forward re-arms after the commit, as
-   * `appendEvent`'s docblock says, when it is appended. A replay appended nothing, so it
-   * brings nothing forward and asks for no re-arm.
+   * An append that brings housekeeping's soonest time or the next tick forward re-arms after
+   * the commit, as `appendEvent`'s docblock says, when it is appended. A replay appended
+   * nothing and re-runs no books, so it brings housekeeping nothing; it re-arms only when the
+   * credit it re-asserts brings the next tick forward (#208), as the report's own would have.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -1920,8 +2056,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // carries a higher cursor. A removal leaves no tombstone, so re-applying
         // the original write would read no row to compare against and could only
         // put back what was removed. It also means a replay deletes nothing.
-        const owed = asRows(s, (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts);
+        const repair = (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts;
+        const owed = asRows(s, repair);
         if (Object.keys(owed).length > 0) await putRows(txn, owed);
+        // A stamp repaired here is the report's, late, and brings the next tick forward as the
+        // first attempt's would have (#208). Only the tick: the books are not re-run on a replay.
+        broughtForward = repair.session !== undefined && tickBroughtForward(s, repair.session as StoredSession);
         return { outcome: "replayed", event: original };
       }
 
@@ -1952,10 +2092,32 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     ) {
       await this.#closeCutSockets();
     }
-    if (result.outcome === "appended" && broughtForward) await this.driver.reArm();
+    if (broughtForward) await this.driver.reArm();
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return result;
+  }
+
+  /**
+   * `BellmanStore.admitSend`'s count. A stranger's key is a row, read and written in one transaction so two
+   * sends landing together are counted one after the other. Only an admission writes, and what it writes is the
+   * times still inside the minute plus this one, so a row never holds more than the limit and a script held at
+   * the limit costs no write at all: at most 6 small writes a minute per stranger. Any other key is in
+   * `#sends`: no await and no storage, so the read of a key's times and the write of them back are one turn.
+   */
+  async admitSend(key: string, limit: number, now: number): Promise<SendAdmission> {
+    if (isStrangerKey(key)) {
+      return this.ctx.storage.transaction(async (txn) => {
+        const row = sendCountKey(key);
+        const counted = admitAt((await txn.get<number[]>(row)) ?? [], limit, now);
+        if (counted.retryAfterMs !== null) return { ok: false, retryAfterMs: counted.retryAfterMs };
+        await txn.put(row, counted.times);
+        return { ok: true };
+      });
+    }
+    const counted = admitAt(this.#sends.get(key) ?? [], limit, now);
+    this.#sends.set(key, counted.times);
+    return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
   }
 
   /**
@@ -2037,8 +2199,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * own timeout. Storage is async here, so the read is awaited FIRST and the
    * registration then runs synchronously — no await between check and push.
    */
-  async waitForEvents(cursor: number, waitMs: number): Promise<SessionEvent[]> {
-    const immediate = await this.events(cursor);
+  async waitForEvents(cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]> {
+    const immediate = await this.events(cursor, limit);
     if (immediate.length > 0 || waitMs <= 0) return immediate;
 
     return new Promise<SessionEvent[]>((resolve) => {
@@ -2231,6 +2393,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     } else if (row.kind === "hosted_release") {
       const { userId, sessionId } = row.payload as { userId: string; sessionId: string };
       await registry().releaseHostedRoom(userId, sessionId);
+    } else if (row.kind === "creator_ban") {
+      const { creatorId, ban } = row.payload as { creatorId: string; ban: CreatorBan };
+      await registry().putCreatorBan(creatorId, ban);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
@@ -2671,9 +2836,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await registry.dropMembershipIndex(userId, s.id);
     }
     for (const orgId of s.orgs) await registry.dropOrgIndex(orgId, s.id);
+    const parties = rosterParties({ members: await this.#everyone() });
     for (const orgId of s.orgs) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
-        .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
+        .append(roomPurgedEntry(s, orgId, parties, now), `purge:${s.id}:${orgId}`);
     }
     await this.driver.deliverNow();
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
@@ -2793,6 +2959,54 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 /** One record per person, and the count beside them (#258). */
 const userKey = (userId: string): string => `us:${userId}`;
 const USER_COUNT = "us:count";
+
+/**
+ * `cb:<creator>:<user>` is an account a creator banned from every room they own (abuse protections spec,
+ * section 1), one row each, so a seating asks one `get`. Both segments are percent-encoded, so the colon
+ * between them is the only one in a key. An operator-issued user id may hold a colon, and unencoded,
+ * `cb:u_x:` would begin the rows of a creator named `u_x:y`.
+ */
+const creatorBanPrefix = (creatorId: string): string => `cb:${encodeURIComponent(creatorId)}:`;
+const creatorBanKey = (creatorId: string, userId: string): string =>
+  `${creatorBanPrefix(creatorId)}${encodeURIComponent(userId)}`;
+
+/** `su:<user>` is a suspended account (abuse protections spec, section 1), its id percent-encoded as `cb:`'s are. */
+const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userId)}`;
+
+/**
+ * Reports (abuse protections spec, section 3) are six kinds of row and a due row, all in the registry:
+ * - `rp:<id>` is the report. An id sorts in filing order, so a listing of the prefix is the queue.
+ * - `ro:<id>` holds the id of a report while it is open: written when it is filed, deleted when it is resolved. The
+ *   operator's queue lists open reports first, and this is how it reads them without reading every report there is.
+ * - `rf:<reporter>:<sessionId>:<targetKey>` holds the id of the open report that account filed about that target:
+ *   what a repeat folds into (R9). Resolving the report deletes it.
+ * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`. It only serves
+ *   that limit, so the purge deletes it once its newest time has left the day.
+ * - `rc:<creator>:<sessionId>:<id>` holds the id of a report that reaches the creator (`reachesCreator`: about a member
+ *   or a message, and not about the creator's own account), so a creator's view of one room is a listing of a prefix.
+ * - `rr:<purgeAt>:<id>` holds the id of a resolved report, dated for its deletion, the time padded to 15 digits so
+ *   string order is time order. `due:report_purge` is the earliest of those dates.
+ * The reporter and the creator are percent-encoded, as `cb:`'s segments are: an operator-issued user id may hold a
+ * colon, and unencoded one account's prefix would cover the rows of another whose id extends it.
+ */
+const REPORT_PREFIX = "rp:";
+const reportKey = (id: string): string => `${REPORT_PREFIX}${id}`;
+const reportFoldKey = (reporterId: string, sessionId: string, target: string): string =>
+  `rf:${encodeURIComponent(reporterId)}:${sessionId}:${target}`;
+const REPORT_OPEN_PREFIX = "ro:";
+const reportOpenKey = (id: string): string => `${REPORT_OPEN_PREFIX}${id}`;
+const REPORT_TIMES_PREFIX = "rl:";
+const reportTimesKey = (reporterId: string): string => `${REPORT_TIMES_PREFIX}${encodeURIComponent(reporterId)}`;
+const reportCreatorPrefix = (creatorId: string, sessionId: string): string =>
+  `rc:${encodeURIComponent(creatorId)}:${sessionId}:`;
+const reportCreatorKey = (creatorId: string, sessionId: string, id: string): string =>
+  `${reportCreatorPrefix(creatorId, sessionId)}${id}`;
+const REPORT_PURGE_PREFIX = "rr:";
+const reportPurgeAt = (at: number): string => `${REPORT_PURGE_PREFIX}${String(at).padStart(15, "0")}`;
+const reportPurgeKey = (purgeAt: number, id: string): string => `${reportPurgeAt(purgeAt)}:${id}`;
+/** The date a `rr:` key is for. */
+const purgeAtOf = (key: string): number =>
+  Number(key.slice(REPORT_PURGE_PREFIX.length, REPORT_PURGE_PREFIX.length + 15));
 
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
@@ -2931,20 +3145,76 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * The backstop for the inline delivery. It fires after OUTBOX_GRACE_MS, finds
-   * an empty queue and does nothing, unless the inline attempt never ran or is
-   * still waiting on an audit object that has stopped answering.
+   * The backstop for the inline delivery, and the deletion of resolved reports.
+   *
+   * The outbox's: it fires after OUTBOX_GRACE_MS, finds an empty queue and does nothing, unless the inline attempt
+   * never ran or is still waiting on an audit object that has stopped answering.
+   *
+   * `report_purge` (R15) is the other name a `due:` row carries here. Every name the driver can report needs a
+   * branch below: a name with none is never consumed, and the closing reArm() points the alarm straight back at
+   * its due time, so the alarm fires back to back for good. `now` is read once, as SessionDO.alarm reads it, so the
+   * handlers due and the reports purged are judged on one clock. A handler that throws is logged by name and
+   * rethrown, as SessionDO.alarm does, so the runtime retries and one line says which handler failed.
    *
    * The closing reArm() is the safety net SessionDO.alarm has too: a fired alarm is
    * consumed, so whatever is still due must have one scheduled before this returns.
-   * The drain re-arms for itself after a failed delivery, so this covers a path
-   * that returns without having done so; nothing reaches it today.
+   * The drain re-arms for itself after a failed delivery, so for the outbox this covers a path
+   * that returns without having done so; nothing reaches it today. For reports it is the one
+   * arming: `#purgeReports` leaves the next date in the due row, and this points the alarm at it.
    */
   async alarm(): Promise<void> {
-    for (const name of await this.driver.dueNow()) {
-      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+    const now = Date.now();
+    for (const name of await this.driver.dueNow(now)) {
+      try {
+        if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+        if (name === REPORT_PURGE_HANDLER) await this.#purgeReports(now);
+      } catch (error) {
+        // The runtime retries a throwing alarm a few times and then leaves it with nothing armed (the next
+        // `resolveReport`, or the next intent queued, arms it again), and it says nothing of which handler it gave up
+        // on. This line is the one record. Rethrown, so the runtime still retries, as SessionDO.alarm does.
+        console.error(`alarm handler "${name}" failed for the registry:`, error);
+        throw error;
+      }
     }
     await this.driver.reArm();
+  }
+
+  /**
+   * `report_purge` (R15): in one transaction, delete every resolved report whose 180 days are up, with its creator
+   * row and its `rr:` row, and every reporter's filing-times row whose times have all left the day, then point the
+   * due row at the next `rr:` row, or delete it when none is left. Without that last step the name stays due and the
+   * alarm fires back to back. The reports are listed up to `now` and not the whole prefix, because the prefix holds
+   * every report resolved in the last 180 days and a firing needs the due ones.
+   *
+   * `#private`, for the reason `#deliver` gives: it deletes reports, and a method on a Durable Object's class is
+   * reachable by anything holding the REGISTRY binding.
+   *
+   * ponytail: every report due is deleted in this one transaction, so a backlog is one large firing. Bound it per
+   * firing if one ever gets that large: the due row would stay due, and the next firing would finish the rest.
+   */
+  async #purgeReports(now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const due = await txn.list<string>({ prefix: REPORT_PURGE_PREFIX, end: reportPurgeAt(now + 1) });
+      const reports = await getRows<Report>(txn, [...due.values()].map(reportKey));
+      const keys = [...due.keys()];
+      for (const id of due.values()) {
+        const report = reports.get(reportKey(id));
+        if (report === undefined) continue;
+        keys.push(reportKey(id));
+        if (report.target.kind !== "room") keys.push(reportCreatorKey(report.creatorId, report.sessionId, id));
+      }
+      // A reporter's filing times only serve the day's limit (R10), so a row whose times have all left the day goes too,
+      // and an account is not kept for good. Listed whole: the rows are those of whoever filed in the last day, and of
+      // whoever filed since the last purge.
+      for (const [key, times] of await txn.list<number[]>({ prefix: REPORT_TIMES_PREFIX })) {
+        if (withinWindow(times, now).length === 0) keys.push(key);
+      }
+      // A delete takes at most KEYS_PER_CALL keys.
+      for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
+      const [next] = await txn.list<string>({ prefix: REPORT_PURGE_PREFIX, limit: 1 });
+      if (next) await txn.put(dueKey(REPORT_PURGE_HANDLER), purgeAtOf(next[0]));
+      else await txn.delete(dueKey(REPORT_PURGE_HANDLER));
+    });
   }
 
   /**
@@ -3511,53 +3781,305 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async countUsers(): Promise<number> {
     return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
   }
+
+  /**
+   * The write a room's outbox delivers as `creator_ban`: the check and the write in one transaction, and
+   * only while the creator holds no ban on the account, so a redelivery and an eviction that asks again
+   * both keep the first ban.
+   */
+  async putCreatorBan(creatorId: string, ban: CreatorBan): Promise<void> {
+    const key = creatorBanKey(creatorId, ban.userId);
+    await this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(key)) === undefined) await txn.put(key, ban);
+    });
+  }
+
+  /** This creator's rows, oldest first. The prefix ends at the colon after their encoded id, so it reaches no other creator's. */
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    const rows = await this.ctx.storage.list<CreatorBan>({ prefix: creatorBanPrefix(creatorId) });
+    return [...rows.values()].sort(oldestFirst);
+  }
+
+  /** Found and deleted in one transaction. A string that is not a ban id is answered before storage is read. */
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      const rows = await txn.list<CreatorBan>({ prefix: creatorBanPrefix(creatorId) });
+      const found = [...rows].find(([, ban]) => ban.banId === banId);
+      if (found === undefined) return false;
+      await txn.delete(found[0]);
+      return true;
+    });
+  }
+
+  /** One read, for a seating. */
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get(creatorBanKey(creatorId, userId))) !== undefined;
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    await this.ctx.storage.put(suspensionKey(userId), s);
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.ctx.storage.delete(suspensionKey(userId));
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get(suspensionKey(userId))) !== undefined;
+  }
+
+  /**
+   * `BellmanStore.fileReport`, in one transaction: the fold's read, the day's count and the writes are one step, so
+   * two filings cannot both pass the limit or both miss each other's fold. A fold and a refusal write nothing. The
+   * filer's times are pruned to the day on the write that adds one, so a row never holds more than the limit.
+   */
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    return this.ctx.storage.transaction(async (txn): Promise<FiledReport> => {
+      const foldKey = reportFoldKey(r.reporterUserId, r.sessionId, targetKey(r.target));
+      const foldedId = await txn.get<string>(foldKey);
+      const open = foldedId === undefined ? undefined : await txn.get<Report>(reportKey(foldedId));
+      if (open?.resolvedAt === null) return { outcome: "folded", report: open };
+      const timesKey = reportTimesKey(r.reporterUserId);
+      const kept = withinWindow((await txn.get<number[]>(timesKey)) ?? [], now);
+      if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
+      const report: Report = { ...r, id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
+      await txn.put<unknown>({
+        [reportKey(report.id)]: report,
+        [foldKey]: report.id,
+        [timesKey]: [...kept, now],
+        [reportOpenKey(report.id)]: report.id,
+        ...(reachesCreator(r) ? { [reportCreatorKey(r.creatorId, r.sessionId, report.id)]: report.id } : {}),
+      });
+      return { outcome: "filed", report };
+    });
+  }
+
+  /**
+   * This creator's rows for this room, newest first. The prefix ends at the colon after the room's id, so it reaches no
+   * other room's.
+   *
+   * ponytail: a room's reports are read whole. A limit and a cursor if a public room ever gathers thousands.
+   */
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    const ids = [...(await this.ctx.storage.list<string>({
+      prefix: reportCreatorPrefix(creatorId, sessionId), reverse: true,
+    })).values()];
+    const rows = await getRows<Report>(this.ctx.storage, ids.map(reportKey));
+    return ids.flatMap((id) => rows.get(reportKey(id)) ?? []);
+  }
+
+  /**
+   * `BellmanStore.listReports`: the open reports, from the `ro:` rows, newest first and at most `limit`, then the resolved
+   * ones to fill what is left, which is none when the open ones fill the cut. When the open reports are fewer than `limit`
+   * these are all of them, so at most that many of the newest `limit` reports are open and the rest of those are resolved:
+   * reading `limit` rows of the queue finds every resolved report the cut needs. Neither read is more than `limit` rows,
+   * however many reports the registry holds.
+   */
+  async listReports(limit: number): Promise<Report[]> {
+    const openIds = [...(await this.ctx.storage.list<string>({ prefix: REPORT_OPEN_PREFIX, reverse: true, limit })).values()];
+    const rows = await getRows<Report>(this.ctx.storage, openIds.map(reportKey));
+    const open = openIds.flatMap((id) => rows.get(reportKey(id)) ?? []);
+    const newest = [...(await this.ctx.storage.list<Report>({ prefix: REPORT_PREFIX, reverse: true, limit })).values()];
+    return [...open, ...newest.filter((r) => r.resolvedAt !== null).slice(0, limit - open.length)];
+  }
+
+  /**
+   * `BellmanStore.resolveReport`, in one transaction: the stamp, the end of the fold and the date of the deletion
+   * land together. The due row takes the earlier of what it holds and this report's date, so a report resolved after
+   * another never moves the alarm back; `#purgeReports` sets it to the next date when it runs. The alarm is pointed
+   * at it after the commit, because `reArm()` reads the due rows the commit wrote.
+   */
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    const outcome = await this.ctx.storage.transaction(async (txn) => {
+      const report = await txn.get<Report>(reportKey(id));
+      // An unknown id answers nothing, and a resolved report is answered as it is: the first resolution stands.
+      if (report === undefined || report.resolvedAt !== null) return { report, scheduled: false };
+      const done: Report = { ...report, resolvedAt: now, resolution: resolution.note, resolvedBy: resolution.by };
+      const purgeAt = now + REPORT_RETENTION_MS;
+      const due = await txn.get<number>(dueKey(REPORT_PURGE_HANDLER));
+      await txn.delete([reportFoldKey(report.reporterUserId, report.sessionId, targetKey(report.target)), reportOpenKey(id)]);
+      await txn.put<unknown>({
+        [reportKey(id)]: done,
+        [reportPurgeKey(purgeAt, id)]: id,
+        [dueKey(REPORT_PURGE_HANDLER)]: due === undefined ? purgeAt : Math.min(due, purgeAt),
+      });
+      return { report: done, scheduled: true };
+    });
+    if (outcome.scheduled) await this.driver.reArm();
+    return outcome.report;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // AuditDO — one per org
 // ---------------------------------------------------------------------------
 
+/** The stream's tables (audit trail spec, D5). `AUTOINCREMENT` never reuses a seq, so a cursor once handed out names one row for good. */
+const AUDIT_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS entries (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    org_id TEXT,
+    session_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_label TEXT,
+    actor_org TEXT,
+    room_name TEXT,
+    parties TEXT,
+    crossing TEXT,
+    direction TEXT,
+    detail TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS entries_at ON entries (at)",
+  "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
+];
+
+/** Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next. */
+function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = null): number {
+  return sql.exec<{ seq: number }>(
+    `INSERT INTO entries (seq, ${AUDIT_COLUMNS.join(", ")}) VALUES (?, ${AUDIT_COLUMNS.map(() => "?").join(", ")}) RETURNING seq`,
+    seq, ...recordOf(e),
+  ).one().seq;
+}
+
+/** How many KV rows the move holds in memory at once, whatever the stream's size. */
+const MOVE_BATCH = 500;
+
+/**
+ * Every KV row under `prefix`, in key order, handed to `move` and deleted, a batch at a time.
+ * Each batch starts after the last key of the one before, so the walk ends however a delete
+ * inside the transaction shows to the next list.
+ */
+function moveKv<T>(storage: DurableObjectStorage, prefix: string, move: (key: string, value: T) => void): void {
+  let after: string | undefined;
+  for (;;) {
+    const batch = [...storage.kv.list<T>({ prefix, startAfter: after, limit: MOVE_BATCH })];
+    if (batch.length === 0) return;
+    for (const [key, value] of batch) {
+      move(key, value);
+      storage.kv.delete(key);
+    }
+    after = batch.at(-1)![0];
+  }
+}
+
+/**
+ * The tables, and a stream written in the KV shape (`a:<seq>` rows, the `seq` counter,
+ * `d:<intent>` markers) moved into them. Run inside one `transactionSync`, so it lands
+ * whole or not at all, however many batches it reads.
+ *
+ * Into an empty table each row keeps the seq its key carries, so every cursor already handed
+ * out still names its row. Once the table holds rows, what is in KV was written there by an
+ * older Worker after a rollback: it read the deleted `seq` counter as 0 and counted again
+ * from 1, so its keys would collide with rows that exist. Those are appended in key order
+ * with the next seqs instead, so nothing collides and nothing is lost, and a stream moved
+ * once and then written to by an older Worker still wakes. Which of the two applies is decided
+ * once, before the first batch: after that batch the table is never empty.
+ * ponytail: memory is flat, MOVE_BATCH rows at a time. Time is the ceiling left: blockConcurrencyWhile
+ * allows 30 s, about two million rows at the 15 µs a row measured locally. Past that, move it across wakes.
+ */
+function migrateAudit(storage: DurableObjectStorage): void {
+  for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
+  const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
+  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
+  // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
+  moveKv<number>(storage, "d:", (key, seq) => {
+    storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
+  });
+  storage.kv.delete("seq");
+}
+
 export class AuditDO extends DurableObject {
-  /**
-   * Append an audit entry, at most once per intent.
-   *
-   * The outbox that feeds this delivers at least once — a row is deleted only
-   * after this call returns, so an acknowledgement lost in flight redelivers.
-   * The `d:` row is what makes that safe. Callers with no intent to redeliver
-   * pass no id and always append.
-   */
-  async append(entry: AuditEntry, intentId?: string): Promise<void> {
-    // The look at the marker and the write that sets it are one transaction, so a
-    // second delivery of the same intent cannot get between them, even if a later
-    // edit puts an await there that opens the input gate (a timer, a call to
-    // another object). Bare, that edit lets both deliveries find no marker, and
-    // both append.
-    await this.ctx.storage.transaction(async (txn) => {
-      if (intentId !== undefined && (await txn.get(deliveredKey(intentId)))) return;
-      const seq = ((await txn.get<number>("seq")) ?? 0) + 1;
-      // Entry, sequence and delivery marker in one write, in this transaction.
-      // Committed apart (in another transaction, or by a write after this one
-      // closes), an interruption between the commits leaves one without the
-      // others: an entry with no sequence is overwritten by the next entry; a
-      // marker with no entry makes the redelivery skip an entry that never
-      // landed; an entry with no marker is appended again by the redelivery. An
-      // audit log that can quietly drop or double the record of a privilege
-      // change is not an audit log.
-      await txn.put<unknown>({
-        [auditKey(seq)]: entry,
-        seq,
-        ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
-      });
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Before any call is let in: the tables, and a stream still in the KV shape moved into them.
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => migrateAudit(this.ctx.storage));
     });
   }
 
-  async recent(limit: number): Promise<AuditEntry[]> {
-    const map = await this.ctx.storage.list<AuditEntry>({
-      prefix: "a:",
-      reverse: true,
-      limit,
+  /**
+   * Append an audit entry, at most once per intent.
+   *
+   * The outbox that feeds this delivers at least once: a row is deleted only after this
+   * call returns, so an acknowledgement lost in flight redelivers. The `delivered` row is
+   * what makes that safe. The look at it, the entry and the marker are one synchronous
+   * transaction, so no second delivery can come between the look and the writes, and a
+   * throw anywhere in it rolls all of it back: an audit log that could drop or double the
+   * record of a privilege change would not be one. Callers with no intent to redeliver pass
+   * no id and always append.
+   */
+  async append(entry: AuditEntry, intentId?: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      if (intentId !== undefined && sql.exec("SELECT 1 FROM delivered WHERE intent_id = ?", intentId).toArray().length > 0) {
+        return;
+      }
+      const seq = insertAuditRow(sql, entry);
+      if (intentId !== undefined) sql.exec("INSERT INTO delivered (intent_id, seq) VALUES (?, ?)", intentId, seq);
     });
-    return [...map.values()].reverse();
+  }
+
+  /** The newest `limit` entries, oldest first: `bellman_audit`'s read. */
+  async recent(limit: number): Promise<AuditEntry[]> {
+    return this.ctx.storage.sql
+      .exec<AuditRecord>("SELECT * FROM entries ORDER BY seq DESC LIMIT ?", limit)
+      .toArray()
+      .reverse()
+      .map(entryOf)
+      .map(({ seq: _seq, ...entry }) => entry);
+  }
+
+  /** One page under the filters, newest first (D6): the same answer `pageOf` gives over memory. */
+  async query(q: AuditQuery): Promise<AuditPage> {
+    const sql = this.ctx.storage.sql;
+    const through = q.through ?? sql.exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM entries").one().seq;
+    const page = auditWhere(q, through, { scope: true, before: true });
+    const rows = sql.exec<AuditRecord>(
+      `SELECT * FROM entries ${page.clause} ORDER BY seq DESC LIMIT ?`, ...page.params, q.limit + 1,
+    ).toArray();
+    const all = auditWhere(q, through, { scope: true, before: false });
+    const total = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM entries ${all.clause}`, ...all.params).one().n;
+    let unrecorded = 0;
+    // A row from before D2 records no crossing and no parties, so neither filter can judge it (D4).
+    if (q.scope !== undefined || q.org !== undefined) {
+      const rest = auditWhere({ ...q, org: undefined }, through, { scope: false, before: false });
+      unrecorded = sql.exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM entries ${rest.clause ? `${rest.clause} AND` : "WHERE"} crossing IS NULL`, ...rest.params,
+      ).one().n;
+    }
+    const entries = rows.slice(0, q.limit).map(entryOf);
+    return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
+  }
+
+  /**
+   * What the filters offer (D6), newest first. A label or a room's name comes from its newest
+   * row: SQLite reads a bare column of a MAX() group from the row that holds the max.
+   * ponytail: `at` is the only index; these and the filters on actor, room and action read the
+   * table by seq, and gain indexes when a stream is large enough to feel the scan.
+   */
+  async facets(): Promise<AuditFacets> {
+    const sql = this.ctx.storage.sql;
+    return {
+      actors: sql.exec<{ id: string; label: string | null; newest: number }>(
+        "SELECT actor_id AS id, actor_label AS label, MAX(seq) AS newest FROM entries GROUP BY actor_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, label }) => ({ id, label })),
+      rooms: sql.exec<{ id: string; name: string | null; newest: number }>(
+        "SELECT session_id AS id, room_name AS name, MAX(seq) AS newest FROM entries WHERE session_id NOT LIKE 'grant:%' GROUP BY session_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, name }) => ({ id, name })),
+      orgs: sql.exec<{ org: string; newest: number }>(
+        "SELECT p.value AS org, MAX(e.seq) AS newest FROM entries e, json_each(e.parties) p WHERE p.value IS NOT NULL AND p.value != e.org_id GROUP BY p.value ORDER BY newest DESC, org ASC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ org }) => org),
+      actions: sql.exec<{ action: string; newest: number }>(
+        "SELECT action, MAX(seq) AS newest FROM entries GROUP BY action ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ action }) => action),
+    };
   }
 }
 
@@ -3766,6 +4288,58 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).removeMember(memberId, req);
   }
 
+  async roomBans(sessionId: string): Promise<Ban[]> {
+    return this.session(sessionId).roomBans();
+  }
+
+  async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
+    return this.session(sessionId).liftRoomBan(banId);
+  }
+
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    return this.registry.creatorBans(creatorId);
+  }
+
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    return this.registry.liftCreatorBan(creatorId, banId);
+  }
+
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return this.registry.isBannedByCreator(creatorId, userId);
+  }
+
+  async isBannedFromRoom(sessionId: string, userId: string): Promise<boolean> {
+    return this.session(sessionId).isBanned(userId);
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    await this.registry.suspend(userId, s);
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.registry.unsuspend(userId);
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return this.registry.isSuspended(userId);
+  }
+
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    return this.registry.fileReport(r, now);
+  }
+
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    return this.registry.roomReports(creatorId, sessionId);
+  }
+
+  async listReports(limit: number): Promise<Report[]> {
+    return this.registry.listReports(limit);
+  }
+
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    return this.registry.resolveReport(id, resolution, now);
+  }
+
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {
     return new Set(await this.session(sessionId).connectedMembers());
   }
@@ -3829,7 +4403,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
   }
 
@@ -3949,6 +4523,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
+  async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
+    return this.session(sessionId).admitSend(key, limit, now);
+  }
+
   async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
     return this.session(sessionId).eventsAfter(cursor, limit);
   }
@@ -3990,9 +4568,10 @@ export class DurableObjectStore implements BellmanStore {
   async waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
-    return this.session(sessionId).waitForEvents(cursor, waitMs);
+    return this.session(sessionId).waitForEvents(cursor, waitMs, limit);
   }
 
   async putPendingConnect(p: PendingConnect): Promise<void> {
@@ -4132,7 +4711,7 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    if (a.orgId === null) return; // no org, no audit stream to write to
+    if (!a.orgId) return; // no org, no audit stream to write to
     await this.audit(a.orgId).append(a);
   }
 
@@ -4140,12 +4719,21 @@ export class DurableObjectStore implements BellmanStore {
     return this.audit(orgId).recent(limit);
   }
 
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return this.audit(orgId).query(query);
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return this.audit(orgId).facets();
+  }
+
   /**
    * No-op by design. MemoryStore sweeps on a timer because it can iterate every
    * session cheaply; a DO namespace cannot. Abandonment is enforced by the
    * per-object alarm set in SessionDO.createSession, the sweep and the purge of a
-   * closed room (#65) by the same alarm, and connect tokens are checked for expiry
-   * when taken. Nothing is left for a sweep to do.
+   * closed room (#65) by the same alarm, a resolved report by the registry's
+   * (`report_purge`), and connect tokens are checked for expiry when taken.
+   * Nothing is left for a sweep to do.
    */
   async sweep(_now: number): Promise<void> {}
 }

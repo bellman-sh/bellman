@@ -3,19 +3,31 @@ import type {
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
+import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
 } from "./retention.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
-// Type-only: host.ts and heartbeat.ts import this module at runtime, so a value import
-// back would be a cycle. `MemoryStore.tick` is handed its rule for that reason.
+// Type-only: host.ts, heartbeat.ts and housekeeping.ts import this module at runtime, so a value
+// import back would be a cycle. `MemoryStore.tick` and `MemoryStore.housekeep` are handed their
+// rules for that reason.
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
+import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import { admitAt, type SendAdmission } from "./send-limit.js";
+import type { Suspension } from "./suspension.js";
+import {
+  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
+  type FiledReport, type NewReport, type Report,
+} from "./reports.js";
+import {
+  auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
+} from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -102,6 +114,14 @@ export const HOST_USER_ID = "u_bellman_host";
 export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
 
 /**
+ * Every hosted seat's label (M13). The role is the creator's to name, so a label built
+ * from it, `security@bellman` say, would lend Bellman's name to the creator's words.
+ * Here with the seat's other facts, and not in host.ts, because member-names.ts names
+ * the seat by it and host.ts imports that module.
+ */
+export const HOST_LABEL = "host@bellman";
+
+/**
  * A member still in the room who is a person and not the hosted seat (hosted seat
  * spec, D5). The host does not vouch for a room, so whether a room is empty, when it
  * is abandoned and whether a hosted tick has anyone to ask all count these and only
@@ -168,6 +188,16 @@ export function departures(
     : [...gone].sort((a, b) => b.leftAt! - a.leftAt! || b.seq - a.seq).slice(0, Math.max(0, limit));
   return { members: [...shown].sort((a, b) => a.seq - b.seq), omitted: gone.length - shown.length };
 }
+
+/**
+ * Everyone a room ever seated, the hosted seat left out, as an audit row's parties (audit trail
+ * spec, D2): what a purge's and a delete's rows say the room held. The roster keeps a member who
+ * left, as the record's `orgs` does, because their org sat in the room. So `members` is every
+ * member seated, not a read room's: MemoryStore's record holds them all, and the Durable Objects
+ * store reads them from their rows, since its record holds only those in the room (ADR 0019).
+ */
+export const rosterParties = (s: Pick<StoredSession, "members">): (string | null)[] =>
+  partiesOf(s.members.filter((m) => !isHostMember(m)).map((m) => m.orgId));
 
 /**
  * Whether the room's hosted seat is still in it (C1). Evicting the host is the
@@ -569,7 +599,29 @@ export interface RemovalRequest {
    * caller expected to happen.
    */
   retire?: { role: string; event: EventBody; audit?: readonly AuditEntry[] };
-  /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
+  /**
+   * Ban the member's account from this room (spec section 1): its user id and label as the member
+   * holds them, stamped `now`. One ban per account, so a room that already holds one keeps it as it
+   * is and writes nothing new.
+   *
+   * Written whether or not this call removed the member, as the door is: someone who left an hour
+   * ago can still be banned, and a retry finishes what a failed call began. Never written on a
+   * refusal. A removal that only bans, the member already out and no live door behind them, writes
+   * no event: a public room's log is public, and the person banned is told only that they can't join.
+   *
+   * Either scope writes this room's ban. `"all"` also writes the creator's ban from every room they
+   * own (`creatorBans`), a separate record: lifting one leaves the other. That one is owed whether or
+   * not this room already holds a ban for the account, so an eviction that asks for `"all"` widens a
+   * room ban made earlier, and a repeat keeps the first creator-wide ban and writes nothing new. A
+   * removal that only widens writes no event, as one that only bans writes none.
+   */
+  ban?: BanScope;
+  /**
+   * Queued in the same transaction and delivered by the outbox, only if this call did the removing or
+   * wrote this room's ban (`ban`). A ban on someone who already left is an eviction in the audit log's
+   * terms, and an org reading it expects every ban there. Not for a creator-wide ban alone: the Durable
+   * Objects store cannot tell a first one from a repeat, so a retry would file the row again.
+   */
   audit: readonly AuditEntry[];
 }
 
@@ -597,9 +649,13 @@ export interface RemovalRequest {
  * is here so the outcome says what the seating did. `SessionDO` reads it to decide
  * whether the seating queued registry drops that want delivering, and the contract
  * suite reads it to pin what a seating did.
+ *
+ * "banned" is an account the room's creator banned (spec section 1). It is refused after "frozen" and
+ * before "full", so a banned account is told it cannot join whether or not a seat is free, and never
+ * learns that the room is full. Like every refusal it writes nothing.
  */
 export interface SeatOutcome {
-  refused: "not_found" | "closed" | "frozen" | "full" | null;
+  refused: "not_found" | "closed" | "frozen" | "full" | "banned" | null;
   reclaimed: Member[];
   /** The seating filled the room and retired the temporary codes it held. False when it held none. */
   codesCleared: boolean;
@@ -761,16 +817,25 @@ export function decideHostCharge(
 }
 
 /**
- * The audit row a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for
- * a member, so a team org's stream sees the host as it sees members. The host belongs to
- * no org, so only the room's own gets it. Both stores queue it in the send's own write.
+ * The audit rows a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for a
+ * member, so a team org's stream sees the host as it sees members. The host belongs to no org
+ * and acts for the room, so the parties are the room's org and the orgs of the people in it
+ * (audit trail spec, D1), and the row says the room's org acted. Both stores queue them in the
+ * send's own write.
  */
-export function hostSentEntries(s: Pick<StoredSession, "id" | "orgId">, e: Omit<SessionEvent, "cursor" | "at">, now: number): AuditEntry[] {
-  if (!s.orgId) return [];
-  return [{
-    at: now, orgId: s.orgId, sessionId: s.id, actorUserId: e.fromUserId, action: `sent_${e.type}`,
-    detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
-  }];
+export function hostSentEntries(
+  s: Pick<StoredSession, "id" | "orgId" | "members" | "manifest">,
+  e: Omit<SessionEvent, "cursor" | "at">,
+  now: number,
+): AuditEntry[] {
+  return auditRows(
+    partiesOf([s.orgId, ...s.members.filter(isActivePerson).map((m) => m.orgId)]),
+    {
+      at: now, sessionId: s.id, action: `sent_${e.type}`, roomName: s.manifest.room,
+      detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+    },
+    { userId: e.fromUserId, label: e.fromLabel, orgId: s.orgId },
+  );
 }
 
 /**
@@ -989,6 +1054,11 @@ export interface BellmanStore {
    * and so could not replay (#116). "Fills" means a further joiner would be refused,
    * which is `seatVictims` answering null once this member is in: not a count of
    * undeparted members, because a stale seat is occupied and still reclaimable.
+   *
+   * An account the room has banned (`RemovalRequest.ban`) is refused "banned" whatever seat it asks
+   * for: after the frozen refusal and before any seat is counted, so a full room does not tell a
+   * banned account it is full. The check is inside the operation for the reason the others are: a ban
+   * landing between a caller's read and this write would otherwise seat the account it was made against.
    */
   seatMember(
     sessionId: string,
@@ -1026,16 +1096,99 @@ export interface BellmanStore {
    * announces no second one. What is still owed is a live code behind them: a
    * leave retires none, so it was never shut, and shutting it is a write that has
    * not happened yet and not a duplicate of one that has. `codeRetired` says so.
-   * With no live code, nothing is written and nothing is queued at all. Closing
-   * the room if it has emptied is NOT part of this — `closeSessionIfEmpty` makes
-   * that decision atomically on its own, and folding it in here would close over a
-   * member who joined in the gap.
+   * A ban asked for (`req.ban`) that the room does not hold yet is owed the same
+   * way: written whether or not this call removed the member, and with no event
+   * when it did not. With no live code and no ban owed, nothing is written and
+   * nothing is queued at all. Closing the room if it has emptied is NOT part of
+   * this — `closeSessionIfEmpty` makes that decision atomically on its own, and
+   * folding it in here would close over a member who joined in the gap. The
+   * creator-wide ban that `"all"` asks for is owed the same way as a room ban.
    */
   removeMember(
     sessionId: string,
     memberId: string,
     req: RemovalRequest,
   ): Promise<RemovalOutcome>;
+  /**
+   * The accounts banned from this room, oldest first (spec section 1). An unknown room answers
+   * none. Each carries the user id, because the store keeps it: what reaches a creator is
+   * `banView`, which leaves it out.
+   */
+  roomBans(sessionId: string): Promise<Ban[]>;
+  /**
+   * Lift one ban by its id, as ONE operation, and say whether there was one. A second lift of
+   * the same id, an id the room never issued and an unknown room all answer false, and so does a
+   * string that is not shaped like a ban id (`isBanId`), without storage being read: the id is a
+   * creator's input, and Durable Object storage limits a key to 2 KiB. It removes the
+   * ban and nothing else: the member the ban came with stays out, and the account seats again
+   * wherever a door is open to it.
+   */
+  liftRoomBan(sessionId: string, banId: string): Promise<boolean>;
+  /**
+   * The accounts this creator banned from every room they own (spec section 1), oldest first. Each
+   * carries the user id and the room it was made in: what reaches a creator is `creatorBanView`, which
+   * leaves the user id out. A room's ban and the creator-wide ban that came with it are separate records.
+   */
+  creatorBans(creatorId: string): Promise<CreatorBan[]>;
+  /**
+   * Lift one of this creator's bans by its id, as ONE operation, and say whether there was one. A
+   * second lift, another creator's id and a string that is not shaped like a ban id (`isBanId`) all
+   * answer false, the last without storage being read. It lifts that ban and nothing else: the room
+   * ban that came with it stays.
+   */
+  liftCreatorBan(creatorId: string, banId: string): Promise<boolean>;
+  /**
+   * Whether this creator banned this account from every room they own. The join check, asked of the
+   * room's creator once a code has resolved: the registry's code rows do not know who made the room.
+   */
+  isBannedByCreator(creatorId: string, userId: string): Promise<boolean>;
+  /**
+   * Whether this room bans this account, in one read. The preview's check, so a banned account is refused before the
+   * room is described to it. The seating decides for itself (`seatMember`), where a ban landing after this read is seen.
+   */
+  isBannedFromRoom(sessionId: string, userId: string): Promise<boolean>;
+  /**
+   * Suspend an account (abuse protections spec, section 1): every authenticated call that reads or writes
+   * the store as it is then refused (plan ruling R8). The registry keeps it, one row an account, and a
+   * repeat replaces the note.
+   */
+  suspend(userId: string, s: Suspension): Promise<void>;
+  /** Lift a suspension, and say whether there was one. */
+  unsuspend(userId: string): Promise<boolean>;
+  /** One read. The Worker keeps the answer a minute per isolate (`SuspensionCache`); the Node server asks each time. */
+  isSuspended(userId: string): Promise<boolean>;
+  /**
+   * File a report (abuse protections spec, section 3), as ONE operation: the fold, the limit and the write are one
+   * step, so two filings cannot both pass the limit's count or both miss each other's fold. A repeat of a target the
+   * account already has open (R9) answers `folded` with that report, and writes nothing: no new row, and no place in
+   * the limit's count. Once the first is resolved a repeat files anew. At 10 filings in the last rolling 24 hours
+   * (R10) the answer is `limited`, with how long until the oldest leaves the window, and nothing is written.
+   * Otherwise the report is stored and answered `filed`, which is the answer a caller sends its email on.
+   *
+   * The registry keeps reports. They are about the platform and not about a room, so a room's purge leaves them.
+   */
+  fileReport(r: NewReport, now: number): Promise<FiledReport>;
+  /**
+   * A room's reports about members and messages, for its creator (spec section 3), newest first. None about the
+   * room itself, none from another room, and none for a creator who did not make it. None about the creator's own
+   * seats or messages either (`reachesCreator`): a creator is not told that one was filed about them, and those reach the
+   * operators alone. What reaches a creator is a view that leaves out who filed the report: the store keeps the reporter,
+   * and this answers it whole.
+   */
+  roomReports(creatorId: string, sessionId: string): Promise<Report[]>;
+  /**
+   * The operator's queue, at most `limit` in all: the open reports first, newest first, then the resolved ones, newest
+   * first. Open first because an open report an operator cannot find is a report never acted on, and a queue cut at
+   * `limit` newest-first would leave the oldest open one behind however many newer ones had been resolved.
+   */
+  listReports(limit: number): Promise<Report[]>;
+  /**
+   * Close a report with a note, as ONE operation, and answer it as it now stands. The first resolution stands: a
+   * resolved report is answered as it is, and the second note is not kept. An unknown id answers undefined. It also
+   * ends the fold (R9) and schedules the report's deletion 180 days on (R15). `MemoryStore` deletes in `sweep` and
+   * the Durable Objects store on the registry's alarm, under the handler `report_purge`.
+   */
+  resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined>;
   /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
@@ -1139,10 +1292,11 @@ export interface BellmanStore {
    * retries a delete it never heard the answer to is the case, and the audit log owes one
    * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
    * `purgeAt` says the same of the time: it is the one the room is stored with, the first
-   * request's, and a repeat is told that and not the `at` it asked for. `by` is null when the
-   * caller is not a person.
+   * request's, and a repeat is told that and not the `at` it asked for. `by` is who asked, named
+   * as an audit row names an actor so each org's row can say whether the delete was its own or
+   * another's, and null when the caller is not a person.
    */
-  schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
+  schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule>;
   /**
    * Make a public room private for good (public rooms spec D2): set `unpublishedAt` to `at`, once.
    * The first time stands, so a retry changes nothing, and a room that is not there is left not
@@ -1314,6 +1468,27 @@ export interface BellmanStore {
     extras?: AppendExtras
   ): Promise<EventWrite>;
   /**
+   * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
+   * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
+   * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
+   * it is given. The caller appends only when admitted; a refusal carries how long until the oldest send under
+   * the key leaves the window, and writes nothing to the log.
+   *
+   * A call of its own, made after a send's checks and before its append (ADR 0022), so both append methods
+   * keep their return types. A send that fails after it was admitted, such as one with a key conflict or one
+   * to a room that froze in the gap, still used its place.
+   *
+   * A stranger's count (a key `isStrangerKey` names) is stored, so it survives the room object leaving memory:
+   * an idle object is evicted after about 30 seconds, and a count kept only in memory would let a script send 6,
+   * pause, and send 6 more. `SessionDO` writes one row per stranger on each admission, holding the times still
+   * inside the minute, which is at most 6 small writes a minute per stranger and never more times than the
+   * limit. Every other key is memory only: `SessionDO` keeps those in the instance, so a room object that sleeps
+   * forgets them, which keeps a write off the busiest senders and costs a member at most a second 30 across an
+   * eviction. `MemoryStore` keeps both beside the room and drops them with it at the purge. The hosted seat is
+   * exempt by never being asked: its writes go through `appendHostEvent` alone.
+   */
+  admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission>;
+  /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
    * when a limit is given. The hosted seat's read (I4) and a public room's events route
    * are the bounded ones; every other caller reads the tail whole.
@@ -1338,7 +1513,12 @@ export interface BellmanStore {
    * the whole array, so the memory store has to say so itself.
    */
   recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]>;
-  waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
+  /**
+   * The events after `cursor`, or the first to arrive within `waitMs`: at most `limit`, the
+   * earliest, when a limit is given. `bellman_sync` passes its page (#208), so a member far
+   * behind reads a page per poll and never the whole log at once.
+   */
+  waitForEvents(sessionId: string, cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]>;
   /**
    * Every surface row of this room, sorted by key, as detached copies. An
    * unknown session answers none. One hop: the Durable Objects store reads the
@@ -1497,14 +1677,20 @@ export interface BellmanStore {
   listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
 
   appendAudit(a: AuditEntry): Promise<void>;
+  /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
+  /** One page of an org's stream under the filters, newest first (audit trail spec, D6). */
+  queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
+  /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
+  auditFacets(orgId: string): Promise<AuditFacets>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
-   * sweeps the unnamed objects of a closed room whose close it did not see (#65), and drops
-   * expired connect tokens. MemoryStore does all of it here; the Durable Objects store does
-   * none, because each room's alarm does its room's.
+   * sweeps the unnamed objects of a closed room whose close it did not see (#65), drops
+   * expired connect tokens, and deletes the reports resolved 180 days ago (R15). MemoryStore does
+   * all of it here; the Durable Objects store does none, because each room's alarm does its
+   * room's and the registry's alarm does the reports'.
    */
   sweep(now: number): Promise<void>;
 }
@@ -1512,6 +1698,13 @@ export interface BellmanStore {
 function detach<T>(value: T): T {
   return structuredClone(value);
 }
+
+/** What makes two reports the same to a fold (R9): one account, one room, one target. JSON, so no field runs into the next. */
+const foldKeyOf = (r: Pick<NewReport, "reporterUserId" | "sessionId" | "target">): string =>
+  JSON.stringify([r.reporterUserId, r.sessionId, targetKey(r.target)]);
+
+/** By id, which is the time filed and then a random suffix: the order the Durable Objects store's key listing gives. */
+const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
 export class MemoryStore implements BellmanStore {
   /**
@@ -1535,7 +1728,9 @@ export class MemoryStore implements BellmanStore {
   private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
   private users = new Map<string, UserRecord>();
-  private audit: AuditEntry[] = [];
+  /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
+  private audit: { seq: number; entry: AuditEntry }[] = [];
+  private auditSeq = new Map<string, number>();
   private waiters = new Map<string, Waiter[]>();
   /**
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
@@ -1553,6 +1748,20 @@ export class MemoryStore implements BellmanStore {
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
+  /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
+  private roomBanned = new Map<string, Ban[]>();
+  /** Creator-wide bans, by creator (spec section 1): about a creator and not a room, so the purge leaves them. */
+  private creatorBanned = new Map<string, CreatorBan[]>();
+  /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
+  private suspensions = new Map<string, Suspension>();
+  /** Reports, by id (spec section 3): about the platform and not a room, so a room's purge leaves them. */
+  private reports = new Map<string, Report>();
+  /** The open report each account has filed about a target, by `foldKeyOf` (R9). Resolving a report drops its entry. */
+  private folds = new Map<string, string>();
+  /** When each account filed its reports, oldest first, by user id: what the day's count reads (R10). */
+  private filings = new Map<string, number[]>();
+  /** Recent sends, by session then by count key (`sendKeyFor`, spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
+  private sends = new Map<string, Map<string, number[]>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1709,6 +1918,8 @@ export class MemoryStore implements BellmanStore {
     if (!s) return { refused: "not_found", reclaimed: [], codesCleared: false };
     if (s.closed) return { refused: "closed", reclaimed: [], codesCleared: false };
     if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
+    // Before capacity is asked, so a banned account is never told the room is full.
+    if (this.isBanned(sessionId, member.userId)) return { refused: "banned", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
     const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
@@ -1787,12 +1998,25 @@ export class MemoryStore implements BellmanStore {
       ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
       : null;
 
+    // The ban this call owes: asked for, and not yet on the room. One ban per account, so a repeat
+    // keeps the first and owes nothing. Decided before the member's state is looked at, for the
+    // door's reason: a ban is owed to one who is already out as much as to one who is not.
+    const banning = req.ban !== undefined && !this.isBanned(s.id, m.userId)
+      ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
+      : null;
+    // The creator-wide ban that "all" also asks for, owed on its own account: a room ban made earlier
+    // does not stand in for it, so a later eviction widens one. Not owed to an account this creator
+    // already bans, whose first ban stands.
+    const widening = req.ban === "all" && !this.bansCreatorWide(s.createdBy, m.userId)
+      ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now, sessionId: s.id }
+      : null;
+
     // Already out: the idempotent path. The departure is not said again, which is
-    // the point of it. A live door behind them is a different matter: it was never
-    // shut, so shutting it is a write that has not happened yet and not a
-    // duplicate. With neither owed, nothing is written.
+    // the point of it. A live door behind them, or a ban not yet on the room, is a
+    // different matter: it was never done, so doing it is a write that has not
+    // happened yet and not a duplicate. With none owed, nothing is written.
     const leaving = isActiveMember(m);
-    if (!leaving && !retiring) return { refused: null, ...none };
+    if (!leaving && !retiring && !banning && !widening) return { refused: null, ...none };
 
     if (leaving) {
       // The event first, then the member write, because a cut names the
@@ -1827,14 +2051,117 @@ export class MemoryStore implements BellmanStore {
       delete s.joinCodes[retiring.role];
       this.appendNow(s, retiring.event);
     }
+    // Last, so a call that throws above leaves no ban behind.
+    if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
+    if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
     // A falsy org names a stream nobody reads, and the Durable Objects store
     // drops such an entry rather than file it, so this one does too. The member's
-    // rows, then the door's: the order the events were written in.
+    // rows, then the door's: the order the events were written in. The member's rows
+    // are filed for a call that removed them or wrote this room's ban: a ban on someone
+    // who already left is the eviction's row all the same, and a repeat writes none.
     this.recordAudit(
-      [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
+      [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
     );
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
+  }
+
+  /** Whether this room holds a ban for the account (spec section 1). */
+  private isBanned(sessionId: string, userId: string): boolean {
+    return (this.roomBanned.get(sessionId) ?? []).some((b) => b.userId === userId);
+  }
+
+  async roomBans(sessionId: string): Promise<Ban[]> {
+    return detach([...(this.roomBanned.get(sessionId) ?? [])].sort(oldestFirst));
+  }
+
+  async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
+    // The Durable Objects store answers this before it reads storage, so this one does too, though
+    // nothing here can throw on a long id: both stores say false for the same strings.
+    if (!isBanId(banId)) return false;
+    // No await from the read to the write, the rule `seatMember` follows. The Durable Objects
+    // store gets it from a transaction instead.
+    const held = this.roomBanned.get(sessionId) ?? [];
+    const kept = held.filter((b) => b.banId !== banId);
+    if (kept.length === held.length) return false;
+    this.roomBanned.set(sessionId, kept);
+    return true;
+  }
+
+  /** Whether this creator bans the account from every room they own (spec section 1). */
+  private bansCreatorWide(creatorId: string, userId: string): boolean {
+    return (this.creatorBanned.get(creatorId) ?? []).some((b) => b.userId === userId);
+  }
+
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    return detach([...(this.creatorBanned.get(creatorId) ?? [])].sort(oldestFirst));
+  }
+
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    // No await from the read to the write, as `liftRoomBan` has none.
+    const held = this.creatorBanned.get(creatorId) ?? [];
+    const kept = held.filter((b) => b.banId !== banId);
+    if (kept.length === held.length) return false;
+    this.creatorBanned.set(creatorId, kept);
+    return true;
+  }
+
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return this.bansCreatorWide(creatorId, userId);
+  }
+
+  async isBannedFromRoom(sessionId: string, userId: string): Promise<boolean> {
+    return this.isBanned(sessionId, userId);
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    this.suspensions.set(userId, detach(s));
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.suspensions.delete(userId);
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return this.suspensions.has(userId);
+  }
+
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    // No await from the fold's read to the write, as `admitSend` has none: two filings cannot both pass the count.
+    const fold = foldKeyOf(r);
+    const openId = this.folds.get(fold);
+    const open = openId === undefined ? undefined : this.reports.get(openId);
+    if (open?.resolvedAt === null) return { outcome: "folded", report: detach(open) };
+    const kept = withinWindow(this.filings.get(r.reporterUserId) ?? [], now);
+    if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
+    const report: Report = { ...detach(r), id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
+    this.reports.set(report.id, report);
+    this.folds.set(fold, report.id);
+    this.filings.set(r.reporterUserId, [...kept, now]);
+    return { outcome: "filed", report: detach(report) };
+  }
+
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    const mine = [...this.reports.values()]
+      .filter((r) => r.creatorId === creatorId && r.sessionId === sessionId && reachesCreator(r));
+    return detach(mine.sort(newestFirst));
+  }
+
+  async listReports(limit: number): Promise<Report[]> {
+    const newest = [...this.reports.values()].sort(newestFirst);
+    return detach([...newest.filter((r) => r.resolvedAt === null), ...newest.filter((r) => r.resolvedAt !== null)].slice(0, limit));
+  }
+
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    const report = this.reports.get(id);
+    if (!report) return undefined;
+    if (report.resolvedAt !== null) return detach(report);
+    report.resolvedAt = now;
+    report.resolution = resolution.note;
+    report.resolvedBy = resolution.by;
+    this.folds.delete(foldKeyOf(report));
+    return detach(report);
   }
 
   /**
@@ -2039,14 +2366,14 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "missing" };
     if (!s.closed) return { ok: false, reason: "open" };
     // Asked already: the first request stands, is on the record once, and is the time the answer gives.
     if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
-    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, rosterParties(s), by, Date.now())));
     return { ok: true, purgeAt: at };
   }
 
@@ -2310,6 +2637,14 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "appended", event: detach(event) };
   }
 
+  async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
+    const room = this.sends.get(sessionId) ?? new Map<string, number[]>();
+    const counted = admitAt(room.get(key) ?? [], limit, now);
+    room.set(key, counted.times);
+    this.sends.set(sessionId, room);
+    return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
+  }
+
   /**
    * The append itself, with no awaits in it, so both public appenders can call
    * it without yielding between their guard and their write. Same rule, and
@@ -2379,10 +2714,11 @@ export class MemoryStore implements BellmanStore {
   waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
-    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor)) : [];
+    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit)) : [];
     if (immediate.length > 0 || waitMs <= 0) return Promise.resolve(immediate);
     return new Promise((resolve) => {
       const w: Waiter = { after: cursor, resolve };
@@ -2581,7 +2917,13 @@ export class MemoryStore implements BellmanStore {
    * contract suite checks.
    */
   private recordAudit(entries: AuditEntry[]): void {
-    for (const entry of entries) this.audit.push(detach(entry));
+    for (const entry of entries) {
+      // No org, no stream: DurableObjectStore drops it too (ARCHITECTURE.md section 9, runtime fact 4).
+      if (!entry.orgId) continue;
+      const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
+      this.auditSeq.set(entry.orgId, seq);
+      this.audit.push({ seq, entry: detach(entry) });
+    }
   }
 
   async putGrantIfOwned(
@@ -2661,11 +3003,23 @@ export class MemoryStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    this.audit.push(detach(a));
+    this.recordAudit([a]);
   }
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
-    return detach(this.audit.filter((a) => a.orgId === orgId).slice(-limit));
+    return detach(this.audit.filter((r) => r.entry.orgId === orgId).slice(-limit).map((r) => r.entry));
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return detach(pageOf(this.streamOf(orgId), query));
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return detach(facetsOf(this.streamOf(orgId), orgId));
+  }
+
+  private streamOf(orgId: string): SeqEntry[] {
+    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq }));
   }
 
   async sweep(now: number): Promise<void> {
@@ -2685,6 +3039,15 @@ export class MemoryStore implements BellmanStore {
     }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
+    }
+    // A resolved report goes 180 days on (R15); the Durable Objects store does this on the registry's alarm.
+    for (const [id, r] of this.reports) {
+      if (r.resolvedAt !== null && r.resolvedAt + REPORT_RETENTION_MS <= now) this.reports.delete(id);
+    }
+    // A reporter's filing times only serve the day's limit, so a row whose times have all left the day goes too, and
+    // an account is not kept for good.
+    for (const [reporter, times] of this.filings) {
+      if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
   }
 
@@ -2720,6 +3083,36 @@ export class MemoryStore implements BellmanStore {
   }
 
   /**
+   * The Node server's housekeeping (#231): for every room, what SessionDO's `#housekeepIfDue`
+   * does for one, run by the loop that runs `tick`. `rules` are `dueFindings` and `clearedKeys`
+   * from housekeeping.ts, handed in because that module imports this one; they decide, and this
+   * writes as the handler writes. A raised key that no longer holds is forgotten, and each due
+   * finding is one `housekeeping` event from the room itself, its key recorded at `now`. The
+   * rules' own gate keeps out a room with no housekeeping, a closed, a frozen or an empty one,
+   * and an abandoned room is refused here as `tick` refuses it. `appendNow` runs the books and
+   * wakes no hosted seat (ruling H1). Not on `BellmanStore`: the Workers store runs this by
+   * alarm. No awaits, for appendEvent's reason.
+   */
+  housekeep(now: number, rules: { dueFindings: (s: StoredSession, now: number) => Finding[]; clearedKeys: (s: StoredSession, now: number) => string[] }): void {
+    for (const s of this.sessions.values()) {
+      if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
+      const cleared = rules.clearedKeys(s, now);
+      const due = rules.dueFindings(s, now);
+      if (cleared.length === 0 && due.length === 0) continue;
+      const raised = { ...s.raised };
+      for (const key of cleared) delete raised[key];
+      for (const f of due) raised[f.key] = { at: now, repeat: f.payload.repeat, since: f.payload.since };
+      Object.assign(s, { raised });
+      for (const f of due) {
+        this.appendNow(s, {
+          type: "housekeeping", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+          payload: f.payload, refId: null,
+        }, now);
+      }
+    }
+  }
+
+  /**
    * The purge (#65, D2), in the order the Durable Objects store keeps: the bytes first, then what
    * the rest of the store holds about the room, then the room. The first step is the only one that
    * can fail, and it fails before anything is forgotten, so a failed purge leaves a room the next
@@ -2738,10 +3131,12 @@ export class MemoryStore implements BellmanStore {
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, now)));
+    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
+    this.roomBanned.delete(s.id);
+    this.sends.delete(s.id);
     this.surfaces.delete(s.id);
     this.sessions.delete(s.id);
   }

@@ -32,7 +32,7 @@ export interface DoorWaiting {
 /** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
 export interface DoorStatus {
   version: 1;
-  delivery: "hook" | "channel";
+  delivery: "hook" | "channel" | "queue";
   signed_in: boolean;
   seats: DoorSeat[];
   waiting: DoorWaiting[];

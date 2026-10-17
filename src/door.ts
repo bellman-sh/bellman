@@ -47,7 +47,7 @@ export interface DoorSource {
   signedIn(): boolean;
   seats(): DoorSeat[];
   recent(): DoorEvent[];
-  /** Hook delivery's inbox. Channel delivery keeps none. */
+  /** Hook and queue delivery's inbox. Channel delivery keeps none. */
   inboxDir?: string;
   /** The bridge's own never rejects (see readEvents in src/bridge.ts). The door answers with the status and body it gives. */
   readEvents(sessionId: string, after?: number): Promise<{ status: number; body: unknown }>;
@@ -65,8 +65,8 @@ export interface DoorSource {
 /**
  * `GET /status`. `waiting` is the inbox's counts regrouped by room, because the inbox is keyed by member and the
  * mod draws rooms; a room's members add up. A member the bridge holds no seat for is left out: its events are
- * still queued for the Stop hook, and no room is waiting on them. Counted with `pendingSummary`, which takes
- * nothing from the inbox, so every event is still there for that hook to drain. Channel delivery keeps no inbox.
+ * still queued, for the Stop hook or bellman_wait, and no room is waiting on them. Counted with `pendingSummary`,
+ * which takes nothing from the inbox, so every event is still there to be drained. Channel delivery keeps no inbox.
  */
 export function statusOf(src: DoorSource): DoorStatus {
   const seats = src.seats();
@@ -75,7 +75,7 @@ export function statusOf(src: DoorSource): DoorStatus {
     delivery: src.delivery,
     signed_in: src.signedIn(),
     seats,
-    waiting: src.delivery === "hook" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
+    waiting: src.delivery !== "channel" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
     recent: src.recent(),
   };
 }

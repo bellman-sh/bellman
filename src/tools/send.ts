@@ -1,16 +1,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok,
+  ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok, refusal,
 } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
-import { FROZEN, activeMembers, audit, findMember, touchMember, writeSurface } from "../rooms.js";
+import { FROZEN, activeMembers, admitSend, audit, findMember, touchMember, writeSurface } from "../rooms.js";
 import type { AppendExtras, BellmanStore, EventWrite } from "../store.js";
 import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
+import { SEND_LIMIT, STRANGER_SEND_LIMIT } from "../send-limit.js";
 
 export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
   server.registerTool(
@@ -39,7 +40,7 @@ Args:
 Returns: { room_members, cursor, replayed? }
   - room_members: the OTHER active members this call saw just before appending — your own seat is not in it, and on a replayed send it is who was there at the retry rather than at the original append. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
   - replayed: true means this key had already been used and nothing new was sent.
-Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke.`,
+Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke. A member sends at most ${SEND_LIMIT} times a minute, and one who joined through a public room's permanent code ${STRANGER_SEND_LIMIT}; past that the send is refused as rate_limited with retry_after in seconds, and nothing is sent.`,
       inputSchema: {
         ...RoomRefShape,
         member_id: z.string().min(4),
@@ -60,8 +61,9 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
       // Handled before the common guards below, which writeSurface runs itself.
       if (type === "surface") {
-        const out = await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key);
-        if (!out.ok) return fail(out.reason);
+        // Counted here and not on the HTTP routes, which run the same writeSurface (R6).
+        const out = await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key, true);
+        if (!out.ok) return refusal(out);
         return ok({
           room_members: out.value.roomMembers,
           cursor: out.value.cursor,
@@ -218,6 +220,12 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           return fail(`progress payload must be { note, step?, eta_seconds? }: ${parsed.error.issues[0]?.message}`);
         }
       }
+
+      // The minute's count (ADR 0022): after the last check that can refuse this send, so one refused anyway
+      // spends no place, and before the first write, so a refusal leaves the log as it was. The surface kind
+      // counts inside writeSurface, at the same point in its own sequence.
+      const admitted = await admitSend(s, session_id, me);
+      if (!admitted.ok) return refusal(admitted);
 
       const draft = {
         type,

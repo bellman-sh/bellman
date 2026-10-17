@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import {
-  MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, roomRoutes, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
@@ -693,6 +693,19 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect((await store.auditForOrg("org_codenerd", 50)).at(-1)).toMatchObject({
       action: "sent_surface", detail: { key: "plan", removed: true },
     });
+  });
+
+  // R6 (ADR 0022): only bellman_send counts against a member's minute. The dash's group drag writes one PUT per
+  // card, so a count here would refuse the 31st card of a drag.
+  it("does not count a write against the member's minute, as bellman_send's surface kind does", async () => {
+    for (let i = 0; i < 31; i++) {
+      const res = (await put(DEV_KEY.jesse, `card_${i}`, { kind: "text", body: "x" }))!;
+      expect(res.status, `write ${i + 1}: ${await res.clone().text()}`).toBe(200);
+    }
+  });
+
+  it("answers rate_limited with 429, for the operation that counts", () => {
+    expect(STATUS.rate_limited).toBe(429);
   });
 
   it("refuses a seat without the verb, and the log is unchanged", async () => {
@@ -1388,7 +1401,9 @@ describe("DELETE /rooms/:id (#65)", () => {
     expect((await removeRoom(DEV_KEY.jesse, "qs_del_twice"))!.status).toBe(202);
 
     const asked = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.sessionId === "qs_del_twice");
-    expect(asked).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+    expect(asked).toEqual([expect.objectContaining({
+      action: "room_deleted", actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd",
+    })]);
   });
 
   // Review M2. The 202 says when the room goes by the time the record holds, which is the first request's, and never by
@@ -1486,6 +1501,17 @@ describe("GET /rooms/:id/events", () => {
     const fromStart = await read(DEV_KEY.jesse, "?after=0");
     expect(fromStart.events.map((e) => e.data.cursor)).toEqual(cursors.slice(0, MAX_EVENTS_READ));
     expect(fromStart.cursor).toBe(cursors[MAX_EVENTS_READ - 1]);
+  });
+
+  // #208: the bound is the store's read, and not a slice taken after reading the rest of the log.
+  it("asks the store for at most a page, past a cursor and up to a removed member's cut", async () => {
+    for (let i = 0; i < MAX_EVENTS_READ + 5; i++) await say(member(), `n${i}`);
+    await evictThroughTool("m_peer");
+    const reads = vi.spyOn(store, "eventsAfter");
+    await read(DEV_KEY.jesse, "?after=0");
+    await read(DEV_KEY.peer);
+    await read(DEV_KEY.peer, "?after=0");
+    expect(reads.mock.calls.map(([, , limit]) => limit)).toEqual([MAX_EVENTS_READ, MAX_EVENTS_READ, MAX_EVENTS_READ]);
   });
 
   it.each(["abc", "-1", "1.5", ""])("refuses ?after=%s, which is not a cursor", async (after) => {

@@ -61,7 +61,8 @@ async function world(answer: Answer | ((userId: string) => Answer), env: Record<
         },
       }),
     },
-    REGISTRY: { idFromName: (n: string) => n, get: () => ({}) },
+    // Nobody here is suspended: /ws and /mcp ask the registry before they serve anyone.
+    REGISTRY: { idFromName: (n: string) => n, get: () => ({ isSuspended: async () => false }) },
     ...env,
   } as never;
   const call = (url: string, headers: Record<string, string> = {}, method = "GET") =>

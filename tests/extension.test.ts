@@ -6,29 +6,21 @@
  * nine tools, and had been missing bellman_whoami since the bridge grew it.
  *
  * What a bundle actually exposes is the server's tools plus the bridge's own, and which
- * of its own depends on BELLMAN_DELIVERY: src/bridge.ts lists bellman_wait only under
- * "hook". The manifest hardcodes that mode, so the mode is asserted here too — flipping
- * it to "channel" drops a tool from the real surface, and a names-only check would
- * otherwise go on passing against a list that had quietly become wrong.
+ * of its own depends on BELLMAN_DELIVERY: src/bridge.ts lists bellman_wait only when it
+ * queues events, under "hook" or "queue". The manifest hardcodes "queue", so the mode is
+ * asserted here too — flipping it to "channel" drops a tool from the real surface, and a
+ * names-only check would otherwise go on passing against a list that had quietly become
+ * wrong.
  *
  * Names, not descriptions. The manifest's one-liners are deliberately shorter than the
  * tool descriptions the model is shown; holding them identical would force marketing
  * copy into a tool schema. Sibling of tests/tools/surface.test.ts, which pins the
- * server's eleven.
+ * server's thirteen.
  */
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type Remote } from "../src/bridge.js";
-import { buildServer } from "../src/server.js";
-import { MemoryBlobStore } from "../src/blobs.js";
-import { MemoryStore } from "../src/store.js";
-import { DEV_KEY } from "./helpers/harness.js";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { deliveryOf, installOf } from "../src/bridge.js";
+import { listBridge } from "./helpers/tool-lists.js";
 
 interface ExtensionManifest {
   version: string;
@@ -48,70 +40,45 @@ const pkg: { version: string } = JSON.parse(
 const declared = () => manifest.tools.map((t) => t.name).sort();
 
 /**
- * The bundle's own surface: a hook-mode bridge over the real tool handlers, which is
- * exactly what manifest.json's mcp_config launches — node server/channel.js with
- * BELLMAN_DELIVERY=hook. Nothing is stubbed, so a tool added to either side shows up
- * here without this file being told about it.
+ * The bundle as Desktop meets it: the bridge in the delivery manifest.json's mcp_config asks
+ * for, read as src/channel.ts reads it — what node server/channel.js launches.
  */
-const temps: string[] = [];
-
-async function bundleTools(): Promise<string[]> {
-  const store = new MemoryStore();
-  const identity = resolveIdentity(`Bearer ${DEV_KEY.jesse}`);
-  if (!identity) throw new Error(`dev key ${DEV_KEY.jesse} no longer resolves`);
-
-  const inboxDir = mkdtempSync(join(tmpdir(), "bellman-extension-"));
-  temps.push(inboxDir);
-
-  const bridge = createBridge({
-    delivery: "hook",
-    inboxDir,
-    remote: async (): Promise<Remote> => {
-      const server = buildServer(identity, store, new MemoryBlobStore(), { hostedSeat: true });
-      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-      const client = new Client({ name: "bridge-remote", version: "0.0.1" });
-      await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
-      return {
-        listTools: () => client.listTools(),
-        callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
-        close: () => client.close(),
-      };
-    },
-  });
-
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-desktop", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
-
-  try {
-    const { tools } = await client.listTools();
-    return tools.map((t) => t.name).sort();
-  } finally {
-    await bridge.close();
-    await client.close();
-  }
-}
-
-afterEach(() => {
-  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const delivery = deliveryOf(manifest.server.mcp_config.env.BELLMAN_DELIVERY);
+const bundle = () => listBridge(delivery);
 
 describe("the Claude Desktop bundle manifest", () => {
   it("declares every tool the bundle exposes, and no others", async () => {
-    expect(declared()).toEqual(await bundleTools());
+    expect(declared()).toEqual((await bundle()).tools.map((t) => t.name).sort());
   });
 
   // The count as an assertion, not prose: tests/tools/surface.test.ts once said 7 over a
-  // list of 8 and nothing failed. Fifteen is the server's twelve plus the bridge's three.
-  it("declares exactly fifteen tools", () => {
-    expect(declared()).toHaveLength(15);
+  // list of 8 and nothing failed. Sixteen is the server's thirteen plus the bridge's three.
+  it("declares exactly sixteen tools", () => {
+    expect(declared()).toHaveLength(16);
   });
 
   // Not cosmetic: the expected list above is mode-dependent, so this is what makes the
-  // comparison meaningful rather than circular.
-  it("launches the bridge in hook delivery, which is the mode that surface assumes", () => {
-    expect(manifest.server.mcp_config.env.BELLMAN_DELIVERY).toBe("hook");
+  // comparison meaningful rather than circular. Queue, not hook: hook delivery tells the
+  // agent a Stop hook hands its events over, and Desktop runs no Stop hook (#241).
+  // A bundle is updated by installing the new one, which is the step the update notice names for it.
+  it("tells the bridge it runs from the bundle, so an update notice names a reinstall", () => {
+    expect(installOf(manifest.server.mcp_config.env.BELLMAN_INSTALL)).toBe("bundle");
+  });
+
+  it("launches the bridge in queue delivery, which is the mode that surface assumes", () => {
+    expect(delivery).toBe("queue");
     expect(manifest.server.entry_point).toBe("server/channel.js");
+  });
+
+  // Desktop takes no channel push and runs no Stop hook, so nothing hands peer events
+  // over: the agent has to collect them. The bundle said the Stop hook would, and an
+  // agent that believed it never looked (#241).
+  it("tells the agent to collect its own peer events", async () => {
+    const { tools, instructions } = await bundle();
+    const wait = tools.find((t) => t.name === "bellman_wait");
+
+    for (const text of [instructions, wait?.description]) expect(text).not.toMatch(/stop hook|need to poll/i);
+    expect(instructions).toMatch(/at the start of each turn, call bellman_sync/i);
   });
 
   it("gives every declared tool a description", () => {

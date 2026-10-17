@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
-import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
+import { HOST_USER_ID, MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
 import type { ArrivingMember, Identity, Member } from "../src/types.js";
 
@@ -786,7 +786,7 @@ describe("evictMember", () => {
 
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -810,7 +810,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door is shut").toBeUndefined();
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type), "the removal is not announced again").toEqual(["invite_revoked"]);
@@ -913,8 +913,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
     expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
   });
@@ -931,7 +931,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -952,7 +952,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const events = await store.eventsAfter("qs_test", 0);
@@ -973,7 +973,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const [evicted, revoked] = await store.eventsAfter("qs_test", 0);
@@ -1000,7 +1000,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
@@ -1241,7 +1241,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.map((a) => a.detail)).toEqual([
@@ -1341,11 +1341,120 @@ describe("evictMember", () => {
     expect(rows[0].detail).toEqual({ member_id: "m_peer", user_id: "u_peer", room_role: "peer_b" });
   });
 
+  describe("with ban (abuse protections spec section 1)", () => {
+    /** A swarm room: the creator, one account in two handles in the default seat, and a bystander. */
+    const manifest = resolveManifest(manifestFixture({ preset: "swarm" }));
+    const twoHandles = () => session({
+      manifest,
+      joinCodes: oneCode("BELL-HELPER-01", "helper"),
+      members: [
+        member({ roomRole: manifest.creatorRole }),
+        member({ memberId: "m_laptop", userId: "u_peer", label: "peer@codenerd", roomRole: "helper" }),
+        member({ memberId: "m_desktop", userId: "u_peer", label: "peer@codenerd", roomRole: "helper" }),
+        member({ memberId: "m_other", userId: "u_other", label: "other@codenerd", roomRole: "helper" }),
+      ],
+    });
+    const stillIn = async () =>
+      (await store.membersOfUser("qs_test", "u_peer")).filter((m) => m.leftAt === null).map((m) => m.memberId);
+
+    it("puts the ban in the eviction's audit row and in no event, because a public room's log is public", async () => {
+      await store.createSession(peopled());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_peer", "room");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.banned).toBe("room");
+      const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
+      expect(rows.map((a) => a.detail)).toEqual([{ member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", ban: "room" }]);
+      // The events an eviction without a ban writes, with the payload it writes: nothing in the log tells a ban from one.
+      const events = await store.eventsAfter("qs_test", 0);
+      expect(events.map((e) => e.type)).toEqual(["member_evicted", "invite_revoked"]);
+      expect(Object.keys(events[0].payload as object).sort()).toEqual(["label", "member_id", "room_role"]);
+      expect(events[1].payload).toEqual({ roles: ["peer_b"] });
+    });
+
+    it("removes every other handle the account holds, each with its own event and audit row", async () => {
+      await store.createSession(twoHandles());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_laptop", "room");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(await stillIn()).toEqual([]);
+      expect(await store.getMember("qs_test", "m_other"), "the bystander stays").toMatchObject({ leftAt: null });
+      const evicted = (await store.eventsAfter("qs_test", 0)).filter((e) => e.type === "member_evicted");
+      expect(evicted.map((e) => (e.payload as { member_id: string }).member_id)).toEqual(["m_laptop", "m_desktop"]);
+      const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
+      expect(rows.map((a) => [a.detail.member_id, a.detail.ban])).toEqual([["m_laptop", "room"], ["m_desktop", "room"]]);
+      expect(await store.roomBans("qs_test"), "one ban for the account, not one per handle").toHaveLength(1);
+    });
+
+    it("removes only the handle it names when it does not ban", async () => {
+      await store.createSession(twoHandles());
+
+      await evictMember(store, jesse, "qs_test", "m_laptop");
+
+      expect(await stillIn()).toEqual(["m_desktop"]);
+    });
+
+    it("finishes the other handles when the eviction is repeated after a refusal partway", async () => {
+      await store.createSession(twoHandles());
+      const removeMember = store.removeMember.bind(store);
+      vi.spyOn(store, "removeMember")
+        .mockImplementationOnce((...args) => removeMember(...args))
+        .mockRejectedValueOnce(new Error("remove failed"));
+
+      await expect(evictMember(store, jesse, "qs_test", "m_laptop", "room")).rejects.toThrow("remove failed");
+      expect(await stillIn(), "the target is out and the other handle is not").toEqual(["m_desktop"]);
+      expect(await store.roomBans("qs_test"), "the ban was written with the target's removal").toHaveLength(1);
+
+      const retry = await evictMember(store, jesse, "qs_test", "m_laptop", "room");
+
+      expect(retry.ok, JSON.stringify(retry)).toBe(true);
+      expect(await stillIn()).toEqual([]);
+      expect(await store.roomBans("qs_test"), "the repeat keeps the one ban").toHaveLength(1);
+    });
+
+    it("bans the account from every room the creator owns when it asks for all", async () => {
+      await store.createSession(peopled());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_peer", "all");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.banned).toBe("all");
+      expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+      expect(await store.isBannedByCreator("u_jesse", "u_other"), "the control: nobody else").toBe(false);
+    });
+
+    it("leaves a public room's permanent code open, where it shuts a code that expires", async () => {
+      const permanent = { helper: { code: "BELL-PERM-01-HELPER", expiresAt: null } };
+      await store.createSession(session({
+        manifest: resolveManifest(manifestFixture({ preset: "swarm", public: true })),
+        joinCodes: { ...permanent, ...oneCode("BELL-WATCH-01", "observer") },
+        members: [
+          member({ roomRole: manifest.creatorRole }),
+          member({ memberId: "m_helper", userId: "u_helper", label: "helper@codenerd", roomRole: "helper" }),
+          member({ memberId: "m_watcher", userId: "u_watcher", label: "watcher@codenerd", roomRole: "observer" }),
+        ],
+      }));
+      expect((await store.getSessionByJoinCode("BELL-PERM-01-HELPER"))?.role, "the control: the permanent code resolves").toBe("helper");
+
+      const gone = await evictMember(store, jesse, "qs_test", "m_helper");
+      const shut = await evictMember(store, jesse, "qs_test", "m_watcher");
+
+      expect(gone.ok && gone.value.codeRetired, "an eviction does not retire the permanent code").toBeNull();
+      expect((await store.getSessionByJoinCode("BELL-PERM-01-HELPER"))?.role).toBe("helper");
+      expect(shut.ok && shut.value.codeRetired, "and still retires a code that expires").toBe("observer");
+      expect(await store.getSessionByJoinCode("BELL-WATCH-01")).toBeUndefined();
+    });
+  });
+
   // The door an eviction shuts is recorded the same way whether or not the member
   // was still in the room: an `invite_revoked` row, beside the member's when there
   // was one. So a query for the doors an eviction shut finds all of them, where a
   // field on the member's row could only describe the ones behind members this call
-  // removed. The row goes to the room's org and the creator's, as revokeInvite's does.
+  // removed. The row goes to the orgs `auditEntries` names, as revokeInvite's does.
   it("audits the door an eviction shut as a row of its own, beside the member's", async () => {
     await store.createSession(peopled());
 
@@ -1414,8 +1523,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type)).toEqual(["member_evicted", "invite_revoked"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
@@ -1441,7 +1550,9 @@ describe("evictMember", () => {
     // any pair that agreed, and auditEntries() builds both from one object.
     const detail = { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b" };
     const theirs = await store.auditForOrg("org_other", 50);
-    expect(theirs).toHaveLength(1);
+    // D1 (audit trail spec): every org with a person in the room gets the row.
+    // The evicted member was in the room when the rows were built, so their org gets the door's too.
+    expect(theirs.map((a) => a.action)).toEqual(["member_evicted", "invite_revoked"]);
     expect(theirs[0]).toMatchObject({ action: "member_evicted", sessionId: "qs_test", actorUserId: "u_jesse" });
     expect(theirs[0].detail).toEqual(detail);
     const ours = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
@@ -1658,8 +1769,9 @@ describe("removal as one store operation", () => {
   });
 });
 
-// The helper's org set, driven directly: the room's, the actor's and any extras the
-// caller names, one row per distinct org and none for an org-less one.
+// The helper's org set, driven directly: the room's, the actor's, those of the people
+// in the room and any extras the caller names, one row per distinct org and none for
+// an org-less one.
 describe("audit", () => {
   it("writes one row per distinct org among the room's, the actor's and the extras", async () => {
     const room = session({ orgId: "org_room" });
@@ -1672,8 +1784,8 @@ describe("audit", () => {
       .toEqual(["org_codenerd", "org_other", "org_room"]);
   });
 
-  // What every caller that names no extra org relies on: the room's and the actor's,
-  // exactly as before the parameter existed.
+  // What every caller that names no extra org relies on: the room's, the actor's and
+  // those of the people in the room, who here are the actor alone.
   it("writes only the room's and the actor's rows when no extra org is named", async () => {
     const room = session({ orgId: "org_room" });
     const written = vi.spyOn(store, "appendAudit");
@@ -1681,5 +1793,58 @@ describe("audit", () => {
     await audit(store, room, jesse, "probe", {});
 
     expect(written.mock.calls.map(([entry]) => entry.orgId).sort()).toEqual(["org_codenerd", "org_room"]);
+  });
+
+  const ana: Identity = { userId: "u_ana", orgId: "org_a", plan: "team", role: "member", label: "Ana" };
+  const anaSeat = member({ memberId: "m_ana", userId: "u_ana", label: "Ana", orgId: "org_a" });
+  const boSeat = member({ memberId: "m_bo", userId: "u_bo", label: "Bo", orgId: "org_b", roomRole: "peer_b" });
+  const inA = (members: Member[]) => session({ id: "qs_cross", orgId: "org_a", members });
+
+  it("writes a send in A's room with B's member present to both orgs: outbound for A, inbound for B", async () => {
+    const room = inA([anaSeat, boSeat]);
+    await audit(store, room, ana, "sent_message", { chars: 5 });
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => [r.crossing, r.direction])).toEqual([["cross_org", "outbound"]]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([{
+      at: expect.any(Number), orgId: "org_b", sessionId: "qs_cross", actorUserId: "u_ana", action: "sent_message",
+      detail: { chars: 5 }, actorLabel: "Ana", actorOrgId: "org_a", roomName: room.manifest.room,
+      parties: ["org_a", "org_b"], crossing: "cross_org", direction: "inbound",
+    }]);
+  });
+
+  it("makes a room with a person who has no org cross-org, and writes that person no row", async () => {
+    const solo = member({ memberId: "m_solo", userId: "u_solo", label: "solo", orgId: null, roomRole: "peer_b" });
+    const written = vi.spyOn(store, "appendAudit");
+    await audit(store, inA([anaSeat, solo]), ana, "sent_message", {});
+
+    expect(written.mock.calls.map(([e]) => [e.orgId, e.crossing, e.parties])).toEqual([["org_a", "cross_org", ["org_a", null]]]);
+  });
+
+  it("counts people still in the room: a member who left and the hosted seat are not parties", async () => {
+    const left = { ...boSeat, leftAt: Date.now() };
+    const host = member({ memberId: "m_host", userId: HOST_USER_ID, label: "host@bellman", orgId: null, roomRole: "host" });
+    await audit(store, inA([anaSeat, left, host]), ana, "sent_message", {});
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => [r.crossing, r.parties])).toEqual([["internal", ["org_a"]]]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([]);
+  });
+
+  it("reaches an evicted member's org, which is no longer in the room, as inbound", async () => {
+    await audit(store, inA([anaSeat]), ana, "member_evicted", { user_id: "u_bo" }, ["org_b"]);
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => r.direction)).toEqual(["outbound"]);
+    expect((await store.auditForOrg("org_b", 10)).map((r) => [r.crossing, r.direction])).toEqual([["cross_org", "inbound"]]);
+  });
+
+  it("keeps a preview between the room's org and the previewer's, since nobody in the room sees it", async () => {
+    const cy: Identity = { userId: "u_cy", orgId: "org_c", plan: "team", role: "member", label: "Cy" };
+    const written = vi.spyOn(store, "appendAudit");
+    await audit(store, inA([anaSeat, boSeat]), cy, "connect_previewed", {}, [], []);
+
+    expect(written.mock.calls.map(([e]) => [e.orgId, e.parties])).toEqual([
+      ["org_a", ["org_a", "org_c"]],
+      ["org_c", ["org_a", "org_c"]],
+    ]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([]);
   });
 });

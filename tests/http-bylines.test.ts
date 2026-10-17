@@ -12,7 +12,7 @@ import { parseOperators, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import { HOST_USER_ID, MemoryStore } from "../src/store.js";
 import type { Identity } from "../src/types.js";
-import { member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
+import { jesseActor, member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { COOKIE, IDENTITY, PANEL, panelConfig, routeWith, seedSession } from "./helpers/panel.js";
 
@@ -504,7 +504,7 @@ describe("GET /public/handles/:handle", () => {
         id: "qs_purged", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: Date.now() - 1_000, joinCodes: {},
       }));
       await store.signRoom("u_jesse", "qs_purged", Date.now() + 60_000);
-      await store.schedulePurge("qs_purged", Date.now(), "u_jesse");
+      await store.schedulePurge("qs_purged", Date.now(), jesseActor);
       await store.sweep(Date.now());
       expect(await store.getSession("qs_purged")).toBeUndefined();
       const res = (await pub("/public/handles/jesse"))!;

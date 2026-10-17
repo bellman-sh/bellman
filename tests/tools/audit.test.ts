@@ -1,13 +1,13 @@
 /**
- * A cross-org session writes into BOTH orgs' audit streams, so each side sees
- * the crossings that touched its own boundary and nothing else. Getting that
- * wrong in either direction leaks one org's activity to the other, or leaves a
- * boundary crossing unrecorded.
+ * A cross-org session writes into the audit stream of every org with a person in
+ * the room, so each side sees the crossings that touched its own boundary and
+ * nothing else. Getting that wrong in either direction leaks one org's activity
+ * to the other, or leaves a boundary crossing unrecorded.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { brief, manifestFixture, member, session } from "../helpers/fixtures.js";
 import type { Identity } from "../../src/types.js";
 
 let h: Harness;
@@ -170,6 +170,55 @@ describe("what the audit trail records", () => {
     // ...but only the creator's org logged the creation itself.
     expect(acmeLog.some((e) => e.action === "session_created")).toBe(true);
     expect(otherLog.some((e) => e.action === "session_created")).toBe(false);
+  });
+
+  /**
+   * Nobody in the room sees a preview, and a previewer may never join, so only the room's org and
+   * the previewer's record it (audit trail spec, D1). Bravo has a member in the room, and Charlie's
+   * preview must not reach Bravo's log.
+   */
+  it("keeps a preview out of the log of an org whose member is in the room", async () => {
+    const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
+    const bravo = await h.connectAs(teamAdmin("u_bravo", "org_bravo"));
+    const charlie = await h.connectAs(teamAdmin("u_charlie", "org_charlie"));
+
+    const started = await acme.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
+    const joinCode = String(started.data.join_code);
+    const bravoPreview = await bravo.call("bellman_connect", { join_code: joinCode });
+    await bravo.call("bellman_confirm", { connect_token: String(bravoPreview.data.connect_token), brief: brief() });
+    const charliePreview = await charlie.call("bellman_connect", { join_code: joinCode });
+    expect(charliePreview.isError, charliePreview.text).toBe(false);
+
+    const previewers = async (peer: typeof acme) =>
+      rows((await peer.call("bellman_audit", { limit: 100 })).data)
+        .filter((e) => e.action === "connect_previewed").map((e) => e.actor).sort();
+    expect(await previewers(acme), "the room's org records every preview").toEqual(["u_bravo", "u_charlie"]);
+    expect(await previewers(charlie), "the previewer's org records its own").toEqual(["u_charlie"]);
+    expect(await previewers(bravo), "bravo is told of its own preview, not of charlie's").toEqual(["u_bravo"]);
+  });
+
+  /**
+   * The joiner's brief goes to the people in the room once the seat is taken, so the roster the row
+   * is addressed from is the one after the seat. Bo's seat went quiet and Charlie's join takes it:
+   * Bo's org is told the seat timed out, and is not told of a brief exchange Bo was never shown.
+   */
+  it("keeps the brief exchange from the org of the member the joiner's seat displaced", async () => {
+    await h.store.createSession(session({
+      id: "qs_stale", orgId: "org_acme",
+      members: [
+        member({ memberId: "m_ana", userId: "u_ana", label: "Ana", orgId: "org_acme" }),
+        member({ memberId: "m_bo", userId: "u_bo", label: "Bo", orgId: "org_bravo", roomRole: "peer_b", lastSeenAt: 1 }),
+      ],
+    }));
+    const charlie = await h.connectAs(teamAdmin("u_charlie", "org_charlie"));
+
+    const preview = await charlie.call("bellman_connect", { join_code: "BELL-TEST-01" });
+    const joined = await charlie.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
+    expect(joined.isError, joined.text).toBe(false);
+
+    const actions = async (orgId: string) => (await h.store.auditForOrg(orgId, 50)).map((e) => e.action);
+    expect(await actions("org_bravo")).toEqual(["member_timed_out"]);
+    expect(await actions("org_acme"), "the room's org still records the exchange").toContain("brief_exchanged");
   });
 
   it("keeps an unrelated org's activity out of the log", async () => {

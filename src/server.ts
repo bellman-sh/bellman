@@ -14,10 +14,17 @@ import { registerLeave } from "./tools/leave.js";
 import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
 import { registerPublicName } from "./tools/public-name.js";
+import { registerReport } from "./tools/report.js";
+import { reportMailer, type ReportMailer } from "./reports.js";
 import { registerAppResource } from "./ui/resource.js";
 
 const SERVER_NAME = "bellman-mcp-server";
-const SERVER_VERSION = "0.1.0";
+/**
+ * The version every client reads in serverInfo. The Worker cannot read package.json, so it is written here, and
+ * tests/bridge.test.ts pins it to the package: a release PR that bumps one and not the other fails there (#222).
+ * A bridge compares it with its own to tell its user an update is out.
+ */
+const SERVER_VERSION = "0.3.5";
 
 /**
  * One `McpServer` per request, bound to a caller identity.
@@ -46,8 +53,16 @@ const SERVER_VERSION = "0.1.0";
  * It has no default for the same reason `blobs` has none: a caller that forgets
  * it does not compile, and so no server is built that decides the seat's switch
  * by accident.
+ *
+ * `features.mailReport` is the report email's sender, handed only to `bellman_report`. It is optional and
+ * defaults to a mailer with no binding, which files the report and logs that no email went: a server built
+ * without one still takes reports, and the registry's queue is where they are read. A deployment that sends the
+ * email passes `reportMailer(binding)` for the `send_email` binding it has.
  */
-export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore, features: { hostedSeat: boolean }): McpServer {
+export function buildServer(
+  identity: Identity, s: BellmanStore, blobs: BlobStore,
+  features: { hostedSeat: boolean; mailReport?: ReportMailer },
+): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   registerStart(server, identity, s, features);
@@ -62,6 +77,7 @@ export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStor
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);
   registerPublicName(server, identity, s);
+  registerReport(server, identity, s, features.mailReport ?? reportMailer(undefined));
 
   // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect,
   // bellman_confirm, bellman_rooms and bellman_surface through it; every other

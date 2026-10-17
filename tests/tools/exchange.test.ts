@@ -10,10 +10,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
-import { pairUp } from "../helpers/flows.js";
+import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
 import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
+import { SYNC_PAGE } from "../../src/tools/sync.js";
 
 let h: Harness;
 
@@ -212,25 +213,37 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
   /**
    * The cost of `outstanding`, which is the reason for the stamp on the record.
    *
-   * Computing it means reading the log from cursor 0 — a request made before
+   * Computing it means reading the log back past the page — a request made before
    * `since_cursor` is still outstanding, so a slice cannot answer it. Done
-   * unconditionally that is a full read per poll, per member, for the life of a
-   * room, including every room that never uses action requests at all.
+   * unconditionally that is a read per poll, per member, for the life of a room,
+   * including every room that never uses action requests at all. `events` is how
+   * many events those reads handed back: the read from cursor 0 this replaced, or
+   * the tail it reads now (#208).
    */
-  const countsLogReads = async (run: () => Promise<unknown>) => {
-    const real = h.store.eventsAfter.bind(h.store);
-    let fromZero = 0;
-    h.store.eventsAfter = async (id: string, after: number) => {
-      if (after === 0) fromZero++;
-      return real(id, after);
+  const readsLog = async (run: () => Promise<unknown>) => {
+    const after = h.store.eventsAfter.bind(h.store);
+    const tail = h.store.recentEvents.bind(h.store);
+    const seen = { reads: 0, events: 0 };
+    h.store.eventsAfter = async (id: string, cursor: number, limit?: number) => {
+      const read = await after(id, cursor, limit);
+      if (cursor === 0) { seen.reads++; seen.events += read.length; }
+      return read;
+    };
+    h.store.recentEvents = async (id: string, limit: number) => {
+      const read = await tail(id, limit);
+      seen.reads++;
+      seen.events += read.length;
+      return read;
     };
     try {
       await run();
     } finally {
-      h.store.eventsAfter = real;
+      h.store.eventsAfter = after;
+      h.store.recentEvents = tail;
     }
-    return fromZero;
+    return seen;
   };
+  const countsLogReads = async (run: () => Promise<unknown>) => (await readsLog(run)).reads;
 
   it("reads no log at all on a room that has never had an action request", async () => {
     const p = await pairUp(h);
@@ -310,6 +323,56 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     expect(out.data.outstanding).toHaveLength(1);
     expect((out.data.outstanding as { cursor: number }[])[0].cursor)
       .toBe(Number(ask.data.cursor));
+  });
+
+  /**
+   * #208. A request expires half an hour after it was sent, so nothing older can be waiting,
+   * and `outstanding` reads the last half hour of the log rather than all of it: a room that
+   * uses requests used to pay a read from cursor 0 on every poll for half an hour after each.
+   */
+  describe("reading for outstanding, a half hour at a time (#208)", () => {
+    const message = (p: PairedSession, text: string, type = "message") => h.store.appendEvent(p.sessionId, {
+      type, fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse", payload: { text }, refId: null,
+    } as never);
+    const head = async (p: PairedSession) => (await h.store.recentEvents(p.sessionId, 1))[0].cursor;
+
+    it("reads the last half hour of the log, not the hour of history before it", async () => {
+      const p = await pairUp(h);
+      const now = Date.now();
+      vi.setSystemTime(now - 2 * ACTION_REQUEST_TTL_MS);
+      await message(p, "an hour ago", "action_request");
+      for (let i = 0; i < 600; i++) await message(p, `m${i}`);
+      vi.useRealTimers();
+      const ask = await p.creator.call("bellman_send", {
+        session_id: p.sessionId, member_id: p.creatorMemberId,
+        type: "action_request", payload: { ask: "Deploy to prod" },
+      });
+      expect(ask.isError, ask.text).toBe(false);
+
+      let out: Awaited<ReturnType<typeof p.joiner.call>> | undefined;
+      const seen = await readsLog(async () => {
+        out = await p.joiner.call("bellman_sync", {
+          session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: await head(p),
+        });
+      });
+      expect((out!.data.outstanding as { cursor: number }[]).map((o) => o.cursor)).toEqual([Number(ask.data.cursor)]);
+      expect(seen.events).toBeLessThan(600);
+    });
+
+    it("finds a live request however many events have landed since it", async () => {
+      const p = await pairUp(h);
+      const ask = await p.creator.call("bellman_send", {
+        session_id: p.sessionId, member_id: p.creatorMemberId,
+        type: "action_request", payload: { ask: "Deploy to prod" },
+      });
+      expect(ask.isError, ask.text).toBe(false);
+      for (let i = 0; i < 600; i++) await message(p, `m${i}`);
+
+      const out = await p.joiner.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: await head(p),
+      });
+      expect((out.data.outstanding as { cursor: number }[]).map((o) => o.cursor)).toEqual([Number(ask.data.cursor)]);
+    });
   });
 
   /**
@@ -676,6 +739,69 @@ describe("send / sync / leave mechanics", () => {
     expect(envelopes(first.data.events).length).toBeGreaterThan(0);
     expect(second.data.events).toEqual([]);
     expect(second.data.cursor).toBe(first.data.cursor);
+  });
+
+  // #208: a poll from far behind is one page of the log, not all of it, and says there is more.
+  it("returns the log a page at a time, and says when there is more", async () => {
+    const p = await pairUp(h);
+    const said = Array.from({ length: SYNC_PAGE + 5 }, (_, i) => `m${i}`);
+    for (const text of said) {
+      await h.store.appendEvent(p.sessionId, {
+        type: "message", fromMemberId: p.joinerMemberId, fromUserId: "u_peer", fromLabel: "peer", payload: { text }, refId: null,
+      });
+    }
+
+    const pages: Array<Record<string, unknown>> = [];
+    let cursor = 0;
+    for (let n = 0; n < 4; n++) {
+      const page = await p.creator.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: cursor,
+      });
+      expect(page.isError, page.text).toBe(false);
+      pages.push(page.data);
+      cursor = Number(page.data.cursor);
+      if (page.data.more !== true) break;
+    }
+
+    expect(pages.map((d) => d.more)).toEqual([true, undefined]);
+    expect(pages[0].cursor).toBe(SYNC_PAGE);
+    expect(pages.map((d) => d.session_status)).toEqual(["active", "active"]);
+    const texts = pages.flatMap((d) => envelopes(d.events))
+      .map((e) => e.data as { type: string; payload: { text?: string } })
+      .filter((d) => d.type === "message")
+      .map((d) => d.payload.text);
+    expect(texts).toEqual(said);
+  });
+
+  // A client stops at `closed` without reading `more`, and a closed room's log is final: so the
+  // answer that says closed carries the rest of it, as every answer did before pages (#208).
+  it("answers a closed room with everything past the cursor, and never says more", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < SYNC_PAGE + 5; i++) {
+      await h.store.appendEvent(p.sessionId, {
+        type: "message", fromMemberId: p.joinerMemberId, fromUserId: "u_peer", fromLabel: "peer", payload: { text: `m${i}` }, refId: null,
+      });
+    }
+    await h.store.closeSession(p.sessionId);
+
+    for (const wait_seconds of [0, 1]) {
+      const out = await p.creator.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, wait_seconds,
+      });
+      expect(out.isError, out.text).toBe(false);
+      expect(out.data.session_status).toBe("closed");
+      expect(out.data.more).toBeUndefined();
+      const messages = envelopes(out.data.events).filter((e) => (e.data as { type: string }).type === "message");
+      expect(messages).toHaveLength(SYNC_PAGE + 5);
+    }
+
+    // Nor when a page happens to end exactly where the log does.
+    const head = (await h.store.recentEvents(p.sessionId, 1))[0].cursor;
+    const last = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: head - SYNC_PAGE,
+    });
+    expect(last.data.cursor).toBe(head);
+    expect(last.data.more).toBeUndefined();
   });
 
   it("broadcasts a departure and closes the session when the last member leaves", async () => {

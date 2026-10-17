@@ -4,13 +4,38 @@ import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
-import type { Identity } from "../types.js";
+import type { Identity, SessionEvent } from "../types.js";
 import { findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
 import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
 import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
+
+/**
+ * The most events one poll returns (#208), the earliest after the caller's cursor. A member
+ * far behind reads the log a page per poll, told by `more` to ask again, where it used to
+ * read all of it in one response.
+ *
+ * Fifty, not the panel route's 200 (`MAX_EVENTS_READ`): a page an agent asks for lands whole
+ * in its context, and at about 220 tokens an event, 200 is some 44k tokens in one call. A
+ * bridge pages the rest at poll speed, so the smaller page costs a catch-up a few more calls.
+ */
+export const SYNC_PAGE = 50;
+
+/**
+ * The log since `since` (#208): with `since` half an hour back, every request that can still
+ * be outstanding and everything after it. The log is in time order, so its tail is read,
+ * doubled until it reaches back past `since` or holds the whole log, and trimmed to the window.
+ */
+async function requestWindow(s: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
+  // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
+  // said in the window; a store read that pages backward is the upgrade if that gets large.
+  for (let n = 256; ; n *= 2) {
+    const tail = await s.recentEvents(sessionId, n);
+    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
+  }
+}
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
@@ -25,7 +50,8 @@ Args:
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
   - surface (boolean, default false): also return the room's working surface in full — every item in an untrusted envelope. Use it after a restart, or when you want the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, surface_cursor?, surface?, removed?, outstanding? }
+Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, more?, surface_cursor?, surface?, removed?, outstanding? }
+more: true means this page was full (at most ${SYNC_PAGE} events): call again at once with the returned cursor for the rest.
 surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for all of them.
 A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
 outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
@@ -91,9 +117,9 @@ If a room's creator has removed you, you still get the history up to and includi
       // against a room it cannot read. There is nothing coming: its feed has a
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
-      const read = cut === undefined
-        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000)
-        : (await s.eventsAfter(session_id, since_cursor)).filter((e) => e.cursor <= cut);
+      const page = cut === undefined
+        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE)
+        : (await s.eventsAfter(session_id, since_cursor, SYNC_PAGE)).filter((e) => e.cursor <= cut);
 
       // The status is the room's as it is when this poll answers, not as it was when the
       // call began (#74). `session` is from before the wait, which is up to `wait_seconds`
@@ -118,6 +144,16 @@ If a room's creator has removed you, you still get the history up to and includi
         ? (await s.getSession(session_id)) ?? session
         : session;
       const status = sessionStatus(answering);
+
+      // An answer that says `closed` is never a page (#208). Every released client stops at
+      // `closed` without reading `more` (src/bridge.ts, src/bus-link.ts), and a closed room's
+      // log is final, so the answer carries the rest of it, capped at the cut, as every answer
+      // did before pages: a member far behind when its room closed would otherwise be handed
+      // one page of what it missed and never the rest.
+      const read = status === "closed" && page.length === SYNC_PAGE
+        ? [...page, ...(await s.eventsAfter(session_id, page[page.length - 1].cursor))
+          .filter((e) => cut === undefined || e.cursor <= cut)]
+        : page;
 
       // A removal that committed after `me` was read is not on `me`. The record,
       // `touchMember` and the event read above are separate calls, and on Workers
@@ -163,19 +199,16 @@ If a room's creator has removed you, you still get the history up to and includi
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
       const foreign = all.filter((e) => e.fromMemberId !== member_id);
 
-      // Every event, not the slice. A request made before `since_cursor` is
-      // still outstanding, and the point of this list is what the caller is
-      // WAITING ON rather than what just happened — a slice would show a
-      // request once, on the poll that carried it, and never again.
+      // The last half hour of the log, not the slice. A request made before
+      // `since_cursor` is still outstanding, and the point of this list is what the
+      // caller is WAITING ON rather than what just happened — a slice would show a
+      // request once, on the poll that carried it, and never again. Half an hour is a
+      // request's whole life (ACTION_REQUEST_TTL_MS), so nothing older is waiting (#208).
       //
       // Capped at the cut for the same reason the slice is: a removed member
       // reads its history and nothing after it (#113), and a request that
       // arrived after they were cut is not theirs to answer or to wait on.
       //
-      // The cost is a full read of the log on every poll. That is bounded by
-      // the room's abandonment rather than by anything here, and the fix if it
-      // stops being enough is a stored cursor for the last `action_request`,
-      // which turns this into a bounded tail read.
       // The guard that keeps this off the common path. `lastActionRequestAt` is
       // the only thing read from the record here, and it decides whether the log
       // is worth reading at all — never what any request's state is, which stays
@@ -188,11 +221,10 @@ If a room's creator has removed you, you still get the history up to and includi
       // every watcher, for the whole life of a room that may never use the
       // feature at all.
       //
-      // What is left unbounded is a room with a request inside the last half
-      // hour, which still reads its whole log. That is the set actually using
-      // the feature, and bounding it further needs a floor cursor this stamp
-      // cannot give: a response may sit far behind the newest request, so there
-      // is no single cursor to start from without tracking the oldest OPEN one.
+      // What is left is a room with a request inside the last half hour, which
+      // reads that half hour (`requestWindow`). It read its whole log, from cursor
+      // 0, on every poll for half an hour after each request, until #208.
+      //
       // From the record this poll ANSWERS with, not the one it began with. A long
       // poll holds for up to `wait_seconds`, and the append that wakes it may be
       // the very `action_request` this is deciding about: read off the pre-wait
@@ -216,7 +248,9 @@ If a room's creator has removed you, you still get the history up to and includi
         askedInSlice
         || (stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS);
 
-      const everything = mayHaveOutstanding ? await s.eventsAfter(session_id, 0) : [];
+      const recent = mayHaveOutstanding
+        ? await requestWindow(s, session_id, Date.now() - ACTION_REQUEST_TTL_MS)
+        : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
       // exists because an eviction that committed after `me` was read leaves
@@ -225,7 +259,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // their own removal through this field: every action_request appended after
       // they were cut, with its sender's member id, label and cursor.
       const stopAt = cut ?? removal?.cursor;
-      const visible = stopAt === undefined ? everything : everything.filter((e) => e.cursor <= stopAt);
+      const visible = stopAt === undefined ? recent : recent.filter((e) => e.cursor <= stopAt);
       // A member who has left or been removed is told nothing is waiting on
       // them, because nothing can be: `bellman_send` refuses their handle, so an
       // `action_response` is not a thing they can produce. `mine: false` says
@@ -255,6 +289,11 @@ If a room's creator has removed you, you still get the history up to and includi
       const surfaceBlock = surface ? await readSurface(s, answering, stopAt) : undefined;
       const sfCursor = stopAt === undefined ? surfaceCursor(answering) : (surfaceBlock?.cursor ?? 0);
 
+      // A full page may have more behind it (#208), unless it already reached the cut: a
+      // removed member's feed ends there however long the room goes on. A closed room's
+      // answer is never a page (above).
+      const more = status !== "closed" && read.length === SYNC_PAGE && (stopAt === undefined || cursor < stopAt);
+
       return ok(
         {
           events: foreign.map((e) =>
@@ -262,6 +301,9 @@ If a room's creator has removed you, you still get the history up to and includi
           ),
           cursor,
           session_status: status,
+          // Only when true, as `removed` is below: a poll that read everything has the shape
+          // it always had.
+          ...(more ? { more: true as const } : {}),
           // Only when there are any, as `replayed` and `ambient` are: a client
           // that has never heard of it keeps working, and a quiet room's poll
           // does not grow a field saying nothing is pending.
@@ -304,7 +346,13 @@ If a room's creator has removed you, you still get the history up to and includi
           // record can say the second. A genuine eviction loses nothing by the
           // wait: this poll is still capped by the event, and the next poll
           // reads the committed cursor and sets the flag.
-          ...(cut !== undefined ? { removed: true as const } : {}),
+          //
+          // And never beside `more` (#208). A released client stops at this flag
+          // without reading `more`, so on a page short of the cut it would end the
+          // feed with the rest of the history unread, the `member_evicted` that says
+          // why among it. It rides the page that reaches the cut, and every poll
+          // after, which is still every poll from past it.
+          ...(cut !== undefined && !more ? { removed: true as const } : {}),
           // Last, after the fields that say whether the feed has ended: `removed` is
           // the one field a client must never miss, and `surface` is the one block
           // that can be large (64 items of up to 8,000 characters), so a read that

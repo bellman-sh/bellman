@@ -4,7 +4,7 @@ import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { auditRoutes } from "./http/audit.js";
 import { handleRoutes } from "./http/handles.js";
-import { moderationRoutes } from "./http/moderation.js";
+import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
@@ -17,7 +17,7 @@ import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
-import { allowedOrigin, parsePanelOrigins } from "./oauth/browser.js";
+import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
@@ -76,9 +76,9 @@ export interface WorkerEnv extends BellmanEnv {
    * Comma-separated origins public room pages are served from, e.g.
    * "https://bellman.sh" (the dash's Worker answers `/r/*` there). Parsed as
    * BELLMAN_PANEL_ORIGINS is. Honoured by `POST /rooms/:id/reports` (its CORS,
-   * its preflight and its CSRF check) and by the sign-in return, and by nothing
-   * else: every other signed-in route answers the panel's origins alone.
-   * Unset grants nothing.
+   * its preflight, its CSRF check and the suspension gate's refusal of it) and by
+   * the sign-in return, and by nothing else: every other signed-in route answers
+   * the panel's origins alone. Unset grants nothing.
    */
   BELLMAN_PUBLIC_PAGE_ORIGINS?: string;
   /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
@@ -229,10 +229,12 @@ export default {
     // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
     // session is touched once. `routeGate` asks first, and refuses a suspended account before a module reads
     // or writes anything as it (plan ruling R8). /public takes no credential, so it has no gate. A throw in
-    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it.
+    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it. The CORS
+    // is the routes' own rule (`routeOrigin`): a suspended reader's report from a public room page is refused with that
+    // page's grant, so the page can read why.
     const who = once(() => roomCaller(request, env, oauth));
     const routeGate = async (): Promise<Response | undefined> => {
-      const origin = allowedOrigin(request, oauth?.panelOrigins ?? []);
+      const origin = routeOrigin(request, oauth?.panelOrigins ?? [], oauth?.publicPageOrigins ?? []);
       try {
         const them = await who();
         return them && (await suspended(them.identity.userId)) ? problem(403, "suspended", SUSPENDED, origin) : undefined;
@@ -272,7 +274,8 @@ export default {
     // serves no room. The moderation routes are asked first: they answer the paths
     // under /rooms/:id/bans and /rooms/:id/reports, and leave every other path to
     // the room routes. Both report routes are behind the suspension gate here. They
-    // alone take the public room pages' origins, for the report write.
+    // alone take the public room pages' origins, for the report write, and the gate
+    // refuses that write with the same grant.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;

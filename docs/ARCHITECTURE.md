@@ -1193,6 +1193,9 @@ loud:
   otherwise POST here with the cookie attached. Every cookie-authenticated
   mutation must carry an allowlisted `Origin`; bearer callers are exempt, and
   the method guard and the CSRF check both run ahead of any deletion.
+  `bellman.sh` is allowlisted (`BELLMAN_PUBLIC_PAGE_ORIGINS`) for one mutation,
+  filing a report, and for the sign-in return; every other write answers the
+  panel's origins alone.
 
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room

@@ -3,14 +3,17 @@
  * unread, which requests wait on the person, how a room is named, and the bell. The mod draws and
  * reads the door; this file decides what the door's events come to.
  *
- * Every string a peer controls (label, room name, message, request) leaves here through `cleanText`,
- * so a toast, a picker entry or a title never carries an escape sequence or a line break.
+ * Every string a peer controls (label, room name, message) leaves here through `cleanText`, so a toast,
+ * a picker entry or a title never carries an escape sequence or a line break; what an action request
+ * asks leaves through `cleanBlock`, every character of it shown (`drawingOf`).
  *
  * Runtime-free on purpose, like `door-protocol.ts`: esbuild bundles it into the mod. Its imports are
- * that file and one constant from `action-state.ts`, which itself imports only a type.
+ * that file, one constant from `action-state.ts`, which itself imports only a type, and the payload
+ * bounds from `payload.ts`, which imports nothing.
  */
 import { ACTION_REQUEST_TTL_MS } from "../action-state.js";
-import { cleanText, eventLine, type DoorEvent, type DoorStatus } from "../door-protocol.js";
+import { cleanBlock, cleanText, eventLine, type DoorEvent, type DoorStatus } from "../door-protocol.js";
+import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH } from "../payload.js";
 
 /** Columns the sidebar asks for when the pane docks. */
 export const SIDEBAR_COLUMNS = 22;
@@ -142,9 +145,45 @@ export interface PendingRequest {
   /** The request's cursor: the `ref_id` an answer carries. */
   cursor: number;
   from_label: string;
-  text: string;
+  /** What the request asks, whole, as the Approve tab draws it (`drawingOf`). */
+  drawing: string;
+  /** The drawing was cut all the same, so it is not the whole request: the person may only deny it. */
+  cut: boolean;
   /** Epoch milliseconds. */
   expires_at: number;
+}
+
+/**
+ * The longest a request's drawing runs, past what any payload `bellman_send` accepts comes to. A payload is at most
+ * `MAX_PAYLOAD_CHARS` serialized and `MAX_PAYLOAD_DEPTH` deep. Printed two spaces to a level, each bracket and comma
+ * of its compact JSON gains a line break and at most 2 × MAX_PAYLOAD_DEPTH spaces, and each colon a space, so it runs
+ * to at most 2 × (MAX_PAYLOAD_DEPTH + 1) characters for each compact one; a character spelled out (`spelledOut`)
+ * runs to eight at most for each it stood for. So `cleanBlock` cuts nothing the server accepts.
+ */
+export const REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1);
+
+/**
+ * A peer's text as the person approving it reads it: every character Claude reads is there. One that draws nothing or
+ * acts on the terminal (a control, the escape a sequence starts with, a direction override, a tag, a private or
+ * unassigned code point, a line or paragraph separator) is written out as its code point, `\u{1b}`, where
+ * `cleanBlock` would drop it, and with it the text a sequence carries or a run of tags spells, which Claude would read
+ * and nobody would see. A line break stays one, a carriage return before it goes, and the zero-width non-joiner and
+ * joiner stay, as they join what is drawn on either side.
+ */
+const spelledOut = (text: string): string =>
+  text.replace(/\r\n/g, "\n").replace(/(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+
+/**
+ * What an action request asks, as the Approve tab draws it: its payload's `text` when that is the payload's one key
+ * and a string, else the whole payload as JSON, two spaces to a level, since Claude reads every field of it and the
+ * person approves what Claude reads. Spelled out, then cleaned with `cleanBlock` at `REQUEST_DRAWN_MAX`, which cuts
+ * nothing the server accepts; `cut` says it was cut all the same.
+ */
+export function drawingOf(payload: unknown): { drawing: string; cut: boolean } {
+  const keys = typeof payload === "object" && payload !== null && !Array.isArray(payload) ? Object.keys(payload) : [];
+  const text = keys.length === 1 && keys[0] === "text" ? (payload as { text: unknown }).text : undefined;
+  const whole = spelledOut(typeof text === "string" ? text : JSON.stringify(payload ?? null, null, 2));
+  return { drawing: cleanBlock(whole, REQUEST_DRAWN_MAX), cut: whole.length > REQUEST_DRAWN_MAX };
 }
 
 /**
@@ -173,7 +212,7 @@ export function pendingRequests(
       session_id: e.session_id,
       cursor: e.cursor,
       from_label: cleanText(e.from_label, NAME_MAX),
-      text: eventLine(e),
+      ...drawingOf(e.payload),
       expires_at: expiresAt,
     });
   }

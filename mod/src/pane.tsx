@@ -1,8 +1,9 @@
 /**
  * The room pane at full width (spec D5): a header, four tabs, and the tab shown. Log is the room's history, newest
  * last; Canvas its surface, drawn by kind; Members each member with role, presence and beat; Approve the action
- * requests waiting on the person, each with Approve and Deny, which the Log's rows carry too. A request the person
- * approved keeps its place, and reads that it waits on Claude where the buttons were.
+ * requests waiting on the person, each drawn whole, every field Claude reads, with Approve and Deny after it. The Log's
+ * row of a waiting request leads there with Review, so a request is approved only where it is seen in full. A request
+ * the person approved keeps its place, and reads that it waits on Claude where the buttons were.
  *
  * Every string a peer controls reaches the screen cleaned: through `cleanText` or `cleanBlock`, through what
  * `pendingRequests` and `roomLabel` (src/mod/view.ts) cleaned already, and a canvas text's Markdown through
@@ -19,7 +20,6 @@ import { decline, readCanvas, seatIn } from "./doors";
 import { personActed } from "./person";
 import { approved, canvas, doors, logs, pending, rooms, tab } from "./state";
 import type { Pieces, Shown } from "./view";
-import { isTurnRunning } from "./waking";
 
 /** A room's id as the server makes one (`qs_…`), and nothing a peer could slip a line break or an instruction into. */
 const ROOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -34,7 +34,7 @@ function serverMade(sessionId: string, cursor: number): void {
 /** What Claude is told when the person approves a request: fixed text around the room and the request's cursor. */
 export function approvedText(sessionId: string, cursor: number): string {
   serverMade(sessionId, cursor);
-  return `Your human approved Bellman action request ${cursor} in room ${sessionId}. Carry it out, then answer it with bellman_send: type "action_response", ref_id "${cursor}", payload { approved: true, result }.`;
+  return `Your human approved Bellman action request ${cursor} in room ${sessionId}. Carry it out unless you already have, then answer it with bellman_send: type "action_response", ref_id "${cursor}", payload { approved: true, result }.`;
 }
 
 /** What Claude is told once the mod has answered a request the person declined. */
@@ -62,10 +62,11 @@ const throwIfRefused = (result: { deny?: string; drop?: string }): void => {
 };
 
 /**
- * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told once: by
- * a row in the turn that is running, or else by a prompt of the mod's own that starts one. An action request is not
- * idempotent, so a press on one already approved tells Claude nothing more. When Claude cannot be told, the approval
- * is taken back: the request draws its buttons again, and the gate stays shut for it.
+ * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told once, by
+ * a prompt of the mod's own, whether a turn is running or not. A plugin's prompt runs once the session is idle, so a
+ * running turn has it next; a row appended to that turn would only be stored, with nothing to make the turn read it.
+ * An action request is not idempotent, so a press on one already approved tells Claude nothing more. When Claude
+ * cannot be told, the approval is taken back: the request draws its buttons again, and the gate stays shut for it.
  */
 async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = approvedText(r.session_id, r.cursor);
@@ -77,7 +78,11 @@ async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
     return first ? [...keys, key] : keys;
   });
   if (!first) return;
-  const takeBack = async (error: unknown): Promise<void> => {
+  try {
+    // It resolves once the prompt has entered, or been queued behind the turn that is running. The framing is the
+    // plugin's own, never `asUser`.
+    throwIfRefused(await $.prompt.submit({ text }));
+  } catch (error) {
     $.ui.log(`bellman-mod: the approval was not told to Claude: ${message(error)}`, { to: "debug" });
     try {
       await update($, approved, (keys) => keys.filter((k) => k !== key));
@@ -85,23 +90,14 @@ async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
     } catch (again) {
       $.ui.log(`bellman-mod: the approval was not taken back: ${message(again)}`, { to: "debug" });
     }
-  };
-  try {
-    if (isTurnRunning()) {
-      throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
-    } else {
-      // Not awaited: it resolves when the turn it queues starts. The framing is the plugin's own, never `asUser`.
-      $.prompt.submit({ text }).then(throwIfRefused).catch(takeBack);
-    }
-  } catch (error) {
-    await takeBack(error);
   }
 }
 
 /**
  * Deny: the mod answers the room itself, `approved: false`, through the door of the bridge that lists the seat
  * (`decline`, doors.ts): no tool call of Claude Code's, which would be refused from a press, and none the gate sees.
- * Claude is told only once the room has been answered, and the person is told when it was not.
+ * Claude is told only once the room has been answered, and the person is told when it was not, and when Claude could
+ * not be told.
  */
 async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = declinedText(r.session_id, r.cursor);
@@ -121,7 +117,12 @@ async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
   }
   // Answered: it waits on nobody, though the log will not say so until its next read.
   await update($, pending, (was) => ({ ...was, [r.session_id]: (was[r.session_id] ?? []).filter((p) => p.cursor !== r.cursor) }));
-  await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
+  try {
+    throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
+  } catch (error) {
+    $.ui.log(`bellman-mod: the decline was not told to Claude: ${message(error)}`, { to: "debug" });
+    $.ui.toast("Bellman: the request was declined, but Claude was not told. Tell Claude not to carry it out.");
+  }
 }
 
 async function turnTo($: EngineInterface, to: Tab): Promise<void> {
@@ -228,6 +229,15 @@ function drawItem(ui: Elements["terminal"], item: CanvasItem): RenderElement | n
 const CHROME_ROWS = 2;
 
 /**
+ * How much of the Approve tab's drawings it draws whole, all told. The engine draws the first 100,000 characters of a
+ * tree's texts and no Button past them, so a drawing that runs past would take its own buttons and those of every
+ * request after it; the rest of the 100,000 is the header's, the tabs' and each request's own line and buttons.
+ * ponytail: a fixed share; a tab of hundreds of requests runs past it all the same, and then what the engine cuts has
+ * no button, so nothing undrawn is approved.
+ */
+const DRAWINGS_MAX = 90_000;
+
+/**
  * The room pane drawn wide (view.tsx's `Pane` hook, at `COMPACT_BELOW` body columns or more), from what the band
  * and the sidebar show (`s`, `p`) and what the reads keep in `$.state`. Every press is the person's, so each says so
  * first.
@@ -250,14 +260,11 @@ export async function drawPane(
     personActed();
     work().catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
   };
-  // A request the person approved waits on Claude, and has no buttons to press again.
-  const answers = (r: PendingRequest) =>
-    given.includes(keyOf(r))
-      ? [<Text dimColor>approved · waiting for Claude</Text>]
-      : [
-          <Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />,
-          <Button key={`deny-${r.cursor}`} label="Deny" onPress={act(() => deny($, r))} />,
-        ];
+  // A request the person approved waits on Claude, and has no button to press again: not Approve, which would tell
+  // Claude twice, and not Deny, which could tell the room "declined" after Claude carried it out.
+  const waitsOnClaude = (r: PendingRequest) => given.includes(keyOf(r));
+  const onClaude = () => <Text dimColor>approved · waiting for Claude</Text>;
+  const denyIt = (r: PendingRequest) => <Button key={`deny-${r.cursor}`} label="Deny" onPress={act(() => deny($, r))} />;
   const tabs: [Tab, string][] = [
     ["log", "Log"],
     ["canvas", "Canvas"],
@@ -274,10 +281,12 @@ export async function drawPane(
         ? [<Text dimColor>Nothing in the room's log yet.</Text>]
         : log.slice(-Math.max(1, site.bodyRows - CHROME_ROWS)).map((e) => {
             const r = open.get(e.cursor);
+            // A row says only a line of what a request asks, so it is answered on the Approve tab, where all of it shows.
             return (
               <Box columnGap={1}>
                 <Text wrap="truncate-end">{`${clock(e.at)} ${cleanText(e.from_label, NAME_MAX)} ${eventLine(e)}`}</Text>
-                {r !== undefined && answers(r)}
+                {r !== undefined &&
+                  (waitsOnClaude(r) ? onClaude() : <Button key={`review-${r.cursor}`} label="Review" onPress={act(() => turnTo($, "approve"))} />)}
               </Box>
             );
           });
@@ -305,18 +314,31 @@ export async function drawPane(
     });
   } else {
     const now = await $.clock.now();
+    // Each request drawn whole, as plain text and not Markdown, since what is drawn is what Claude reads, and its
+    // buttons after it. One whose drawing was cut, or would not fit in what is left of `DRAWINGS_MAX`, is drawn for
+    // its Deny alone.
+    let left = DRAWINGS_MAX;
     body =
       waiting.length === 0
         ? [<Text dimColor>Nothing waits on you.</Text>]
-        : waiting.map((r) => (
-            <Box flexDirection="column">
-              <Text>{`${r.from_label} asks: ${r.text}`}</Text>
-              <Box columnGap={1}>
-                <Text dimColor>{`${Math.max(0, Math.ceil((r.expires_at - now) / 60_000))} min left`}</Text>
-                {answers(r)}
+        : waiting.map((r) => {
+            const whole = !r.cut && r.drawing.length <= left;
+            if (whole) left -= r.drawing.length;
+            const minutes = Math.max(0, Math.ceil((r.expires_at - now) / 60_000));
+            return (
+              <Box flexDirection="column">
+                <Text wrap="truncate-end">{`${r.from_label} asks · ${minutes} min left`}</Text>
+                {whole && <Text wrap="wrap">{r.drawing}</Text>}
+                <Box columnGap={1}>
+                  {waitsOnClaude(r)
+                    ? onClaude()
+                    : whole
+                      ? [<Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />, denyIt(r)]
+                      : [<Text dimColor>too long to show in full here, so it can only be denied</Text>, denyIt(r)]}
+                </Box>
               </Box>
-            </Box>
-          ));
+            );
+          });
   }
 
   return (

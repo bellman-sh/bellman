@@ -88,8 +88,11 @@ export type RoomView = {
   last_event: { cursor: number; type: string; at: string } | null;
 };
 
-/** An action request waiting on the person: `PendingRequest` in src/mod/view.ts. */
-export type PendingRequest = { session_id: string; cursor: number; from_label: string; text: string; expires_at: number };
+/**
+ * An action request waiting on the person: `PendingRequest` in src/mod/view.ts. `drawing` is what it asks, whole, as the
+ * Approve tab draws it, and `cut` says it was cut all the same, so it may only be denied.
+ */
+export type PendingRequest = { session_id: string; cursor: number; from_label: string; drawing: string; cut: boolean; expires_at: number };
 
 /** Where the room shows: the docked sidebar, or the band above the prompt (`Layout` in src/mod/view.ts). */
 export type Layout = "sidebar" | "band";

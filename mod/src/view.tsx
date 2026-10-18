@@ -70,14 +70,19 @@ function statusLine(list: readonly DoorView[]): string | undefined {
 }
 
 /**
- * Opens the room pane on `to`, wide. The person's press is behind every call, so it is placed at any width, but only
- * while the engine reads the open as the press's: an `$.ui.open` made after an await is unasked (L13), and a pane the
- * person has docked then ignores it. So the open is called before the first await, the tab is written while it is
- * under way (the pane's drawing reads the tab, so it redraws when the write lands), and both are awaited together.
+ * Opens the room pane on `to`, wide, showing the room `pick` when the press names one. The person's press is behind
+ * every call, so it is placed at any width, but only while the engine reads the open as the press's: an `$.ui.open`
+ * made after an await is unasked (L13), and a pane the person has docked then ignores it. So the open is called before
+ * the first await, the tab and the room are written while it is under way (the pane's drawing reads them, so it
+ * redraws when the writes land), and all are awaited together.
  */
-export async function openPane($: EngineInterface, to: Tab): Promise<void> {
+export async function openPane($: EngineInterface, to: Tab, pick?: string): Promise<void> {
   refused = false;
-  await Promise.all([$.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }), update($, tab, () => to)]);
+  await Promise.all([
+    $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }),
+    update($, tab, () => to),
+    ...(pick === undefined ? [] : [update($, room, () => pick)]),
+  ]);
   if (to === "canvas") await readCanvas($);
 }
 
@@ -133,8 +138,10 @@ export type Shown = {
   about: string;
   peers: string[];
   unread: number;
-  /** The action requests waiting on the person: the pending ones they have not approved. */
+  /** The action requests waiting on the person in every room of the session's seats: the pending ones not approved. */
   approve: number;
+  /** The room of the oldest of those, which the Approve count opens; null while none waits. */
+  approveIn: string | null;
   paused: boolean;
 };
 
@@ -146,6 +153,10 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
   const view = views.find((r) => r.session_id === picked);
   const mine = seats.filter((s) => s.session_id === picked);
   const preset = view?.room.preset ? cleanText(view.room.preset, NAME_MAX) : "";
+  // Every room's requests that wait on the person, the oldest first: a request in a room not in view counts too.
+  const held = await read($, pending);
+  const given = await read($, approved);
+  const waiting = ids.flatMap((id) => awaitingPerson(held[id] ?? [], given)).sort((a, b) => a.expires_at - b.expires_at);
   return {
     retrying: seats.some((s) => s.retrying),
     options: ids.map((id) => ({ value: id, label: labelOf(id, views) })),
@@ -158,7 +169,8 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
       list.flatMap((d) => d.status?.recent ?? []),
       { sessionId: picked, seatMemberId: mine[0]!.member_id, openedThrough: (await read($, openedThrough))[picked] ?? -1 },
     ),
-    approve: awaitingPerson((await read($, pending))[picked] ?? [], await read($, approved)).length,
+    approve: waiting.length,
+    approveIn: waiting[0]?.session_id ?? null,
     paused: (await read($, wake)).paused,
   };
 }
@@ -169,9 +181,9 @@ export type Pieces = ReturnType<typeof pieces>;
 /** The pieces the band, the sidebar and the room pane lay out differently. Every press is the person's, so each says so first. */
 function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
   const { Button, Select, Text } = ui;
-  const press = (to: Tab) => () => {
+  const press = (to: Tab, pick?: string) => () => {
     personActed();
-    void openPane($, to);
+    void openPane($, to, pick);
   };
   const pick = (value: string) => {
     personActed();
@@ -208,7 +220,8 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
       // first row, a plain one, it drew "b: " and pushed that row out of line with the other three (L7).
       <Button key="open-log" label="Log" hotkey="b" onPress={press("log")} />,
       <Button key="open-canvas" label="Canvas" onPress={press("canvas")} />,
-      s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve")} />,
+      // Every room's count, and it opens the room that has waited longest.
+      s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve", s.approveIn ?? undefined)} />,
     ],
     peers: s.peers.map((peer) => <Text wrap="truncate-end">{peer}</Text>),
     unread: s.unread > 0 && <Text color="claude">{`${s.unread} new`}</Text>,

@@ -12,7 +12,7 @@ Phase 2 of joining: after your human has reviewed the preview from bellman_conne
 Args:  
   - connect_token: from bellman_connect (single-use, 10 minute TTL)  
   - brief: YOUR structured context summary — this is what crosses to the room  
-  - capabilities: what you allow peers to do to you (default: read_context, receive_messages)  
+  - capabilities: what you allow peers to do to you (default: read_context, receive_messages). read_context lets peers read your brief; it is on by default, and without it only you see your brief.  
 
 You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.  
 

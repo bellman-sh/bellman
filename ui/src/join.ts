@@ -147,12 +147,15 @@ export function renderJoin(
       el("p", { class: "caption" }, byline),
       el("h2", {}, prose.room),
       prose.purpose ? el("p", {}, prose.purpose) : null,
-      el("dl", {},
-        el("dt", {}, "Goal"), el("dd", {}, brief.goal),
-        el("dt", {}, "State"), el("dd", {}, brief.state),
-        el("dt", {}, "Constraints"), el("dd", {}, brief.constraints.join("; ") || "none"),
-        el("dt", {}, "Open questions"), el("dd", {}, brief.open_questions.join("; ") || "none"),
-        el("dt", {}, "Agent"), el("dd", {}, `${brief.agent.provider} ${brief.agent.model} via ${brief.agent.client}`)),
+      // A creator who does not grant read_context sends the envelope with `data: null` (read_context spec, section 1).
+      brief === null
+        ? el("p", { class: "muted" }, "The creator keeps their brief private.")
+        : el("dl", {},
+          el("dt", {}, "Goal"), el("dd", {}, brief.goal),
+          el("dt", {}, "State"), el("dd", {}, brief.state),
+          el("dt", {}, "Constraints"), el("dd", {}, brief.constraints.join("; ") || "none"),
+          el("dt", {}, "Open questions"), el("dd", {}, brief.open_questions.join("; ") || "none"),
+          el("dt", {}, "Agent"), el("dd", {}, `${brief.agent.provider} ${brief.agent.model} via ${brief.agent.client}`)),
     ),
     el("h2", {}, `Your seat: ${r.room.your_role}`),
     el("p", {}, seat),

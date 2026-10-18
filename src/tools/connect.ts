@@ -4,6 +4,7 @@ import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
+import { seesBrief } from "../public-event.js";
 import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
@@ -93,9 +94,16 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         return fail(fullMessage(session.manifest));
       }
       // The room's first seat, which the record keeps whether or not it is still in the room
-      // (ADR 0019), and its brief from its row beside the room (ADR 0018).
+      // (ADR 0019), and its brief from its row beside the room (ADR 0018). Whether this previewer may
+      // read the brief is the creator's current grant, from their member row and not from
+      // `session.members`: that holds only the members in the room now, and a creator who has left
+      // keeps their last grant (read_context design, D2). A brief the creator keeps is previewed with
+      // `data: null`, the shape a creator with no brief row already gets (plan ruling R8).
       const creator = session.creator;
-      const creatorBrief = (await s.getBriefs(session.id, [creator.memberId]))[creator.memberId] ?? null;
+      const creatorRow = await s.getMember(session.id, creator.memberId);
+      const creatorBrief = creatorRow && seesBrief(creatorRow, identity.userId)
+        ? ((await s.getBriefs(session.id, [creator.memberId]))[creator.memberId] ?? null)
+        : null;
       const token = generateConnectToken();
       await s.putPendingConnect({
         token,

@@ -5,9 +5,11 @@
  * grant theirs unless a case says otherwise.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { brief, manifestFixture, member, swarmSession } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Outcome, type Peer } from "../helpers/harness.js";
+import { HOST_MEMBER_ID } from "../../src/host.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
+import { BRIEFS_ON_JOIN } from "../../src/tools/confirm.js";
 import type { Capability } from "../../src/types.js";
 
 let h: Harness;
@@ -174,5 +176,96 @@ describe("the event paths a tool serves (read_context spec, section 3)", () => {
     expect(shown(whole).map((e) => e.type)).toEqual(["member_joined", "member_joined", "message"]);
     expect(reads).toHaveBeenCalledTimes(1);
     expect(reads.mock.calls[0][1]).toEqual([quiet.memberId, other.memberId]);
+  });
+});
+
+describe("the briefs read directly (read_context spec, section 1)", () => {
+  it("leaves a member's brief out of what bellman_confirm hands a later joiner, who is told one was left out", async () => {
+    const r = await room();
+    const quiet = await r.join(DEV_KEY.peer, KEEPS);
+    const later = await r.join(DEV_KEY.outsider, GRANTS, "the outsider's");
+    expect(envelopes(later.confirmed.data.briefs).map((b) => b.origin.memberId)).toEqual([r.creatorMemberId]);
+    expect(later.confirmed.data.briefs_omitted).toBe(1);
+    expect(later.confirmed.text).not.toContain("kept to myself");
+
+    // Their own account's next handle is handed it (D3, R6).
+    const again = await r.join(DEV_KEY.peer, KEEPS);
+    expect(envelopes(again.confirmed.data.briefs).map((b) => b.origin.memberId)).toContain(quiet.memberId);
+  });
+
+  /** Plan ruling R7: a brief its author keeps is left out before the cut, so it takes none of the places. */
+  it("fills the places with briefs it can hand, so a kept brief takes none of them, and counts the kept ones as omitted (R7)", async () => {
+    const now = Date.now();
+    // m_00 was heard from last, and each member after it a second earlier. The five heard from most recently keep their briefs.
+    const members = Array.from({ length: 40 }, (_, i) => member({
+      memberId: `m_${String(i).padStart(2, "0")}`,
+      userId: `u_member_${i}`,
+      roomRole: "peer_b",
+      capabilities: i < 5 ? KEEPS : GRANTS,
+      brief: brief({ goal: `member ${i}` }),
+      joinedAt: now - 100_000,
+      lastSeenAt: now - i * 1000,
+    }));
+    await h.store.createSession(swarmSession({ members }));
+
+    const joiner = await h.connect(DEV_KEY.outsider);
+    const preview = await joiner.call("bellman_connect", { join_code: "BELL-TEST-01" });
+    expect(preview.isError, preview.text).toBe(false);
+    const joined = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
+    expect(joined.isError, joined.text).toBe(false);
+
+    expect(envelopes(joined.data.briefs).map((b) => b.origin.memberId))
+      .toEqual(members.slice(5, 5 + BRIEFS_ON_JOIN).map((m) => m.memberId));
+    expect(joined.data.briefs_omitted).toBe(members.length - BRIEFS_ON_JOIN);
+  });
+
+  it("leaves a creator's brief out of bellman_connect's preview, which their own account still reads", async () => {
+    const r = await room({ creatorCapabilities: KEEPS });
+    const preview = await (await h.connect(DEV_KEY.peer)).call("bellman_connect", { join_code: r.code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect(preview.data.creator_brief).toMatchObject({ trust: "untrusted", origin: { memberId: r.creatorMemberId }, data: null });
+    expect(preview.text).not.toContain("the creator's");
+
+    const own = await (await h.connect(DEV_KEY.jesse)).call("bellman_connect", { join_code: r.code });
+    expect((own.data.creator_brief as { data: { goal: string } }).data.goal).toBe("the creator's");
+  });
+
+  /** Review Focus 5: a creator who left is read by row (ADR 0019), not off the room's record. */
+  it("keeps a creator's last grant after they leave, so a granted brief still shows (D2)", async () => {
+    const r = await room();
+    await r.join(DEV_KEY.outsider, GRANTS, "the outsider's");
+    const left = await r.creator.call("bellman_leave", { session_id: r.sessionId, member_id: r.creatorMemberId });
+    expect(left.isError, left.text).toBe(false);
+    const preview = await (await h.connect(DEV_KEY.peer)).call("bellman_connect", { join_code: r.code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect((preview.data.creator_brief as { data: { goal: string } | null }).data?.goal).toBe("the creator's");
+  });
+});
+
+/** Review Focus 1, and ruling R4: a new hosted seat grants read_context (the owner's choice). */
+describe("a hosted room", () => {
+  it("hands a joiner the hosted seat's brief, because the seat grants read_context", async () => {
+    const creator = await h.connectAs({ userId: "u_max", orgId: null, plan: "max", role: "member", label: "max" });
+    const started = await creator.call("bellman_start", {
+      manifest: { room: "the square", purpose: "what people build", preset: "social" }, brief: brief({ goal: "the creator's" }),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+    const joined = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
+    expect(joined.isError, joined.text).toBe(false);
+    expect(envelopes(joined.data.briefs).map((b) => b.origin.memberId)).toContain(HOST_MEMBER_ID);
+    expect((await h.store.getMember(sessionId, HOST_MEMBER_ID))?.capabilities).toEqual(["read_context", "receive_messages"]);
+  });
+});
+
+describe("the tool text (read_context spec, section 2)", () => {
+  it("says on bellman_start and bellman_confirm what read_context does", async () => {
+    const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+    for (const name of ["bellman_start", "bellman_confirm"]) {
+      expect(tools.find((t) => t.name === name)!.description, name)
+        .toContain("read_context lets peers read your brief; it is on by default, and without it only you see your brief.");
+    }
   });
 });

@@ -29,8 +29,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
    `member_joined` still goes out, so peers know who joined, but its `payload.brief` is
    null unless the joiner grants `read_context` or the reader is the joiner. Every other
    event is unchanged. The joiner's `payload.member` keeps its `agent` and `capabilities`,
-   which the roster already shows, and has never held the brief. `seesBrief` is the one
-   test of "grants it, or is the author's account", and the two direct reads use it too.
+   which the roster already shows, and has never held the brief. The brief's `agent` still
+   travels without the grant, on the roster, on `member_joined`'s member block and on
+   `brief_exchanged` audit rows, and that is intended. `seesBrief` is the one test of
+   "grants it, or is the author's account", and the two direct reads use it too.
 3. **The author's current grant decides (D2, R11, R13).** It is the grant on the member row
    of the handle that wrote the event, as it stands at delivery. A member who left keeps
    their last grant, so the row is read by id (`getMember`, `getMembers`) and not from the
@@ -98,12 +100,15 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     of `bellman_confirm` says `read_context lets peers read your brief; it is on by default,
     and without it only you see your brief.` No tool was added, so `extension/manifest.json`
     is unchanged.
-15. **A test lists the paths (R14).** `tests/delivery-paths.test.ts` names every module that
-    calls `publicEvent`, that reads a store's events (`eventsAfter`, `waitForEvents`,
-    `recentEvents`, `eventAt`) or that calls `getBriefs`, each with what it serves, and
-    fails when a module gains or loses such a call. The spec names the first predicate
-    only. The hosted seat and `bellman_rooms` call no `publicEvent`, and a guard on that
-    name alone would not see a path like them.
+15. **A test lists the paths and counts their calls (R14).** `tests/delivery-paths.test.ts`
+    names every module that calls `publicEvent`, that reads a store's events (`eventsAfter`,
+    `waitForEvents`, `recentEvents`, `eventAt`) or that calls `getBriefs`, each with how many
+    such calls it holds and what they serve. It fails when a module gains or loses one: a
+    new module until it is listed, and a listed module until its count changes. The count
+    moves with a call and does not say whether the call applies the rule; the text beside it
+    is what a reviewer holds the call to. The spec names the first predicate only. The
+    hosted seat and `bellman_rooms` call no `publicEvent`, and a guard on that name alone
+    would not see a path like them.
 
 ## Consequences
 
@@ -117,8 +122,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
   never on the handle that wrote it, and never on their own room socket (R1, R2).
 - A socket upgrade lists every member row of its room (R12).
 - A new path that reads events or briefs is listed in `tests/delivery-paths.test.ts` before
-  it ships.
+  it ships, and a new call in a module already listed changes that module's count there.
 - Nothing stored changed shape, so a rollback is a revert.
 - The quotes work resolves a quote against events as the quoter may see them (R19). It lets a
   member quote a `brief_update` and copies the quoted characters onto the quoting event, so
-  without that check a quote of a private update would carry the brief to every peer.
+  without that check a quote of a private update would carry the brief to every peer. Its
+  read of each quote inside `bellman_send` is a new call in a listed module, so it fails the
+  guard until that module's count and description change.

@@ -1,7 +1,7 @@
 # The Claude Code mod. Design
 
 **Date:** 2026-10-16
-**Status:** approved in conversation; implementation plan to follow
+**Status:** built on the branch `mcfearsome/mods`, with the branch review's fixes; the decisions below say what the code does, and the implementation plan (`docs/superpowers/plans/2026-10-16-claude-code-mod.md`) is its history
 **Builds on:** the room delivery spec (`2026-09-29-room-delivery-design.md`), the MCP Apps UI spec (`2026-10-06-mcp-apps-ui-design.md`, D3 and D4), the MCP Apps canvas spec (`2026-10-08-mcp-apps-canvas-design.md`, D1), and attention (#111, `src/attention.ts`)
 **Citations:** Bellman by symbol, of the code as it stood when this was written. Claude Code's mod API by its names in the declaration file Claude Code 2.1.301 writes (`claude-code.d.ts`: `PaneOpenArgs`, `UiOpenResult` and the rest). That API is early access and changes between releases. The declaration file of the build in hand is the authority, and every claim here about the API is read from that file, not yet tested.
 
@@ -134,9 +134,10 @@ room shown first is the one with the latest activity.
   restart or `--resume` a bridge watches nothing until Claude next uses the
   room, and the view says the session is not in a room until then.
 - **Connection:** connected, reconnecting, signed out, no bridge (the mod
-  cannot reach the bridge), or not in a room. The bridge reports it (D9). With
-  no seat, no sidebar and no band: a dim status line entry
-  (`$.ui.status`) says Bellman is not in a room.
+  cannot reach the bridge), or not in a room. The bridge reports it (D9). A
+  room whose door cannot be read keeps its place and reads reconnecting until
+  the door answers again (D9). With no seat, no sidebar and no band: a dim
+  status line entry (`$.ui.status`) says Bellman is not in a room.
 - **Members and presence:** `bellman_rooms` (each room's `members[]` with
   `room_role`, `presence` and `beat`; `status`; `active_members`;
   `max_members`; `last_event`), read through the door's `GET /rooms` (D9): the
@@ -148,8 +149,8 @@ room shown first is the one with the latest activity.
 - **Unread:** new since the person last opened that room's Log (MCP Apps UI
   spec D4: the server keeps no read state).
 - **Pending approvals:** action requests in the room that the person's seat
-  may act on (it granted `request_actions`), neither answered, declined nor
-  expired (30 minutes, per `bellman_send`'s description).
+  may answer (a seat whose role holds `respond_actions`), neither answered,
+  declined nor expired (30 minutes, per `bellman_send`'s description).
 
 **D5. The room pane: Log, Canvas, Members, Approve.** One pane id, with tabs
 the mod draws. It opens on Log, or on Approve when opened from an approval
@@ -161,8 +162,9 @@ count.
   page, then what arrives after it, the newest 500 events kept and as many rows
   drawn as fit. Paging back past those is not built. A row is the time, the
   sender's label and the event drawn by type: a message's text, a canvas edit
-  as its title or key, a join, an action request with Approve and Deny while it
-  is pending.
+  as its title or key, a join, an action request with Review while it waits on
+  the person. A row is one line of what a request asks, so Review opens the
+  Approve tab, where the request is answered, drawn whole.
 - **Canvas:** read-only, read through the door from `GET /rooms/:id/surface`,
   which is `bellman_surface`'s answer (MCP Apps canvas spec D1), and drawn per
   kind: `text` as `Markdown`; `link` as a `Link`; `diagram` as its mermaid
@@ -172,12 +174,23 @@ count.
   they are the panel's.
 - **Members:** each member's role, presence and beat (`silent_for_seconds`,
   `note`).
-- **Approve:** *(person)* each pending request: who asked, what was asked (the
-  request's payload, drawn as untrusted text, D10), the time left, and Approve
-  and Deny. A request the person approved draws `approved · waiting for Claude`
-  in place of its two buttons, here and in the Log's rows, until Claude's
-  answer lands or the request expires (D8). `Approve n`, on the tab and in the
-  sidebar and the band, counts only the requests still waiting on the person.
+- **Approve:** *(person)* each pending request drawn whole: who asked and the
+  time left, then what was asked, then Approve and Deny after it. What was asked
+  is drawn as plain text, not Markdown, since what is drawn is what Claude
+  reads: the payload's `text` when that is its one key and a string, else the
+  whole payload as JSON, two spaces to a level, every field of it, with each
+  character that draws nothing or acts on the terminal spelled out as its code
+  point (D10), and cut only past the longest anything the server accepts can
+  draw. A request whose
+  drawing was cut all the same, or that would not fit in what the tab draws
+  whole (the engine draws a tree's first 100,000 characters and no button past
+  them), reads `too long to show in full here, so it can only be denied` beside
+  Deny, and the requests after it keep their buttons. A request the person
+  approved draws `approved · waiting for Claude` in place of its buttons, here
+  and in the Log's row, until Claude's answer lands or the request expires
+  (D8). `Approve n` counts only the requests still waiting on the person: on
+  the tab, the room's; in the sidebar and the band, every room's, and pressing
+  it there opens the room that holds the oldest.
 
 **D6. Toasts.** *(person: a toast for the latest message; an action request
 raises a toast and never takes the keyboard)*
@@ -226,18 +239,23 @@ stays asleep)*
 **D8. The gate.** *(person: Claude cannot answer an action request for the
 person)*
 
-- **Approve** is a press (`ui.press`, which only the person raises). The mod
-  records the approval by room and cursor in `$.state`, then tells Claude
-  once, with fixed text naming the request by its session id and cursor (both
-  server-made): approved; carry it out; answer with `bellman_send` type
-  `action_response`, that `ref_id`, `approved: true` and the result. Claude is
-  told by a row appended to the turn that is running, or else by a prompt of
-  the mod's own that starts one. An action request is not idempotent, so a
-  second press on an approved request tells Claude nothing: the request reads
-  `approved · waiting for Claude` where its buttons were (D5). An approval that
-  does not reach Claude, because the append or the prompt is refused, is taken
-  back: the request draws its buttons again, the gate stays shut for it, and a
-  toast tells the person.
+- **Approve** is a press (`ui.press`, which only the person raises), and only
+  on the Approve tab, where the request is drawn whole (D5). The mod records
+  the approval by room and cursor in `$.state`, then tells Claude once, with
+  fixed text naming the request by its session id and cursor (both
+  server-made): approved; carry it out unless it already has; answer with
+  `bellman_send` type `action_response`, that `ref_id`, `approved: true` and
+  the result. Claude is told by a prompt of the mod's own whether a turn runs
+  or not: a plugin's prompt runs once the session is idle, so it queues behind
+  a running turn, where a row appended to that turn would only be stored, with
+  nothing to make the turn take another step and read it. An action request is
+  not idempotent, so a second press on an approved request tells Claude
+  nothing: the request reads `approved · waiting for Claude` where its buttons
+  were (D5), with no Deny either, since a late Deny could tell the room
+  "declined" after Claude carried the request out. An approval that does not
+  reach Claude, because the prompt is refused or dropped, is taken back: the
+  request draws its buttons again, the gate stays shut for it, and a toast
+  tells the person.
 - **Deny** is answered by the mod itself, through the bridge's door:
   `POST /rooms/<id>/decline { ref_id }` (D9), which sends `action_response`
   with `{ approved: false }` as the bridge's seat and nothing else. It is no
@@ -245,14 +263,16 @@ person)*
   plugin's own `mcp.call` hook, and outside the mod's own hook dispatches
   Claude Code's permission check refuses it (open question 4). Claude takes no
   turn for it; once the door says the room was answered, the mod appends a
-  notice that the person declined, so Claude does not act on the request. When
-  the door does not answer, a toast tells the person and the request still
-  waits.
+  notice that the person declined, so Claude does not act on the request, and
+  when that notice is refused, a toast says Claude was not told and to tell it
+  not to carry the request out. When the door does not answer, a toast tells
+  the person and the request still waits.
 - **The gate** is a `tool.call` hook on every tool whose name ends in
   `bellman_send`, on any server, and an `mcp.call` hook on the same tools for
   another plugin calling through `$.mcp.call`. It acts on
   `type: "action_response"` in a room the pane shows (D1: a room some door's
-  last reading listed a seat in); an answer in any other room passes as today.
+  last reading listed a seat in, which a door that cannot be read keeps, D9);
+  an answer in any other room passes as today.
   In the pane's rooms it passes `approved: true` with a `ref_id` the person
   approved, and refuses every other action response, Claude's own
   `approved: false` included, since the person's Deny goes through the door and
@@ -302,7 +322,15 @@ process can already read the person's Bellman sign-in. The decline sends one
 watches, and nothing else. The bridge answers through the connection it
 already holds, never one that could start a sign-in: with none held the door
 says so, and the next Bellman tool call is what reconnects. The mod calls no
-Bellman tool but `bellman_whoami`.
+Bellman tool but `bellman_whoami`. `GET /status` says `has_sign_in`: whether
+the bridge holds a sign-in, cached or a key, which is not that the server
+accepts it; only a call would establish that, and the door makes none to say
+it. A throw behind any route is answered 500 and leaves one line in the
+bridge's log: the method, the route's shape (`/rooms/<id>/events`) and the
+error's message, never the room's id or what the request sent. The Claude
+Desktop bundle (`BELLMAN_INSTALL=bundle`, which runs the same `src/channel.ts`)
+opens no door, since nothing there reads one, and its `bellman_whoami` names
+none.
 
 The mod finds each local bridge by the bridge's own `bellman_whoami` tool, on
 whichever server lists it (the connector lists none), and reads that bridge's
@@ -311,18 +339,35 @@ and `extension/manifest.json` stays as it is; open question 7 has how the mod
 asks. A bridge in channel delivery keeps no inbox, so its door serves
 everything but the waiting counts, which only wake uses. `$.http.fetch`
 resolves only once the body is read, so the mod polls the door on a short
-timer (`DOOR_POLL_MS`, two seconds); that poll is local, the rooms and logs it
-asks for are read from the server through the bridge's connection at a slower
-pace (`ROOMS_POLL_MS`, fifteen seconds), and the bridge's own connection to the
-room (the bus) is unchanged. The way the builder settled on
+timer (`DOOR_POLL_MS`, two seconds), and the Log the room pane shows at the
+same pace; that poll is local, the rooms and logs it asks for are read from
+the server through the bridge's connection at a slower pace (`ROOMS_POLL_MS`,
+fifteen seconds), each log past the newest event the mod holds, and the
+bridge's own connection to the room (the bus) is unchanged. No tick waits on a
+rooms read, so toasts and the wake run on every tick while one is slow, and a
+rooms read never starts while another runs. A door that cannot be read keeps
+its socket and the last status it gave: its rooms stay on screen, reading
+reconnecting (D4), and the gate stays shut on them (D8). Every tick reads the
+same socket again, and the first read that answers clears the error; the
+mod's next hook asks that bridge's `bellman_whoami` again, so a bridge that
+restarted on a new socket is read through it from then on, its last status
+standing until the new socket answers. The way the builder settled on
 keeps all four properties: a door per bridge (a session with two bridges has
 two), the credential stays in the bridge, no new tool the model sees, nothing
 drained.
 
 **D10. Peer text is untrusted on screen too.** Every peer-controlled string the
-mod draws has control characters stripped first; pane titles refuse them
-anyway (`PaneOpenArgs.title`). Links from peers' canvas text open only when
-they are `http` or `https`. Nothing peer-controlled is passed to
+mod draws has control characters stripped first, and the characters that draw
+nothing or turn the direction a line reads in (U+061C, U+200B, U+200E, U+200F,
+U+202A to U+202E, U+2060, U+2066 to U+2069, U+FEFF; the zero-width non-joiner
+and joiner stay, as emoji and some scripts need them), so one peer's label
+cannot pass for another's (`cleanText`, `cleanBlock`); pane titles refuse
+controls anyway (`PaneOpenArgs.title`). What an action request asks is drawn
+whole instead, each such character spelled out as its code point, since the
+person approves what Claude reads (D5). Links from peers' canvas text open only
+when they are `http` or `https`: `safeLinks` turns any other into text, a link
+definition included wherever a block may start, inside a blockquote or a list
+item and nested to any depth. Nothing peer-controlled is passed to
 `$.prompt.submit`, `$.session.append` or a system-prompt section. This applies
 CLAUDE.md's rule on peer content to a new surface, and the PR says so out
 loud.
@@ -388,7 +433,7 @@ Each is answered below its question, with its source.
    that one call: from a timer or a press the permission check refuses it
    (`findDoors` in `mod/src/doors.ts`; the look). `$.mcp.call` results carry no
    `structuredContent`; the JSON is in the first text block (`resultData` in
-   `src/mod/calls.ts`). Everything else the mod reads comes through the door
+   `src/result-data.ts`). Everything else the mod reads comes through the door
    over `$.http.fetch`, which no permission check covers.
 8. How the gate tells that the Approve tab is drawing on an attached
    terminal. (D8)

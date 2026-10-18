@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
-last-verified-against-source: 21f13b4
-last-updated: 2026-10-15
+last-verified-against-source: 32b6c28
+last-updated: 2026-10-17
 ---
 
 # Bellman Architecture
@@ -482,7 +482,7 @@ one on a Unix socket, `~/.claude/bellman/door/<bridge pid>.sock`
 
 | Route | Answers |
 |---|---|
-| `GET /status` | the delivery mode, whether the bridge is signed in, the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox) and the latest events it delivered |
+| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox) and the latest events it delivered |
 | `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
 | `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
 | `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
@@ -501,19 +501,30 @@ plugin's own tool call (`tool.check skipped: re-entry`). That is why the rooms,
 the canvas and the decline are door routes and not tool calls, and why they work
 from a timer, since `$.http.fetch` over a socket is covered by no permission
 check. A `$.mcp.call` result carries no `structuredContent`; the JSON is in its
-first text block (`resultData`, `src/mod/calls.ts`). The mod reads each door
-every `DOOR_POLL_MS` (two seconds), a read on this machine, and the rooms and
+first text block (`resultData`, `src/result-data.ts`). The mod reads each
+door's status every `DOOR_POLL_MS` (two seconds), a read on this machine, and
+the Log the room pane shows through the door at the same pace; the rooms and
 their logs every `ROOMS_POLL_MS` (fifteen seconds, the MCP Apps monitor's
-cadence), which the bridge answers from the server through its own connection.
-The bridge's connection to the room, the bus, is as it was.
+cadence), each log past the newest event the mod holds, which the bridge
+answers from the server through its own connection. No tick waits on a rooms
+read, so a slow one holds up no toast and no wake, and one never starts while
+another runs. The bridge's connection to the room, the bus, is as it was.
 
 **The door is an aid and never a dependency**, like the bus (invariant 6 below).
 The bridge is the session's Bellman MCP server, so a bridge that cannot make a
 door (a socket path that is too long, a folder it cannot create) logs it and
 goes on, and `bellman_whoami` names none; a throw behind a request is answered
 with a 500 and an error on the running server is swallowed, because either would
-be an uncaught exception in a process with no handler for one. A bridge older
-than the door names none either, and the mod says to update it.
+be an uncaught exception in a process with no handler for one. A 500 leaves one
+line in the bridge's log: the method, the route's shape and the error, never the
+room's id or what the request sent. A bridge older than the door names none
+either, and the mod says to update it. The Claude Desktop bundle, which runs the
+same `src/channel.ts`, opens no door at all: nothing there reads one. A door
+that cannot be read (a bridge restarting, say) keeps its socket and the last
+status it gave, so its rooms stay on screen, reading reconnecting, and the gate
+stays shut on them; every tick reads the same socket again, and the mod's next
+hook asks the bridge's `bellman_whoami` again, which names the new socket of a
+bridge that restarted.
 
 ## 5. Storage
 
@@ -1400,9 +1411,15 @@ loud:
   a seat in unless it is `approved: true` for a request the person approved by
   pressing Approve (`judgeSend`, `src/mod/gate.ts`). Each hook has a `.catch`
   that refuses when it failed before answering, so a broken gate stays shut and
-  breaks nothing else. The person's Deny is answered through the door and never
-  through here, so Claude's own `approved: false` is refused too. Approve tells
-  Claude once, and an approval that does not reach Claude is taken back. This is
+  breaks nothing else. A door that cannot be read keeps the seats it last
+  listed, so the gate stays shut on their rooms while a bridge restarts. Approve
+  is offered only on the Approve tab, where the request is drawn whole: every
+  field of the payload Claude reads, each character that draws nothing spelled
+  out, and nothing the server accepts cut short; a request that cannot be
+  drawn whole there can only be denied, and a Log row leads there with Review. The person's Deny is answered through the door and never through
+  here, so Claude's own `approved: false` is refused too. Approve tells Claude
+  once, by a prompt of the mod's own that queues behind any turn running, and an
+  approval that does not reach Claude is taken back. This is
   a guard against Claude answering on its own and no proof to the requester: a
   prompt-injected Claude could still read the bridge's saved sign-in and post an
   answer another way, and only the server can prove a person pressed Approve,
@@ -1440,8 +1457,12 @@ loud:
   made, checked first. Every peer string the mod draws (a label, a room name, a
   message, a request, a canvas body) passes `cleanText` or `cleanBlock`
   (`src/door-protocol.ts`) first, so a toast, a title or a row never carries an
-  escape sequence or a line break, and a link in a peer's canvas text opens only
-  if it is `http` or `https` (`safeLinks`, `src/mod/view.ts`). The model still
+  escape sequence, a line break or a character that draws nothing or turns the
+  direction a line reads in; what an action request asks is drawn whole, each
+  such character spelled out as its code point instead. A link in a peer's
+  canvas text opens only if it is `http` or `https` (`safeLinks`,
+  `src/mod/view.ts`), a link definition inside a blockquote or a list item
+  included. The model still
   reads peer events only through the bridge's tools, wrapped as untrusted. This
   applies the untrusted-content rules above to a new surface.
 - **No shared mutable state between sessions.** Reads return detached copies and

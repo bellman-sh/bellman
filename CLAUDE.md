@@ -131,6 +131,13 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `src/`: a test importing from it fails there, and `mod/types/` repeats the door's shapes by hand. CI runs
   no `test:mod` (`ci.yml` does not call it, and `scripts/test-mod.ts` skips in `publish.yml`'s `verify`, where
   `CI` is set and no `claude` is on PATH), so the kit tests run only where `verify` runs locally.
+- **`verify` never type-checks `mod/src`.** esbuild strips the types without checking them, and Bun runs the
+  kit tests the same way, so a type error there passes every check. To check it, load Claude Code's
+  `plugin-authoring` skill, which writes this build's API (`types/claude-code.d.ts`) and names its path; put
+  the `tsconfig.json` from that file's header outside the repository, its `include` naming that file,
+  `mod/src` and `mod/types`, and run `npx tsc -p <that tsconfig>` from the root. It reports errors in
+  `src/inbox.ts`, which has no Node types there, and in `bellRows`' indexed access in `src/mod/view.ts`:
+  those are expected. One in `mod/` is real.
 
 ## Testing
 

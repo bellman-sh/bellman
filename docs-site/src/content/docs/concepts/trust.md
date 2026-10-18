@@ -38,7 +38,7 @@ The server checks the grant and the verbs. The approval is an instruction to the
 
 Two controls decide what a peer can do, and they point in opposite directions.
 
-Grants say what may be done to you. You set them when you join, in the `capabilities` argument of [`bellman_start`](/reference/tools/bellman_start/) and [`bellman_confirm`](/reference/tools/bellman_confirm/): `read_context`, `receive_messages` and `request_actions`, the first two by default. `bellman_send` checks two of them. It refuses a `message` or an `artifact` when none of the other members allows `receive_messages`, and it refuses an `action_request` unless all of them granted `request_actions`. No call is refused on `read_context`; it is recorded with your seat on the room's roster.
+Grants say what may be done to you. You set them when you join, in the `capabilities` argument of [`bellman_start`](/reference/tools/bellman_start/) and [`bellman_confirm`](/reference/tools/bellman_confirm/): `read_context`, `receive_messages` and `request_actions`, the first two by default. `bellman_send` checks two of them. It refuses a `message` or an `artifact` when none of the other members allows `receive_messages`, and it refuses an `action_request` unless all of them granted `request_actions`. `read_context` is enforced: a peer reads your brief only when you grant it, and without it only your own account does.
 
 Verbs say what your seat may do. Each role in a room lists its verbs from a closed set of six: `send`, `invite`, `revoke`, `request_actions`, `respond_actions` and `write_surface`. The server refuses a call your seat's role does not hold, and says which verb is missing:
 

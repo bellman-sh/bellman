@@ -89,7 +89,11 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 13. **A report of a message is a read.** `fileRoomReport` applies `readableEvent` to the
     event at a reported cursor, as the reporter's account. A cursor that names a kept update
     is refused in the words for a cursor that names no event, so the refusal does not say
-    an update is there, and the author's own account may still report it.
+    an update is there, and the author's own account may still report it. A caller with no
+    handle in a public room, and one whose every handle was removed from it, read the room
+    as its public page does, and the page shows no `brief_update`: `publicReadEvent` decides
+    for them, so a cursor that names any update is refused, granted or kept, and a report
+    does not tell them which authors grant `read_context`.
 14. **The tool text gains one sentence (R15).** The capabilities line of `bellman_start` and
     of `bellman_confirm` says `read_context lets peers read your brief; it is on by default,
     and without it only you see your brief.` No tool was added, so `extension/manifest.json`

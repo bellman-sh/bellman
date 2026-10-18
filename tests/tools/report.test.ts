@@ -5,7 +5,7 @@ import { NEED_ROOM, SEND_KINDS } from "../../src/tools/kit.js";
 import type { EventType } from "../../src/types.js";
 import { brief } from "../helpers/fixtures.js";
 import { joinWith, pairUp, publicRoom, type PairedSession } from "../helpers/flows.js";
-import { DEV_KEY, Harness } from "../helpers/harness.js";
+import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
 
 let h: Harness;
 let mailed: Report[];
@@ -42,6 +42,15 @@ async function post(sessionId: string, creatorMemberId: string, text: string): P
   });
   expect(event).not.toBeNull();
   return event!.cursor;
+}
+
+/** A `brief_update` from a seat, sent through the tool, and the cursor it got. The room needs another active member for a send. */
+async function update(peer: Peer, sessionId: string, memberId: string, goal: string): Promise<number> {
+  const sent = await peer.call("bellman_send", {
+    session_id: sessionId, member_id: memberId, type: "brief_update", payload: brief({ goal }),
+  });
+  expect(sent.isError, sent.text).toBe(false);
+  return Number(sent.data.cursor);
 }
 
 describe("bellman_report (spec §3)", () => {
@@ -295,6 +304,82 @@ describe("bellman_report (spec §3)", () => {
     expect((await outsider.call("bellman_report", { session_id: room.sessionId, reason: "spam" })).isError).toBe(false);
     expect((await outsider.call("bellman_report", { session_id: room.sessionId, cursor: posted, reason: "spam" })).isError).toBe(false);
     expect((await h.store.listReports(10)).map((r) => r.target.kind).sort()).toEqual(["message", "room"]);
+  });
+
+  /**
+   * The public page shows no brief_update, so a caller who reads a public room as the public is told no more than the page tells
+   * anyone: a report of an update is refused in the words for a cursor with no event, whatever its author grants. Filed for an
+   * author who grants read_context and refused for one who keeps their brief would tell a stranger which authors grant it.
+   */
+  it("reads a stranger to a public room as the page does: a brief_update is no message at its cursor, granted or kept, and a message is one", async () => {
+    const room = await publicRoom(harness());
+    const keeper = await h.connect(DEV_KEY.peer);
+    const joined = await joinWith(keeper, room.code, ["receive_messages"]);
+    expect(joined.isError, joined.text).toBe(false);
+    const granted = await update(room.creator, room.sessionId, room.memberId, "shared");
+    const kept = await update(keeper, room.sessionId, String(joined.data.member_id), "kept to myself");
+    const said = await post(room.sessionId, room.memberId, "buy now");
+
+    const stranger = await h.connect(DEV_KEY.outsider);
+    const report = (cursor: number) => stranger.call("bellman_report", { session_id: room.sessionId, cursor, reason: "spam" });
+    const atGranted = await report(granted);
+    const atKept = await report(kept);
+    const atNothing = await report(9_999);
+    expect([atGranted.isError, atKept.isError, atNothing.isError]).toEqual([true, true, true]);
+    expect(atNothing.text).toContain("no message at that cursor");
+    expect(atGranted.text, "a granted update reads as no event at all").toBe(atNothing.text);
+    expect(atKept.text, "and so does a kept one, so the two are not told apart").toBe(atNothing.text);
+    expect(await h.store.listReports(10)).toEqual([]);
+    expect(mailed).toEqual([]);
+
+    const atMessage = await report(said);
+    expect(atMessage.isError, atMessage.text).toBe(false);
+    expect(mailed.map((r) => r.target)).toEqual([{ kind: "message", cursor: said }]);
+  });
+
+  it("reads a member removed from a public room as the page does too, where nothing is cut", async () => {
+    const room = await publicRoom(harness());
+    const joiner = await h.connect(DEV_KEY.peer);
+    const joined = await joinWith(joiner, room.code);
+    expect(joined.isError, joined.text).toBe(false);
+    const removed = await room.creator.call("bellman_evict", { session_id: room.sessionId, member_id: String(joined.data.member_id) });
+    expect(removed.isError, removed.text).toBe(false);
+    // The creator is alone now, and a send refuses a sender with no other active member, so both go in through the store.
+    const appended = await h.store.appendEvent(room.sessionId, {
+      type: "brief_update", fromMemberId: room.memberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: brief({ goal: "shared" }), refId: null,
+    });
+    expect(appended).not.toBeNull();
+    const said = await post(room.sessionId, room.memberId, "said once they were out");
+
+    const report = (cursor: number) => joiner.call("bellman_report", { session_id: room.sessionId, cursor, reason: "harassment" });
+    const atUpdate = await report(appended!.cursor);
+    const atNothing = await report(9_999);
+    expect([atUpdate.isError, atNothing.isError]).toEqual([true, true]);
+    expect(atNothing.text).toContain("no message at that cursor");
+    expect(atUpdate.text, "a granted update reads as no event at all").toBe(atNothing.text);
+    expect(mailed).toEqual([]);
+
+    const atMessage = await report(said);
+    expect(atMessage.isError, atMessage.text).toBe(false);
+    expect(mailed.map((r) => r.target)).toEqual([{ kind: "message", cursor: said }]);
+  });
+
+  /** A caller who holds a handle in a public room reads as their account, as before: the page's rule is for those with none. */
+  it("still reads a member of a public room as their account: a granted brief_update is theirs to report, a kept one is not, unless they wrote it", async () => {
+    const room = await publicRoom(harness());
+    const keeper = await h.connect(DEV_KEY.peer);
+    const joined = await joinWith(keeper, room.code, ["receive_messages"]);
+    expect(joined.isError, joined.text).toBe(false);
+    const granted = await update(room.creator, room.sessionId, room.memberId, "shared");
+    const kept = await update(keeper, room.sessionId, String(joined.data.member_id), "kept to myself");
+
+    const report = (who: Peer, cursor: number) => who.call("bellman_report", { session_id: room.sessionId, cursor, reason: "other" });
+    const peerGranted = await report(keeper, granted);
+    const author = await report(keeper, kept);
+    const peerKept = await report(room.creator, kept);
+    expect([peerGranted.isError, author.isError, peerKept.isError], [peerGranted, author, peerKept].map((r) => r.text).join(" | ")).toEqual([false, false, true]);
+    expect(peerKept.text).toContain("no message at that cursor");
+    expect(mailed.map((r) => r.target)).toEqual([{ kind: "message", cursor: granted }, { kind: "message", cursor: kept }]);
   });
 
   it("lets a member removed from a public room report what was said past its cut, since the room's log is public", async () => {

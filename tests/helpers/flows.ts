@@ -91,12 +91,15 @@ export async function publicRoom(
   return { creator, sessionId, memberId, code: String(door.data.join_code) };
 }
 
-/** Both phases of joining: the preview's refusal if it refused, else the confirm's outcome. */
-export async function joinWith(peer: Peer, code: string): Promise<Outcome> {
+/**
+ * Both phases of joining: the preview's refusal if it refused, else the confirm's outcome. The joiner grants
+ * `read_context` unless `capabilities` says otherwise.
+ */
+export async function joinWith(peer: Peer, code: string, capabilities: string[] = ["read_context", "receive_messages"]): Promise<Outcome> {
   const preview = await peer.call("bellman_connect", { join_code: code });
   if (preview.isError) return preview;
   return peer.call("bellman_confirm", {
-    connect_token: String(preview.data.connect_token), brief: brief(), capabilities: ["read_context", "receive_messages"],
+    connect_token: String(preview.data.connect_token), brief: brief(), capabilities,
   });
 }
 

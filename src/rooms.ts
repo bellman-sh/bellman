@@ -28,7 +28,7 @@ import {
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
-import { briefAuthors, readableEvent, readableEvents } from "./public-event.js";
+import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
@@ -1282,6 +1282,12 @@ const NO_MESSAGE_AT_CURSOR = "no message at that cursor.";
  * event, so the refusal does not say an update is there. The author's row decides as it stands, one who left included,
  * and a missing row reads as not granting.
  *
+ * A caller who reads a public room as anyone with its link does reads what the public page shows, and the page shows no
+ * brief_update: a caller with no handle in the room, now or before, and one whose every handle was removed from it. For them
+ * a cursor that names an update is refused whatever its author grants, in the same words, because filed for an author who
+ * grants and refused for one who keeps their brief would tell them what the page keeps from them. A caller with a handle
+ * still in the room, or one that left of its own accord, reads as their account, as above.
+ *
  * The shape of the request is checked first, because it reads nothing from the room. The limit on a note applies to what
  * was sent, before it is trimmed, which is what the tool's schema bounds, so the tool and the route agree. A note is then
  * trimmed and an empty one is none. The note is untrusted text and is kept as written.
@@ -1329,14 +1335,20 @@ export async function fileRoomReport(
     }
     // A caller may report what it could read. A public room's log is public, so it has no cut to keep. Past the access
     // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
-    const cut = isPublic(session) ? undefined : cutFor(handles);
+    // `memberCut` is where reading as a member stops, if it does: defined for a caller with no handle and for one whose every
+    // handle was removed, undefined while any handle reads on.
+    const memberCut = cutFor(handles);
+    const cut = isPublic(session) ? undefined : memberCut;
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
     if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
-    // And what read_context lets it read (D2, D3): a brief_update its author keeps is no event to any account but the author's.
-    // The author's row is read as it stands, one who left included, and no row reads as not granting (R11).
-    if (!readableEvent(event, await store.getMember(session.id, event.fromMemberId), actor.userId)) {
-      return refuse("invalid", NO_MESSAGE_AT_CURSOR);
-    }
+    // And what read_context lets it read (D2, D3). In a public room, a caller with no member reading of it has the public page
+    // and nothing else, and the page has no brief_update to show. Anyone else reads as their account: a brief_update its author
+    // keeps is no event to any account but the author's, from the author's row as it stands, one who left included, and no row
+    // reads as not granting (R11).
+    const shown = isPublic(session) && memberCut !== undefined
+      ? publicReadEvent(event)
+      : readableEvent(event, await store.getMember(session.id, event.fromMemberId), actor.userId);
+    if (!shown) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
     target = { kind: "message", cursor: event.cursor };
     subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
   }

@@ -268,4 +268,22 @@ describe("the tool text (read_context spec, section 2)", () => {
         .toContain("read_context lets peers read your brief; it is on by default, and without it only you see your brief.");
     }
   });
+
+  /** The result text the creator reads and relays, not the listing: it must not promise joiners a brief that no joiner can read. */
+  it("leaves bellman_start's instruction to review the creator's brief out of its result when the creator withholds read_context", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const instructions = async (capabilities?: Capability[]) => {
+      const started = await creator.call("bellman_start", {
+        manifest: manifestFixture({ preset: "swarm" }), brief: brief(), ...(capabilities ? { capabilities } : {}),
+      });
+      expect(started.isError, started.text).toBe(false);
+      return String(started.data.share_instructions);
+    };
+    const withheld = await instructions(KEEPS);
+    expect(withheld).not.toContain("review your brief");
+    expect(withheld, "the sentence still names both calls").toContain("they run bellman_connect with the code, then bellman_confirm with their own.");
+    for (const text of [await instructions(GRANTS), await instructions()]) {
+      expect(text, "granted, or by default").toContain("they run bellman_connect with the code, review your brief, then bellman_confirm with their own.");
+    }
+  });
 });

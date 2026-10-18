@@ -27,7 +27,7 @@ import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
-import { publicEvent } from "./public-event.js";
+import { publicEvent, readableEvent, readableEvents } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
@@ -852,17 +852,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * Both come BEFORE the events read, so a refusal reads nothing more and
    * accepts nothing, and the events read stays the last await ahead of the
-   * attach. Every one of them is a storage read, which is what keeps the gate
-   * closed across the whole sequence.
+   * attach. So does the list of every member row the frames are judged by
+   * (read_context), after both rechecks, so a refusal still lists nothing.
+   * Every one of them is a storage read, which is what keeps the gate closed
+   * across the whole sequence.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
    * which races an append against an upgrade, is what exercises it.
    *
    * What goes out is publicEvent(e), the shape wake() and the poll use, and not
-   * the stored event, which carries the sender's user id (spec D1a). The frames
-   * are built straight after the read, so that a failure there, like the read's
-   * and the attach's, accepts nothing.
+   * the stored event, which carries the sender's user id (spec D1a). And only
+   * the events as no one may read them (read_context plan, R2), which is what
+   * wake() sends a live socket, so a reconnect is shown no more: a brief its
+   * author keeps is dropped, and their join goes out with its brief null. The
+   * attached cursor is still the last event read, so it moves past one dropped.
+   * The frames are built straight after the read, so that a failure there, like
+   * the read's and the attach's, accepts nothing.
    *
    * The cursor goes on before the accept. wake() has no good answer for a
    * socket whose cursor it does not know: send it everything, or silently
@@ -939,6 +945,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return new Response("Forbidden", { status: 403 });
     }
 
+    // Every member row, departed included: a frame shows a brief only when its
+    // author grants read_context, a member who left keeps their grant (D2), and
+    // the record holds only the members in the room now (ADR 0019). Listed before
+    // the events read, though only the briefs' authors are wanted, because those
+    // are known only from the events, and the events read must stay the last
+    // await (plan ruling R12).
+    // ponytail: every member row on each upgrade, as departedMembers lists them;
+    // read only briefAuthors(missed)'s rows when a roster outgrows one list, which
+    // moves a storage read after the events read and the sequence test with it.
+    const rows = [...(await this.ctx.storage.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+
     // The last await, and every one before it is a storage read, so the gate
     // holds from the first recheck to the return. From here nothing yields.
     const missed = await this.events(cursor, REPLAY_LIMIT + 1);
@@ -948,7 +965,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         { status: 410 },
       );
     }
-    const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
+    // As no one (R2), so the attachment below still takes its cursor from `missed`.
+    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -1906,10 +1924,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<SessionEvent | null> {
     let broughtForward = false as boolean;
     let wakesHost = false;
+    // The rows this transaction read, for the wake's read_context rule.
+    let members: readonly Member[] = [];
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
+      members = s.members;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const owed = await extraRows(txn, s, next, extras);
       const wake = await this.#replyWakeRows(txn, s, next);
@@ -1917,7 +1938,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       broughtForward = await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
       return next;
     });
-    if (event) this.#wake(event);
+    if (event) this.#wake(event, members);
     // After the wake, so the member removed receives the frame announcing it
     // before the socket goes. The notice is the last thing they get.
     if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
@@ -2023,9 +2044,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<EventWrite> {
     let broughtForward = false as boolean;
     let wakesHost = false;
+    // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
+    let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
+      members = s.members;
 
       const storageKey = idempotencyKey(e.fromMemberId, key);
       const record = await txn.get<IdempotencyRecord>(storageKey);
@@ -2080,7 +2104,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       broughtForward = await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts, ...wake }, owed.deletes);
       return { outcome: "appended", event };
     });
-    if (result.outcome === "appended") this.#wake(result.event);
+    if (result.outcome === "appended") this.#wake(result.event, members);
     // The sockets follow the cut down this path as they do down appendEvent's:
     // the contract hands both the same extras, so a cut that held here and left
     // the socket open would be the open feed by another route. A replay counts
@@ -2260,6 +2284,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * receives every other member's events (spec D1a). The waiter arm resolves
    * with the stored event because the poll projects it at the tool boundary.
    *
+   * And it is the event as no one may read it (read_context plan, R2), because
+   * one frame goes to every socket in the room, the author's own included. A
+   * brief_update whose author keeps their brief builds no frame: no socket is
+   * sent it and no attachment moves. A member_joined of theirs goes out with its
+   * brief null. Here the two arms part: the poll reads as its caller's account
+   * (eventsFor), so an author reads their own brief on another handle's sync and
+   * on no socket. The author is judged by their row in `members`, the rows the
+   * append read; appendEvent and appendEventOnce hand theirs. An author not among
+   * them reads as not granting (R11). Every other caller hands none, and none of
+   * their events carries a brief.
+   *
    * Synchronous on purpose. getWebSockets, deserializeAttachment, send and
    * serializeAttachment are all sync, so nothing here yields — an await
    * between reading a socket's cursor and sending would reopen the gap that
@@ -2274,22 +2309,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * is deliberately absent here: it would skip socket delivery whenever nobody
    * is long-polling, which is the common case once the bridge stops polling.
    */
-  #wake(event: SessionEvent): void {
+  #wake(event: SessionEvent, members: readonly Member[] = []): void {
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
 
-    // Built on the first socket that is due the event and shared by the rest: a
+    // Decided on the first socket that is due the event and shared by the rest: a
     // poll-only room pays nothing per append, and a projection failure lands in
     // the per-socket try below instead of failing an append whose event is
-    // already stored.
-    let frame: string | undefined;
+    // already stored. Null is a decision too, the event shown to no socket.
+    let frame: string | null | undefined;
     for (const ws of this.ctx.getWebSockets()) {
       // One socket must not starve the rest. getWebSockets() returns a list, and
       // a throw would end this loop with every later socket missing the event,
       // after the waiter arm had run and the event was stored. So each socket is
       // its own try: log, skip, carry on. The cause known today is building the
-      // frame, JSON.stringify(publicEvent(event)), which sits inside the try and
+      // frame, JSON.stringify(publicEvent(shown)), which sits inside the try and
       // which "contains a frame that cannot be built" drives. The one send
       // failure observed, to a socket that is closing, is skipped below instead
       // of caught; a send to a socket that reads OPEN has not been observed to
@@ -2322,7 +2357,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // wrong, and over-delivering every event to a socket whose cursor we do
         // not know is the worse of the two answers.
         if (!att || event.cursor <= att.cursor) continue;
-        frame ??= JSON.stringify(publicEvent(event));
+        if (frame === undefined) {
+          const shown = readableEvent(event, members.find((m) => m.memberId === event.fromMemberId), null);
+          frame = shown === null ? null : JSON.stringify(publicEvent(shown));
+        }
+        if (frame === null) break;
         ws.send(frame);
         ws.serializeAttachment({ ...att, cursor: event.cursor });
       } catch (err) {

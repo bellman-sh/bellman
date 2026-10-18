@@ -1533,6 +1533,51 @@ describe("fetch: websocket upgrade", () => {
     expect(ctx.sockets[0].sent).toHaveLength(storeDo.REPLAY_LIMIT);
   });
 
+  /**
+   * The room socket on a reconnect (read_context spec, section 2): its frames are shared, so a granted
+   * brief only. The socket reads as no one (plan ruling R2), so the author's own socket is shown no
+   * more than a peer's, and an author with no row grants nothing (R11). The last event read is one no
+   * socket is shown, and the cursor still moves past it.
+   */
+  it("replays no brief its author keeps, and their join without its brief", async () => {
+    const quiet = member({ memberId: "m9", userId: "u9", label: "peer", roomRole: "peer_b", capabilities: ["receive_messages"] });
+    const storage = fakeStorage({ session: currentRow({ members: [member(), quiet] }), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    const by = { fromMemberId: "m9", fromUserId: "u9", fromLabel: "peer", refId: null };
+    await doi.appendEvent({ ...by, type: "member_joined", payload: { member: { member_id: "m9" }, brief: { goal: "kept" } } });
+    await doi.appendEvent({ ...by, type: "brief_update", payload: { goal: "kept" } });
+    await doi.appendEvent({ ...by, type: "message", payload: { text: "hi" } });
+    await doi.appendEvent({ ...by, fromMemberId: "m_unseated", fromUserId: "u_unseated", type: "brief_update", payload: { goal: "kept" } });
+
+    await doi.fetch(upgrade(0, "m9")); // the author's own socket
+    await doi.fetch(upgrade(0)); // a peer's
+    expect(ctx.sockets).toHaveLength(2);
+    for (const ws of ctx.sockets) {
+      const frames = ws.sent.map((f) => JSON.parse(f));
+      expect(frames.map((f) => f.type)).toEqual(["member_joined", "message"]);
+      expect(frames[0].payload).toEqual({ member: { member_id: "m9" }, brief: null });
+      expect(ws.deserializeAttachment(), "the cursor is the last event read").toMatchObject({ cursor: 4 });
+    }
+  });
+
+  /**
+   * D2 on the replay: a member who left keeps their last grant. Their row is read, and not the room's
+   * record, which holds only the members in it now (ADR 0019).
+   */
+  it("replays the brief of a member who has left, by the grant on their row", async () => {
+    const left = member({ memberId: "m8", userId: "u8", label: "left", roomRole: "peer_b", leftAt: 5 });
+    const storage = fakeStorage({ session: currentRow({ members: [member(), left] }), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.appendEvent({
+      type: "brief_update", fromMemberId: "m8", fromUserId: "u8", fromLabel: "left", payload: { goal: "shared" }, refId: null,
+    });
+
+    await doi.fetch(upgrade(0));
+    expect(ctx.sockets[0].sent.map((f) => JSON.parse(f).payload)).toEqual([{ goal: "shared" }]);
+  });
+
   it("replays nothing when the cursor is current", async () => {
     const { doi, ctx } = await world(2);
     await doi.fetch(upgrade(2));
@@ -1582,8 +1627,15 @@ describe("fetch: websocket upgrade", () => {
     // a socket outlives a failed read with no attachment, and wake() has no
     // good answer for a socket whose cursor it does not know: send it
     // everything, or silently send it nothing.
+    //
+    // Only the events read fails. The member rows are listed before it (read_context), and
+    // a list failing there would throw before the read this case is about is reached.
     const { doi, ctx, storage } = await world(2);
-    storage.list = async () => { throw new Error("storage unavailable"); };
+    const list = storage.list;
+    storage.list = async (opts: { prefix?: string } = {}) => {
+      if (opts.prefix === "e:") throw new Error("storage unavailable");
+      return list(opts);
+    };
 
     await expect(doi.fetch(upgrade(0))).rejects.toThrow("storage unavailable");
     expect(ctx.sockets).toHaveLength(0);
@@ -1630,7 +1682,8 @@ describe("fetch: websocket upgrade", () => {
     // directly.
     //
     // events() is the last thing fetch awaits. The roster is read just ahead of
-    // it (#113), which is not hooked: the question here is what happens between
+    // it (#113), and so is every member row (read_context), neither of them
+    // hooked: the question here is what happens between
     // the events read and the accept, and an await added after the events read is
     // what this goes red on. The server socket does not exist until fetch builds
     // the pair, so the hooks go on events() and on the WebSocketPair constructor
@@ -1943,6 +1996,49 @@ describe("wake: socket delivery", () => {
 
     expect(ws.sent).toHaveLength(1);
     expect(yieldedAtSend).toBe(false);
+  });
+
+  /**
+   * The pushes (read_context spec, section 2): one frame goes to every socket in the room, so a granted
+   * brief only. The socket reads as no one (plan ruling R2): the author's own socket, opened first so
+   * it is the one the frame is decided on, is shown no more than a peer's. An author not among the
+   * append's rows grants nothing (R11), and an event no socket is shown moves no socket's cursor.
+   */
+  it("sends no brief its author keeps, keyed or not, and their join without its brief", async () => {
+    const quiet = member({ memberId: "m9", userId: "u9", label: "peer", roomRole: "peer_b", capabilities: ["receive_messages"] });
+    const storage = fakeStorage({ session: currentRow({ members: [member(), quiet] }), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.fetch(open(ctx, 0, "m9")); // the author's own socket
+    await doi.fetch(open(ctx, 0)); // a peer's
+    const by = { fromMemberId: "m9", fromUserId: "u9", fromLabel: "peer", refId: null };
+    await doi.appendEvent({ ...by, type: "member_joined", payload: { member: { member_id: "m9" }, brief: { goal: "kept" } } });
+    await doi.appendEvent({ ...by, type: "brief_update", payload: { goal: "kept" } });
+    await doi.appendEventOnce({ ...by, type: "brief_update", payload: { goal: "kept again" } }, "key-0001");
+    await doi.appendEvent({ ...by, type: "message", payload: { text: "hi" } });
+    await doi.appendEvent({ ...by, fromMemberId: "m_unseated", fromUserId: "u_unseated", type: "brief_update", payload: { goal: "kept" } });
+
+    expect(ctx.sockets).toHaveLength(2);
+    for (const ws of ctx.sockets) {
+      const frames = ws.sent.map((f) => JSON.parse(f));
+      expect(frames.map((f) => f.type)).toEqual(["member_joined", "message"]);
+      expect(frames[0].payload).toEqual({ member: { member_id: "m9" }, brief: null });
+      expect(ws.deserializeAttachment(), "the cursor is the last event sent").toMatchObject({ cursor: 4 });
+    }
+  });
+
+  /** The other half: each append hands the rows it read, so a brief its author grants goes out down both. */
+  it("sends a brief its author grants, keyed or not, and their join with it", async () => {
+    const { doi, ctx } = await world(); // its one member, m_creator, grants read_context
+    await doi.fetch(open(ctx, 0));
+    const by = { fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null };
+    await doi.appendEvent({ ...by, type: "member_joined", payload: { member: { member_id: "m_creator" }, brief: { goal: "shared" } } });
+    await doi.appendEventOnce({ ...by, type: "brief_update", payload: { goal: "shared again" } }, "key-0002");
+
+    expect(ctx.sockets[0].sent.map((f) => JSON.parse(f).payload)).toEqual([
+      { member: { member_id: "m_creator" }, brief: { goal: "shared" } },
+      { goal: "shared again" },
+    ]);
   });
 
   it("sends the public event, not the stored one", async () => {

@@ -3,6 +3,7 @@ import { reportMail, type Report } from "../../src/reports.js";
 import { fileRoomReport } from "../../src/rooms.js";
 import { NEED_ROOM, SEND_KINDS } from "../../src/tools/kit.js";
 import type { EventType } from "../../src/types.js";
+import { brief } from "../helpers/fixtures.js";
 import { joinWith, pairUp, publicRoom, type PairedSession } from "../helpers/flows.js";
 import { DEV_KEY, Harness } from "../helpers/harness.js";
 
@@ -213,6 +214,63 @@ describe("bellman_report (spec §3)", () => {
     }
     expect(outcomes.filter(([, taken]) => taken).map(([type]) => type).sort()).toEqual([...SEND_KINDS].sort());
     expect((await h.store.listReports(20)).map((r) => r.target.kind)).toEqual(Array(SEND_KINDS.length).fill("message"));
+  });
+
+  /**
+   * read_context, enforced (spec section 1): a caller may report a message exactly when it could read it, and a peer cannot read a
+   * brief_update its author keeps. The refusal is the one for a cursor that names no event, so it does not say an update is there.
+   */
+  it("refuses a peer's brief_update that its author keeps in the words for a cursor with no event, filing nothing", async () => {
+    const s = await pairUp(harness(), { creatorCapabilities: ["receive_messages"] });
+    const sent = await s.creator.call("bellman_send", {
+      session_id: s.sessionId, member_id: s.creatorMemberId, type: "brief_update", payload: brief({ goal: "kept to myself" }),
+    });
+    expect(sent.isError, sent.text).toBe(false);
+    const kept = await s.joiner.call("bellman_report", { session_id: s.sessionId, cursor: sent.data.cursor, reason: "spam" });
+    const absent = await s.joiner.call("bellman_report", { session_id: s.sessionId, cursor: 9_999, reason: "spam" });
+    expect([kept.isError, absent.isError]).toEqual([true, true]);
+    expect(kept.text).toContain("no message at that cursor");
+    expect(kept.text, "the same words, so a kept update is not told apart from no event").toBe(absent.text);
+    expect(await h.store.listReports(10)).toEqual([]);
+    expect(mailed).toEqual([]);
+  });
+
+  it("takes a brief_update from its author's own account, kept or not, and from a peer when the author grants read_context", async () => {
+    const kept = await pairUp(harness(), { creatorCapabilities: ["receive_messages"] });
+    const mine = await kept.creator.call("bellman_send", {
+      session_id: kept.sessionId, member_id: kept.creatorMemberId, type: "brief_update", payload: brief({ goal: "kept to myself" }),
+    });
+    expect(mine.isError, mine.text).toBe(false);
+    const own = await kept.creator.call("bellman_report", { session_id: kept.sessionId, cursor: mine.data.cursor, reason: "other" });
+    expect(own.isError, own.text).toBe(false);
+
+    const granted = await pairUp(h);
+    const shared = await granted.creator.call("bellman_send", {
+      session_id: granted.sessionId, member_id: granted.creatorMemberId, type: "brief_update", payload: brief({ goal: "shared" }),
+    });
+    expect(shared.isError, shared.text).toBe(false);
+    const peers = await granted.joiner.call("bellman_report", { session_id: granted.sessionId, cursor: shared.data.cursor, reason: "other" });
+    expect(peers.isError, peers.text).toBe(false);
+    expect(mailed.map((r) => r.target)).toEqual([
+      { kind: "message", cursor: mine.data.cursor }, { kind: "message", cursor: shared.data.cursor },
+    ]);
+  });
+
+  /** An author with no row reads as one that keeps its brief (R11), to every account but its own. */
+  it("reads a brief_update that no member row stands behind as kept, for a peer and not for the account that wrote it", async () => {
+    const s = await pairUp(harness());
+    const orphan = await h.store.appendEvent(s.sessionId, {
+      type: "brief_update", fromMemberId: "m_gone", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null,
+    });
+    expect(orphan).not.toBeNull();
+    expect(await h.store.getMember(s.sessionId, "m_gone"), "no row behind it").toBeUndefined();
+    const peer = await s.joiner.call("bellman_report", { session_id: s.sessionId, cursor: orphan!.cursor, reason: "spam" });
+    expect(peer.isError).toBe(true);
+    expect(peer.text).toContain("no message at that cursor");
+    expect(mailed).toEqual([]);
+    const author = await s.creator.call("bellman_report", { session_id: s.sessionId, cursor: orphan!.cursor, reason: "spam" });
+    expect(author.isError, author.text).toBe(false);
+    expect(mailed.map((r) => r.target)).toEqual([{ kind: "message", cursor: orphan!.cursor }]);
   });
 
   it("turns a stranger away from a private room as it does from a room that is not there, and takes one to a public room", async () => {

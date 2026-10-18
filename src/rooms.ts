@@ -28,7 +28,7 @@ import {
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
-import { briefAuthors, readableEvents } from "./public-event.js";
+import { briefAuthors, readableEvent, readableEvents } from "./public-event.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
@@ -1252,6 +1252,9 @@ export async function evictMember(
   });
 }
 
+/** One refusal for a cursor that names no event and for one that names an event the caller may not read, so the two read alike. */
+const NO_MESSAGE_AT_CURSOR = "no message at that cursor.";
+
 /**
  * File a report (abuse protections spec section 3, R11), for both transports: who may report, what a target must
  * be, the store's fold and daily limit, and the email once a report is filed, never for a fold or a refusal.
@@ -1273,6 +1276,11 @@ export async function evictMember(
  * does not exist: a report must not tell it what the room holds after it was out. A public room's log is public to
  * anyone, so while the room is public there is no cut, and someone removed from it may still report what is said about
  * them afterwards. A member who left keeps the open feed, and so the open cursors.
+ *
+ * A brief_update whose author does not grant `read_context` is one a caller cannot read, unless the caller is the author's
+ * own account (read_context spec, section 1). A cursor that names one is refused in the words for a cursor that names no
+ * event, so the refusal does not say an update is there. The author's row decides as it stands, one who left included,
+ * and a missing row reads as not granting.
  *
  * The shape of the request is checked first, because it reads nothing from the room. The limit on a note applies to what
  * was sent, before it is trimmed, which is what the tool's schema bounds, so the tool and the route agree. A note is then
@@ -1323,7 +1331,12 @@ export async function fileRoomReport(
     // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
     const cut = isPublic(session) ? undefined : cutFor(handles);
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
-    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", "no message at that cursor.");
+    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
+    // And what read_context lets it read (D2, D3): a brief_update its author keeps is no event to any account but the author's.
+    // The author's row is read as it stands, one who left included, and no row reads as not granting (R11).
+    if (!readableEvent(event, await store.getMember(session.id, event.fromMemberId), actor.userId)) {
+      return refuse("invalid", NO_MESSAGE_AT_CURSOR);
+    }
     target = { kind: "message", cursor: event.cursor };
     subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
   }

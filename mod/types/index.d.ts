@@ -49,9 +49,9 @@ export type DoorLog = { events: DoorEvent[]; cursor: number };
 /**
  * One local bridge, by the MCP server that lists its `bellman_whoami`, and what its door said.
  *
- * `socketPath` is null for a bridge older than the door (its `bellman_whoami` names none) and
- * for one whose door failed, until a tick finds it again. `status` is the door's answer on
- * the latest tick, null when it was not read; `error` says why it could not be.
+ * `socketPath` is null for a bridge older than the door (its `bellman_whoami` names none).
+ * `status` is the door's last answer, null until one; a door that cannot be read keeps it, and
+ * its socket, and `error` says why, until a read answers again.
  */
 export type DoorView = { server: string; socketPath: string | null; status: DoorStatus | null; error: string | null };
 

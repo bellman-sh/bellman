@@ -1,7 +1,8 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
+import { GATE_REASON, WAKE_TEXT } from "../hooks/register.mjs";
 import type { DoorStatus } from "../types";
-import { STATUS, tick, world } from "./harness";
+import { STATUS, band, peerEvent, roomsTick, tick, world } from "./harness";
 import type { World } from "./harness";
 
 /** The person presses Enter in the composer: a `prompt.submit` of the mod's own hooks, where its call is allowed. */
@@ -18,22 +19,43 @@ test("finds the door through bellman_whoami and keeps the bridge's status", asyn
   expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: STATUS, error: null }]);
 });
 
-test("a bridge that restarts is found again at the next prompt, not by a tick alone", async ($, on) => {
+test("a bridge that restarts keeps its rooms while its old socket refuses, and is read through the new one from the next prompt", async ($, on) => {
   const w = await world($, on);
   await tick(w);
-  w.doorDown = true;
-  await tick(w);
-  expect(w.state.doors?.[0]).toMatchObject({ socketPath: null, status: null, error: expect.any(String) });
-  w.doorDown = false;
+  // The bridge restarts: the socket its door had refuses from now on, and its bellman_whoami names a new one.
   w.door = "/tmp/bellman-door-2.sock";
   for (let i = 0; i < 3; i++) await tick(w);
+  // Each tick read the old socket again, and the door keeps it, and the last status it gave.
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: "/tmp/bellman-door-1.sock", status: STATUS, error: expect.any(String) }]);
   // A tick asks nothing: Claude Code refuses the mod's own tool call from a timer.
   expect(asked(w)).toBe(1);
-  expect(w.state.doors?.[0]).toMatchObject({ socketPath: null, status: null });
   await types($);
   expect(asked(w)).toBe(2);
+  // Named and not yet read: the last status stands, and the error, until the new socket answers.
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: "/tmp/bellman-door-2.sock", status: STATUS, error: expect.any(String) }]);
   await tick(w);
   expect(w.state.doors).toEqual([{ server: "bellman", socketPath: "/tmp/bellman-door-2.sock", status: STATUS, error: null }]);
+});
+
+test("a door read that fails once keeps the door, its rooms and the gate shut, and the next read that answers wakes the session", async ($, on) => {
+  // The branch review's probe: one tick finds the socket refusing, and from the next it answers again.
+  const w = await world($, on);
+  await tick(w);
+  await band($);
+  const answer = () =>
+    $.tool.call({ tool: "mcp__bellman__bellman_send", type: "action_response", session_id: "qs_room1", ref_id: "5", payload: { approved: true } });
+  w.doorDown = true;
+  await tick(w);
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: STATUS, error: expect.any(String) }]);
+  expect(await answer()).toEqual({ deny: GATE_REASON });
+  w.doorDown = false;
+  w.status.waiting = [{ session_id: "qs_room1", interrupting: 1, ambient: 0 }];
+  for (let i = 0; i < 30; i++) {
+    await tick(w);
+    expect(await answer()).toEqual({ deny: GATE_REASON });
+  }
+  expect(w.submitted).toEqual([WAKE_TEXT]);
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: w.status, error: null }]);
 });
 
 test("a turn's start or its end asks again too, and no hook asks while every door answers", async ($, on) => {
@@ -137,9 +159,10 @@ test("a tick that reads while a prompt is asking keeps what it read", async ($, 
   release();
   await typed;
   await w.clock.settle();
+  // The second door takes the socket its bridge named, and keeps the last status it gave until that socket answers.
   expect(w.state.doors).toEqual([
     { server: "bellman", socketPath: w.door, status: { ...STATUS, has_sign_in: false }, error: null },
-    { server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status: null, error: null },
+    { server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status, error: expect.any(String) },
   ]);
 });
 
@@ -150,7 +173,7 @@ test("a door found at a prompt while a tick is reading keeps the socket it was f
   // The second bridge restarts: the tick that finds its old socket refusing leaves the asking to the next hook.
   w.second!.door = "/tmp/bellman-door-10.sock";
   await tick(w);
-  expect(w.state.doors?.[1]).toMatchObject({ socketPath: null, error: expect.any(String) });
+  expect(w.state.doors?.[1]).toEqual({ server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-9.sock", status, error: expect.any(String) });
   // A tick held reading the first door while the person's prompt finds the second's, then let go.
   let release = (): void => undefined;
   w.held = new Promise((resolve) => (release = resolve));
@@ -159,7 +182,51 @@ test("a door found at a prompt while a tick is reading keeps the socket it was f
   w.held = null;
   release();
   await w.clock.settle();
-  expect(w.state.doors?.[1]).toEqual({ server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status: null, error: null });
+  expect(w.state.doors?.[1]).toEqual({ server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status, error: expect.any(String) });
   await tick(w);
   expect(w.state.doors?.[1]).toEqual({ server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status, error: null });
+});
+
+test("a bridge whose bellman_whoami fails while its door cannot be read keeps the door, its rooms and the gate shut", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  await band($);
+  w.doorDown = true;
+  await tick(w);
+  w.whoamiFails = true;
+  await types($);
+  expect(asked(w)).toBe(2);
+  // A failed answer names nothing: the socket stays the one to read again, and the last status stands.
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: STATUS, error: expect.any(String) }]);
+  const answer = await $.tool.call({ tool: "mcp__bellman__bellman_send", type: "action_response", session_id: "qs_room1", ref_id: "5", payload: { approved: true } });
+  expect(answer).toEqual({ deny: GATE_REASON });
+  w.doorDown = false;
+  await tick(w);
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: STATUS, error: null }]);
+});
+
+test("a rooms read asks each room's log only for what is new past the newest event held", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [peerEvent({ cursor: 4 }), peerEvent({ cursor: 7, payload: { text: "later" } })], cursor: 7 };
+  await tick(w);
+  const reads = () => w.fetched.filter((f) => f.path === "/rooms/qs_room1/events");
+  // None held yet: the newest page.
+  expect(reads()).toEqual([{ socket: w.door, method: "GET", path: "/rooms/qs_room1/events" }]);
+  w.log.qs_room1.events.push(peerEvent({ cursor: 9, payload: { text: "new" } }));
+  await roomsTick(w);
+  expect(reads().at(-1)).toEqual({ socket: w.door, method: "GET", path: "/rooms/qs_room1/events", after: "7" });
+  expect(w.state.logs?.qs_room1?.map((e) => e.cursor)).toEqual([4, 7, 9]);
+});
+
+test("a rooms read that never answers holds up no tick: the next one still toasts, and no second read starts", async ($, on) => {
+  const w = await world($, on);
+  // The door asks the server for the rooms, and the server never answers.
+  w.roomsHeld = new Promise(() => undefined);
+  await tick(w);
+  w.status.recent = [peerEvent({ cursor: 2 })];
+  await tick(w);
+  // No rooms read has finished, so the room is named by the end of its id.
+  expect(w.toasts).toEqual(["ada in room _room1: hello"]);
+  await roomsTick(w);
+  expect(w.fetched.filter((f) => f.path === "/rooms")).toHaveLength(1);
 });

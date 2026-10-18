@@ -370,6 +370,20 @@ test("a Deny whose notice Claude cannot be given says so: the room is answered, 
   expect(w.toasts.at(-1)).toBe("Bellman: the request was declined, but Claude was not told. Tell Claude not to carry it out.");
 });
 
+test("a room seen through two bridges is answered through the one whose door answers, while the other's cannot be read", async ($, on) => {
+  const w = await world($, on, {
+    second: { server: "plugin_bellman_bellman", door: "/tmp/bellman-door-9.sock", status: structuredClone(STATUS), rooms: structuredClone(ROOMS) },
+  });
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await reviewing($, w);
+  // The first bridge goes away: its socket refuses, and its door keeps the seat it last listed.
+  w.door = "/tmp/bellman-door-gone.sock";
+  await tick(w);
+  expect(w.state.doors?.[0]).toMatchObject({ server: "bellman", socketPath: "/tmp/bellman-door-1.sock", error: expect.any(String) });
+  await room.press({ key: "deny-5" });
+  expect(w.declined).toEqual([{ socket: "/tmp/bellman-door-9.sock", room: "qs_room1", body: { ref_id: "5" } }]);
+});
+
 test("a Deny that does not reach the room tells Claude nothing", async ($, on) => {
   const room2 = { ...structuredClone(ROOMS[0]!), session_id: "qs_room2", your_member_id: "m-me2" };
   const w = await world($, on, {

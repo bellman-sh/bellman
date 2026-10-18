@@ -138,6 +138,8 @@ test("a press on the sidebar's × counts as the person, so waking resumes", asyn
 
 test("a peer's message raises one toast; one's own and an ambient one do not", async ($, on) => {
   const w = await world($, on);
+  // The first tick starts the rooms read, which names the room; a tick does not wait for it.
+  await tick(w);
   w.status.recent = [
     peerEvent({ cursor: 2 }),
     peerEvent({ cursor: 3, from_member_id: "m-me", from_label: "you", payload: { text: "mine" } }),
@@ -156,11 +158,14 @@ test("two bridges: the picker lists both doors' rooms, and an event seen through
     second: {
       server: "plugin_bellman_bellman",
       door: "/tmp/bellman-door-9.sock",
-      status: { ...structuredClone(STATUS), seats: [{ session_id: "qs_room2", member_id: "m-me2", retrying: false }], recent: [twice] },
+      status: { ...structuredClone(STATUS), seats: [{ session_id: "qs_room2", member_id: "m-me2", retrying: false }] },
       rooms: [room2],
     },
   });
+  // The first tick starts the rooms read, which names the rooms; then the event arrives through both doors.
+  await tick(w);
   w.status.recent = [twice];
+  w.second!.status.recent = [twice];
   await tick(w);
   await tick(w);
   expect(w.toasts).toEqual(["ada in swarm _room1: hello"]);
@@ -175,6 +180,8 @@ test("a hostile label and message are cleaned in the band and the toast", async 
   const hostile = "\u{1b}[2Jevil\n";
   const w = await world($, on);
   w.rooms[0]!.members[1]!.label = hostile;
+  // The first tick starts the rooms read, which names the room; then the hostile message arrives.
+  await tick(w);
   w.status.recent = [peerEvent({ cursor: 2, from_label: hostile, payload: { text: "x".repeat(10_000) } })];
   await tick(w);
   for (const drawing of [await band($), await pane($, 22)]) {
@@ -281,6 +288,22 @@ test("the sidebar on screen keeps no toast away: only the room pane's Log does",
   w.status.recent = [peerEvent({ cursor: 2 })];
   await tick(w);
   expect(w.toasts).toEqual(["ada in swarm _room1: hello"]);
+});
+
+test("a room whose door cannot be read draws Reconnecting, its room still there, and Connected once it answers", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  expect(await shown(await band($))).toContain("● Connected");
+  w.doorDown = true;
+  await tick(w);
+  for (const drawing of [await band($), await pane($, SIDEBAR_COLUMNS)]) {
+    const text = await shown(drawing);
+    expect(text).toContain("◌ Reconnecting");
+    expect(text).toContain("swarm _room1");
+  }
+  w.doorDown = false;
+  await tick(w);
+  expect(await shown(await band($))).toContain("● Connected");
 });
 
 test("a door that goes unreachable while the sidebar is open closes nothing", async ($, on) => {

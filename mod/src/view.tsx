@@ -27,7 +27,7 @@ import {
   unreadCount,
 } from "../../src/mod/view.js";
 import type { DoorSeat, DoorView, RoomView, Tab } from "../types";
-import { readCanvas } from "./doors";
+import { readCanvas, seatIn } from "./doors";
 import { markDrawn, markPaneWide, shownTab } from "./drawn";
 import { awaitingPerson, drawPane, message } from "./pane";
 import { personActed } from "./person";
@@ -158,7 +158,8 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
   const given = await read($, approved);
   const waiting = ids.flatMap((id) => awaitingPerson(held[id] ?? [], given)).sort((a, b) => a.expires_at - b.expires_at);
   return {
-    retrying: seats.some((s) => s.retrying),
+    // A seat whose sync is being retried, or a room whose door cannot be read: either way the room is out of reach for now.
+    retrying: seats.some((s) => s.retrying) || (seatIn(list, picked)?.door.error ?? null) !== null,
     options: ids.map((id) => ({ value: id, label: labelOf(id, views) })),
     picked,
     label: labelOf(picked, views),

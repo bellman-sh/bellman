@@ -34,7 +34,11 @@ export async function gateShut($: EngineInterface): Promise<boolean> {
   return hasDrawn() && (await $.session.surfaces()).includes("terminal");
 }
 
-/** The rooms the pane shows: those of every door's seats, as the last door tick read them. */
+/**
+ * The rooms the pane shows: those of every door's seats, as each door last answered. A door that cannot be read keeps
+ * the seats it last listed, so a bridge that restarts leaves the gate shut on its rooms; only a status read without
+ * the seat, or the bridge leaving the tool list, drops one.
+ */
 async function paneRooms($: EngineInterface): Promise<Set<string>> {
   return new Set((await read($, doors)).flatMap((door) => door.status?.seats.map((seat) => seat.session_id) ?? []));
 }

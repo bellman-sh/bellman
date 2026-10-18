@@ -269,7 +269,11 @@ async function askBridges($) {
   if (unasked.length === 0) return;
   const asked = await Promise.all(unasked.map((server) => ask($, server)));
   await update($, doors, (current) => [
-    ...current.map((d) => d.socketPath === null ? asked.find((a) => a.server === d.server) ?? d : d),
+    ...current.map((d) => {
+      const answer = asked.find((a) => a.server === d.server);
+      if (answer === void 0 || answer.error !== null || d.socketPath !== null && d.error === null) return d;
+      return d.status === null ? answer : { ...d, socketPath: answer.socketPath };
+    }),
     ...asked.filter((a) => !current.some((d) => d.server === a.server))
   ]);
 }
@@ -285,7 +289,7 @@ async function pollDoors($, list) {
       try {
         return { ...door, status: await fromDoor($, door.socketPath, "/status"), error: null };
       } catch (error) {
-        return { ...door, socketPath: null, status: null, error: message(error) };
+        return { ...door, error: message(error) };
       }
     })
   );
@@ -308,16 +312,23 @@ async function readRooms($, list, known) {
 }
 var seatsKey = (list) => JSON.stringify(list.flatMap((d) => (d.status?.seats ?? []).map((s) => [d.server, s.session_id])).sort());
 var roomsFor = null;
+var refreshing = false;
 async function refreshRooms($, list) {
-  roomsFor = seatsKey(list);
-  const fresh = await readRooms($, list, await read2($, rooms));
-  await update($, rooms, () => fresh);
-  await readLogs($, list, [...seatedRooms(list).keys()], false);
-  if (await shownTab($) === "canvas") await readCanvas($);
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    roomsFor = seatsKey(list);
+    const fresh = await readRooms($, list, await read2($, rooms));
+    await update($, rooms, () => fresh);
+    await readLogs($, list, [...seatedRooms(list).keys()]);
+    if (await shownTab($) === "canvas") await readCanvas($);
+  } finally {
+    refreshing = false;
+  }
 }
 function seatedRooms(list) {
   const seated = /* @__PURE__ */ new Map();
-  for (const door of list) {
+  for (const door of [...list].sort((a, b) => Number(a.error !== null) - Number(b.error !== null))) {
     for (const seat of door.status?.seats ?? []) if (!seated.has(seat.session_id)) seated.set(seat.session_id, { door, seat });
   }
   return seated;
@@ -337,7 +348,7 @@ function merged(was, fresh) {
   for (const e of fresh) byCursor.set(e.cursor, e);
   return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor).slice(-LOG_KEPT);
 }
-async function readLogs($, list, ids, newer) {
+async function readLogs($, list, ids) {
   const seated = seatedRooms(list);
   const known = await read2($, logs);
   const fresh = /* @__PURE__ */ new Map();
@@ -346,7 +357,7 @@ async function readLogs($, list, ids, newer) {
       const socketPath = seated.get(id)?.door.socketPath;
       if (!socketPath) return;
       try {
-        fresh.set(id, await fetchLog($, socketPath, id, newer ? known[id]?.at(-1)?.cursor : void 0));
+        fresh.set(id, await fetchLog($, socketPath, id, known[id]?.at(-1)?.cursor));
       } catch (error) {
         $.ui.log(`bellman-mod: a room's log: ${message(error)}`, { to: "debug" });
       }
@@ -383,7 +394,7 @@ async function readShownLog($, list) {
   readingLog = true;
   void (async () => {
     try {
-      await readLogs($, list, [id], true);
+      await readLogs($, list, [id]);
       const newest = (await read2($, logs))[id]?.at(-1)?.cursor;
       if (newest !== void 0) await update($, openedThrough, (was) => ({ ...was, [id]: Math.max(was[id] ?? -1, newest) }));
     } catch (error) {
@@ -429,7 +440,9 @@ async function tick($) {
       doors,
       (current) => current.filter((d) => listed.includes(d.server)).map((d) => d.socketPath === null ? d : bySocket.get(d.socketPath) ?? d)
     );
-    if (seatsKey(list) !== roomsFor) await refreshRooms($, list);
+    if (seatsKey(list) !== roomsFor) {
+      refreshRooms($, list).catch((error) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
+    }
     for (const fn of subscribers) {
       try {
         await fn(list);
@@ -799,7 +812,8 @@ async function shownOf($, list, seats) {
   const given = await read5($, approved);
   const waiting = ids.flatMap((id) => awaitingPerson(held[id] ?? [], given)).sort((a, b) => a.expires_at - b.expires_at);
   return {
-    retrying: seats.some((s) => s.retrying),
+    // A seat whose sync is being retried, or a room whose door cannot be read: either way the room is out of reach for now.
+    retrying: seats.some((s) => s.retrying) || (seatIn(list, picked)?.door.error ?? null) !== null,
     options: ids.map((id) => ({ value: id, label: labelOf(id, views) })),
     picked,
     label: labelOf(picked, views),

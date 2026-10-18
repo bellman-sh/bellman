@@ -146,12 +146,16 @@ export type World = {
   doorDown: boolean;
   /** While set, every door's `/status` waits for it: a tick held mid-read. */
   held: Promise<void> | null;
+  /** While set, every door's `/rooms` waits for it: a rooms read the server is slow to answer. */
+  roomsHeld: Promise<void> | null;
   /** While set, every `bellman_whoami` answer waits for it: a hook of the mod's held mid-ask. */
   asking: Promise<void> | null;
+  /** While true every `bellman_whoami` is refused, as a call the bridge cannot answer is. */
+  whoamiFails: boolean;
   /** What a well-formed decline is answered: 200 with its cursor, or this status with an error (422 is the server's refusal). */
   declineStatus: number;
-  /** Every request a door answered, in order. */
-  fetched: { socket: string; method: string; path: string }[];
+  /** Every request a door answered, in order, with the `?after=` it carried, when it carried one. */
+  fetched: { socket: string; method: string; path: string; after?: string }[];
   /** Every decline a door answered, well-formed or not, with its body as JSON (or as the text it was, when it is none). */
   declined: { socket: string; room: string; body: unknown }[];
   /** A second local bridge, under another server's name, when a test sets one. */
@@ -230,7 +234,9 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     log: {},
     doorDown: false,
     held: null,
+    roomsHeld: null,
     asking: null,
+    whoamiFails: false,
     declineStatus: 200,
     fetched: [],
     declined: [],
@@ -303,6 +309,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
         // The bridge's own tool (`describeSelf` in src/bridge.ts), its JSON compact as the live look saw it.
         const door = bridge.door;
         await w.asking;
+        if (w.whoamiFails) return { deny: "bellman_whoami failed" };
         return answer(JSON.stringify({ source: "env", label: null, door }));
       }
       case "bellman_send":
@@ -338,8 +345,10 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     const bridge = bridges().find((b) => b.door !== null && b.door === socket);
     if (w.doorDown || !bridge || socket === undefined) return { deny: `connect ECONNREFUSED ${socket ?? e.url}` };
     const method = e.init?.method ?? "GET";
-    const path = new URL(e.url).pathname;
-    w.fetched.push({ socket, method, path });
+    const url = new URL(e.url);
+    const path = url.pathname;
+    const after = url.searchParams.get("after");
+    w.fetched.push({ socket, method, path, ...(after === null ? {} : { after }) });
     const route = /^\/rooms\/([^/]+)\/(events|surface|decline)$/.exec(path);
     const room = route ? decodeURIComponent(route[1]!) : "";
     const seated = bridge.status.seats.some((s) => s.session_id === room);
@@ -364,8 +373,15 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
       return reply(200, bridge.status);
     }
     // The bridge's own seats' rooms, as bellman_rooms gives them.
-    if (path === "/rooms") return reply(200, { rooms: bridge.rooms.filter((r) => bridge.status.seats.some((s) => s.session_id === r.session_id)) });
-    if (route?.[2] === "events") return reply(200, w.log[room] ?? { events: [], cursor: 0 });
+    if (path === "/rooms") {
+      await w.roomsHeld;
+      return reply(200, { rooms: bridge.rooms.filter((r) => bridge.status.seats.some((s) => s.session_id === r.session_id)) });
+    }
+    if (route?.[2] === "events") {
+      // What the room's log holds past `after`, or all of it with none.
+      const log = w.log[room] ?? { events: [], cursor: 0 };
+      return reply(200, after === null ? log : { events: log.events.filter((e) => e.cursor > Number(after)), cursor: log.cursor });
+    }
     if (route?.[2] === "surface" && seated) return reply(200, w.surface[room] ?? { session_id: room, room: {}, surface: { cursor: 0, items: [] } });
     return reply(404, { error: "not_found" });
   });

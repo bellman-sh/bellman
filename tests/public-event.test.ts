@@ -9,10 +9,11 @@
  * the real tool and not about a copy of it.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { publicEvent } from "../src/public-event.js";
-import type { SessionEvent } from "../src/types.js";
+import { briefAuthors, publicEvent, readableEvent, readableEvents, seesBrief } from "../src/public-event.js";
+import type { Member, SessionEvent } from "../src/types.js";
 import { Harness, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
+import { brief } from "./helpers/fixtures.js";
 
 const stored = (over: Partial<SessionEvent> = {}): SessionEvent => ({
   cursor: 7,
@@ -110,5 +111,87 @@ describe("the poll and the socket share one shape", () => {
       .filter((e) => e.fromMemberId !== p.creatorMemberId);
     expect(theirs.length, "the comparison must not be vacuous").toBeGreaterThan(0);
     expect(envelopes(sync.data.events).map((e) => e.data)).toEqual(theirs.map(publicEvent));
+  });
+});
+
+/**
+ * The rule (read_context spec, section 1): one function over the stored event, the author's row
+ * and the reader, a user id or null for a path every member shares.
+ */
+describe("readableEvent", () => {
+  const AUTHOR = "u_quiet";
+  const READER = { author: AUTHOR, peer: "u_peer", none: null } as const;
+  const GRANT: Record<"on" | "off", Pick<Member, "capabilities">> = {
+    on: { capabilities: ["read_context", "receive_messages"] },
+    off: { capabilities: ["receive_messages"] },
+  };
+  const kept = brief({ goal: "kept to myself" });
+  const by = { fromMemberId: "m_quiet", fromUserId: AUTHOR, fromLabel: "quiet@codenerd" };
+  const update = stored({ ...by, type: "brief_update", payload: kept });
+  const newJoin = () => stored({ ...by, type: "member_joined", payload: { member: { member_id: "m_quiet", label: "quiet@codenerd" }, brief: kept } });
+  const joined = newJoin();
+  const message = stored({ ...by, payload: { text: "hi" } });
+  const withoutBrief = { ...joined, payload: { member: { member_id: "m_quiet", label: "quiet@codenerd" }, brief: null } };
+
+  it.each([
+    ["a brief_update", "on", "peer", update, update],
+    ["a brief_update", "on", "none", update, update],
+    ["a brief_update", "on", "author", update, update],
+    ["a brief_update", "off", "peer", update, null],
+    ["a brief_update", "off", "none", update, null],
+    ["a brief_update", "off", "author", update, update],
+    ["a member_joined", "on", "peer", joined, joined],
+    ["a member_joined", "on", "none", joined, joined],
+    ["a member_joined", "on", "author", joined, joined],
+    ["a member_joined", "off", "peer", joined, withoutBrief],
+    ["a member_joined", "off", "none", joined, withoutBrief],
+    ["a member_joined", "off", "author", joined, joined],
+    ["a message", "on", "peer", message, message],
+    ["a message", "off", "peer", message, message],
+    ["a message", "off", "none", message, message],
+    ["a message", "off", "author", message, message],
+  ] as const)("shows %s, with the grant %s, to a reader who is the %s", (_what, grant, reader, e, expected) => {
+    expect(readableEvent(e, GRANT[grant], READER[reader])).toEqual(expected);
+  });
+
+  it("reads an author with no row as one who does not grant read_context, except for the author", () => {
+    expect(readableEvent(update, undefined, "u_peer")).toBeNull();
+    expect(readableEvent(update, undefined, null)).toBeNull();
+    expect(readableEvent(update, undefined, AUTHOR)).toEqual(update);
+  });
+
+  it("changes nothing in the event it is handed", () => {
+    // A join of its own: the table above hands the shared `joined` to readableEvent, so a copy
+    // taken from it would already hold a change made in place, and the comparison would pass.
+    const own = newJoin();
+    const before = structuredClone(own);
+    readableEvent(own, GRANT.off, "u_peer");
+    expect(own).toEqual(before);
+  });
+
+  /** Review Focus 4: a grant is a handle's, so one account's two handles can differ. */
+  it("over a list, looks each author up by member id, keeps the order and leaves out what it drops", () => {
+    const open = stored({ type: "brief_update", fromMemberId: "m_open", fromUserId: AUTHOR, payload: brief(), cursor: 8 });
+    const rows = [{ memberId: "m_quiet", ...GRANT.off }, { memberId: "m_open", ...GRANT.on }];
+    expect(readableEvents([update, open, message], rows, "u_peer")).toEqual([open, message]);
+    expect(readableEvents([update, open, message], rows, AUTHOR)).toEqual([update, open, message]);
+    // The rows in another order than the events: a lookup by position would pair each event with the wrong row.
+    expect(readableEvents([update, open, message], [...rows].reverse(), "u_peer")).toEqual([open, message]);
+    // m_quiet has no row here, so its update reads as not granting (R11) in a list as it does alone.
+    expect(readableEvents([update, open, message], rows.slice(1), "u_peer")).toEqual([open, message]);
+  });
+
+  it("names the authors whose rows it needs: those of a brief_update or a member_joined, once each", () => {
+    expect(briefAuthors([update, joined, message, stored({ type: "brief_update", fromMemberId: "m_loud" })])).toEqual(["m_quiet", "m_loud"]);
+    expect(briefAuthors([message])).toEqual([]);
+    // A joiner who wrote no update still needs a row: the list above cannot tell, since m_quiet wrote both.
+    expect(briefAuthors([stored({ type: "member_joined", fromMemberId: "m_new" })])).toEqual(["m_new"]);
+  });
+
+  it("lets a reader see a brief its author grants, or one of its own account (D3)", () => {
+    expect(seesBrief({ userId: AUTHOR, ...GRANT.on }, "u_peer")).toBe(true);
+    expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, "u_peer")).toBe(false);
+    expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, null)).toBe(false);
+    expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, AUTHOR)).toBe(true);
   });
 });

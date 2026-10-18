@@ -27,7 +27,7 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../o
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { auditEntries, cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -782,8 +782,10 @@ export const etagMatches = (header: string | null, tag: string): boolean =>
  * included, because a person reading the log reads the whole conversation. Without `?after`, the
  * newest MAX_EVENTS_READ; with it, the next MAX_EVENTS_READ past that cursor, so a poll that carries
  * the last cursor it saw reads only what is new. The caller rule is the surface read's: membership
- * first, a removed member to its cut, and #65's fallback for an org admin reading a closed room. A
- * read and nothing else: it moves no one's `lastSeenAt` and no bridge's cursor.
+ * first, a removed member to its cut, and #65's fallback for an org admin reading a closed room. The
+ * reader is the caller's account, an org admin's included (read_context spec, section 3): a brief its
+ * author keeps is left out, and the author's own account reads it. A read and nothing else: it moves
+ * no one's `lastSeenAt` and no bridge's cursor.
  */
 async function readEventsRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -812,8 +814,11 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
     // A removed member's newest are the ones before its cut, which the room's tail may not reach.
     read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ), MAX_EVENTS_READ)).filter(within);
   }
+  // The cursor comes from `read`, not from `events`: an event left out is still passed over, so the
+  // next poll does not ask for it again.
+  const events = await eventsFor(deps.store, sessionId, read, who.identity.userId);
   return json(200, {
-    events: read.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
+    events: events.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
     cursor: read.at(-1)?.cursor ?? after ?? 0,
   }, origin);
 }

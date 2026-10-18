@@ -1547,6 +1547,49 @@ describe("GET /rooms/:id/events", () => {
     const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
     expect(texts(r)).toEqual(["said in the org's room"]);
   });
+
+  /** Review Focus 2: an org admin reading a closed room (#65) is a reader like any other. */
+  it("reads a closed room's log for an org admin without a brief its author keeps", async () => {
+    await store.createSession(orgRoom({ closed: false, closedAt: null }));
+    await store.updateMember(ORG_ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    await store.appendEvent(ORG_ROOM, {
+      type: "brief_update", fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", payload: { goal: "kept to myself" }, refId: null,
+    });
+    await say(peer(), "said in the org's room", ORG_ROOM);
+    await store.closeSession(ORG_ROOM);
+    const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
+    expect(r.events.map((e) => e.data.type)).toEqual(["message"]);
+  });
+
+  /** The dash's Log route (read_context spec, section 3): the caller's account is the reader. */
+  it("leaves a brief its author keeps out of a peer's log, keeps it in the author's, and moves the cursor past it", async () => {
+    await store.updateMember(ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    const as = { fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", refId: null };
+    await store.appendEvent(ROOM, { ...as, type: "member_joined", payload: { member: { member_id: "m_peer" }, brief: { goal: "kept to myself" } } });
+    const update = (await store.appendEvent(ROOM, { ...as, type: "brief_update", payload: { goal: "still to myself" } }))!;
+
+    const theirs = await read(DEV_KEY.jesse);
+    expect(theirs.events.map((e) => e.data.type)).toEqual(["member_joined"]);
+    expect(theirs.events[0].data.payload).toEqual({ member: { member_id: "m_peer" }, brief: null });
+    expect(theirs.cursor).toBe(update.cursor);
+    expect(JSON.stringify(theirs)).not.toContain("to myself");
+
+    const mine = await read(DEV_KEY.peer);
+    expect(mine.events.map((e) => e.data.type)).toEqual(["member_joined", "brief_update"]);
+  });
+
+  /** The Log polls with ?after, so a poll is a path of its own: no brief its author keeps, and a cursor that still passes it. */
+  it("leaves a brief its author keeps out of a poll past a cursor, and moves the cursor past it", async () => {
+    await store.updateMember(ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    const as = { fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", refId: null };
+    const joined = (await store.appendEvent(ROOM, { ...as, type: "member_joined", payload: { member: { member_id: "m_peer" }, brief: { goal: "kept to myself" } } }))!;
+    const update = (await store.appendEvent(ROOM, { ...as, type: "brief_update", payload: { goal: "still to myself" } }))!;
+
+    expect(await read(DEV_KEY.jesse, `?after=${joined.cursor}`)).toEqual({ events: [], cursor: update.cursor });
+
+    const mine = await read(DEV_KEY.peer, `?after=${joined.cursor}`);
+    expect(mine.events.map((e) => e.data.type)).toEqual(["brief_update"]);
+  });
 });
 
 describe("POST /rooms/:id/unpublish (public rooms)", () => {

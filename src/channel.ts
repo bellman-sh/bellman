@@ -65,6 +65,7 @@ import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 const key = process.env.BELLMAN_KEY;
 const url = process.env.BELLMAN_URL ?? "https://mcp.bellman.sh/mcp";
 const delivery = deliveryOf(process.env.BELLMAN_DELIVERY);
+const install = installOf(process.env.BELLMAN_INSTALL);
 const log = (message: string) => console.error(`[bellman] ${message}`);
 
 /**
@@ -138,7 +139,7 @@ let door: { close(): Promise<void> } | undefined;
 
 const bridge = createBridge({
   delivery,
-  install: installOf(process.env.BELLMAN_INSTALL),
+  install,
   inboxDir,
   remote: connect,
   whoami,
@@ -163,7 +164,7 @@ const bridge = createBridge({
 
 /**
  * The door (src/door.ts): how the Claude Code mod in this session reads what only the bridge holds (the inbox's counts,
- * a room's log, whether it is signed in) and gets what it cannot ask Claude Code for: the rooms the bridge sits in, a
+ * a room's log, whether it holds a sign-in) and gets what it cannot ask Claude Code for: the rooms the bridge sits in, a
  * room's canvas, and a decline of an action request, all through the connection the bridge holds. Named for this pid,
  * under BELLMAN_DOOR_ROOT or ~/.claude/bellman/door, and bellman_whoami says where.
  *
@@ -173,12 +174,17 @@ const bridge = createBridge({
  * try, the path included.
  *
  * The functions are handed over and not their results, so each request sees the bridge as it is then.
+ *
+ * None in the Claude Desktop bundle (BELLMAN_INSTALL=bundle): the mod is Claude Code's, nothing in Claude Desktop reads
+ * a door, and an unread door would still take a decline from any process running as the person. bellman_whoami names
+ * none there.
  */
 const doorOpened = (async () => {
+  if (install === "bundle") return;
   try {
     const opened = await startDoor(doorPathFor(process.pid), {
       delivery,
-      signedIn: () => whoami().source !== "unknown",
+      hasSignIn: () => whoami().source !== "unknown",
       seats: bridge.seats,
       recent: bridge.recent,
       inboxDir,
@@ -186,7 +192,7 @@ const doorOpened = (async () => {
       readRooms: bridge.readRooms,
       readSurface: bridge.readSurface,
       decline: bridge.decline,
-    });
+    }, log);
     door = opened;
     doorPath = opened.path;
   } catch (error) {

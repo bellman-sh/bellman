@@ -76,11 +76,11 @@ function texts(node: unknown, out: string[] = []): string[] {
 /** What a mounted drawing shows, as one string. */
 export const shown = async (ui: { drawn: () => Promise<unknown> }): Promise<string> => texts(await ui.drawn()).join(" ");
 
-/** The door of a bridge in hook delivery, signed in, with one seat, nothing waiting and nothing recent. */
+/** The door of a bridge in hook delivery, holding a sign-in, with one seat, nothing waiting and nothing recent. */
 export const STATUS: DoorStatus = {
   version: 1,
   delivery: "hook",
-  signed_in: true,
+  has_sign_in: true,
   seats: [{ session_id: "qs_room1", member_id: "m-me", retrying: false }],
   waiting: [],
   recent: [],

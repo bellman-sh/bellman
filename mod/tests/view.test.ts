@@ -208,7 +208,7 @@ test("the status line speaks for the best bridge: an older bridge beside a door 
   await tick(w);
   expect(w.statuses.at(-1)).toBe("Bellman: not in a room");
   // Down the ladder, as the better bridge fares worse; the older bridge speaks only once no other does.
-  w.second!.status.signed_in = false;
+  w.second!.status.has_sign_in = false;
   await tick(w);
   expect(w.statuses.at(-1)).toBe("Bellman: the bridge is not signed in");
   w.doorDown = true;
@@ -219,9 +219,9 @@ test("the status line speaks for the best bridge: an older bridge beside a door 
   expect(w.statuses.at(-1)).toBe("Bellman: update the bridge to see your rooms here");
 });
 
-test("a door that answers signed in speaks over one that answers signed out", async ($, on) => {
+test("a door that answers holding a sign-in speaks over one that answers holding none", async ($, on) => {
   const w = await world($, on, {
-    second: { server: "plugin_bellman_bellman", door: "/tmp/bellman-door-9.sock", status: { ...structuredClone(STATUS), seats: [], signed_in: false }, rooms: [] },
+    second: { server: "plugin_bellman_bellman", door: "/tmp/bellman-door-9.sock", status: { ...structuredClone(STATUS), seats: [], has_sign_in: false }, rooms: [] },
   });
   w.status.seats = [];
   await tick(w);

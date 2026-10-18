@@ -131,14 +131,14 @@ test("a tick that reads while a prompt is asking keeps what it read", async ($, 
   w.asking = new Promise((resolve) => (release = resolve));
   const typed = types($);
   await w.clock.settle();
-  w.status.signed_in = false;
+  w.status.has_sign_in = false;
   await tick(w);
   w.asking = null;
   release();
   await typed;
   await w.clock.settle();
   expect(w.state.doors).toEqual([
-    { server: "bellman", socketPath: w.door, status: { ...STATUS, signed_in: false }, error: null },
+    { server: "bellman", socketPath: w.door, status: { ...STATUS, has_sign_in: false }, error: null },
     { server: "plugin_bellman_bellman", socketPath: "/tmp/bellman-door-10.sock", status: null, error: null },
   ]);
 });

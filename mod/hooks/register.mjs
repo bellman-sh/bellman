@@ -1,18 +1,4 @@
 // src/mod/calls.ts
-function resultData(result) {
-  if (result.isError) return null;
-  const data = result.structuredContent ?? parsed(result.content.find((block) => block.type === "text")?.text);
-  return typeof data === "object" && data !== null && !Array.isArray(data) ? data : null;
-}
-function parsed(text) {
-  if (text === void 0) return null;
-  const blank = text.lastIndexOf("\n\n");
-  try {
-    return JSON.parse(blank === -1 ? text : text.slice(blank + 2));
-  } catch {
-    return null;
-  }
-}
 var OWN_TOOL = /^mcp__.+__bellman_whoami$/;
 var isOwnCall = (tool, origin) => OWN_TOOL.test(tool) && origin?.plugin === "bellman-mod";
 
@@ -25,8 +11,8 @@ var ACTION_REQUEST_TTL_MS = 30 * 6e4;
 // src/door-protocol.ts
 var CSI = /\u{1b}\[[0-?]*[ -/]*[@-~]/gu;
 var OSC = /\u{1b}\][^\u{7}\u{1b}]*(?:\u{7}|\u{1b}\\)/gu;
-var TEXT_CONTROLS = /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}]/gu;
-var BLOCK_CONTROLS = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}]/gu;
+var TEXT_CONTROLS = /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}\u{61c}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}\u{2066}-\u{2069}\u{feff}]/gu;
+var BLOCK_CONTROLS = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}\u{61c}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}\u{2066}-\u{2069}\u{feff}]/gu;
 function withoutSequences(text) {
   return text.replace(CSI, "").replace(OSC, "");
 }
@@ -187,7 +173,23 @@ function bellRows() {
 var WEB = /^https?:/i;
 var WEB_TARGET = /^\s*<?https?:/i;
 function safeLinks(markdown) {
-  return markdown.replace(/\[([^[\]]*)\]\(([^)]*)\)/g, (whole, label, inner) => WEB_TARGET.test(inner) ? whole : label).replace(/\]\((?!\s*<?https?:)[^)]*\)/gi, "]").replace(/<([a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>/gi, (whole, target) => WEB.test(target) ? whole : target).replace(/^( {0,3}\[(?!\^)[^\]\n]+\]):(?![ \t]*<?https?:)/gim, "$1\\:");
+  return markdown.replace(/\[([^[\]]*)\]\(([^)]*)\)/g, (whole, label, inner) => WEB_TARGET.test(inner) ? whole : label).replace(/\]\((?!\s*<?https?:)[^)]*\)/gi, "]").replace(/<([a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>/gi, (whole, target) => WEB.test(target) ? whole : target).replace(/^((?:[ \t]*(?:>|[-+*](?=[ \t])|\d{1,9}[.)](?=[ \t])))*[ \t]*\[(?:\\[\s\S]|[^[\]\\])+\]):(?![ \t]*<?https?:)/gim, "$1\\:");
+}
+
+// src/result-data.ts
+function resultData(result) {
+  if (result.isError) return null;
+  const data = result.structuredContent ?? parsed(result.content.find((block) => block.type === "text")?.text);
+  return typeof data === "object" && data !== null && !Array.isArray(data) ? data : null;
+}
+function parsed(text) {
+  if (text === void 0) return null;
+  const blank = text.lastIndexOf("\n\n");
+  try {
+    return JSON.parse(blank === -1 ? text : text.slice(blank + 2));
+  } catch {
+    return null;
+  }
 }
 
 // mod/src/drawn.ts
@@ -773,7 +775,7 @@ function labelOf(id, views) {
 function statusLine(list) {
   if (seatsOf(list).length > 0) return void 0;
   const answering = list.filter((d) => d.socketPath !== null && d.error === null);
-  if (answering.some((d) => d.status?.signed_in !== false)) return "Bellman: not in a room";
+  if (answering.some((d) => d.status?.has_sign_in !== false)) return "Bellman: not in a room";
   if (answering.length > 0) return "Bellman: the bridge is not signed in";
   if (list.some((d) => d.error !== null)) return "Bellman: cannot reach the bridge";
   if (list.length > 0) return "Bellman: update the bridge to see your rooms here";

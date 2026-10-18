@@ -55,14 +55,14 @@ function labelOf(id: string, views: readonly RoomView[]): string {
 
 /**
  * The status line while the session holds no seat (spec D4), said for the best bridge there is (L6): a door that
- * answers, signed in, says the session is in no room; one that answers signed out, that the bridge is not signed in;
- * then a door that could not be read; and a bridge older than the door only when no bridge has a door. None with a
- * seat, or with no Bellman bridge at all.
+ * answers holding a sign-in says the session is in no room; one that answers holding none, that the bridge is not
+ * signed in; then a door that could not be read; and a bridge older than the door only when no bridge has a door.
+ * None with a seat, or with no Bellman bridge at all.
  */
 function statusLine(list: readonly DoorView[]): string | undefined {
   if (seatsOf(list).length > 0) return undefined;
   const answering = list.filter((d) => d.socketPath !== null && d.error === null);
-  if (answering.some((d) => d.status?.signed_in !== false)) return "Bellman: not in a room";
+  if (answering.some((d) => d.status?.has_sign_in !== false)) return "Bellman: not in a room";
   if (answering.length > 0) return "Bellman: the bridge is not signed in";
   if (list.some((d) => d.error !== null)) return "Bellman: cannot reach the bridge";
   if (list.length > 0) return "Bellman: update the bridge to see your rooms here";

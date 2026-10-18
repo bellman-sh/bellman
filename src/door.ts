@@ -10,7 +10,7 @@ import { pendingSummary } from "./inbox.js";
  * The bridge's door: what the Claude Code mod in the same session reads off the bridge, over a Unix socket.
  *
  * The bridge holds three things the mod cannot get anywhere else: how many events wait in its inbox, a room's
- * log (the events route wants a credential, and the credential stays in the bridge), and whether it is signed in.
+ * log (the events route wants a credential, and the credential stays in the bridge), and whether it holds a sign-in.
  * The socket is named for the bridge's pid, so each bridge has a door of its own, and a session with two bridges
  * has two.
  *
@@ -24,7 +24,8 @@ import { pendingSummary } from "./inbox.js";
  *
  * The bridge is the session's Bellman MCP server, and the door is an aid to something else. Nothing that goes
  * wrong behind a request may take the bridge down, so a throw is answered with a 500, and an error on the running
- * server is swallowed: either would be an uncaught exception, and the bridge has no handler for one.
+ * server is swallowed: either would be an uncaught exception, and the bridge has no handler for one. A 500 leaves one
+ * line in the bridge's log, saying which route failed and why, and nothing of the room or the request it was sent.
  */
 
 /** The folder every door lives in, beside the inbox and the bus. */
@@ -44,7 +45,8 @@ export function doorPathFor(pid: number, root = doorRoot()): string {
  */
 export interface DoorSource {
   delivery: Delivery;
-  signedIn(): boolean;
+  /** Whether the bridge holds a sign-in (`DoorStatus.has_sign_in`): cached, or a key; not whether the server takes it. */
+  hasSignIn(): boolean;
   seats(): DoorSeat[];
   recent(): DoorEvent[];
   /** Hook and queue delivery's inbox. Channel delivery keeps none. */
@@ -73,7 +75,7 @@ export function statusOf(src: DoorSource): DoorStatus {
   return {
     version: DOOR_VERSION,
     delivery: src.delivery,
-    signed_in: src.signedIn(),
+    has_sign_in: src.hasSignIn(),
     seats,
     waiting: src.delivery !== "channel" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
     recent: src.recent(),
@@ -107,6 +109,17 @@ const ROOM_ROUTE = /^\/rooms\/([^/]+)\/(events|surface|decline)$/;
 const CURSOR = /^\d{1,15}$/;
 /** A decline's body is `{"ref_id":"<fifteen digits>"}`: about thirty bytes. */
 const DECLINE_BODY_MAX = 1024;
+
+/**
+ * The route a request named, for a log line: the room it named and anything it sent are left out, since a room's id
+ * names who is in it, and a body or an unserved path is whatever the caller wrote.
+ */
+function shapeOf(target: string): string {
+  const path = target.split("?")[0];
+  const room = ROOM_ROUTE.exec(path);
+  if (room !== null) return `/rooms/<id>/${room[2]}`;
+  return path === "/status" || path === "/rooms" ? path : "a path it does not serve";
+}
 
 const NOT_FOUND: Reply = { status: 404, body: { error: "not_found" } };
 const BAD_REQUEST: Reply = { status: 400, body: { error: "bad_request" } };
@@ -221,8 +234,14 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
  * close() drops every open connection before it waits for them: a request the bridge is still answering, a log read
  * waiting on the server, must not hold up the shutdown that awaits this. Closing a server unlinks its socket (Node's
  * documentation, and src/bus.ts measured it), so nothing is left at `path`.
+ *
+ * `log` is the bridge's own (its stderr): each 500 is one line there.
  */
-export async function startDoor(path: string, src: DoorSource): Promise<{ path: string; close(): Promise<void> }> {
+export async function startDoor(
+  path: string,
+  src: DoorSource,
+  log: (message: string) => void = () => undefined,
+): Promise<{ path: string; close(): Promise<void> }> {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   rmSync(path, { force: true });
 
@@ -230,9 +249,11 @@ export async function startDoor(path: string, src: DoorSource): Promise<{ path: 
     try {
       const reply = await route(src, req);
       send(res, reply.status, reply.body);
-    } catch {
-      // Whatever failed, the answer is this one, and the error goes no further than this catch: what the bridge
-      // threw is not for a request to read.
+    } catch (error) {
+      // Whatever failed, the answer is this one, and the error goes no further than the bridge's own log: what the
+      // bridge threw is not for a request to read.
+      const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
+      log(`door: ${req.method} ${shapeOf(req.url ?? "")} answered 500: ${why}`);
       send(res, 500, { error: "internal" });
     }
   });

@@ -45,11 +45,11 @@ function event(over: Partial<PeerEvent> = {}): PeerEvent {
   };
 }
 
-/** A bridge in channel delivery, signed in, watching one member in one room, whose log reads answer 200. */
+/** A bridge in channel delivery, holding a sign-in, watching one member in one room, whose log reads answer 200. */
 function source(over: Partial<DoorSource> = {}): DoorSource {
   return {
     delivery: "channel",
-    signedIn: () => true,
+    hasSignIn: () => true,
     seats: () => [{ session_id: "qs_room1", member_id: "m1", retrying: false }],
     recent: () => [event()],
     readEvents: vi.fn(async () => ({ status: 200, body: { events: [], cursor: 3 } })),
@@ -157,8 +157,8 @@ describe("statusOf", () => {
   it("reports what the source reports", () => {
     const seats = [{ session_id: "qs_room1", member_id: "m1", retrying: true }];
     const recent = [event({ cursor: 8 })];
-    const src = source({ delivery: "hook", signedIn: () => false, seats: () => seats, recent: () => recent });
-    expect(statusOf(src)).toEqual({ version: 1, delivery: "hook", signed_in: false, seats, waiting: [], recent });
+    const src = source({ delivery: "hook", hasSignIn: () => false, seats: () => seats, recent: () => recent });
+    expect(statusOf(src)).toEqual({ version: 1, delivery: "hook", has_sign_in: false, seats, waiting: [], recent });
   });
 });
 
@@ -296,7 +296,7 @@ describe("the door", () => {
       .mockRejectedValueOnce(new Error("secret detail"))
       .mockResolvedValueOnce({ status: 200, body: cyclic })
       .mockResolvedValueOnce({ status: 1000, body: {} });
-    const door = await start("5.sock", source({ signedIn: boom, seats: boom, recent: boom, readEvents }));
+    const door = await start("5.sock", source({ hasSignIn: boom, seats: boom, recent: boom, readEvents }));
     const thrown = [
       ["/status", "a getter that throws"],
       ["/rooms/qs_room1/events", "a read that rejects"],
@@ -309,6 +309,34 @@ describe("the door", () => {
       expect(JSON.parse(res.body), why).toEqual({ error: "internal" });
     }
     expect((await get(door.path, "/elsewhere")).status).toBe(404);
+  });
+
+  it("leaves one line in the bridge's log for each 500: the method, the route and why, and nothing of the room or the body", async () => {
+    const lines: string[] = [];
+    const door = await startDoor(
+      join(root, "5.sock"),
+      source({
+        readEvents: vi.fn().mockRejectedValue(new Error("the upstream\n  went away")),
+        decline: vi.fn().mockRejectedValue(new Error("no seat")),
+        recent: () => {
+          throw new Error("recent threw");
+        },
+      }),
+      (line) => lines.push(line),
+    );
+    doors.push(door);
+    expect((await get(door.path, "/rooms/qs_secret_room/events?after=41")).status).toBe(500);
+    expect((await post(door.path, "/rooms/qs_secret_room/decline", { body: '{"ref_id":"777"}' })).status).toBe(500);
+    expect((await get(door.path, "/status")).status).toBe(500);
+    // What the door answers itself is no failure, and leaves nothing.
+    expect((await get(door.path, "/elsewhere/qs_secret_room")).status).toBe(404);
+    expect((await post(door.path, "/rooms/qs_secret_room/decline", { body: "{}" })).status).toBe(400);
+    expect(lines).toEqual([
+      "door: GET /rooms/<id>/events answered 500: the upstream went away",
+      "door: POST /rooms/<id>/decline answered 500: no seat",
+      "door: GET /status answered 500: recent threw",
+    ]);
+    for (const secret of ["qs_secret_room", "41", "777"]) expect(lines.join("\n")).not.toContain(secret);
   });
 
   it("outlives an error on its running server, which would otherwise be an uncaught exception", async () => {

@@ -33,7 +33,11 @@ export interface DoorWaiting {
 export interface DoorStatus {
   version: 1;
   delivery: "hook" | "channel" | "queue";
-  signed_in: boolean;
+  /**
+   * The bridge holds a sign-in: a cached one, or a BELLMAN_KEY. Not that the server accepts it, which only a call
+   * would establish, and the door makes none to say this.
+   */
+  has_sign_in: boolean;
   seats: DoorSeat[];
   waiting: DoorWaiting[];
   /** The latest events the bridge delivered, newest last, ambient ones included. */
@@ -85,10 +89,19 @@ const OSC = /\u{1b}\][^\u{7}\u{1b}]*(?:\u{7}|\u{1b}\\)/gu;
 // With the sequences gone, every C0 and C1 control and DEL goes too, each without a trace. The
 // whitespace ones (tab through carriage return) are the exception in `cleanText`, which folds
 // them to a space instead; `cleanBlock` keeps only the newline.
-// ponytail: controls only. Unicode format characters (bidi overrides, zero-width joiners) pass
-// through; strip them here the day a label is spoofed with one.
-const TEXT_CONTROLS = /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}]/gu;
-const BLOCK_CONTROLS = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}]/gu;
+// So do the characters that draw nothing or turn the direction a line reads in, with which one
+// peer's label passes for another's or a line reads other than it runs: the Arabic letter mark
+// (U+061C), the zero-width space (U+200B), the left-to-right and right-to-left marks (U+200E,
+// U+200F), the embeddings and overrides (U+202A to U+202E), the word joiner (U+2060), the
+// isolates (U+2066 to U+2069) and the byte order mark (U+FEFF). The zero-width non-joiner and
+// joiner (U+200C, U+200D) stay: emoji and some scripts need them.
+// ponytail: those, by name. Other format characters (a soft hyphen, the invisible operators
+// U+2061 to U+2064, the tag characters a flag emoji is spelled with) pass; strip one here the
+// day a label is spoofed with it.
+const TEXT_CONTROLS =
+  /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}\u{61c}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}\u{2066}-\u{2069}\u{feff}]/gu;
+const BLOCK_CONTROLS =
+  /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}\u{61c}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}\u{2066}-\u{2069}\u{feff}]/gu;
 
 function withoutSequences(text: string): string {
   return text.replace(CSI, "").replace(OSC, "");

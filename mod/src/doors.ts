@@ -20,8 +20,8 @@
  */
 import { read, update } from "claude-code";
 import type { EngineInterface, HttpInit, Timer } from "claude-code";
-import { resultData } from "../../src/mod/calls.js";
 import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
+import { resultData } from "../../src/result-data.js";
 import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
 import { shownTab } from "./drawn";
 import { canvas, doors, logs, openedThrough, pending, room, rooms } from "./state";

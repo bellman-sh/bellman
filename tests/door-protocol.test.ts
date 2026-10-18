@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { cleanBlock, cleanText, eventLine } from "../src/door-protocol.js";
 
+/** The characters that draw nothing or turn the direction a line reads in: each one the cleaners drop. */
+const INVISIBLE = [
+  "\u{61c}", "\u{200b}", "\u{200e}", "\u{200f}", "\u{202a}", "\u{202b}", "\u{202c}", "\u{202d}", "\u{202e}",
+  "\u{2060}", "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}", "\u{feff}",
+];
+/** A family emoji: three people held together by zero-width joiners. */
+const FAMILY = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+
 describe("cleanText", () => {
   it("drops escape sequences and control characters", () => {
     expect(cleanText("\u{1b}[31mred\u{1b}[0m\u{7}bell\u{1b}]0;title\u{7}!")).toBe("redbell!");
@@ -13,6 +21,20 @@ describe("cleanText", () => {
   });
   it("leaves nothing of a string of control characters alone", () => {
     expect(cleanText("\u{0}\u{1b}\u{7f}\u{9b}")).toBe("");
+  });
+  it("drops every character that draws nothing or turns a line's direction", () => {
+    for (const c of INVISIBLE) expect(cleanText(`a${c}b`), `U+${c.codePointAt(0)!.toString(16)}`).toBe("ab");
+    // An override that would draw "live" as "evil", and an isolate that would reorder what follows it.
+    expect(cleanText("\u{202e}live\u{202c}")).toBe("live");
+    expect(cleanText("ada \u{2067}nimda\u{2069} 1")).toBe("ada nimda 1");
+  });
+  it("leaves nothing of a label made of them alone", () => {
+    expect(cleanText(INVISIBLE.join(""))).toBe("");
+    expect(cleanText(` ${INVISIBLE.join(" ")} `)).toBe("");
+  });
+  it("keeps the zero-width joiner and non-joiner, which emoji and some scripts need", () => {
+    expect(cleanText(FAMILY)).toBe(FAMILY);
+    expect(cleanText("a\u{200c}b")).toBe("a\u{200c}b");
   });
   it("ends an OSC sequence at its string terminator as well as at BEL", () => {
     expect(cleanText("a\u{1b}]0;title\u{1b}\\b")).toBe("ab");
@@ -37,6 +59,10 @@ describe("cleanBlock", () => {
   });
   it("cuts at max characters, the last one an ellipsis", () => {
     expect(cleanBlock("x".repeat(20), 5)).toBe("xxxx…");
+  });
+  it("drops every character that draws nothing or turns a line's direction, and keeps the joiners", () => {
+    expect(cleanBlock(`# Plan\n${INVISIBLE.join("")}- a\u{200c}b ${FAMILY}\n`)).toBe(`# Plan\n- a\u{200c}b ${FAMILY}\n`);
+    for (const c of INVISIBLE) expect(cleanBlock(`a${c}\nb`), `U+${c.codePointAt(0)!.toString(16)}`).toBe("a\nb");
   });
 });
 

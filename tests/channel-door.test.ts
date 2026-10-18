@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,9 +55,11 @@ interface Options {
   url?: string;
   /** A sign-in cached the way a real one leaves it, for a bridge with no key. */
   cachedSignIn?: boolean;
-  delivery?: "hook";
+  delivery?: "hook" | "queue";
   /** BELLMAN_DOOR_ROOT. Unset, the scratch folder itself. */
   doorRoot?: string;
+  /** BELLMAN_INSTALL: "bundle" is how Claude Desktop's bundle runs it. */
+  install?: string;
 }
 
 interface Answer {
@@ -82,7 +84,7 @@ interface Bridge {
 /** Spawn the bridge and finish the MCP handshake. Env is spelled out, so nothing of the developer's BELLMAN_* is inherited. */
 async function open(
   scratch: string,
-  { key, url = DISCARD, cachedSignIn, delivery, doorRoot = scratch }: Options
+  { key, url = DISCARD, cachedSignIn, delivery, doorRoot = scratch, install }: Options
 ): Promise<Bridge> {
   if (cachedSignIn) {
     const dir = join(scratch, "bellman");
@@ -115,6 +117,7 @@ async function open(
       BELLMAN_DOOR_ROOT: doorRoot,
       ...(key ? { BELLMAN_KEY: key } : {}),
       ...(delivery ? { BELLMAN_DELIVERY: delivery } : {}),
+      ...(install ? { BELLMAN_INSTALL: install } : {}),
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -235,7 +238,7 @@ describe("the bridge's door, as the process opens it", () => {
     const status = await get(door, "/status");
     expect(status.status).toBe(200);
     expect(JSON.parse(status.body)).toEqual({
-      version: DOOR_VERSION, delivery: "channel", signed_in: true, seats: [], waiting: [], recent: [],
+      version: DOOR_VERSION, delivery: "channel", has_sign_in: true, seats: [], waiting: [], recent: [],
     });
 
     expect(await bridge.stop()).toBe(0);
@@ -268,13 +271,32 @@ describe("the bridge's door, as the process opens it", () => {
     expect(existsSync(join(notAFolder, `${bridge.pid}.sock`))).toBe(false);
   });
 
-  // Which of bellman_whoami's three answers the bridge is in decides signed_in, and only "unknown" is not signed in:
+  // Claude Desktop's bundle runs this same file (in queue delivery), and nothing there reads a door: one left open
+  // would still take a decline from any process running as the person.
+  it("opens no door as the Claude Desktop bundle, and bellman_whoami names none", async () => {
+    const scratch = scratchDir();
+    const bridge = await open(scratch, { key: DEV_KEY.jesse, delivery: "queue", install: "bundle" });
+
+    const who = await bridge.whoami();
+    const sockets = readdirSync(scratch).filter((name) => name.endsWith(".sock"));
+    const exitCode = await bridge.stop();
+
+    expect({ door: who.door, sockets, exitCode, log: bridge.log() }).toEqual({
+      door: null,
+      sockets: [],
+      exitCode: 0,
+      // Not a door it failed to make: none was asked for.
+      log: [expect.stringMatching(/^ready: queue delivery via /)],
+    });
+  });
+
+  // Which of bellman_whoami's three answers the bridge is in decides has_sign_in, and only "unknown" holds none:
   // a BELLMAN_KEY is not an account the bridge can read, and it is still a credential the bridge holds.
   describe("what /status says of the process", () => {
-    const cases: Array<[string, Options, Pick<DoorStatus, "delivery" | "signed_in">]> = [
-      ["a BELLMAN_KEY, in channel delivery", { key: DEV_KEY.jesse }, { delivery: "channel", signed_in: true }],
-      ["a cached sign-in, in hook delivery", { cachedSignIn: true, delivery: "hook" }, { delivery: "hook", signed_in: true }],
-      ["no key and no sign-in", {}, { delivery: "channel", signed_in: false }],
+    const cases: Array<[string, Options, Pick<DoorStatus, "delivery" | "has_sign_in">]> = [
+      ["a BELLMAN_KEY, in channel delivery", { key: DEV_KEY.jesse }, { delivery: "channel", has_sign_in: true }],
+      ["a cached sign-in, in hook delivery", { cachedSignIn: true, delivery: "hook" }, { delivery: "hook", has_sign_in: true }],
+      ["no key and no sign-in", {}, { delivery: "channel", has_sign_in: false }],
     ];
 
     it.each(cases)("with %s", async (_what, options, expected) => {
@@ -285,7 +307,7 @@ describe("the bridge's door, as the process opens it", () => {
       expect((await bridge.whoami()).door).toBe(door);
       const status = await statusOf(door);
 
-      expect({ delivery: status.delivery, signed_in: status.signed_in }).toEqual(expected);
+      expect({ delivery: status.delivery, has_sign_in: status.has_sign_in }).toEqual(expected);
     });
   });
 
@@ -390,7 +412,7 @@ describe("the bridge's door, as the process opens it", () => {
       expect(await statusOf(door)).toEqual({
         version: DOOR_VERSION,
         delivery: "hook",
-        signed_in: true,
+        has_sign_in: true,
         seats: [{ session_id: ROOM, member_id: MEMBER, retrying: false }],
         waiting: [{ session_id: ROOM, interrupting: 1, ambient: 0 }],
         recent: [event],

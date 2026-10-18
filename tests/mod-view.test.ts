@@ -110,6 +110,9 @@ describe("toastFor, more", () => {
   it("still names the room and the message when the label is nothing but controls", () => {
     expect(toastFor([ev({ cursor: 2, from_label: "\u{1b}[2J\u{7}\u{0}" })], p)!.text).toBe("in swarm room1: hello");
   });
+  it("still names the room and the message when the label is nothing but characters that draw nothing", () => {
+    expect(toastFor([ev({ cursor: 2, from_label: "\u{202e}\u{200b}\u{2066}\u{feff}\u{200f}" })], p)!.text).toBe("in swarm room1: hello");
+  });
   it("names a room that has no label by the end of its id, and cuts a long label", () => {
     expect(toastFor([ev({ cursor: 2 })], { ...p, labels: new Map() })!.text).toBe("ada in _room1: hello");
     const long = toastFor([ev({ cursor: 2 })], { ...p, labels: new Map([["qs_room1", "R".repeat(10_000)]]) })!.text;
@@ -202,6 +205,9 @@ describe("roomLabel, hostile names", () => {
     expect(roomLabel({ session_id: id, public_name: "\u{1b}[31mschema\u{1b}[0m\nsweep", preset: "swarm" })).toBe("schema sweep");
     expect(roomLabel({ session_id: id, public_name: "n".repeat(10_000), preset: "swarm" })).toBe(`${"n".repeat(39)}…`);
     expect(roomLabel({ session_id: id, public_name: "\u{1b}[2J\u{7}\u{0}", preset: "swarm" })).toBe("swarm 123456");
+    // A name that would read backwards, or that is made of characters that draw nothing.
+    expect(roomLabel({ session_id: id, public_name: "\u{202e}peews\u{202c}", preset: "swarm" })).toBe("peews");
+    expect(roomLabel({ session_id: id, public_name: "\u{200b}\u{2060}\u{feff}\u{61c}", preset: "swarm" })).toBe("swarm 123456");
   });
   it("cleans a preset, keeps the end of the id when the preset is long, and names a room with neither", () => {
     expect(roomLabel({ session_id: id, preset: "\u{1b}[2Jswarm\n" })).toBe("swarm 123456");
@@ -235,7 +241,8 @@ describe("safeLinks, every shape of a link", () => {
     for (const keep of [
       "[a](HTTPS://x.dev)", '[a](https://x.dev "title")', "[a](<https://x.dev>)", "[a](  http://x.dev )",
       "![i](https://x.dev/a.png)", "<HTTP://x.dev>", '[ref]: https://x.dev "t"', "[ref]:   <https://x.dev>",
-      "[^1]: a note", "x <b>bold</b> y < 3 and a<b>c", "no links here",
+      "> [ref]: https://x.dev", "- [ref]: <https://x.dev>", "1. > [ref]: http://x.dev",
+      "x <b>bold</b> y < 3 and a<b>c", "no links here",
     ]) expect(safeLinks(keep)).toBe(keep);
   });
   it.each([
@@ -249,6 +256,23 @@ describe("safeLinks, every shape of a link", () => {
     ["a link inside a label that stays a link", "[a [b](file:///x)](https://safe.dev)", "[a b](https://safe.dev)"],
     ["a link inside a label that does not", "[a [b](file:///x)](file:///y)", "[a b]"],
     ["a reference definition", "[ref]: file:///etc/passwd\n\n[a][ref]", "[ref]\\: file:///etc/passwd\n\n[a][ref]"],
+    // A definition is one wherever a block may start, so inside a container it reads as text exactly as at the top.
+    ["a definition in a blockquote", "> [r]: file:///etc/passwd\n\n[click][r]", "> [r]\\: file:///etc/passwd\n\n[click][r]"],
+    ["a definition after a blockquote marker with no space", ">[r]: file:///etc/passwd", ">[r]\\: file:///etc/passwd"],
+    ["a definition in a nested blockquote", "> > [r]: file:///etc/passwd\n\n[click][r]", "> > [r]\\: file:///etc/passwd\n\n[click][r]"],
+    ["a definition in a list item", "- [r]: file:///etc/passwd\n\n[click][r]", "- [r]\\: file:///etc/passwd\n\n[click][r]"],
+    ["a definition in a list item of either other marker", "* [r]: file:///x\n+ [s]: file:///y", "* [r]\\: file:///x\n+ [s]\\: file:///y"],
+    ["a definition in a list item marked by a tab", "-\t[r]: file:///etc/passwd", "-\t[r]\\: file:///etc/passwd"],
+    ["a definition in an ordered list item", "1. [r]: file:///etc/passwd\n\n[click][r]", "1. [r]\\: file:///etc/passwd\n\n[click][r]"],
+    ["a definition in an ordered list item marked with a parenthesis", "12) [r]: file:///x", "12) [r]\\: file:///x"],
+    ["a definition in a list inside a blockquote", "> - [r]: file:///etc/passwd", "> - [r]\\: file:///etc/passwd"],
+    ["a definition in a list item's later paragraph", "10. item\n\n    [r]: file:///x", "10. item\n\n    [r]\\: file:///x"],
+    // The engine's Markdown draws no footnotes: a [^1] label is a definition's like any other.
+    ["a definition whose label starts with a caret", "[^x]: file:///etc/passwd\n\n[click][^x]", "[^x]\\: file:///etc/passwd\n\n[click][^x]"],
+    ["a footnote with no link at all, which reads the same either way", "[^1]: a note", "[^1]\\: a note"],
+    ["a definition whose label holds an escaped bracket", "[a\\]b]: file:///x", "[a\\]b]\\: file:///x"],
+    ["a definition whose label runs over two lines", "[r\nx]: file:///x\n\n[click][r x]", "[r\nx]\\: file:///x\n\n[click][r x]"],
+    ["a definition whose target is on the next line", "[r]:\nfile:///x", "[r]\\:\nfile:///x"],
   ])("turns %s into text", (_, markdown, text) => {
     expect(safeLinks(markdown)).toBe(text);
   });

@@ -35,7 +35,8 @@ export type DoorWaiting = { session_id: string; interrupting: number; ambient: n
 export type DoorStatus = {
   version: 1;
   delivery: "hook" | "channel" | "queue";
-  signed_in: boolean;
+  /** The bridge holds a sign-in, cached or a key: not that the server accepts it. */
+  has_sign_in: boolean;
   seats: DoorSeat[];
   waiting: DoorWaiting[];
   /** The latest events the bridge delivered, newest last, ambient ones included. */

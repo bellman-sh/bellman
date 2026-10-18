@@ -31,7 +31,7 @@ import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
-import { resultData } from "./mod/calls.js";
+import { resultData } from "./result-data.js";
 import type { EventType } from "./types.js";
 import { compareVersions, VERSION } from "./version.js";
 

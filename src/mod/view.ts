@@ -247,7 +247,9 @@ const WEB_TARGET = /^\s*<?https?:/i;
  * It covers CommonMark's own link syntax: `[label](target "title")` and the image form, a `<target>` autolink
  * (a URI, or an email address), and a `[ref]: target` definition, which makes every `[label][ref]` a link. A
  * link becomes its label and an autolink its bare target; a definition keeps its line with the colon escaped,
- * so it reads as text.
+ * so it reads as text. A definition is one wherever a block may start: at the top, or inside a blockquote or a
+ * list item, nested to any depth, and its label may hold escapes and line breaks. A `[^1]:` footnote is one too,
+ * since the engine's Markdown draws no footnotes and reads it as a definition like any other.
  *
  * ponytail: regexes, not a Markdown parser. Raw HTML (`<a href>`) is not touched, and a code span or fence
  * is not told from prose, so a `[x](y)` inside one is rewritten too. A flood of unterminated links costs time
@@ -262,6 +264,7 @@ export function safeLinks(markdown: string): string {
     .replace(/\]\((?!\s*<?https?:)[^)]*\)/gi, "]")
     // <target>: an autolink, a URI with a scheme or an email address.
     .replace(/<([a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>/gi, (whole: string, target: string) => (WEB.test(target) ? whole : target))
-    // [ref]: target, but not a footnote, [^1]: escape the colon so the line reads as text.
-    .replace(/^( {0,3}\[(?!\^)[^\]\n]+\]):(?![ \t]*<?https?:)/gim, "$1\\:");
+    // [ref]: target, after any run of blockquote markers, list markers and indentation: escape the colon so the
+    // line reads as text.
+    .replace(/^((?:[ \t]*(?:>|[-+*](?=[ \t])|\d{1,9}[.)](?=[ \t])))*[ \t]*\[(?:\\[\s\S]|[^[\]\\])+\]):(?![ \t]*<?https?:)/gim, "$1\\:");
 }

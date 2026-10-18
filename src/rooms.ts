@@ -28,6 +28,7 @@ import {
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
+import { briefAuthors, readableEvents } from "./public-event.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
@@ -371,6 +372,28 @@ export async function readSurface(
     ? surfaceCursor(session)
     : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
   return { cursor, items: visible.map(surfaceItem) };
+}
+
+/**
+ * These events as `reader` may see them (read_context spec, section 1): a `brief_update` its author
+ * keeps is left out, a `member_joined` of one loses its brief, and the author's own account reads both.
+ * `reader` is a user id, or null for a path every member shares.
+ *
+ * The rows of the briefs' authors are read by id, gone from the room or not: the session holds only the
+ * members in the room now (ADR 0019), and a member who left keeps their last grant (D2). One
+ * `getMembers` call, and none when no event carries a brief.
+ *
+ * The result can be shorter than `events`. A caller that moves a cursor takes it from the events it
+ * read and not from this list, so a dropped event is passed over and not asked for again.
+ */
+export async function eventsFor(
+  s: BellmanStore,
+  sessionId: string,
+  events: readonly SessionEvent[],
+  reader: string | null,
+): Promise<SessionEvent[]> {
+  const authors = briefAuthors(events);
+  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader);
 }
 
 /**

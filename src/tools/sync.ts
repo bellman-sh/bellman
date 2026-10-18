@@ -5,7 +5,7 @@ import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
 import type { Identity, SessionEvent } from "../types.js";
-import { findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
+import { eventsFor, findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
 import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
@@ -197,7 +197,15 @@ If a room's creator has removed you, you still get the history up to and includi
       // asked from past its cut gets its own cursor back, so round-tripping it
       // stays put instead of re-requesting the same empty range forever.
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
-      const foreign = all.filter((e) => e.fromMemberId !== member_id);
+      // The caller's own handle is left out by member id, and what is left is read as this account
+      // may read it (read_context spec, section 1): a brief its author keeps is not handed over.
+      // `cursor` above and `outstanding` below read `all` and the log, never this list, so a dropped
+      // brief_update still moves the cursor on and is not asked for again. The untrusted preamble
+      // follows this list, so a poll whose only news was a brief its author keeps carries no warning
+      // of peer content.
+      const foreign = await eventsFor(
+        s, session_id, all.filter((e) => e.fromMemberId !== member_id), identity.userId,
+      );
 
       // The last half hour of the log, not the slice. A request made before
       // `since_cursor` is still outstanding, and the point of this list is what the

@@ -131,7 +131,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
             max_members: capacityOf(session.manifest),
             org_only: session.orgOnly,
           },
-          room: roomPreview(session, role),
+          room: roomPreview(session, role, identity.userId),
           creator_brief: untrusted(
             { memberId: creator.memberId, label: creator.label },
             creatorBrief

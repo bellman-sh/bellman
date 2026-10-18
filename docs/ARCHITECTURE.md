@@ -229,7 +229,13 @@ surface read, the log read and the blob download fall back to it for a caller wi
 answered 202 with the time the room is stored to go, because the room's own
 alarm does it. The detail carries `closed_at` and `purge_at` as ISO times, null
 where the record has none, so a member of a closed room can see how long it
-has. A member a creator removed
+has. Its preview carries a hosted room's `host_instructions` to the room's
+creator alone: `roomPreview` is told which account is asking and compares it
+with `createdBy`, the test the `PUT` admits on, and the key sits in `text.data`,
+the untrusted envelope beside the room's name and purpose, never in the trusted
+`host` block. The tools that return the same preview (`bellman_start`,
+`bellman_connect`, `bellman_confirm`, `bellman_surface`, `bellman_rooms`) carry
+it on the same terms. A member a creator removed
 (#113) is served the room as it stood at its removal and nothing after: the
 surface to the rows it was shown, and the roster and the member count as of the
 removal, with no `presence`. The one exception is the org's admin: once the room
@@ -838,7 +844,10 @@ anything to refuse. The creator's instructions are the one part of the manifest
 that does change (`PUT /rooms/:id/host`, `setHostInstructions` in both stores,
 which writes the audit row with the change); they carry no verb, and the seat
 reads them from the room on every wake, so a change reaches the next question
-and nothing is cached between wakes.
+and nothing is cached between wakes. The creator reads the current text back in
+the room read's preview as `text.data.host_instructions`: prose a person wrote,
+so it rides in the untrusted envelope and to the creator's account alone (see
+the control panel above).
 Replies cross into its prompt as data: each inside `<reply from="…">`, its text
 escaped (`&`, `<`, `>`) and its sender's name escaped for an attribute (`escapeAttr`),
 after Bellman's fixed rules and the creator's instructions in the system prompt,

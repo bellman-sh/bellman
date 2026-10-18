@@ -51,7 +51,7 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
         {
           session_id: session.id,
           your_seats: yourSeats(session, live),
-          room: roomPreview(session, viewer?.roomRole ?? null),
+          room: roomPreview(session, viewer?.roomRole ?? null, identity.userId),
           surface,
         },
         UNTRUSTED_PREAMBLE,

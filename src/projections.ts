@@ -97,6 +97,14 @@ export function rosterAsOf(members: readonly Member[], at: number) {
 }
 
 /**
+ * Whether `userId` is the account that created the room: the comparison
+ * `PUT /rooms/:id/host` admits its caller on, and the one the room read's `mine`
+ * makes. A viewer who is not named is not the creator.
+ */
+const isCreator = (session: Pick<StoredSession, "createdBy">, userId: string | undefined): boolean =>
+  userId !== undefined && session.createdBy === userId;
+
+/**
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
@@ -133,13 +141,26 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
  *
+ * One key rides in that envelope for one viewer. `viewerUserId` is the account
+ * looking, and when it is the account that created the room (`isCreator`) and the
+ * room has a host, `text.data` carries `host_instructions`: the hosted seat's
+ * instructions as stored, a string, or null once the creator cleared them. That is
+ * the creator's read-back, so the panel can show what it lets them edit. It is
+ * prose a person wrote, so it sits in the envelope beside `room` and `purpose` and
+ * never in the `host` block beside `model` and `role`, which a joiner's model
+ * reads as fact. No one else gets the key, not even as null, and a room with no
+ * host has none to give. The viewer is an account and not a seat: the creator may
+ * hold any role, and another account may hold the same one. A caller that leaves
+ * `viewerUserId` out names no creator, so forgetting it drops the key and never
+ * shows it to the wrong reader.
+ *
  * `your_verbs` goes through verbsOfRole, and so does denyVerb, which the guards
  * in bellman_send and bellman_invite call — so what a joiner is SHOWN and what
  * is ENFORCED are one computation and cannot drift apart. Do not inline the
  * lookup back into this function: a preview that over-promised by a single verb
  * is the failure this whole design exists to prevent.
  */
-export function roomPreview(session: StoredSession, viewerRole: string | null) {
+export function roomPreview(session: StoredSession, viewerRole: string | null, viewerUserId?: string) {
   const m = session.manifest;
   const seconds = (ms: number | null): number | null => (ms === null ? null : Math.round(ms / 1000));
   const creator = session.creator;
@@ -206,11 +227,14 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
     heartbeat_on,
     // The seat Bellman runs, if the room has one, and the model it calls: shown before
     // a joiner's human accepts a seat, as the roles are. Its instructions are the
-    // creator's prose and stay out of the preview.
+    // creator's prose and stay out of this block; the creator reads them in `text`.
     host: m.host === null ? null : { role: m.host.role, model: m.host.model },
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
-      { room: m.room, purpose: m.purpose, descriptions, instructions },
+      {
+        room: m.room, purpose: m.purpose, descriptions, instructions,
+        ...(m.host !== null && isCreator(session, viewerUserId) ? { host_instructions: m.host.instructions } : {}),
+      },
     ),
   };
 }
@@ -279,6 +303,11 @@ export const soleSeat = (mine: readonly Member[]): Member | undefined => (mine.l
  * the same authority. A seat that cannot invite takes nothing from the ones
  * that can. `tail` is the newest events in cursor order, from `recentEvents`;
  * the latest `progress` per member is read off it.
+ *
+ * `viewerUserId` is the account that called, handed to `roomPreview` for the
+ * creator's read-back of a hosted seat's instructions. It is named apart from
+ * `mine` on purpose: `mine` says which seats the account holds, and reading the
+ * account off the first of them would name whoever happened to be first.
  */
 export function roomSummary(
   s: StoredSession,
@@ -286,6 +315,7 @@ export function roomSummary(
   connected: ReadonlySet<string>,
   tail: SessionEvent[],
   now: number,
+  viewerUserId?: string,
 ) {
   const seats = yourSeats(s, mine);
   const only = soleSeat(mine);
@@ -304,7 +334,7 @@ export function roomSummary(
     active_members: activeMembers(s).length,
     your_seats: seats,
     your_member_id: only?.memberId ?? null,
-    room: roomPreview(s, only?.roomRole ?? null),
+    room: roomPreview(s, only?.roomRole ?? null, viewerUserId),
     members: s.members.filter(isActiveMember).map((m) => ({
       ...publicMember(m, connected),
       beat: beatOf(s, m, now, latestNote.get(m.memberId)),

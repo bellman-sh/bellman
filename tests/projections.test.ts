@@ -200,6 +200,63 @@ describe("roomPreview and housekeeping", () => {
 });
 
 /**
+ * A hosted room's instructions are text a person wrote (`PUT /rooms/:id/host`), so the room's creator reads them back
+ * inside the preview's untrusted text and nowhere else, and no one else reads them at all. The viewer is named by
+ * account and not by seat: the creator holds whatever seat the room gave them, and another account may hold the same.
+ */
+describe("roomPreview and the host's instructions", () => {
+  const TEXT = "Ask about the week.";
+  const CREATOR = "u_jesse"; // the fixture room's creator
+  const OTHER = "u_peer";
+  const hosted = (instructions: string | null = TEXT) => session({
+    manifest: roomManifest({
+      mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+      roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+      defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions },
+    }),
+  });
+
+  it("gives the room's creator the text inside the untrusted envelope", () => {
+    const { text } = roomPreview(hosted(), "lead", CREATOR);
+    expect(text.trust).toBe("untrusted");
+    expect(text.data.host_instructions).toBe(TEXT);
+  });
+
+  it("gives the creator null once the text is cleared: present, and not left out", () => {
+    const { data } = roomPreview(hosted(null), "lead", CREATOR).text;
+    expect("host_instructions" in data).toBe(true);
+    expect(data.host_instructions).toBeNull();
+  });
+
+  it("gives anyone else the preview it had before: no key, and the text nowhere", () => {
+    const room = hosted();
+    const before = roomPreview(room, "lead");
+    expect(before.text.data).not.toHaveProperty("host_instructions");
+    for (const viewer of [OTHER, "", undefined]) {
+      const preview = roomPreview(room, "lead", viewer);
+      expect(preview, JSON.stringify(viewer)).toEqual(before);
+      expect(JSON.stringify(preview), JSON.stringify(viewer)).not.toContain(TEXT);
+    }
+  });
+
+  it("leaves the key out of a room with no host, even for its creator", () => {
+    expect(roomPreview(session(), "peer_a", CREATOR).text.data).not.toHaveProperty("host_instructions");
+  });
+
+  it("adds that one key to the creator's text and changes nothing else", () => {
+    const room = hosted();
+    const { text: mine, ...mineRest } = roomPreview(room, "lead", CREATOR);
+    const { text: theirs, ...theirsRest } = roomPreview(room, "lead", OTHER);
+    expect(mineRest).toEqual(theirsRest);
+    expect(mine.origin).toEqual(theirs.origin);
+    expect(mine.data).toEqual({ ...theirs.data, host_instructions: TEXT });
+    // The trusted fields beside the envelope stay a role and a model: the text is not one of them.
+    expect(mineRest.host).toEqual({ role: "host", model: "haiku" });
+    expect(JSON.stringify(mineRest)).not.toContain(TEXT);
+  });
+});
+
+/**
  * The two times the detail carries (#65, review M8): when the room closed and when it goes. ISO, as the envelope's
  * others are spelled, and null where the record has none, so the page can tell "kept until deleted" from "in six days".
  */

@@ -566,6 +566,12 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
  * R3): the creator alone may make a public room private. And `signed` (bylines spec D6): true only
  * for the creator of a room they have signed with their handle, false for every other caller.
+ *
+ * The preview is told who is asking (`who.identity.userId`), on both branches. A hosted room's
+ * creator reads its host's current instructions in `preview.text.data.host_instructions`, the
+ * untrusted text beside the room's name and purpose; no other caller does, and a room with no host
+ * has none. The key follows `mine`: the comparison is `createdBy`, the one `PUT /rooms/:id/host`
+ * admits on, so what the panel can edit is what it can read.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -583,7 +589,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       mine: session.createdBy === who.identity.userId,
       signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
       ...retentionOf(session),
-      preview: roomPreview(session, null),
+      preview: roomPreview(session, null, who.identity.userId),
       ...await liveRoster(deps.store, session),
       my_handles: myHandles(session, mine),
     }, origin);
@@ -610,7 +616,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     mine: session.createdBy === who.identity.userId,
     signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
     ...retentionOf(session),
-    preview: roomPreview(session, viewer.roomRole),
+    preview: roomPreview(session, viewer.roomRole, who.identity.userId),
     ...roster,
     my_handles: myHandles(session, mine),
   }, origin);

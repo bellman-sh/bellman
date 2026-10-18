@@ -1731,6 +1731,82 @@ describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
     const stranger = (await call(null, `/rooms/${HOSTED}/host`, { method: "OPTIONS", headers: { origin: "https://elsewhere.example.test" } }))!;
     expect([stranger.status, stranger.headers.get("access-control-allow-origin")]).toEqual([204, null]);
   });
+
+  /**
+   * The creator reads the instructions back, so the panel can show and edit them. They are text a person wrote, so
+   * they ride in the preview's untrusted text beside the room's name and purpose and never in the trusted fields
+   * beside the host's `model` and `role`. Present, as a string or null, for the room's creator in a room with a
+   * host; absent for every other reader and for a room with no host.
+   */
+  describe("read back by GET /rooms/:id", () => {
+    const TEXT = "Ask about the week.";
+    type Read = { mine: boolean; preview: Record<string, unknown> & { host: unknown; text: { trust: string; data: Record<string, unknown> } } };
+    const read = async (key: string, room = HOSTED) => (await bodyOf(await call(key, `/rooms/${room}`))) as unknown as Read;
+    const raw = async (key: string, room = HOSTED) => (await call(key, `/rooms/${room}`))!.text();
+
+    it("gives the creator what is stored, the new text after a change, and null once it is cleared", async () => {
+      expect((await read(DEV_KEY.jesse)).preview.text.data.host_instructions).toBe(TEXT);
+      await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+      expect((await read(DEV_KEY.jesse)).preview.text.data.host_instructions).toBe("Ask how agents have grown.");
+      await set(DEV_KEY.jesse, { instructions: null });
+      const { data } = (await read(DEV_KEY.jesse)).preview.text;
+      expect("host_instructions" in data, "cleared is null, not left out").toBe(true);
+      expect(data.host_instructions).toBeNull();
+    });
+
+    it("gives a member who is not the creator no key, and the text nowhere in the body", async () => {
+      const body = await raw(DEV_KEY.peer);
+      expect(JSON.parse(body).preview.text.data).not.toHaveProperty("host_instructions");
+      expect(body).not.toContain(TEXT);
+      // Control: the same room's body does hold the text for the creator, so the line above can fail.
+      expect(await raw(DEV_KEY.jesse)).toContain(TEXT);
+    });
+
+    it("carries no key for a room with no host, to its creator or to a member", async () => {
+      for (const key of [DEV_KEY.jesse, DEV_KEY.peer]) {
+        expect((await read(key, ROOM)).preview.text.data, key).not.toHaveProperty("host_instructions");
+      }
+    });
+
+    it("keeps the text inside the untrusted envelope, and the trusted host block to its role and model", async () => {
+      const { preview } = await read(DEV_KEY.jesse);
+      expect(preview.text.trust).toBe("untrusted");
+      expect(preview.text.data.host_instructions).toBe(TEXT);
+      expect(preview.host).toEqual({ role: "host", model: "haiku" });
+      // Nowhere in the preview but inside `text`: a key beside `host`, or in it, would be a trusted field.
+      expect(JSON.stringify({ ...preview, text: null })).not.toContain(TEXT);
+    });
+
+    it("changes nothing else in the creator's preview", async () => {
+      const { text: creators, ...creatorRest } = (await read(DEV_KEY.jesse)).preview;
+      const { text: members, ...memberRest } = (await read(DEV_KEY.peer)).preview;
+      // The two seats differ in their own role and verbs, so the comparison is on what the room says, not on the seat.
+      const { your_role: _a, your_verbs: _b, your_heartbeat_on: _c, ...fromCreator } = creatorRest;
+      const { your_role: _d, your_verbs: _e, your_heartbeat_on: _f, ...fromMember } = memberRest;
+      expect(fromCreator).toEqual(fromMember);
+      expect(creators.data).toEqual({ ...members.data, host_instructions: TEXT });
+    });
+
+    // The admin's read is the second place the route builds a preview. It follows `mine`, which is the same
+    // comparison the PUT makes: the creator's, and no other admin's.
+    it("follows `mine` on an admin's read of a closed room", async () => {
+      const closed = (id: string, createdBy: string) => session({
+        id, createdBy, closed: true, closedAt: 1_700_000_000_000, manifest: hostedManifest(),
+        members: [member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" }), hostMember(hostedManifest(), Date.now())],
+      });
+      await store.createSession(closed("qs_admin_theirs", "u_peer"));
+      await store.createSession(closed("qs_admin_mine", "u_jesse"));
+
+      const theirs = await raw(DEV_KEY.jesse, "qs_admin_theirs");
+      expect(JSON.parse(theirs)).toMatchObject({ viewer: "admin", mine: false });
+      expect(JSON.parse(theirs).preview.text.data).not.toHaveProperty("host_instructions");
+      expect(theirs).not.toContain(TEXT);
+
+      const mine = await read(DEV_KEY.jesse, "qs_admin_mine");
+      expect(mine).toMatchObject({ viewer: "admin", mine: true });
+      expect(mine.preview.text.data.host_instructions).toBe(TEXT);
+    });
+  });
 });
 
 describe("GET /rooms/:id says whose room it is", () => {

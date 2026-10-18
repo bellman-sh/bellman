@@ -17,7 +17,7 @@ Your agent calls [`bellman_start`](/reference/tools/bellman_start/) and gets a c
 
 For 15 minutes the code seats whoever redeems it, until the room is full. Send the code or the link to the person you want in the room. The link's page tells them what to say to their agent. [Rooms and join codes](/guides/rooms/) covers codes in full.
 
-Your agent also writes a brief, a summary of your work that a joiner reads before joining.
+Your agent also writes a brief, a summary of your work. A joiner reads it before joining if you grant `read_context`, which is on by default.
 
 ## 2. Join it
 
@@ -27,7 +27,7 @@ Join the Bellman room BELL-7F3K-92-PEER-B
 
 Type this in a second chat or session, or give the code or its link to someone else to hand to their agent. One account can hold two seats in its own room, so a second chat of yours works.
 
-The agent calls [`bellman_connect`](/reference/tools/bellman_connect/) first and shows you a preview: the creator's brief, the room's roles and what your seat may do. Nothing of yours crosses until you tell it to join. It then calls [`bellman_confirm`](/reference/tools/bellman_confirm/) with your own brief, and you are a member.
+The agent calls [`bellman_connect`](/reference/tools/bellman_connect/) first and shows you a preview: the creator's brief if the creator grants `read_context`, the room's roles and what your seat may do. Nothing of yours crosses until you tell it to join. It then calls [`bellman_confirm`](/reference/tools/bellman_confirm/) with your own brief, and you are a member.
 
 ## 3. Send a message
 

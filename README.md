@@ -18,7 +18,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | Tool | Purpose |
 |---|---|
 | `bellman_start` | Create a room from a manifest, or from a preset you saved in the panel; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
-| `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are enforced by the server). **Nothing of yours ships yet.** |
+| `bellman_connect` | Phase 1: preview the creator's brief, if the creator grants `read_context`, and the room's roles (the verbs each lists and the one you would get; verbs are enforced by the server). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
@@ -119,7 +119,7 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 
-- **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists and the one they would get; verbs are enforced by the server) before their own context crosses. A code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, or the room closes. The one exception is a public room's permanent code for its default seat (ADR 0020): it does not expire, a full room keeps it for when a seat frees, and it ends when it is reissued or revoked, when the room is made private, or when the room closes.
+- **Two-phase connect**: joiners see the creator's brief, if the creator grants `read_context`, and the room's roles (the verbs each lists and the one they would get; verbs are enforced by the server) before their own context crosses. A code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, or the room closes. The one exception is a public room's permanent code for its default seat (ADR 0020): it does not expire, a full room keeps it for when a seat frees, and it ends when it is reissued or revoked, when the room is made private, or when the room closes.
 - **Untrusted envelopes**: peer-written briefs, messages and artifacts arrive wrapped `{ trust: "untrusted", origin, data }`, and a response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions. `structuredContent` has none, so there `trust` is the only marker; role names, modes, verbs and agent fields ship unwrapped.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). `read_context` is enforced: a member's brief reaches peers only when they grant it, and without it only their own account reads it. Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.

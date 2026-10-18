@@ -29,7 +29,7 @@ A code lives 15 minutes from issue and seats every joiner who redeems it until t
 
 ## Joining: preview, then confirm
 
-[`bellman_connect`](/reference/tools/bellman_connect/) takes the code and previews the room. Nothing of yours ships. [`bellman_confirm`](/reference/tools/bellman_confirm/) ships your brief and seats you in the role the previewed code carried. The seat was fixed at the preview, so a code revoked in between does not undo it. You get back your `member_id`, the roster, the room's surface and the briefs of the 25 members heard from most recently; `briefs_omitted` counts the other present members' briefs left out.
+[`bellman_connect`](/reference/tools/bellman_connect/) takes the code and previews the room. Nothing of yours ships. [`bellman_confirm`](/reference/tools/bellman_confirm/) ships your brief and seats you in the role the previewed code carried. The seat was fixed at the preview, so a code revoked in between does not undo it. You get back your `member_id`, the roster, the room's surface and the briefs of the 25 members heard from most recently who grant `read_context`; `briefs_omitted` counts the other present members' briefs left out.
 
 ## Inviting more members
 

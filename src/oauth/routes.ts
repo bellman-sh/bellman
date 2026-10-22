@@ -88,8 +88,8 @@ export interface OAuthConfig {
   /**
    * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
    * operator's platform-wide powers, which no plan, role or grant confers.
-   * Today that is releasing anyone's handle, suspending an account and working
-   * the report queue. Absent or empty names no one.
+   * Today that is releasing anyone's handle, listing who holds one, suspending an
+   * account and working the report queue. Absent or empty names no one.
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
@@ -103,7 +103,7 @@ export type PlanStore = Pick<
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
   | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
   | "countCreatesThisMonth"
-  | "releaseHandleNamed"
+  | "releaseHandleNamed" | "handleHolders" | "sessionsJoinedBy" | "membersOfUser"
   | "recordSignIn"
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
@@ -1578,6 +1578,32 @@ export async function handleOAuth(
     }
 
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST, DELETE" } });
+  }
+
+  // ------------------------------------------------------ /admin/handles
+  // The operator lists every account holding a handle, for the notice that goes to every holder 30 days before members
+  // are named by handle (public rooms on bellman.sh spec, D6). Each holder comes with the sign-in label of its seat in
+  // one room it sat in. For most accounts that is an email address, or `<login>@<provider>` when the provider gave none,
+  // and it is where the notice goes. An account in no room, as the room index knows it (`sessionsJoinedBy`), has
+  // `label: null` and needs no notice: the change shows its handle nowhere. On /admin/handles/:handle's gate, and
+  // outside the suspension check as /admin/reports is (R8), in the order every route here takes: the gate, the method,
+  // the plan store, then the answer. The path is exact, so a release's never lands here and this one never lands on a
+  // release.
+  //
+  // ponytail: the whole list in one answer, and two reads per holder (a room, then its seat). The Workers cap of 1,000
+  // subrequests ends it near 500 holders, with an error and not a short list. Page it before then.
+  if (path === "/admin/handles") {
+    const gate = await operatorGate(request, config, "listing handle holders");
+    if (gate instanceof Response) return gate;
+    if (method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+    const { plans } = config;
+    if (!plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const holders = await Promise.all((await plans.handleHolders()).map(async ({ userId, handle }) => {
+      const room = (await plans.sessionsJoinedBy(userId, 1))[0];
+      const seat = room === undefined ? undefined : (await plans.membersOfUser(room, userId))[0];
+      return { handle, user_id: userId, label: seat?.label ?? null };
+    }));
+    return json({ holders });
   }
 
   // ---------------------------------------------- /admin/handles/:handle

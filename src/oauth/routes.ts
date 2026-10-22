@@ -1340,10 +1340,13 @@ export async function handleOAuth(
       // record: read-then-write let another org's admin land a grant for the
       // same key in the gap, and write-then-audit let the record of a change
       // that already happened be lost with no way to retry it.
-      if ((await config.plans.putGrantIfOwned(grant, identity.orgId,
-        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId })) === "conflict") {
+      const written = await config.plans.putGrantIfOwned(grant, identity.orgId,
+        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId });
+      if (written === "conflict") {
         return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
       }
+      // The seat cap (orgs spec, D3): an org with a record holds as many grants as it bought.
+      if (written === "full") return oauthError("conflict", "that org has no free seat", 409);
       return json({ granted: grant }, 201);
     }
 

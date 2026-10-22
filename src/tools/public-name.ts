@@ -12,7 +12,7 @@ export function registerPublicName(server: McpServer, identity: Identity, s: Bel
     "bellman_public_name",
     {
       title: "Check or set a public room's name",
-      description: `Check or set the name in a public room's link, dash.bellman.sh/r/<name>, which until then is dash.bellman.sh/r/<session_id>. First come, first served; free again when its room closes or is made private.
+      description: `Check or set the name in a public room's link, bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>. First come, first served; free again when its room closes or is made private.
 
 Args: name (3 to 40 lowercase letters, digits and single hyphens); session_id or room_id to set it on your public, open room, as its creator, freeing its previous name. Without one, the name is only checked.
 Returns: { name, free } when checking; { name, public_url } when setting.

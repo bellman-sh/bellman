@@ -1408,6 +1408,74 @@ describe("the grant endpoint validates what it is given", () => {
  * alone. For a user who signed in with a provider that is what their next token refresh
  * would carry: `replanOnRefresh` over the provider subject the id is built from.
  */
+describe("an org's standing (orgs spec, D5)", () => {
+  const by = { actorUserId: "u_op" };
+  const acme = {
+    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator" as const,
+    active: true, createdAt: 1, requireSso: false, domains: [],
+  };
+  const owner = {
+    key: "github:1", plan: "team" as const, role: "admin" as const, orgId: "org_acme", source: "operator",
+    grantedAt: 1, grantedBy: "u_op", expiresAt: null,
+  };
+  const member = (plan: "team" | "pro" = "team") => ({ ...owner, key: "github:4242", plan, role: "member" as const, source: "org" });
+
+  const signIn = async () => {
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const tokens = (await exchange(clientId, code)).body;
+    return { clientId, tokens, identity: (await identityFromAccessToken(tokens.access_token, config))! };
+  };
+  const refresh = async (clientId: string, refreshToken: string) => {
+    const res = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId }).toString(),
+    });
+    const body = (await res.json()) as Record<string, string>;
+    return { body, identity: (await identityFromAccessToken(body.access_token, config))! };
+  };
+
+  it("resolves a member of an active org to the grant's plan", async () => {
+    await config.plans!.createOrg(acme, owner, by);
+    await config.plans!.putGrantIfOwned(member(), "org_acme", by);
+    expect((await signIn()).identity).toMatchObject({ plan: "team", role: "member", orgId: "org_acme" });
+  });
+
+  it("resolves a member of an inactive org to free, keeping the role and the org, at sign-in and at refresh", async () => {
+    await config.plans!.createOrg(acme, owner, by);
+    await config.plans!.putGrantIfOwned(member(), "org_acme", by);
+    const { clientId, tokens } = await signIn();
+
+    await (config.plans as MemoryStore).deactivateOrg("org_acme", by);
+    expect((await refresh(clientId, tokens.refresh_token)).identity).toMatchObject({ plan: "free", role: "member", orgId: "org_acme", userId: "u_github_4242" });
+    expect((await signIn()).identity).toMatchObject({ plan: "free", role: "member", orgId: "org_acme" });
+  });
+
+  /** The rule is the org's standing, not the plan's name: a pro grant filed in the org falls too. */
+  it("resolves any plan in an inactive org to free", async () => {
+    await config.plans!.createOrg(acme, owner, by);
+    await config.plans!.putGrantIfOwned(member("pro"), "org_acme", by);
+    await (config.plans as MemoryStore).deactivateOrg("org_acme", by);
+    expect((await signIn()).identity).toMatchObject({ plan: "free", orgId: "org_acme" });
+  });
+
+  it("restores the plan at the next refresh once the org is active again", async () => {
+    await config.plans!.createOrg(acme, owner, by);
+    await config.plans!.putGrantIfOwned(member(), "org_acme", by);
+    await (config.plans as MemoryStore).deactivateOrg("org_acme", by);
+    const { clientId, tokens } = await signIn();
+    expect((await identityFromAccessToken(tokens.access_token, config))?.plan).toBe("free");
+
+    await (config.plans as MemoryStore).activatePurchasedOrg("org_acme", "u_github_1", 3, by);
+    expect((await refresh(clientId, tokens.refresh_token)).identity.plan).toBe("team");
+  });
+
+  it("resolves a grant in an org with no record to its plan, as before", async () => {
+    await config.plans!.putGrantIfOwned({ ...member(), orgId: "org_unrecorded" }, "org_unrecorded", by);
+    expect((await signIn()).identity).toMatchObject({ plan: "team", orgId: "org_unrecorded" });
+  });
+});
+
 describe("signedInPlan", () => {
   const grant = (key: string, plan: "pro" | "max", source = "operator") =>
     ({ key, plan, role: "member" as const, orgId: null, source, grantedAt: 0, grantedBy: "test", expiresAt: null });

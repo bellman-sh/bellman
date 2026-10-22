@@ -93,6 +93,7 @@ export type PlanStore = Pick<
   BellmanStore,
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
+  | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
   | "recordSignIn"
@@ -275,10 +276,25 @@ async function firstGrant(
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
     if (usableGrant(grant) && (honourPurchases || grant.source !== PURCHASE)) {
-      return { grant, key: stable[i] };
+      // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
+      // refresh, a panel session's re-check and a hosted room's month turn all come through
+      // this function, so a lapse reaches each of them as a revocation does.
+      return { grant: await standingOf(plans, grant), key: stable[i] };
     }
   }
   return undefined;
+}
+
+/**
+ * The grant as the org it names stands (orgs spec, D5): the free plan while the org's record says
+ * nobody is paying, the role and the org kept so the person is still a member of it; the grant
+ * unchanged for an active org and for an org with no record, which is only a string in grants
+ * and overrides and has no standing to lose. One read of the registry, for grants in an org only.
+ */
+export async function standingOf(plans: Pick<PlanStore, "getOrg">, grant: PlanGrant): Promise<PlanGrant> {
+  if (grant.orgId === null) return grant;
+  const org = await plans.getOrg(grant.orgId);
+  return org && !org.active ? { ...grant, plan: "free" } : grant;
 }
 
 /**

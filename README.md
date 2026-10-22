@@ -329,9 +329,18 @@ GET    /org/members               the roster: every grant in the org, the owner 
 POST   /org/members               {key, role}  seats a teammate as a team grant in your org
 PATCH  /org/members/<key>         {role}
 DELETE /org/members/<key>         the owner cannot be removed or demoted
+GET    /org/idp                   the org's identity provider, never its secret
+PUT    /org/idp                   {issuer, client_id, client_secret}  discovered when saved
+DELETE /org/idp
+POST   /org/domains               {domain}  answers the TXT record to publish
+POST   /org/domains/<domain>/verify
+DELETE /org/domains/<domain>
+PATCH  /org                       {require_sso}  needs an IdP and a verified domain
 POST   /admin/orgs                {org_id, name, owner_key, seats}    (operator)
 PATCH  /admin/orgs/<orgId>        {name?, seats?}  seats of an operator org only (operator)
 ```
+
+**Single sign-on** (ADR 0025): an org's admin saves one OIDC identity provider (Okta, Entra ID, Google Workspace, JumpCloud) and proves the org's email domains with a TXT record at `_bellman.<domain>`. The sign-in pages then take a work email: an address under a verified domain is sent to that org's IdP, with `https://mcp.bellman.sh/callback/sso/<orgId>` as the redirect URI the IdP is registered with, and the first sign-in seats the person as a team member of the org, within its seats. With `require_sso` on, everyone the org claims, by grant or by a verified address, must sign in that way; the org's owner may still use GitHub or Google, which is the break-glass if the IdP is down. The IdP's client secret is stored sealed under `BELLMAN_SEAL_SECRET` (or the token secret) and never returned.
 
 A seat is a grant: the owner holds one, and `POST /org/members` answers `409 full` at the count the subscription bought. When the subscription stops paying the org goes inactive and keeps its members, each resolving to the free plan with their role and org kept, until a payment brings it back. An org that exists only as a string in `BELLMAN_USERS` has no record, no cap and no member routes; `POST /admin/orgs` gives it one. Billing touches only the orgs billing created: an operator's org keeps its seats and stays active whatever its owner's subscription does, and a purchased org's seats are its subscription's quantity, which `PATCH /admin/orgs` refuses to change.
 

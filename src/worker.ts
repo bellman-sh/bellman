@@ -120,6 +120,7 @@ function oauthConfig(
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
     secret: env.BELLMAN_TOKEN_SECRET,
+    sealSecret: env.BELLMAN_SEAL_SECRET,
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),

@@ -1721,11 +1721,16 @@ export interface BellmanStore {
   /**
    * Billing's write (D4): a record for an org that has none, named by its id, `source: "purchase"`
    * and active; otherwise the seats and `active: true` and nothing else, so a name its owner gave
-   * it survives every Stripe event. `unchanged` writes and records nothing.
+   * it survives every Stripe event. `unchanged` writes and records nothing. `not_purchased` is an
+   * org the operator created: billing touches only what billing created (ADR 0014, decision 3),
+   * so it is left as it is, whatever id it was given.
    */
-  activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged">;
-  /** The lapse (D5): `active: false`, the members kept. `missing` for no record; `unchanged` when already inactive. */
-  deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing">;
+  activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased">;
+  /**
+   * The lapse (D5): `active: false`, the members kept. `missing` for no record; `unchanged` when
+   * already inactive; `not_purchased` for an operator org, which billing leaves active.
+   */
+  deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased">;
 
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
@@ -3132,7 +3137,7 @@ export class MemoryStore implements BellmanStore {
     return this.liveMembers(orgId);
   }
 
-  async activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged"> {
+  async activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
     const previous = this.orgs.get(orgId);
     const now = Date.now();
     if (!previous) {
@@ -3141,6 +3146,7 @@ export class MemoryStore implements BellmanStore {
       this.recordAudit(orgAuditEntries(undefined, org, audit, now));
       return "created";
     }
+    if (previous.source !== "purchase") return "not_purchased";
     if (previous.seats === seats && previous.active) return "unchanged";
     const next: Org = { ...previous, seats, active: true };
     this.orgs.set(orgId, detach(next));
@@ -3148,9 +3154,10 @@ export class MemoryStore implements BellmanStore {
     return "updated";
   }
 
-  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
     const previous = this.orgs.get(orgId);
     if (!previous) return "missing";
+    if (previous.source !== "purchase") return "not_purchased";
     if (!previous.active) return "unchanged";
     const next: Org = { ...previous, active: false };
     this.orgs.set(orgId, detach(next));

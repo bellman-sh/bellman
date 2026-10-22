@@ -4418,6 +4418,19 @@ export function describeStoreContract(
         expect(await store.getOrg("org_u_github_4242")).toMatchObject({ name: "Acme", seats: 4 });
       });
 
+      /**
+       * Billing touches only what billing created (ADR 0014, decision 3, carried to the org): an org the
+       * operator made, under whatever id, keeps its seats and stays active whatever a subscription does.
+       */
+      it("leaves an operator org alone: a purchase neither resizes nor deactivates it", async () => {
+        const stripe = { actorUserId: "stripe" };
+        await store.createOrg(acme({ orgId: "org_u_github_1", seats: 10 }), owner({ orgId: "org_u_github_1" }), by);
+        expect(await store.activatePurchasedOrg("org_u_github_1", "u_github_1", 3, stripe)).toBe("not_purchased");
+        expect(await store.deactivateOrg("org_u_github_1", stripe)).toBe("not_purchased");
+        expect(await store.getOrg("org_u_github_1")).toMatchObject({ seats: 10, active: true, source: "operator" });
+        expect((await store.auditForOrg("org_u_github_1", 20)).map((e) => e.action)).toEqual(["org_created", "plan_granted"]);
+      });
+
       it("deactivates an org once, and a later activation brings it back", async () => {
         const stripe = { actorUserId: "stripe" };
         expect(await store.deactivateOrg("org_nobody", stripe)).toBe("missing");

@@ -3567,9 +3567,11 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   async #activatePurchasedOrgTxn(
     orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
-  ): Promise<"created" | "updated" | "unchanged"> {
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
     return this.ctx.storage.transaction(async (txn) => {
       const previous = await txn.get<Org>(orgKey(orgId));
+      // Billing touches only what billing created (ADR 0014, decision 3): an operator org stays as it is.
+      if (previous && previous.source !== "purchase") return "not_purchased" as const;
       if (previous && previous.seats === seats && previous.active) return "unchanged" as const;
       const now = Date.now();
       // The seats and the standing, and nothing else (D4): the name its owner gave it survives every Stripe event.
@@ -3582,16 +3584,17 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   async activatePurchasedOrg(
     orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
-  ): Promise<"created" | "updated" | "unchanged"> {
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
     const outcome = await this.#activatePurchasedOrgTxn(orgId, ownerUserId, seats, audit);
-    if (outcome !== "unchanged") await this.driver.deliverNow();
+    if (outcome === "created" || outcome === "updated") await this.driver.deliverNow();
     return outcome;
   }
 
-  async #deactivateOrgTxn(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+  async #deactivateOrgTxn(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
     return this.ctx.storage.transaction(async (txn) => {
       const previous = await txn.get<Org>(orgKey(orgId));
       if (!previous) return "missing" as const;
+      if (previous.source !== "purchase") return "not_purchased" as const;
       if (!previous.active) return "unchanged" as const;
       const next: Org = { ...previous, active: false };
       const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, Date.now())));
@@ -3600,7 +3603,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     });
   }
 
-  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
     const outcome = await this.#deactivateOrgTxn(orgId, audit);
     if (outcome === "updated") await this.driver.deliverNow();
     return outcome;
@@ -4919,11 +4922,11 @@ export class DurableObjectStore implements BellmanStore {
 
   async activatePurchasedOrg(
     orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
-  ): Promise<"created" | "updated" | "unchanged"> {
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
     return this.registry.activatePurchasedOrg(orgId, ownerUserId, seats, audit);
   }
 
-  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
     return this.registry.deactivateOrg(orgId, audit);
   }
 

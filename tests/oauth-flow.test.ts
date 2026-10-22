@@ -1410,8 +1410,9 @@ describe("the grant endpoint validates what it is given", () => {
  */
 describe("an org's standing (orgs spec, D5)", () => {
   const by = { actorUserId: "u_op" };
+  // A purchased org: the one kind billing deactivates. An operator org is always active.
   const acme = {
-    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator" as const,
+    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase" as const,
     active: true, createdAt: 1, requireSso: false, domains: [],
   };
   const owner = {

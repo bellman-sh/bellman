@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MemoryStore, type GrantDelete, type GrantWrite } from "../src/store.js";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
 import {
@@ -300,6 +300,26 @@ describe("reconciling what Stripe says with what is stored", () => {
 
     expect(await reconcilePurchase(user, billing, store)).toBe("written");
     expect(calls.map((c) => c[0])).toEqual(["put", "deactivate"]);
+  });
+
+  it("leaves an org the operator created alone, and says so, when its owner's purchase lapses", async () => {
+    const billing = new MemoryBillingStore();
+    const plans = new MemoryStore();
+    const org = {
+      orgId: "org_u_github_4242", name: "Comped", ownerUserId: user, seats: 10, source: "operator" as const,
+      active: true, createdAt: 1, requireSso: false, domains: [],
+    };
+    await plans.createOrg(org, { key: "github:4242", plan: "team", role: "admin", orgId: org.orgId, source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null }, { actorUserId: "u_op" });
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", { plan: "team", status: "canceled", eventAt: 1 });
+    const logged = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // The owner's grant is the operator's too, so billing leaves both and reports the clash.
+    expect(await reconcilePurchase(user, billing, plans)).toBe("conflict");
+    expect(await plans.getOrg(org.orgId)).toMatchObject({ seats: 10, active: true });
+    expect(await plans.getGrant("github:4242")).toMatchObject({ source: "operator", plan: "team" });
+    expect(logged.mock.calls.flat().join(" ")).toContain("org_u_github_4242");
+    logged.mockRestore();
   });
 
   it("creates the record a team purchase pays for, with its seats and its owner", async () => {

@@ -249,6 +249,23 @@ describe("/admin/orgs (orgs spec, D7)", () => {
     expect([list.status, list.headers.get("allow")]).toEqual([405, "POST"]);
   });
 
+  /**
+   * A purchased org's seats are what its subscription sells: the next Stripe event would write
+   * them back, so a resize here would be undone with only a `stripe` row to explain it. The name
+   * is not billing's, so that still goes through.
+   */
+  it("leaves a purchased org's seats to billing, and still renames it", async () => {
+    const auth = await bearer(OPERATOR);
+    await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, { actorUserId: "stripe" });
+    const seats = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { seats: 5 });
+    expect([seats.status, await error(seats)]).toEqual([409, "purchased"]);
+    const both = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { seats: 5, name: "Acme" });
+    expect(both.status).toBe(409);
+    expect(await store.getOrg("org_u_github_4242")).toMatchObject({ seats: 3, name: "org_u_github_4242" });
+    const name = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { name: "Acme" });
+    expect([name.status, ((await name.json()) as { org: { name: string; seats: number } }).org]).toEqual([200, expect.objectContaining({ name: "Acme", seats: 3 })]);
+  });
+
   it("lets no one else through, and creates nothing", async () => {
     for (const operators of [undefined, new Set<string>()]) {
       const closed = routeWith(panelConfig({ plans: store, operators }));

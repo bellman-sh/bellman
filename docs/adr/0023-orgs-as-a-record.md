@@ -46,6 +46,10 @@ hang a per-org identity provider until the org is a record.
 
 ## Consequences
 
+- Billing touches only the orgs billing created, as it touches only the grants it wrote: an
+  operator org under any id, the purchase namespace included, answers `not_purchased` to both of
+  billing's writes and is logged, never resized or deactivated; and a purchased org's seats are
+  the subscription's, which `PATCH /admin/orgs` refuses to change.
 - An org named only in `BELLMAN_USERS` or in older grants has no record: no cap, always active,
   no member routes, `/admin/grants` as before. The operator gives it a record when its admin
   should have the routes.

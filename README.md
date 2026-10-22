@@ -330,10 +330,10 @@ POST   /org/members               {key, role}  seats a teammate as a team grant 
 PATCH  /org/members/<key>         {role}
 DELETE /org/members/<key>         the owner cannot be removed or demoted
 POST   /admin/orgs                {org_id, name, owner_key, seats}    (operator)
-PATCH  /admin/orgs/<orgId>        {name?, seats?}                     (operator)
+PATCH  /admin/orgs/<orgId>        {name?, seats?}  seats of an operator org only (operator)
 ```
 
-A seat is a grant: the owner holds one, and `POST /org/members` answers `409 full` at the count the subscription bought. When the subscription stops paying the org goes inactive and keeps its members, each resolving to the free plan with their role and org kept, until a payment brings it back. An org that exists only as a string in `BELLMAN_USERS` has no record, no cap and no member routes; `POST /admin/orgs` gives it one.
+A seat is a grant: the owner holds one, and `POST /org/members` answers `409 full` at the count the subscription bought. When the subscription stops paying the org goes inactive and keeps its members, each resolving to the free plan with their role and org kept, until a payment brings it back. An org that exists only as a string in `BELLMAN_USERS` has no record, no cap and no member routes; `POST /admin/orgs` gives it one. Billing touches only the orgs billing created: an operator's org keeps its seats and stays active whatever its owner's subscription does, and a purchased org's seats are its subscription's quantity, which `PATCH /admin/orgs` refuses to change.
 
 Bans and suspensions have routes of their own. The first three below are a room's creator's: list its bans, ban a member (it runs `bellman_evict` and answers with that tool's fields) and lift a ban. The next two are for anyone signed in, about the bans they made across the rooms they own. The last two are the operator's: they take a bearer token for a user id the `BELLMAN_OPERATORS` secret lists, never a cookie, and with the secret unset or empty nobody passes. A lift answers 204, or 404 when there is no such ban or suspension.
 

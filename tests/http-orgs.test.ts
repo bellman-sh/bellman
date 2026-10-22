@@ -29,8 +29,9 @@ const caller = async (request: Request): Promise<RoomCaller | null> => {
   return identity && token !== undefined ? { identity, via: token.startsWith("cookie-") ? "cookie" : "bearer" } : null;
 };
 
+/** A purchased org, so billing's deactivation applies to it; the routes read the same of either kind. */
 const acme: Org = {
-  orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true,
+  orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase", active: true,
   createdAt: Date.parse("2026-10-21T00:00:00Z"), requireSso: false, domains: [],
 };
 const ownerGrant: PlanGrant = {
@@ -86,7 +87,7 @@ describe("GET /org", () => {
     expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([200, PANEL]);
     expect(await res.json()).toEqual({
       org_id: "org_acme", name: "Acme", owner_user_id: "u_github_1", seats: 3, seats_used: 1, active: true,
-      source: "operator", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin",
+      source: "purchase", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin",
     });
   });
 

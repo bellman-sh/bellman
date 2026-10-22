@@ -1523,6 +1523,14 @@ export async function handleOAuth(
     if (body.seats !== undefined && seats === undefined) return oauthError("invalid_request", `seats must be a whole number from 1 to ${MAX_SEATS}`);
     // `active` is billing's for a purchased org and always true for an operator one; nothing else is editable here.
     if (name === undefined && seats === undefined) return oauthError("invalid_request", "give a name, seats, or both");
+    // A purchased org's seats are what its subscription sells: the next Stripe event writes them back,
+    // so a resize here would be undone with only a `stripe` row to explain it. The source never
+    // changes, so reading it ahead of the write is safe. The name is not billing's.
+    const current = await config.plans.getOrg(adminOrg[1]);
+    if (!current) return oauthError("not_found", "no such org", 404);
+    if (seats !== undefined && current.source === "purchase") {
+      return oauthError("purchased", "seats are billing's for a purchased org: change the subscription's quantity in Stripe", 409);
+    }
     const org = await config.plans.updateOrg(adminOrg[1], { name, seats }, operatorIntent(gate.identity));
     if (!org) return oauthError("not_found", "no such org", 404);
     return json({ org: orgView(org, await config.plans.countOrgMembers(org.orgId), null) });

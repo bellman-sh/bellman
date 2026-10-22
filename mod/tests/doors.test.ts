@@ -2,7 +2,7 @@ import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import { GATE_REASON, WAKE_TEXT } from "../hooks/register.mjs";
 import type { DoorStatus } from "../types";
-import { STATUS, band, peerEvent, roomsTick, tick, world } from "./harness";
+import { ENGINE, STATUS, band, peerEvent, roomsTick, tick, world } from "./harness";
 import type { World } from "./harness";
 
 /** The person presses Enter in the composer: a `prompt.submit` of the mod's own hooks, where its call is allowed. */
@@ -203,6 +203,28 @@ test("a bridge whose bellman_whoami fails while its door cannot be read keeps th
   w.doorDown = false;
   await tick(w);
   expect(w.state.doors).toEqual([{ server: "bellman", socketPath: w.door, status: STATUS, error: null }]);
+});
+
+test("a bridge that comes back without a door drops its rooms, out of the view and the gate, and the status line says to update it", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  await band($);
+  const answer = () =>
+    $.tool.call({ tool: "mcp__bellman__bellman_send", type: "action_response", session_id: "qs_room1", ref_id: "5", payload: { approved: true } });
+  // The bridge restarts older than the door: its socket refuses, and its bellman_whoami answers naming none.
+  w.door = null;
+  await tick(w);
+  // Unreachable, the door keeps its rooms and the gate shut on them, until the bridge says otherwise.
+  expect(await answer()).toEqual({ deny: GATE_REASON });
+  await types($);
+  expect(w.state.doors).toEqual([{ server: "bellman", socketPath: null, status: null, error: null }]);
+  await tick(w);
+  expect(w.statuses.at(-1)).toBe("Bellman: update the bridge to see your rooms here");
+  expect(await (await band($)).drawn()).toMatchObject(ENGINE);
+  expect(await answer()).toMatchObject({ result: { structuredContent: { cursor: 99 } } });
+  // Asked once more and no more: a bridge older than the door is asked once.
+  await types($);
+  expect(asked(w)).toBe(2);
 });
 
 test("a rooms read asks each room's log only for what is new past the newest event held", async ($, on) => {

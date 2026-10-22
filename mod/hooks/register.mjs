@@ -126,7 +126,10 @@ function unreadCount(events, p) {
   return roomLog(events, p.sessionId).filter((e) => e.cursor > p.openedThrough && e.ambient !== true && e.from_member_id !== p.seatMemberId).length;
 }
 var REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1);
-var spelledOut = (text) => text.replace(/\r\n/g, "\n").replace(/(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}]/gu, (c) => `\\u{${c.codePointAt(0).toString(16)}}`);
+var spelledOut = (text) => text.replace(/\r\n/g, "\n").replace(
+  /(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}\u{e0100}-\u{e01ef}]|(?<![^\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])[\u{fe00}-\u{fe0f}]/gu,
+  (c) => `\\u{${c.codePointAt(0).toString(16)}}`
+);
 function drawingOf(payload) {
   const keys = typeof payload === "object" && payload !== null && !Array.isArray(payload) ? Object.keys(payload) : [];
   const text = keys.length === 1 && keys[0] === "text" ? payload.text : void 0;
@@ -272,7 +275,7 @@ async function askBridges($) {
     ...current.map((d) => {
       const answer = asked.find((a) => a.server === d.server);
       if (answer === void 0 || answer.error !== null || d.socketPath !== null && d.error === null) return d;
-      return d.status === null ? answer : { ...d, socketPath: answer.socketPath };
+      return d.status === null || answer.socketPath === null ? answer : { ...d, socketPath: answer.socketPath };
     }),
     ...asked.filter((a) => !current.some((d) => d.server === a.server))
   ]);

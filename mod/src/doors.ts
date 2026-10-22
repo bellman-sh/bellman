@@ -14,11 +14,12 @@
  *
  * Every tick reads every door, and lists the bridges, since one may connect after the session starts. A door that
  * cannot be read keeps its socket and the last status it gave, its rooms with it, so the gate stays shut on them, and
- * every tick reads it again. The rooms the seats are in come from each door's `/rooms`, every `ROOMS_POLL_MS` and on
- * any tick whose seats changed, so a room Claude just joined shows within a tick: the door asks the server for them,
- * so no tick waits on that read, and one never starts while another runs. Each room's log comes through its door at
- * the same moments, what is new past the newest event held (the newest page while none is), and on every tick while
- * the room pane shows that room's Log; its canvas through the door as well, only while the pane shows the Canvas.
+ * every tick reads it again; a bridge that answers again naming no door is one older than the door, and its rooms go.
+ * The rooms the seats are in come from each door's `/rooms`, every `ROOMS_POLL_MS` and on any tick whose seats
+ * changed, so a room Claude just joined shows within a tick: the door asks the server for them, so no tick waits on
+ * that read, and one never starts while another runs. Each room's log comes through its door at the same moments, what
+ * is new past the newest event held (the newest page while none is), and on every tick while the room pane shows that
+ * room's Log; its canvas through the door as well, only while the pane shows the Canvas.
  * Nothing here calls `bellman_sync` or takes from an inbox: those belong to Claude.
  */
 import { read, update } from "claude-code";
@@ -82,11 +83,13 @@ async function askBridges($: EngineInterface): Promise<void> {
   // still has no socket, or still fails, takes its bridge's answer, and an answer that is itself a failure changes
   // nothing. A door that has given a status takes only the socket named, keeping that status and its error until a
   // read of the new socket replaces them: a bridge that restarted keeps its rooms, and the gate shut on them, meanwhile.
+  // A bridge that answers naming no door has come back older than the door, and is one: its last status goes, and its
+  // seats with it, out of the view and the gate.
   await update($, doors, (current) => [
     ...current.map((d) => {
       const answer = asked.find((a) => a.server === d.server);
       if (answer === undefined || answer.error !== null || (d.socketPath !== null && d.error === null)) return d;
-      return d.status === null ? answer : { ...d, socketPath: answer.socketPath };
+      return d.status === null || answer.socketPath === null ? answer : { ...d, socketPath: answer.socketPath };
     }),
     ...asked.filter((a) => !current.some((d) => d.server === a.server)),
   ]);

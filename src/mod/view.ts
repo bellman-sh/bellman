@@ -5,7 +5,8 @@
  *
  * Every string a peer controls (label, room name, message) leaves here through `cleanText`, so a toast,
  * a picker entry or a title never carries an escape sequence or a line break; what an action request
- * asks leaves through `cleanBlock`, every character of it shown (`drawingOf`).
+ * asks leaves through `cleanBlock`, once `spelledOut` has written out as code points the characters it
+ * names, which would hide text or act on the terminal (`drawingOf`).
  *
  * Runtime-free on purpose, like `door-protocol.ts`: esbuild bundles it into the mod. Its imports are
  * that file, one constant from `action-state.ts`, which itself imports only a type, and the payload
@@ -163,15 +164,24 @@ export interface PendingRequest {
 export const REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1);
 
 /**
- * A peer's text as the person approving it reads it: every character Claude reads is there. One that draws nothing or
- * acts on the terminal (a control, the escape a sequence starts with, a direction override, a tag, a private or
- * unassigned code point, a line or paragraph separator) is written out as its code point, `\u{1b}`, where
- * `cleanBlock` would drop it, and with it the text a sequence carries or a run of tags spells, which Claude would read
- * and nobody would see. A line break stays one, a carriage return before it goes, and the zero-width non-joiner and
- * joiner stay, as they join what is drawn on either side.
+ * A peer's text as the person approving it reads it. These are written out as their code points, `\u{1b}`, where
+ * `cleanBlock` would drop them, and with them the text a sequence carries or a run of tags spells, which Claude would
+ * read and nobody would see: every control, format, private-use or unassigned character and every line or paragraph
+ * separator, but the line break and the zero-width non-joiner and joiner, which join what is drawn on either side;
+ * every variation selector of the supplement (U+E0100 to U+E01EF); and every one of the sixteen (U+FE00 to U+FE0F) but
+ * one directly after a character that is not a selector, which picks how that character draws, so `❤️` draws as it is
+ * and a run after it shows. A carriage return before a line break goes.
+ * ponytail: by those categories and ranges. What else draws nothing passes: the one selector after each character, a
+ * joiner included, and the marks and fillers that draw nothing (U+034F, U+115F, U+1160, U+3164, U+FFA0); spell one out
+ * here the day it hides a request.
  */
 const spelledOut = (text: string): string =>
-  text.replace(/\r\n/g, "\n").replace(/(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+  text
+    .replace(/\r\n/g, "\n")
+    .replace(
+      /(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}\u{e0100}-\u{e01ef}]|(?<![^\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])[\u{fe00}-\u{fe0f}]/gu,
+      (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`,
+    );
 
 /**
  * What an action request asks, as the Approve tab draws it: its payload's `text` when that is the payload's one key

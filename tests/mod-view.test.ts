@@ -250,6 +250,31 @@ describe("drawingOf, all of what a request asks", () => {
   });
 });
 
+describe("drawingOf, variation selectors", () => {
+  it("keeps the one selector that picks how a character draws, and spells out a run after it", () => {
+    // A heart and the selector that draws it as an emoji, and a face with the one that draws it as text: as they are.
+    expect(drawingOf({ text: "❤\u{fe0f}" }).drawing).toBe("❤\u{fe0f}");
+    expect(drawingOf({ text: "☺\u{fe0e} plain" }).drawing).toBe("☺\u{fe0e} plain");
+    // Twelve after an emoji: the first picks how it draws, and the eleven after it show.
+    expect(drawingOf({ text: `❤${"\u{fe0f}".repeat(12)}` }).drawing).toBe(`❤\u{fe0f}${"\\u{fe0f}".repeat(11)}`);
+    // One with no character before it, and one after another selector of either kind.
+    expect(drawingOf({ text: "\u{fe00}a" }).drawing).toBe("\\u{fe00}a");
+    expect(drawingOf({ text: "a\u{fe00}\u{fe01}" }).drawing).toBe("a\u{fe00}\\u{fe01}");
+    expect(drawingOf({ text: "a\u{e0100}\u{fe01}" }).drawing).toBe("a\\u{e0100}\\u{fe01}");
+    // In a payload's JSON as well, which writes them as they are.
+    expect(drawingOf({ a: "x\u{fe0f}\u{fe0f}" }).drawing).toBe('{\n  "a": "x\u{fe0f}\\u{fe0f}"\n}');
+  });
+
+  it("spells out every selector of the supplement, wherever it stands", () => {
+    expect(drawingOf({ text: "字\u{e0100} 字\u{e01ef}" }).drawing).toBe("字\\u{e0100} 字\\u{e01ef}");
+    // A command written a byte to a selector after an emoji, as text is smuggled past a reader: all of it shows.
+    const smuggled = [..."rm -rf ~"].map((c) => String.fromCodePoint(0xe0100 + c.charCodeAt(0) - 16)).join("");
+    expect(drawingOf({ text: `ok 😀${smuggled}` }).drawing).toBe(
+      `ok 😀${[..."rm -rf ~"].map((c) => `\\u{${(0xe0100 + c.charCodeAt(0) - 16).toString(16)}}`).join("")}`,
+    );
+  });
+});
+
 describe("roomLabel, hostile names", () => {
   const id = "qs_abcdef123456";
   it("cleans and cuts a public name, and falls to the preset when it cleans to nothing", () => {

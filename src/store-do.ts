@@ -1,13 +1,14 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
+  Org, OrgPatch,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -33,7 +34,7 @@ import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
@@ -3296,7 +3297,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     return this.ctx.storage.transaction(async (txn) => {
       const stored = await txn.get<PlanGrant>(grantKey(grant.key));
       // A lapsed grant is not a grant — the same rule getGrant applies. Letting
@@ -3304,6 +3305,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // key indefinitely, because nothing sweeps it until someone reads it.
       const previous = stored && !lapsed(stored) ? stored : undefined;
       if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
+      // The seat cap (orgs spec, D3), decided in the transaction that seats: an org with a
+      // record holds as many grants as it bought, a key already in this org changes role for
+      // no seat, and an org that is only a string in grants has no record and no cap.
+      if (grant.orgId !== null && !(previous && previous.orgId === grant.orgId)) {
+        const org = await txn.get<Org>(orgKey(grant.orgId));
+        if (org && (await this.#countMembers(txn, grant.orgId, Date.now())) >= org.seats) return "full" as const;
+      }
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
@@ -3324,7 +3332,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     const outcome = await this.#putGrantIfOwnedTxn(grant, expectedOrgId, audit);
     if (outcome === "written") await this.driver.deliverNow();
     return outcome;
@@ -3483,6 +3491,119 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       startAfter = last;
     }
     return live;
+  }
+
+  // ------------------------------------------------- orgs (orgs spec, D1 to D5)
+  // The record sits beside the grants that are its members, so a seat is decided in the
+  // transaction that takes it, and the rows an org change owes go out through the same outbox.
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    return this.ctx.storage.get<Org>(orgKey(orgId));
+  }
+
+  /**
+   * The org's live grants: its members (D2), the owner's among them. A scan of the org's index
+   * range, bounded by the org's own size, so it can run inside a transaction with the write it
+   * guards. `#private` because it reads through whatever storage it is handed.
+   * ponytail: a scan per member write; a counter row is the upgrade if an org ever holds thousands.
+   */
+  async #countMembers(from: Pick<DurableObjectTransaction, "list">, orgId: string, now: number): Promise<number> {
+    let count = 0;
+    for (const grant of (await from.list<PlanGrant>({ prefix: orgIndexPrefix(orgId) })).values()) {
+      if (!lapsed(grant, now)) count++;
+    }
+    return count;
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.#countMembers(this.ctx.storage, orgId, Date.now());
+  }
+
+  async #createOrgTxn(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (await txn.get<Org>(orgKey(org.orgId))) return "exists" as const;
+      const stored = await txn.get<PlanGrant>(grantKey(ownerGrant.key));
+      const previous = stored && !lapsed(stored) ? stored : undefined;
+      if (previous && previous.orgId !== org.orgId) return "conflict" as const;
+      for (const stale of staleIndexKeys(stored, ownerGrant)) await txn.delete(stale);
+      const now = Date.now();
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([
+        ...orgAuditEntries(undefined, org, audit, now),
+        ...grantAuditEntries(previous, ownerGrant, audit, now),
+      ]));
+      // The record, the owner's grant, its index copy and the rows to record them, in one commit (D7).
+      await txn.put<unknown>({
+        [orgKey(org.orgId)]: org,
+        [grantKey(ownerGrant.key)]: ownerGrant,
+        [orgIndexKey(ownerGrant.orgId, ownerGrant.key)]: ownerGrant,
+        ...rows,
+      });
+      return "created" as const;
+    });
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    const outcome = await this.#createOrgTxn(org, ownerGrant, audit);
+    if (outcome === "created") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #updateOrgTxn(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      if (!previous) return undefined;
+      const next = patchedOrg(previous, patch);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, Date.now())));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return next;
+    });
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    const next = await this.#updateOrgTxn(orgId, patch, audit);
+    if (next) await this.driver.deliverNow();
+    return next;
+  }
+
+  async #activatePurchasedOrgTxn(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      if (previous && previous.seats === seats && previous.active) return "unchanged" as const;
+      const now = Date.now();
+      // The seats and the standing, and nothing else (D4): the name its owner gave it survives every Stripe event.
+      const next: Org = previous ? { ...previous, seats, active: true } : purchasedOrg(orgId, ownerUserId, seats, now);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, now)));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return previous ? ("updated" as const) : ("created" as const);
+    });
+  }
+
+  async activatePurchasedOrg(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged"> {
+    const outcome = await this.#activatePurchasedOrgTxn(orgId, ownerUserId, seats, audit);
+    if (outcome !== "unchanged") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #deactivateOrgTxn(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      if (!previous) return "missing" as const;
+      if (!previous.active) return "unchanged" as const;
+      const next: Org = { ...previous, active: false };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, Date.now())));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "updated" as const;
+    });
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+    const outcome = await this.#deactivateOrgTxn(orgId, audit);
+    if (outcome === "updated") await this.driver.deliverNow();
+    return outcome;
   }
 
   /**
@@ -4744,7 +4865,7 @@ export class DurableObjectStore implements BellmanStore {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     return this.registry.putGrantIfOwned(grant, expectedOrgId, audit);
   }
 
@@ -4778,6 +4899,32 @@ export class DurableObjectStore implements BellmanStore {
 
   async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
     return this.registry.listGrants(limit, orgId);
+  }
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    return this.registry.getOrg(orgId);
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    return this.registry.createOrg(org, ownerGrant, audit);
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    return this.registry.updateOrg(orgId, patch, audit);
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.registry.countOrgMembers(orgId);
+  }
+
+  async activatePurchasedOrg(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged"> {
+    return this.registry.activatePurchasedOrg(orgId, ownerUserId, seats, audit);
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing"> {
+    return this.registry.deactivateOrg(orgId, audit);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

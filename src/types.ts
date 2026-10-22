@@ -372,6 +372,47 @@ export interface PlanGrant {
 }
 
 /**
+ * An org as a record (orgs spec, D1). Before it, an org was the string a grant or
+ * BELLMAN_USERS named, and nothing created, owned or counted one.
+ *
+ * Its members are not here: a member is a grant whose `orgId` names this org (D2),
+ * so the roster is the grant index and nothing is derived from anything else.
+ */
+export interface Org {
+  /** The id every grant, room and audit row names it by. `isOrgId`'s grammar, never reused. */
+  orgId: string;
+  /** For display: trimmed, 1 to 80 characters. A purchased org starts out named by its id. */
+  name: string;
+  /** Exactly one, never changes. The break-glass for `requireSso`, and the one member nobody removes. */
+  ownerUserId: string;
+  /** How many grants the org may hold, the owner's among them (D3). Billing's number for a purchased org. */
+  seats: number;
+  /** Who the org answers to: a Stripe subscription, or the operator who created it. */
+  source: "purchase" | "operator";
+  /**
+   * Whether anyone is paying for it (D5). Billing clears it when the subscription stops paying
+   * and sets it when one pays again; every grant in an inactive org resolves to the free plan,
+   * and stays, so a failed card loses no roster. Always true for an operator org.
+   */
+  active: boolean;
+  createdAt: number;
+  /** Whether members must sign in through the org's IdP (SSO, D13). Written false until then. */
+  requireSso: boolean;
+  /** The domains the org has claimed (SSO, D11); only a verified one routes a sign-in. Written empty until then. */
+  domains: OrgDomain[];
+}
+
+/** One domain claim: the token its DNS record must carry, and when it was seen there, or null while it has not been. */
+export interface OrgDomain {
+  domain: string;
+  token: string;
+  verifiedAt: number | null;
+}
+
+/** What `updateOrg` may change: the name (its admin), the seats (the operator), the SSO switch (its admin). */
+export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
+
+/**
  * That a person exists.
  *
  * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org

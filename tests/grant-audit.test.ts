@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { purchaseGrant } from "../src/billing/grants.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
-import type { PlanGrant } from "../src/types.js";
+import { grantAuditEntries, orgAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
+import type { Org, PlanGrant } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;
 const admin: AuditIntent = { actorUserId: "u_admin" };
@@ -401,5 +401,45 @@ describe("every entry", () => {
     expect(intent).toEqual({ actorUserId: "stripe", detail: { stripe_customer: "cus_1" } });
     expect(previous).toEqual(grant({ orgId: "org_old" }));
     expect(next).toEqual(grant({ orgId: "org_new" }));
+  });
+});
+
+describe("org rows (orgs spec, D8)", () => {
+  const org = (over: Partial<Org> = {}): Org => ({
+    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_4242", seats: 3, source: "purchase",
+    active: true, createdAt: NOW, requireSso: false, domains: [], ...over,
+  });
+  const stripe: AuditIntent = { actorUserId: "stripe" };
+
+  it("records a creation with the record's facts, under org:<id>, internal to the org", () => {
+    const rows = orgAuditEntries(undefined, org(), stripe, 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      at: 5, orgId: "org_acme", sessionId: "org:org_acme", actorUserId: "stripe", action: "org_created",
+      detail: { name: "Acme", owner_user_id: "u_github_4242", seats: 3, source: "purchase", active: true },
+      ...internal("org_acme"),
+    });
+  });
+
+  it("records only the fields an update changed", () => {
+    expect(orgAuditEntries(org(), org({ seats: 5, active: false }), stripe, 5)).toEqual([expect.objectContaining({
+      action: "org_updated", sessionId: "org:org_acme", detail: { seats: 5, active: false },
+    })]);
+    expect(orgAuditEntries(org(), org({ name: "Acme Ltd" }), stripe, 5)[0].detail).toEqual({ name: "Acme Ltd" });
+    expect(orgAuditEntries(org(), org({ requireSso: true }), stripe, 5)[0].detail).toEqual({ require_sso: true });
+  });
+
+  /** A redelivered Stripe event, or a domain claim, moves nothing an org's stream should say. */
+  it("records nothing for an update that changed none of them", () => {
+    expect(orgAuditEntries(org(), org(), stripe, 5)).toEqual([]);
+    expect(orgAuditEntries(org(), org({ domains: [{ domain: "acme.com", token: "t", verifiedAt: null }] }), stripe, 5)).toEqual([]);
+    expect(orgAuditEntries(org(), org({ createdAt: NOW + 1 }), stripe, 5)).toEqual([]);
+  });
+
+  it("names the acting admin as a grant row does", () => {
+    const by: AuditIntent = { actorUserId: "u_op", actorLabel: "Ops", actorOrgId: null };
+    expect(orgAuditEntries(org(), org({ name: "Acme Ltd" }), by, 5)[0]).toMatchObject({
+      actorUserId: "u_op", actorLabel: "Ops", actorOrgId: null, direction: null,
+    });
   });
 });

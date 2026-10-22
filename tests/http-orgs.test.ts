@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ORG_WRITE_BYTES, orgRoutes, type OrgRouteDeps } from "../src/http/orgs.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
+import { ssoUserId } from "../src/oauth/providers.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
@@ -175,6 +176,15 @@ describe("POST /org/members", () => {
     const full = (await add("owner", { key: "github:10", role: "member" }))!;
     expect([full.status, await full.json()]).toEqual([409, { error: "full", error_description: "this org holds 3 of 3 seats", seats: 3, seats_used: 3 }]);
     expect(await store.getGrant("github:10")).toBeUndefined();
+  });
+
+  /** An sso key names its org: seated elsewhere, the person would sign in through their own IdP and land in the wrong org. */
+  it("seats an IdP subject of this org, and refuses one of another org's", async () => {
+    const foreign = (await add("owner", { key: "sso:org_b:00u9", role: "member" }))!;
+    expect([foreign.status, await said(foreign)]).toEqual([400, expect.stringContaining("another org")]);
+    expect(await store.getGrant("sso:org_b:00u9")).toBeUndefined();
+    const own = (await add("owner", { key: "sso:org_acme:00u9", role: "admin" }))!;
+    expect([own.status, ((await json(own)).member as { user_id: string }).user_id]).toEqual([201, ssoUserId("org_acme", "00u9")]);
   });
 
   it("writes a grant that is this org's, whatever the body says of plan, org or source", async () => {

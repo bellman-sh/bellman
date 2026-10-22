@@ -20,7 +20,7 @@ import { grantKeyForUser } from "../billing/grants.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { domainVerified, isDomain, newDomainToken, verificationRecord } from "../oauth/dns.js";
 import { discover } from "../oauth/oidc.js";
-import { isStableIdentityKey } from "../oauth/providers.js";
+import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { MAX_ORG_NAME_CHARS, orgView, parseOrgName, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
@@ -263,6 +263,10 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
         return problem(400, "invalid_request",
           "key must be github:<numeric id>, google:<numeric id>, or an email address (github:, google: or email:) — a username or display name can be reassigned", origin);
       }
+      // An sso key names its org (SSO spec, D10): seated here, a person of another org would sign in
+      // through their own IdP and land in this one, with their own admin unable to see why.
+      const sso = parseSsoKey(body.key);
+      if (sso && sso.orgId !== orgId) return problem(400, "invalid_request", "that key names an IdP subject of another org", origin);
       const role = parseRole(body.role);
       if (role === undefined) return problem(400, "invalid_request", "role must be member or admin", origin);
       // Seating is create-only. The owner's grant is nobody's to rewrite here: seating them again as

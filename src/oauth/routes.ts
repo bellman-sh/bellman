@@ -609,7 +609,6 @@ interface UpgradeRequest {
  * the log. `via` names the door for that log line.
  */
 async function finishAuthorize(
-  url: URL,
   exchange: () => Promise<ProviderProfile>,
   pending: AuthorizeRequest,
   config: OAuthConfig,
@@ -636,7 +635,6 @@ async function finishAuthorize(
     console.error(`${via} sign-in failed:`, err);
     return refuse(`${via} sign-in failed`);
   }
-  void url;
 
   const authCode = randomId();
   await config.store.putCode(authCode, {
@@ -1219,7 +1217,7 @@ export async function handleOAuth(
     if (state.audience === SESSION_AUDIENCE) {
       return finishSession(request, url, exchange, state.claims.bellman as unknown as SessionRequest, config);
     }
-    return finishAuthorize(url, exchange, state.claims.bellman as unknown as AuthorizeRequest, config, "single sign-on");
+    return finishAuthorize(exchange, state.claims.bellman as unknown as AuthorizeRequest, config, "single sign-on");
   }
 
   // ------------------------------------------------- provider comes back
@@ -1254,7 +1252,7 @@ export async function handleOAuth(
       target.searchParams.set("error_description", upstreamError ?? "no authorization code returned");
       return Response.redirect(target.toString(), 302);
     }
-    return finishAuthorize(url, exchange, pending, config, name);
+    return finishAuthorize(exchange, pending, config, name);
   }
 
   // ----------------------------------------------------------------- /token

@@ -96,6 +96,7 @@ export type PlanStore = Pick<
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
+  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
   | "recordSignIn"

@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
+import { allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
@@ -8,7 +8,7 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
-  Org, OrgPatch,
+  Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -34,7 +34,7 @@ import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
-import { grantAuditEntries, orgAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
@@ -3609,6 +3609,128 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  // ------------------------------------------------- SSO (SSO spec, D9, D11, D13)
+
+  async #putOrgIdpTxn(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<Org>(orgKey(orgId)))) return "missing" as const;
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "idp_configured", { issuer: idp.issuer }, audit, Date.now())]));
+      await txn.put<unknown>({ [idpKey(orgId)]: idp, ...rows });
+      return "written" as const;
+    });
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    const outcome = await this.#putOrgIdpTxn(orgId, idp, audit);
+    if (outcome === "written") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    return this.ctx.storage.get<OrgIdp>(idpKey(orgId));
+  }
+
+  async #deleteOrgIdpTxn(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<OrgIdp>(idpKey(orgId)))) return "missing" as const;
+      await txn.delete(idpKey(orgId));
+      await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "idp_removed", {}, audit, Date.now())])));
+      return "deleted" as const;
+    });
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    const outcome = await this.#deleteOrgIdpTxn(orgId, audit);
+    if (outcome === "deleted") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #claimDomainTxn(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "missing" as const;
+      if (org.domains.some((d) => d.domain === domain)) return "exists" as const;
+      const next: Org = { ...org, domains: [...org.domains, { domain, token, verifiedAt: null }] };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_claimed", { domain }, audit, now)]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "claimed" as const;
+    });
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    const outcome = await this.#claimDomainTxn(orgId, domain, token, now, audit);
+    if (outcome === "claimed") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  /** The index read and the claim's write in one transaction (D11): two orgs verifying one domain at once cannot both win. */
+  async #verifyDomainTxn(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      const claim = org?.domains.find((d) => d.domain === domain);
+      if (!org || !claim) return "unknown" as const;
+      const holder = await txn.get<string>(domainKey(domain));
+      if (holder !== undefined && holder !== orgId) return "taken" as const;
+      if (claim.verifiedAt !== null) {
+        await txn.put(domainKey(domain), orgId);
+        return "verified" as const;
+      }
+      const next: Org = { ...org, domains: org.domains.map((d) => (d.domain === domain ? { ...d, verifiedAt: now } : d)) };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_verified", { domain }, audit, now)]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, [domainKey(domain)]: orgId, ...rows });
+      return "verified" as const;
+    });
+  }
+
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    const outcome = await this.#verifyDomainTxn(orgId, domain, now, audit);
+    if (outcome === "verified") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #releaseDomainTxn(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org || !org.domains.some((d) => d.domain === domain)) return "unknown" as const;
+      const next: Org = { ...org, domains: org.domains.filter((d) => d.domain !== domain) };
+      if ((await txn.get<string>(domainKey(domain))) === orgId) await txn.delete(domainKey(domain));
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_released", { domain }, audit, Date.now())]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "released" as const;
+    });
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    const outcome = await this.#releaseDomainTxn(orgId, domain, audit);
+    if (outcome === "released") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(domainKey(domain));
+  }
+
+  async #provisionSsoMemberTxn(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "no_org" as const;
+      const stored = await txn.get<PlanGrant>(grantKey(key));
+      if (stored && !lapsed(stored, now)) return "exists" as const;
+      if ((await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
+      const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
+      for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
+      await txn.put<unknown>({ [grantKey(key)]: grant, [orgIndexKey(orgId, key)]: grant, ...rows });
+      return "written" as const;
+    });
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    const outcome = await this.#provisionSsoMemberTxn(orgId, key, now, audit);
+    if (outcome === "written") await this.driver.deliverNow();
+    return outcome;
+  }
+
   /**
    * Remove both copies of a grant. Every delete path goes through here, and in
    * one transaction: half a delete leaves the grant listed but unresolvable,
@@ -4928,6 +5050,38 @@ export class DurableObjectStore implements BellmanStore {
 
   async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
     return this.registry.deactivateOrg(orgId, audit);
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    return this.registry.putOrgIdp(orgId, idp, audit);
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    return this.registry.getOrgIdp(orgId);
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.registry.deleteOrgIdp(orgId, audit);
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    return this.registry.claimDomain(orgId, domain, token, now, audit);
+  }
+
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    return this.registry.verifyDomain(orgId, domain, now, audit);
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    return this.registry.releaseDomain(orgId, domain, audit);
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.registry.orgForDomain(domain);
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    return this.registry.provisionSsoMember(orgId, key, now, audit);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

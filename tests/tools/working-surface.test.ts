@@ -38,6 +38,10 @@ const write = (p: PairedSession, payload: Record<string, unknown>, extra: Record
 const rows = (p: PairedSession) => h.store.surfaceOf(p.sessionId);
 const eventCount = async (p: PairedSession) => (await h.store.eventsAfter(p.sessionId, 0)).length;
 
+/** An item as a write takes it: without the four fields the server sets on every read (room pages spec, R4). */
+const withoutServerFields = (item: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(item).filter(([k]) => !["cursor", "at", "created_at", "changed_at"].includes(k)));
+
 /** A blob in the harness's store, as the upload route would have left it. */
 const stored = async (p: PairedSession, type: string, bytes: Uint8Array, name = "notes.md", room = p.sessionId) => {
   const id = newBlobId();
@@ -121,10 +125,10 @@ describe("writing an item", () => {
   });
 
   // Read, edit, send back is the natural replace. An item as a member reads it
-  // spells what it left out as `null` and carries the `cursor` and `at` the
-  // server set, so the write shape takes `null` as it takes absence, and the two
-  // server-set fields are the only ones to strip.
-  it("accepts an item as it was read, null fields and all, once cursor and at are removed", async () => {
+  // spells what it left out as `null` and carries the `cursor`, `at`, `created_at`
+  // and `changed_at` the server set, so the write shape takes `null` as it takes
+  // absence, and those four server-set fields are the only ones to strip.
+  it("accepts an item as it was read, null fields and all, once the server's four fields are removed", async () => {
     const p = await pairUp(h);
     for (const item of [
       { key: "plan", kind: "text", body: "1. read\n2. write" },
@@ -148,33 +152,33 @@ describe("writing an item", () => {
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
     // pass just as well for a read that had dropped them.
-    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, blob: null, shape: null, cursor: expect.any(Number) });
+    expect(item("plan")).toMatchObject({
+      title: null, ends: null, placement: null, blob: null, shape: null,
+      cursor: expect.any(Number), at: expect.any(String), created_at: expect.any(String), changed_at: expect.any(String),
+    });
     expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
     // A shape reads back with its defaults spelled out, `flip: false` on a rectangle among them: the loop
     // below sends it back as it reads, so a rule that refused the default would fail it there.
     expect(item("box")).toMatchObject({ body: null, shape: { form: "rect", color: "slate", flip: false } });
 
-    const asWritten = (data: Record<string, unknown>) =>
-      Object.fromEntries(Object.entries(data).filter(([k]) => k !== "cursor" && k !== "at"));
-
     // The replace the review named: only `body` changed.
-    const edited = await write(p, { ...asWritten(item("plan")), body: "1. read\n2. write\n3. ship" });
+    const edited = await write(p, { ...withoutServerFields(item("plan")), body: "1. read\n2. write\n3. ship" });
     expect(edited.isError, edited.text).toBe(false);
     expect((await rows(p)).find((r) => r.key === "plan")!.body).toBe("1. read\n2. write\n3. ship");
 
     // And every kind as it reads, the connector with its null body and placement
     // among them, goes back unchanged.
     for (const data of asRead) {
-      const out = await write(p, asWritten(data));
+      const out = await write(p, withoutServerFields(data));
       expect(out.isError, `${String(data.key)}: ${out.text}`).toBe(false);
     }
 
-    // `cursor` and `at` are the server's to set, so they stay refused, and by name.
-    // Said last, because it is the control for the strictness `null` must not
+    // `cursor`, `at`, `created_at` and `changed_at` are the server's to set, so they stay refused, and
+    // by name. Said last, because it is the control for the strictness `null` must not
     // loosen: with the nulls accepted, the unrecognized keys are the first issue.
     const unstripped = await write(p, { ...item("plan"), body: "kept as it was" });
     expect(unstripped.isError).toBe(true);
-    expect(unstripped.text).toContain("cursor");
+    for (const name of ["cursor", "at", "created_at", "changed_at"]) expect(unstripped.text).toContain(`"${name}"`);
   });
 
   it("lets the creator write before anyone has joined", async () => {
@@ -693,7 +697,7 @@ describe("file and image items (#183)", () => {
   });
 
   // Review Focus 3: read, edit, send back works for a blob-backed item too, once the server's
-  // fields come off — the three inside `blob` as well as the two on top. zod reports the nested
+  // fields come off — the three inside `blob` as well as the four on top. zod reports the nested
   // issue before the top-level one and the refusal names only the first, so each step asserts
   // its first issue by its path (`blob: `; the refusal's own prefix says `blob?, shape? }`, never
   // `blob: `) and by the key it names, and says which issue is not the first.
@@ -707,21 +711,21 @@ describe("file and image items (#183)", () => {
     const [item] = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items.map((i) => i.data);
     expect(item.blob).toEqual({ id, bytes: MD.byteLength, type: "text/markdown", name: "notes.md" });
 
-    // As read: the blob's three server fields are the first issue; cursor and at are the second.
+    // As read: the blob's three server fields are the first issue; the item's four are the second.
     const asRead = await write(p, { ...item, title: "Renamed" });
     expect(asRead.isError).toBe(true);
     expect(asRead.text).toContain("blob: ");
     expect(asRead.text).toContain('"bytes"');
     expect(asRead.text).not.toContain('"cursor"');
 
-    // The blob reduced to its id: the top-level pair is the first issue now, and the blob is not named.
+    // The blob reduced to its id: the top-level four are the first issue now, and the blob is not named.
     const blobFixed = await write(p, { ...item, blob: { id }, title: "Renamed" });
     expect(blobFixed.isError).toBe(true);
-    expect(blobFixed.text).toContain('"cursor"');
+    for (const name of ["cursor", "at", "created_at", "changed_at"]) expect(blobFixed.text).toContain(`"${name}"`);
     expect(blobFixed.text).not.toContain("blob: ");
 
-    // cursor and at off, the blob left as read: the blob again, by name.
-    const { cursor: _c, at: _a, ...rest } = item;
+    // The four off, the blob left as read: the blob again, by name.
+    const rest = withoutServerFields(item);
     const stripped = await write(p, { ...rest, title: "Renamed" });
     expect(stripped.isError).toBe(true);
     expect(stripped.text).toContain("blob: ");

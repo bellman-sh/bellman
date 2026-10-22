@@ -127,6 +127,29 @@ describe("GET /public/rooms/:id/surface", () => {
     const again = (await read(`/public/rooms/${PUB}/surface`, { "if-none-match": tag }))!;
     expect([again.status, again.headers.get("etag"), again.headers.get("access-control-allow-origin")]).toEqual([304, tag, "*"]);
   });
+
+  // Room pages spec, D4: what the page orders and dates a post by.
+  it("dates each item: when its key was first written and when it last changed, ISO 8601", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const put = async (body: string) => {
+        const res = (await asCreator(`/rooms/${PUB}/surface/plan?member_id=m_creator`, {
+          method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "text", title: "The plan", body }),
+        }))!;
+        expect(res.status, await res.clone().text()).toBe(200);
+      };
+      vi.setSystemTime(new Date("2026-10-18T09:00:00.000Z"));
+      await put("first");
+      vi.setSystemTime(new Date("2026-10-19T10:30:00.000Z"));
+      await put("revised");
+      const { items } = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as unknown as { items: { data: Record<string, unknown> }[] };
+      expect(items[0].data).toMatchObject({
+        created_at: "2026-10-18T09:00:00.000Z", changed_at: "2026-10-19T10:30:00.000Z", at: "2026-10-19T10:30:00.000Z",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("GET /public/rooms/:id/events", () => {

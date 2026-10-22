@@ -488,6 +488,14 @@ describe("GET /rooms/:id/surface", () => {
     expect(Object.keys(body).sort()).toEqual(["items", "surface_cursor"]);
   });
 
+  it("dates each item for a member as for the public read", async () => {
+    const written = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method: "PUT", body: { kind: "text", body: "hello" } }))!;
+    expect(written.status).toBe(200);
+    const { items } = (await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))) as unknown as { items: { data: Record<string, unknown> }[] };
+    expect(items[0].data.created_at).toBe(items[0].data.at);
+    expect(items[0].data.changed_at).toBe(items[0].data.at);
+  });
+
   it("answers 304 from the record alone when If-None-Match names the cursor, and 200 once a write moves it", async () => {
     const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
     const reads = { n: 0 };
@@ -775,6 +783,18 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(await bodyOf(res)).toMatchObject({ error: "invalid_request", error_description: expect.stringContaining("DELETE") });
     }
     expect((await store.surfaceOf(ROOM)).map((r) => r.body)).toEqual(["v1"]);
+  });
+
+  // Review Focus 1: read, edit, send back. The server's dates are refused by name, as cursor and at are (R4).
+  // This passes before the change too: it pins the refusal the strict shape gives, now that a read carries both.
+  it("refuses an item sent back with the server's dates, naming the field", async () => {
+    for (const field of ["created_at", "changed_at"]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, {
+        method: "PUT", body: { kind: "text", body: "hello", [field]: "2026-10-18T09:00:00.000Z" },
+      }))!;
+      expect(res.status, field).toBe(400);
+      expect(String((await bodyOf(res)).error_description), field).toContain(field);
+    }
   });
 
   it("refuses a body whose key disagrees with the path, and accepts one that agrees", async () => {

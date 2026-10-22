@@ -7,6 +7,7 @@ import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import { heldName } from "./public-names.js";
 import { purgeDueAt } from "./retention.js";
+import { createdAtOf } from "./surface.js";
 import type { StoredSession } from "./stored-session.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
@@ -432,6 +433,10 @@ export function surfaceItem(r: SurfaceRow) {
       shape: r.shape ?? null,
       cursor: r.cursor,
       at: new Date(r.at).toISOString(),
+      // Room pages spec, D4: when the key was first written and when it last changed, the dates a page shows and orders by.
+      // `at` stays beside them for the readers that have it (R3): it is `changed_at` under its older name.
+      created_at: new Date(createdAtOf(r)).toISOString(),
+      changed_at: new Date(r.at).toISOString(),
     },
   );
 }

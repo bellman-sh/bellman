@@ -91,7 +91,7 @@ const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape })
  * The blob a `file`, an `image` or an `html` item names (#183, D5): the id and nothing else.
  * `bytes`, `type` and `name` are the server's to set from the object, so an item
  * sent back as it was read is refused for them until the sender takes them off,
- * as it is for `cursor` and `at`.
+ * as it is for `cursor`, `at`, `created_at` and `changed_at`.
  */
 const BlobShape = z.strictObject({
   id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
@@ -134,8 +134,9 @@ const boundedText = (max: number) =>
 
 /**
  * An item as the wire carries it. Strict, so an unknown field is refused rather
- * than dropped: `cursor` and `at` are the server's to set, and an item sent back
- * as it was read is refused for them until the sender takes them off.
+ * than dropped: `cursor`, `at`, `created_at` and `changed_at` are the server's to
+ * set, and an item sent back as it was read is refused for them until the sender
+ * takes them off.
  *
  * `null` is absence, for the six fields a read spells that way: an item as a
  * member reads it carries `null` for each it left out, and read, edit, send back

@@ -31,9 +31,7 @@ export function planForPrice(price: StripePrice | null | undefined): Plan | null
 
 /** Prices on a subscription's items, skipping anything that is not an item. */
 export function pricesOf(items: unknown): (StripePrice | undefined)[] {
-  const data = isRecord(items) ? items.data : undefined;
-  if (!Array.isArray(data)) return [];
-  return data.filter(isRecord).map((item) => (isRecord(item.price) ? (item.price as StripePrice) : undefined));
+  return itemsOf(items).map((item) => item.price);
 }
 
 /**
@@ -49,7 +47,33 @@ export interface SubscriptionReading {
   /** null when no price on it names a plan this server knows. */
   plan: Plan | null;
   status: string;
+  /**
+   * The seats it sells (orgs spec, D4): the sum of `quantity` over the items whose price names the
+   * plan, an item with no whole positive quantity counting one. The team price's three-seat minimum
+   * is Stripe's to enforce on the Payment Link; this reads what was bought.
+   */
+  seats: number;
 }
+
+/** What one subscription item is, as far as the plan and the seats go. */
+interface StripeItem {
+  price?: StripePrice;
+  quantity?: unknown;
+}
+
+/** The items as `price` and `quantity`, skipping anything that is not an item. */
+function itemsOf(items: unknown): StripeItem[] {
+  const data = isRecord(items) ? items.data : undefined;
+  if (!Array.isArray(data)) return [];
+  return data.filter(isRecord).map((item) => ({
+    price: isRecord(item.price) ? (item.price as StripePrice) : undefined,
+    quantity: item.quantity,
+  }));
+}
+
+/** An item's seats: its quantity when that is a whole positive number, else one. */
+const seatsOf = (item: StripeItem): number =>
+  typeof item.quantity === "number" && Number.isInteger(item.quantity) && item.quantity > 0 ? item.quantity : 1;
 
 /**
  * The subscription as Stripe has it now. Anything but a success throws, so the
@@ -73,7 +97,8 @@ export async function readSubscription(id: string, source: SubscriptionSource): 
   }
   const body: unknown = await res.json();
   if (!isRecord(body)) throw new Error(`Stripe returned a non-object for subscription ${id}`);
-  const prices = pricesOf(body.items);
+  const items = itemsOf(body.items);
+  const prices = items.map((item) => item.price);
   const plans = [...new Set(prices.map(planForPrice).filter((p): p is Plan => p !== null))];
   const status = typeof body.status === "string" ? body.status : "";
 
@@ -93,7 +118,10 @@ export async function readSubscription(id: string, source: SubscriptionSource): 
       `subscription ${id} sells more than one plan (${plans.join(", ")}) — plans are ` +
         `mutually exclusive, so this grants nothing. Fix the prices on it in Stripe.`
     );
-    return { plan: null, status };
+    return { plan: null, status, seats: 0 };
   }
-  return { plan: plans[0] ?? null, status };
+  const plan = plans[0] ?? null;
+  // Only the items that sell the plan count a seat: an add-on priced beside it seats nobody.
+  const seats = plan === null ? 0 : items.filter((item) => planForPrice(item.price) === plan).reduce((sum, item) => sum + seatsOf(item), 0);
+  return { plan, status, seats };
 }

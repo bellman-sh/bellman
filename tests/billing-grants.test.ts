@@ -26,6 +26,14 @@ function spyStore(answer: { put?: GrantWrite; del?: GrantDelete } = {}) {
       calls.push(["delete", key, expectedSource, audit]);
       return answer.del ?? { outcome: "deleted" };
     },
+    async activatePurchasedOrg(orgId, ownerUserId, seats, audit) {
+      calls.push(["activate", orgId, ownerUserId, seats, audit]);
+      return "created";
+    },
+    async deactivateOrg(orgId, audit) {
+      calls.push(["deactivate", orgId, audit]);
+      return "updated";
+    },
   };
   return { store, calls };
 }
@@ -158,8 +166,8 @@ describe("reconciling what Stripe says with what is stored", () => {
     await reconcilePurchase(user, billing, plans);
 
     const granted = await plans.auditForOrg("org_u_github_4242", 10);
-    expect(granted).toHaveLength(1);
-    expect(granted[0]).toMatchObject({
+    expect(granted.map((e) => e.action)).toEqual(["org_created", "plan_granted"]);
+    expect(granted[1]).toMatchObject({
       action: "plan_granted", actorUserId: "stripe",
       detail: { key: "github:4242", plan: "team", stripe_customer: "cus_A" },
     });
@@ -167,10 +175,12 @@ describe("reconciling what Stripe says with what is stored", () => {
     await billing.recordSubscription("cus_A", "sub_1", { plan: "team", status: "canceled", eventAt: 2 });
     await reconcilePurchase(user, billing, plans);
 
+    // The revocation, then the org going inactive: the org is marked after the grant goes (orgs spec, D4).
     const after = await plans.auditForOrg("org_u_github_4242", 10);
     expect(after.map((e) => [e.actorUserId, e.action]))
-      .toEqual([["stripe", "plan_granted"], ["stripe", "plan_revoked"]]);
-    expect(after[1]).toMatchObject({ detail: { reason: "subscription no longer paying" } });
+      .toEqual([["stripe", "org_created"], ["stripe", "plan_granted"], ["stripe", "plan_revoked"], ["stripe", "org_updated"]]);
+    expect(after[2]).toMatchObject({ detail: { reason: "subscription no longer paying" } });
+    expect(after[3]).toMatchObject({ detail: { active: false, reason: "subscription no longer paying" } });
   });
 
   /**
@@ -187,7 +197,10 @@ describe("reconciling what Stripe says with what is stored", () => {
 
     expect(await reconcilePurchase(user, billing, store)).toBe("written");
 
+    // The org first, with the seats a state recorded before seats reads as (one), then the grant.
     expect(calls).toEqual([
+      ["activate", "org_u_github_4242", "u_github_4242", 1,
+        { actorUserId: "stripe", detail: { stripe_customer: "cus_A" } }],
       ["put", "github:4242", "team", PURCHASE,
         { actorUserId: "stripe", detail: { stripe_customer: "cus_A" } }],
     ]);
@@ -204,6 +217,8 @@ describe("reconciling what Stripe says with what is stored", () => {
 
     expect(calls).toEqual([
       ["delete", "github:4242", PURCHASE,
+        { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } }],
+      ["deactivate", "org_u_github_4242",
         { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } }],
     ]);
   });
@@ -223,7 +238,7 @@ describe("reconciling what Stripe says with what is stored", () => {
     await reconcilePurchase(user, billing, plans);
     await reconcilePurchase(user, billing, plans);
 
-    expect(await plans.auditForOrg("org_u_github_4242", 10)).toHaveLength(1);
+    expect((await plans.auditForOrg("org_u_github_4242", 10)).map((e) => e.action)).toEqual(["org_created", "plan_granted"]);
   });
 
   /**
@@ -245,8 +260,59 @@ describe("reconciling what Stripe says with what is stored", () => {
     expect(await reconcilePurchase(user, billing, plans)).toBe("written");
 
     expect(await plans.getGrant("github:4242")).toMatchObject({ plan: "pro", orgId: null });
+    // Nobody pays for the org's seats any more, so it goes inactive after the grant leaves it (orgs spec, D4).
     expect((await plans.auditForOrg("org_u_github_4242", 10)).map((e) => e.action))
-      .toEqual(["plan_granted", "plan_revoked"]);
+      .toEqual(["org_created", "plan_granted", "plan_revoked", "org_updated"]);
+    expect(await plans.getOrg("org_u_github_4242")).toMatchObject({ active: false });
+  });
+
+  it("activates the org with the seats it paid for before writing the grant", async () => {
+    const billing = new MemoryBillingStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", { plan: "team", status: "active", eventAt: 1, seats: 4 });
+    const { store, calls } = spyStore();
+
+    expect(await reconcilePurchase(user, billing, store)).toBe("written");
+    expect(calls).toEqual([
+      ["activate", "org_u_github_4242", "u_github_4242", 4, { actorUserId: "stripe", detail: { stripe_customer: "cus_A" } }],
+      ["put", "github:4242", "team", PURCHASE, { actorUserId: "stripe", detail: { stripe_customer: "cus_A" } }],
+    ]);
+  });
+
+  it("deactivates the org after the grant goes, when nothing pays", async () => {
+    const billing = new MemoryBillingStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", { plan: "team", status: "canceled", eventAt: 1 });
+    const { store, calls } = spyStore();
+
+    expect(await reconcilePurchase(user, billing, store)).toBe("deleted");
+    expect(calls).toEqual([
+      ["delete", "github:4242", PURCHASE, { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } }],
+      ["deactivate", "org_u_github_4242", { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } }],
+    ]);
+  });
+
+  it("deactivates the org for a plan that scopes none, and never activates one", async () => {
+    const billing = new MemoryBillingStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", { plan: "pro", status: "active", eventAt: 1, seats: 2 });
+    const { store, calls } = spyStore();
+
+    expect(await reconcilePurchase(user, billing, store)).toBe("written");
+    expect(calls.map((c) => c[0])).toEqual(["put", "deactivate"]);
+  });
+
+  it("creates the record a team purchase pays for, with its seats and its owner", async () => {
+    const billing = new MemoryBillingStore();
+    const plans = new MemoryStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", { plan: "team", status: "active", eventAt: 1, seats: 4 });
+
+    await reconcilePurchase(user, billing, plans);
+    expect(await plans.getOrg("org_u_github_4242")).toMatchObject({
+      name: "org_u_github_4242", ownerUserId: user, seats: 4, source: "purchase", active: true,
+    });
+    expect(await plans.countOrgMembers("org_u_github_4242")).toBe(1);
   });
 
   /**

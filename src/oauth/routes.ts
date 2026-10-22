@@ -3,9 +3,11 @@ import { isOrgId } from "../grant-index.js";
 import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
+import { isRecord } from "../billing/subscription.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
-import type { BellmanStore } from "../store.js";
-import type { Identity, Plan, PlanGrant } from "../types.js";
+import type { AuditIntent, BellmanStore } from "../store.js";
+import type { Identity, Org, Plan, PlanGrant } from "../types.js";
 import {
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey,
@@ -1469,12 +1471,81 @@ export async function handleOAuth(
     return report ? json({ report: operatorReportView(report) }) : oauthError("not_found", "no such report", 404);
   }
 
+  // ------------------------------------------------------------ /admin/orgs
+  // The operator creates an org that was not bought, with its owner seated, and resizes one (orgs
+  // spec, D7), on /admin/handles' gate. A purchased org is billing's to create (D4), and BELLMAN_USERS
+  // keeps naming orgs by string; this is for the org that should have a record, a cap and an owner,
+  // so its admin gets the member routes. The order the other operator routes keep: the gate, the
+  // method, the plan store, then the body.
+  if (path === ADMIN_ORGS) {
+    const gate = await operatorGate(request, config, "creating an org");
+    if (gate instanceof Response) return gate;
+    if (method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const body = await jsonObject(request);
+    if (!body) return oauthError("invalid_request", "body must be a JSON object");
+    const orgId = typeof body.org_id === "string" && isOrgId(body.org_id) ? body.org_id : undefined;
+    if (orgId === undefined) return oauthError("invalid_request", "org_id must be 1-64 characters of letters, digits, _ or -");
+    const name = parseOrgName(body.name);
+    if (name === undefined) return oauthError("invalid_request", `name must be 1 to ${MAX_ORG_NAME_CHARS} characters`);
+    const seats = parseSeats(body.seats);
+    if (seats === undefined) return oauthError("invalid_request", `seats must be a whole number from 1 to ${MAX_SEATS}`);
+    // A subject key, never an address: an address names no user id until a sign-in claims it, and
+    // the record needs its owner's id now.
+    const ownerUserId = typeof body.owner_key === "string" ? userIdForKey(body.owner_key) : null;
+    if (ownerUserId === null) {
+      return oauthError("invalid_request", "owner_key must be github:<numeric id> or google:<numeric id> — an address names no user id yet, so it cannot own an org");
+    }
+    const now = Date.now();
+    const org: Org = { orgId, name, ownerUserId, seats, source: "operator", active: true, createdAt: now, requireSso: false, domains: [] };
+    const owner: PlanGrant = {
+      key: body.owner_key as string, plan: "team", role: "admin", orgId, source: "operator",
+      grantedAt: now, grantedBy: gate.identity.userId, expiresAt: null,
+    };
+    const outcome = await config.plans.createOrg(org, owner, operatorIntent(gate.identity));
+    if (outcome === "exists") return oauthError("exists", "an org with that id already has a record", 409);
+    if (outcome === "conflict") return oauthError("conflict", "the owner's key already has a grant in another org", 409);
+    return json({ org: orgView(org, 1, null) }, 201);
+  }
+  const adminOrg = ADMIN_ORG.exec(path);
+  if (adminOrg) {
+    const gate = await operatorGate(request, config, "resizing an org");
+    if (gate instanceof Response) return gate;
+    if (method !== "PATCH") return new Response("Method not allowed", { status: 405, headers: { allow: "PATCH" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    // An org id needs no decoding: its grammar has nothing to encode, so a segment outside it names no org.
+    if (!isOrgId(adminOrg[1])) return oauthError("not_found", "no such org", 404);
+    const body = await jsonObject(request);
+    if (!body) return oauthError("invalid_request", "body must be a JSON object");
+    const name = body.name === undefined ? undefined : parseOrgName(body.name);
+    if (body.name !== undefined && name === undefined) return oauthError("invalid_request", `name must be 1 to ${MAX_ORG_NAME_CHARS} characters`);
+    const seats = body.seats === undefined ? undefined : parseSeats(body.seats);
+    if (body.seats !== undefined && seats === undefined) return oauthError("invalid_request", `seats must be a whole number from 1 to ${MAX_SEATS}`);
+    // `active` is billing's for a purchased org and always true for an operator one; nothing else is editable here.
+    if (name === undefined && seats === undefined) return oauthError("invalid_request", "give a name, seats, or both");
+    const org = await config.plans.updateOrg(adminOrg[1], { name, seats }, operatorIntent(gate.identity));
+    if (!org) return oauthError("not_found", "no such org", 404);
+    return json({ org: orgView(org, await config.plans.countOrgMembers(org.orgId), null) });
+  }
+
   return undefined;
 }
 
+const ADMIN_ORGS = "/admin/orgs";
+const ADMIN_ORG = /^\/admin\/orgs\/([^/]+)$/;
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
 const ADMIN_SUSPENSION = /^\/admin\/suspensions\/([^/]+)$/;
 const ADMIN_REPORT_RESOLVE = /^\/admin\/reports\/([^/]+)\/resolve$/;
+
+/** The body as a JSON object, or undefined: not JSON, `null`, an array and a scalar are all no body. */
+async function jsonObject(request: Request): Promise<Record<string, unknown> | undefined> {
+  const parsed: unknown = await request.json().catch(() => undefined);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+/** How an operator's write is recorded: by their id and label, with no org, since the operator acts for the platform. */
+const operatorIntent = (identity: Identity): AuditIntent =>
+  ({ actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: null });
 
 /**
  * The note an operator's write carries, for a suspension and for a resolution: trimmed, 1 to 500 characters, or

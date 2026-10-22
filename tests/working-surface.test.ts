@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  MAX_SURFACE_ITEMS, SurfaceKeyShape, applySurfaceWrite, surfaceCursor,
+  MAX_SURFACE_ITEMS, SurfaceKeyShape, applySurfaceWrite, createdAtOf, surfaceCursor,
 } from "../src/surface.js";
 import { surfaceIndex, surfaceItem } from "../src/projections.js";
 import type { SessionEvent, SurfaceItem, SurfaceRow } from "../src/types.js";
@@ -44,8 +44,31 @@ describe("applySurfaceWrite", () => {
   it("writes a row from the item and the event that carried it", () => {
     const row = applySurfaceWrite(undefined, event(5), { key: "plan", item: item() });
     expect(row).toEqual({
-      ...item(), cursor: 5, at: event(5).at, byMemberId: "m_creator", byLabel: "jesse@codenerd",
+      ...item(), cursor: 5, at: event(5).at, createdAt: event(5).at, byMemberId: "m_creator", byLabel: "jesse@codenerd",
     });
+  });
+
+  // Room pages spec, D4: the first write of a key stamps it, and an edit keeps it.
+  it("stamps createdAt on a key's first write and keeps it across an edit", () => {
+    const first = applySurfaceWrite(undefined, event(5), { key: "plan", item: item() }) as SurfaceRow;
+    const edited = applySurfaceWrite(first, event(9), { key: "plan", item: item({ body: "revised" }) }) as SurfaceRow;
+    expect([edited.createdAt, edited.at]).toEqual([event(5).at, event(9).at]);
+  });
+
+  // Review Focus 5 and R2: a row from before createdAt reads its at as both, and an edit keeps that at as when it was written.
+  it("reads a row written before createdAt as created at its at, and keeps that across an edit", () => {
+    const legacy: SurfaceRow = { ...item(), cursor: 5, at: event(5).at, byMemberId: "m_creator", byLabel: "jesse@codenerd" };
+    expect(createdAtOf(legacy)).toBe(event(5).at);
+    const edited = applySurfaceWrite(legacy, event(9), { key: "plan", item: item({ body: "revised" }) }) as SurfaceRow;
+    expect([edited.createdAt, edited.at]).toEqual([event(5).at, event(9).at]);
+  });
+
+  // An edit reads the row the last edit left, whose `at` has moved on: createdAt comes from the first write, not from that row's at.
+  it("keeps createdAt across a second edit, when the row's at has already moved", () => {
+    const first = applySurfaceWrite(undefined, event(5), { key: "plan", item: item() }) as SurfaceRow;
+    const edited = applySurfaceWrite(first, event(9), { key: "plan", item: item({ body: "revised" }) }) as SurfaceRow;
+    const again = applySurfaceWrite(edited, event(12), { key: "plan", item: item({ body: "revised again" }) }) as SurfaceRow;
+    expect([again.createdAt, again.at]).toEqual([event(5).at, event(12).at]);
   });
 
   it("replaces a row with a newer write", () => {

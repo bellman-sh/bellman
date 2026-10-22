@@ -695,6 +695,12 @@ export interface SurfaceItem {
 export interface SurfaceRow extends SurfaceItem {
   cursor: number;
   at: number;
+  /**
+   * When this key was first written, in epoch milliseconds (room pages spec, D4). Set on its first write, kept by
+   * every edit, and set afresh when a removed key is written again. Absent on a row written before it, which
+   * `createdAtOf` reads as `at`; nothing rewrites such a row (R1).
+   */
+  createdAt?: number;
   byMemberId: string;
   byLabel: string;
 }

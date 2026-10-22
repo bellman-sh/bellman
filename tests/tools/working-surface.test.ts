@@ -72,7 +72,7 @@ describe("writing an item", () => {
 
     expect(await rows(p)).toEqual([{
       key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null, shape: null,
-      cursor: last.cursor, at: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
+      cursor: last.cursor, at: last.at, createdAt: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
     }]);
   });
 

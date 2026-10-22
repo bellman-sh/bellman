@@ -80,7 +80,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     return (await moderationRoutes(request, { ...deps, publicPageOrigins: [], mailReport })) ?? roomRoutes(request, deps);
   })));
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
-  app.use("/org", serve(gated((request) => orgRoutes(request, { store, caller, panelOrigins: [] }))));
+  // A fixed seal secret: this server keeps nothing between runs, so there is nothing a rotation could lock out.
+  app.use("/org", serve(gated((request) => orgRoutes(request, { store, caller, panelOrigins: [], sealSecret: "local-dev-seal" }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [], publicPageOrigins: [] }))));
   // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of

@@ -5,6 +5,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ORG_WRITE_BYTES, orgRoutes, type OrgRouteDeps } from "../src/http/orgs.js";
 import type { RoomCaller } from "../src/http/rooms.js";
+import { DNS_JSON } from "../src/oauth/dns.js";
+import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 
@@ -39,11 +41,30 @@ const ownerGrant: PlanGrant = {
   grantedAt: 1, grantedBy: "u_op", expiresAt: null,
 };
 
+const SEAL = "test-seal-secret";
+const IDP = "https://idp.test";
+
+/** The fake IdP's discovery document and the fake resolver, at the fetch boundary (SSO spec, D9, D11). */
+let dns: { answers: string[]; status: number };
+const fakeFetch = (async (input: RequestInfo | URL) => {
+  const url = String(input);
+  if (url === `${IDP}/.well-known/openid-configuration`) {
+    return Response.json({ issuer: IDP, authorization_endpoint: `${IDP}/authorize`, token_endpoint: `${IDP}/token`, userinfo_endpoint: `${IDP}/userinfo` });
+  }
+  if (url === "https://bad.test/.well-known/openid-configuration") return Response.json({ issuer: "https://other.test", authorization_endpoint: `${IDP}/a`, token_endpoint: `${IDP}/t` });
+  if (url.startsWith(DNS_JSON)) {
+    if (dns.status !== 200) return new Response("down", { status: dns.status });
+    return Response.json({ Status: 0, Answer: dns.answers.map((data) => ({ name: "_bellman.acme.test", type: 16, data })) });
+  }
+  return new Response("unexpected", { status: 500 });
+}) as typeof fetch;
+
 let store: MemoryStore;
 let deps: OrgRouteDeps;
 beforeEach(async () => {
   store = new MemoryStore();
-  deps = { store, caller, panelOrigins: [PANEL] };
+  dns = { answers: [], status: 200 };
+  deps = { store, caller, panelOrigins: [PANEL], sealSecret: SEAL, fetchImpl: fakeFetch };
   await store.createOrg(acme, ownerGrant, { actorUserId: "u_op" });
   await store.createOrg({ ...acme, orgId: "org_b", name: "B", ownerUserId: "u_github_2" }, { ...ownerGrant, key: "github:2", orgId: "org_b" }, { actorUserId: "u_op" });
 });
@@ -249,5 +270,122 @@ describe("DELETE /org/members/:key", () => {
     expect((await call("cookie-owner", "/org/members/github%3A9", "DELETE", undefined, null))!.status).toBe(403);
     expect((await call("member", "/org/members/github%3A9", "DELETE"))!.status).toBe(403);
     expect(await store.getGrant("github:9")).toBeDefined();
+  });
+});
+
+describe("the IdP (SSO spec, D9, D14)", () => {
+  const put = (who: string, body: unknown) => call(who, "/org/idp", "PUT", body);
+  const config = { issuer: IDP, client_id: "0oa", client_secret: "shh" };
+
+  it("discovers, seals and stores an IdP, and shows it back without the secret", async () => {
+    expect(await json(await call("owner", "/org/idp"))).toEqual({ idp: null });
+    const res = (await put("owner", config))!;
+    expect([res.status, await res.json()]).toEqual([200, { idp: {
+      protocol: "oidc", issuer: IDP, client_id: "0oa", client_secret_set: true, token_auth: "client_secret_basic",
+      authorization_endpoint: `${IDP}/authorize`, token_endpoint: `${IDP}/token`, userinfo_endpoint: `${IDP}/userinfo`,
+      configured_at: expect.any(String), configured_by: "u_github_1",
+    } }]);
+    const stored = (await store.getOrgIdp("org_acme"))!;
+    expect(isSealed(stored.clientSecret)).toBe(true);
+    expect(await unseal(SEAL, stored.clientSecret)).toBe("shh");
+    expect(JSON.stringify(await json(await call("owner", "/org/idp")))).not.toContain("shh");
+    expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "idp_configured", actorUserId: "u_github_1", detail: { issuer: IDP } });
+  });
+
+  it("refuses an issuer discovery cannot use, a missing field, an oversized secret, and a non-admin", async () => {
+    const bad = (await put("owner", { ...config, issuer: "https://bad.test" }))!;
+    expect([bad.status, (await json(bad)).error]).toEqual([400, "discovery"]);
+    for (const body of [{ client_id: "0oa", client_secret: "shh" }, { ...config, client_secret: "" }, { ...config, client_secret: "x".repeat(1025) }, { ...config, client_id: 5 }]) {
+      expect((await put("owner", body))!.status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await put("member", config))!.status).toBe(403);
+    expect((await call("cookie-owner", "/org/idp", "PUT", config, null))!.status).toBe(403);
+    expect(await store.getOrgIdp("org_acme")).toBeUndefined();
+  });
+
+  it("removes the IdP, unless single sign-on is required", async () => {
+    await put("owner", config);
+    await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
+    await store.updateOrg("org_acme", { requireSso: true }, { actorUserId: "u_op" });
+    const held = (await call("owner", "/org/idp", "DELETE"))!;
+    expect([held.status, (await json(held)).error]).toEqual([409, "require_sso"]);
+    await store.updateOrg("org_acme", { requireSso: false }, { actorUserId: "u_op" });
+    expect((await call("owner", "/org/idp", "DELETE"))!.status).toBe(204);
+    expect((await call("owner", "/org/idp", "DELETE"))!.status).toBe(404);
+    expect(await store.getOrgIdp("org_acme")).toBeUndefined();
+  });
+});
+
+describe("domains (SSO spec, D11)", () => {
+  const claim = (who: string, domain: unknown) => call(who, "/org/domains", "POST", { domain });
+
+  it("claims a domain and hands back the record to publish, once", async () => {
+    const res = (await claim("owner", "ACME.test"))!;
+    const body = await res.json() as { domain: string; verified_at: null; record: { name: string; type: string; value: string } };
+    expect([res.status, body.domain, body.verified_at, body.record.name, body.record.type]).toEqual([201, "acme.test", null, "_bellman.acme.test", "TXT"]);
+    expect(body.record.value).toMatch(/^bellman-verify=[A-Za-z0-9_-]{22}$/);
+    expect((await json(await call("owner", "/org"))).domains).toEqual([{ domain: "acme.test", verified_at: null }]);
+    const again = (await claim("owner", "acme.test"))!;
+    expect([again.status, (await json(again)).error]).toEqual([409, "exists"]);
+    for (const bad of ["acme", "-acme.com", 5, ""]) expect((await claim("owner", bad))!.status, String(bad)).toBe(400);
+    expect((await claim("member", "acme.test"))!.status).toBe(403);
+  });
+
+  it("verifies a claim against the record, saying what it found when it is not there", async () => {
+    const value = ((await (await claim("owner", "acme.test"))!.json()) as { record: { value: string } }).record.value;
+    dns.answers = ['"v=spf1 -all"'];
+    const not = (await call("owner", "/org/domains/acme.test/verify", "POST"))!;
+    expect([not.status, await not.json()]).toEqual([409, { error: "unverified", error_description: expect.stringContaining("_bellman.acme.test"), found: ["v=spf1 -all"] }]);
+    dns.answers = ['"v=spf1 -all"', `"${value}"`];
+    const yes = (await call("owner", "/org/domains/acme.test/verify", "POST"))!;
+    expect([yes.status, await yes.json()]).toEqual([200, { domain: "acme.test", verified_at: expect.any(String) }]);
+    expect(await store.orgForDomain("acme.test")).toBe("org_acme");
+    expect((await call("owner", "/org/domains/nobody.test/verify", "POST"))!.status).toBe(404);
+    dns.status = 503;
+    const down = (await call("owner", "/org/domains/acme.test/verify", "POST"))!;
+    expect([down.status, (await json(down)).error]).toEqual([502, "dns"]);
+  });
+
+  it("answers taken when another org verified the domain first", async () => {
+    await store.claimDomain("org_b", "acme.test", "theirs", 1, { actorUserId: "u_op" });
+    await store.verifyDomain("org_b", "acme.test", 2, { actorUserId: "u_op" });
+    const value = ((await (await claim("owner", "acme.test"))!.json()) as { record: { value: string } }).record.value;
+    dns.answers = [`"${value}"`];
+    const taken = (await call("owner", "/org/domains/acme.test/verify", "POST"))!;
+    expect([taken.status, (await json(taken)).error]).toEqual([409, "taken"]);
+  });
+
+  it("releases a claim, unless it is the last verified domain while single sign-on is required", async () => {
+    await claim("owner", "acme.test");
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
+    await store.putOrgIdp("org_acme", { protocol: "oidc", issuer: IDP, clientId: "0oa", clientSecret: "v1.x.y", tokenAuth: "client_secret_basic", authorizationEndpoint: `${IDP}/a`, tokenEndpoint: `${IDP}/t`, userinfoEndpoint: null, configuredAt: 1, configuredBy: "u_op" }, { actorUserId: "u_op" });
+    await store.updateOrg("org_acme", { requireSso: true }, { actorUserId: "u_op" });
+    const held = (await call("owner", "/org/domains/acme.test", "DELETE"))!;
+    expect([held.status, (await json(held)).error]).toEqual([409, "require_sso"]);
+    await claim("owner", "acme.dev");
+    await store.verifyDomain("org_acme", "acme.dev", 3, { actorUserId: "u_op" });
+    expect((await call("owner", "/org/domains/acme.test", "DELETE"))!.status).toBe(204);
+    expect(await store.orgForDomain("acme.test")).toBeUndefined();
+    expect((await call("owner", "/org/domains/acme.test", "DELETE"))!.status).toBe(404);
+    expect((await call("cookie-owner", "/org/domains/acme.dev", "DELETE", undefined, null))!.status).toBe(403);
+  });
+});
+
+describe("PATCH /org { require_sso } (SSO spec, D13)", () => {
+  it("turns single sign-on on only with an IdP and a verified domain, and off at any time", async () => {
+    const on = { require_sso: true };
+    const bare = (await call("owner", "/org", "PATCH", on))!;
+    expect([bare.status, (await json(bare)).error]).toEqual([409, "require_sso"]);
+    await store.putOrgIdp("org_acme", { protocol: "oidc", issuer: IDP, clientId: "0oa", clientSecret: "v1.x.y", tokenAuth: "client_secret_basic", authorizationEndpoint: `${IDP}/a`, tokenEndpoint: `${IDP}/t`, userinfoEndpoint: null, configuredAt: 1, configuredBy: "u_op" }, { actorUserId: "u_op" });
+    expect((await call("owner", "/org", "PATCH", on))!.status).toBe(409);
+    await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
+    expect((await call("owner", "/org", "PATCH", on))!.status).toBe(409);
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
+    const res = (await call("owner", "/org", "PATCH", { ...on, name: "Acme SSO" }))!;
+    expect([res.status, await json(res)]).toEqual([200, expect.objectContaining({ require_sso: true, name: "Acme SSO" })]);
+    expect((await call("owner", "/org", "PATCH", { require_sso: "yes" }))!.status).toBe(400);
+    expect((await call("owner", "/org", "PATCH", { require_sso: false }))!.status).toBe(200);
+    expect((await store.getOrg("org_acme"))?.requireSso).toBe(false);
   });
 });

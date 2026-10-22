@@ -1,3 +1,4 @@
+import { parseSsoKey, ssoUserId } from "./oauth/providers.js";
 import type { Org, Role } from "./types.js";
 
 /**
@@ -25,13 +26,15 @@ export function parseSeats(value: unknown): number | undefined {
 }
 
 /**
- * The user id a stable key names, as `defaultIdentity` mints it: `github:4242` is `u_github_4242`.
- * Null for an address, which names nobody until a sign-in claims it onto a subject (ADR 0013), and
- * for anything that is not a provider subject.
+ * The user id a stable key names, as `defaultIdentity` mints it: `github:4242` is `u_github_4242`,
+ * and an `sso:` key the encoded id of SSO spec D10. Null for an address, which names nobody until a
+ * sign-in claims it onto a subject (ADR 0013), and for anything that is not a provider subject.
  */
 export function userIdForKey(key: string): string | null {
   const match = /^(github|google):(\d+)$/.exec(key);
-  return match ? `u_${match[1]}_${match[2]}` : null;
+  if (match) return `u_${match[1]}_${match[2]}`;
+  const sso = parseSsoKey(key);
+  return sso ? ssoUserId(sso.orgId, sso.sub) : null;
 }
 
 /** An org as `GET /org` and the operator's routes answer it: snake_case, ISO dates, and never a domain's token. */

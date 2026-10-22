@@ -10,7 +10,7 @@ import type { AuditIntent, BellmanStore } from "../store.js";
 import type { Identity, Org, Plan, PlanGrant } from "../types.js";
 import {
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
-  isProviderName, isStableIdentityKey,
+  isProviderName, isStableIdentityKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
 import {
@@ -252,9 +252,10 @@ export async function signedInPlan(
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">,
 ): Promise<Plan | null> {
   const subject = /^u_(github|google)_(\d+)$/.exec(userId);
-  if (!subject) return null;
+  const key = subject ? `${subject[1]}:${subject[2]}` : ssoKeyForUser(userId);
+  if (!key) return null;
   const stored: Identity = { userId, orgId: null, plan: "free", role: "member", label: "" };
-  return (await replanOnRefresh(stored, [`${subject[1]}:${subject[2]}`], config)).identity.plan;
+  return (await replanOnRefresh(stored, [key], config)).identity.plan;
 }
 
 /**

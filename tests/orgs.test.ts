@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
+import { ssoUserId } from "../src/oauth/providers.js";
 import type { Org } from "../src/types.js";
 
 /** The runtime-free rules the org routes share (orgs spec, D6, D7). */
@@ -32,6 +33,11 @@ describe("the user id a key names", () => {
     for (const key of ["email:a@b.test", "github:mcfearsome", "slack:1", "github:", ""]) {
       expect(userIdForKey(key), key).toBeNull();
     }
+  });
+
+  it("derives it from an IdP subject too (SSO spec, D10)", () => {
+    expect(userIdForKey("sso:org_acme:00u1abc")).toBe(ssoUserId("org_acme", "00u1abc"));
+    expect(userIdForKey("sso:org_acme:")).toBeNull();
   });
 });
 

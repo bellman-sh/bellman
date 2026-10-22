@@ -8,7 +8,7 @@ import {
 import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/manifest.js";
 import { decideHostCharge, type HostAppend } from "../src/store.js";
 import { monthKey, type StoredSession } from "../src/stored-session.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { brief, member, roomManifest, session } from "./helpers/fixtures.js";
 import type { Plan, SessionEvent } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00Z");
@@ -375,6 +375,28 @@ function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord
 const open10 = { cursor: 10, lastCause: 10, questions: [{ cursor: 10, text: "What shipped?", askedAt: NOW - 60_000, answers: 0 }] };
 const replyWake = (cursor: number) => ({ sessionId: "qs_test", cause: "reply" as const, cursor });
 const tickWake = (cursor: number) => ({ sessionId: "qs_test", cause: "tick" as const, cursor });
+
+/**
+ * The hosted seat is a peer (read_context spec, section 2), and its transcript is the replies to
+ * its open question: message and progress events (`decide`). A brief never reaches the model,
+ * granted or not, so the read_context rule has nothing to remove here, and this pins that it
+ * stays so. A change that lets a brief into the prompt fails here, and owes the rule first.
+ */
+describe("the transcript and briefs", () => {
+  it("sends the model no brief, even a brief_update that names the open question as its ref", async () => {
+    const { driver, bodies } = seat({
+      record: open10,
+      events: [
+        ev({ cursor: 11, type: "brief_update", refId: "10", payload: brief({ goal: "KEPT-TO-MYSELF" }) }),
+        ev({ cursor: 12, refId: "10", payload: { text: "a reply" } }),
+      ],
+    });
+    await handleWake(driver, replyWake(12), NOW);
+    expect(bodies).toHaveLength(1);
+    expect(JSON.stringify(bodies[0])).toContain("a reply");
+    expect(JSON.stringify(bodies[0])).not.toContain("KEPT-TO-MYSELF");
+  });
+});
 
 describe("handleWake checks before it reads (I4, M7)", () => {
   it("reads nothing and calls nothing when the month is spent, and posts its notice", async () => {

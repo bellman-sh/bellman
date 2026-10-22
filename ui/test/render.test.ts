@@ -105,11 +105,20 @@ describe("renderJoin", () => {
     expect(renderJoin(r, () => {}, NOW).textContent).not.toContain("Bellman names");
   });
 
+  it("says the creator keeps their brief private when the preview carries none (read_context spec, section 1)", () => {
+    const r = connectFixture();
+    r.creator_brief.data = null;
+    const text = renderJoin(r, () => {}, NOW).textContent!;
+    expect(text).toContain("The creator keeps their brief private.");
+    expect(text, "the room's own words stay").toContain("payments-migration");
+    expect(text).not.toContain("Open questions");
+  });
+
   it("renders creator prose as text, never as markup", () => {
     const r = connectFixture();
     r.room.text.data.room = HOSTILE;
     r.room.text.data.descriptions.author = HOSTILE;
-    r.creator_brief.data.goal = HOSTILE;
+    r.creator_brief.data!.goal = HOSTILE;
     r.creator_brief.origin.label = HOSTILE;
     const node = renderJoin(r, () => {}, NOW);
     expect(node.querySelector("img")).toBeNull();

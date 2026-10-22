@@ -98,8 +98,13 @@ async function main(): Promise<void> {
   const preview = await call(peer, "bellman_connect", { join_code: joinCode });
   assert(!preview.isError, "peer previews session (a free plan can join any room)");
   assert(preview.text.includes("UNTRUSTED"), "preview wraps creator brief in untrusted envelope");
-  const previewBrief = preview.data.creator_brief as { data: { goal: string } };
-  assert(previewBrief.data.goal === jesseBrief.goal, "preview shows creator goal before peer ships anything");
+  // `data` is null when the creator keeps their brief (no read_context): the preview then has no goal to show.
+  const previewBrief = preview.data.creator_brief as { data: { goal: string } | null };
+  if (previewBrief.data) {
+    assert(previewBrief.data.goal === jesseBrief.goal, "preview shows creator goal before peer ships anything");
+  } else {
+    console.log("   creator keeps their brief private; the preview shows none");
+  }
 
   const confirmed = await call(peer, "bellman_confirm", {
     connect_token: String(preview.data.connect_token),

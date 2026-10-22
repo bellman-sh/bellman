@@ -45,7 +45,8 @@ export interface ConnectResult {
   connect_token_expires_at: string;
   session: { mode: string; active_members: number; max_members: number; org_only: boolean };
   room: RoomBlock;
-  creator_brief: Untrusted<Brief>;
+  /** `data` is null when the creator does not grant read_context: the room's own words come without their brief. */
+  creator_brief: Untrusted<Brief | null>;
 }
 
 export interface Beat {

@@ -948,8 +948,8 @@ shown instead, because the record's could claim a change it never saw.
 Briefs are rows too, `bf:<memberId>` (ADR 0018). A member keeps only its brief's
 `agent`, for the roster, and `getBriefs` reads the briefs a caller names:
 `bellman_connect` the creator's, `bellman_confirm` the 25 present members heard
-from most recently. Each store writes a brief in the transaction that seats its
-member.
+from most recently. Each hands a brief only to a reader its author's `read_context`
+allows (§7). Each store writes a brief in the transaction that seats its member.
 
 So are members, `mb:<memberId>`, in the room or gone from it (ADR 0019). The record
 keeps `present`, the ids of the members in the room in join order, the counts the
@@ -1330,6 +1330,14 @@ loud:
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
+- **A brief reaches a peer only when its author grants `read_context`** (ADR 0023).
+  `readableEvent` (`src/public-event.ts`) decides at delivery from the author's member
+  row as it stands, so a grant changed later covers earlier briefs: a `brief_update` is
+  dropped, and a `member_joined` loses its brief, for any reader but the author's own
+  account. `bellman_sync`, `bellman_rooms` and the dash's Log read as the caller's
+  account (`eventsFor`); the room socket's frames are shared and read as no one;
+  `bellman_confirm` and `bellman_connect` hand a brief through `seesBrief`.
+  `tests/delivery-paths.test.ts` lists every module that reads events or briefs.
 - **No shared mutable state between sessions.** Reads return detached copies and
   every write is an explicit store method.
 - **Encryption would not change any of this.** End-to-end encryption
@@ -1987,12 +1995,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,437** | every request, whether or not you are in a room |
+| Tool definitions | **~9,483** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-18 for read_context, by the method below: 46 tokens over the 9,437
+that main (`f130144f`) measures, a row that already includes the reports work
+(`bellman_report`, 325, in the paragraphs below). `bellman_start` is up 23, to 2,492, and
+`bellman_confirm` up 23, to 827, for the sentence their capabilities line gains on what
+`read_context` does. No tool was added. That is 9,483. Main, run as the control, reproduced
+9,437 (`bellman_start` 2,469, `bellman_confirm` 804) before the new figures were read.
 
 Re-measured on 2026-10-17 for the section 1C fix pass, by the method below: 4 tokens over the 9,433
 that the section's tip (`75b5d5d7`) measures, all of them `bellman_report`'s, which went from 321 to 325

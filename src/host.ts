@@ -92,7 +92,10 @@ export function hostMember(manifest: RoomManifest, now: number): ArrivingMember 
     userId: HOST_USER_ID,
     label: HOST_LABEL,
     orgId: null,
-    capabilities: ["receive_messages"],
+    // read_context beside receive_messages: a member whose row does not grant it has its brief kept from
+    // every peer, and joiners are meant to read the seat's (read_context plan, R4). Only a room started
+    // from here on seats this row; a seat already running keeps the one it was given.
+    capabilities: ["read_context", "receive_messages"],
     roomRole: manifest.host.role,
     brief: {
       goal: "Ask the room a question each tick and answer replies in the thread",

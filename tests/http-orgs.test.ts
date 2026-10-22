@@ -161,6 +161,24 @@ describe("POST /org/members", () => {
     expect(await store.getGrant("github:9")).toMatchObject({ plan: "team", orgId: "org_acme", source: "org", expiresAt: null });
   });
 
+  /**
+   * Seating is create-only. The owner's grant is not this route's to rewrite: a POST with their key
+   * and `role: "member"` would demote them and turn a purchase grant into an org one, which billing
+   * would then refuse to touch. A member already seated is changed through PATCH, which keeps the
+   * grant's source and expiry as they were.
+   */
+  it("refuses the owner's key and a key already seated, leaving both grants as they were", async () => {
+    const owner = (await add("admin-2", { key: "github:1", role: "member" }))!;
+    expect([owner.status, (await json(owner)).error]).toEqual([409, "owner"]);
+    expect(await store.getGrant("github:1")).toEqual(ownerGrant);
+
+    await store.putGrantIfOwned({ ...ownerGrant, key: "github:9", role: "admin", source: "operator" }, "org_acme", { actorUserId: "u_op" });
+    const seated = (await add("owner", { key: "github:9", role: "member" }))!;
+    expect([seated.status, (await json(seated)).error]).toEqual([409, "exists"]);
+    expect(await store.getGrant("github:9")).toMatchObject({ role: "admin", source: "operator" });
+    expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.actorUserId === "u_github_1")).toEqual([]);
+  });
+
   it("refuses a key granted in another org, and a cookie without the panel's Origin", async () => {
     const taken = (await add("owner", { key: "github:2", role: "member" }))!;
     expect([taken.status, (await json(taken)).error]).toEqual([409, "conflict"]);

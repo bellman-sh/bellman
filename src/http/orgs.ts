@@ -138,6 +138,16 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       }
       const role = parseRole(body.role);
       if (role === undefined) return problem(400, "invalid_request", "role must be member or admin", origin);
+      // Seating is create-only. The owner's grant is nobody's to rewrite here: seating them again as
+      // a member would demote them and turn a purchase grant into an org one, which billing would then
+      // refuse to touch. A member already seated is changed through PATCH, which keeps the grant's
+      // source and expiry. Read-then-write, since the owner's key is a stable fact of the record and
+      // two admins seating one key at once can only agree.
+      if (isOwner(body.key, org)) return problem(409, "owner", "the owner stays an admin and cannot be re-seated", origin);
+      const seated = await deps.store.getGrant(body.key);
+      if (seated && seated.orgId === orgId) {
+        return problem(409, "exists", "that key is already a member; change its role with PATCH /org/members/:key", origin);
+      }
       // What the body says of plan, org, source or expiry is not read: a member of this org is a
       // team grant in this org, from this org, that lapses with the org and not on a date.
       const grant: PlanGrant = {

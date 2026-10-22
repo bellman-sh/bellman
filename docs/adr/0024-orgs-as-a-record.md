@@ -1,4 +1,4 @@
-# ADR 0023 — An org is a record, and its members are its grants
+# ADR 0024 — An org is a record, and its members are its grants
 
 **Date:** 2026-10-21 · **Status:** accepted · **Closes:** #53 · **Spec:** `docs/superpowers/specs/2026-10-21-orgs-and-sso-design.md` (D1 to D8)
 

@@ -320,7 +320,7 @@ An address key is for onboarding someone you know by email, and it is **claimed 
 
 `orgId` must be your own org: grants are org-tenanted, and an admin administers only their own. Grants and revocations are written to the org audit log, so `bellman_audit` shows who changed whose plan and when.
 
-**An org is a record** (ADR 0023): a name, one owner, a seat count and a standing, kept beside the grants that are its members. Buying `team` creates one, named for the buyer until they rename it; the operator creates one that was not bought. Its admins seat teammates through the org routes, over the panel's cookie or a bearer token, and a purchased admin may: a grant written here lapses with the org, so a month of team buys a month.
+**An org is a record** (ADR 0024): a name, one owner, a seat count and a standing, kept beside the grants that are its members. Buying `team` creates one, named for the buyer until they rename it; the operator creates one that was not bought. Its admins seat teammates through the org routes, over the panel's cookie or a bearer token, and a purchased admin may: a grant written here lapses with the org, so a month of team buys a month.
 
 ```
 GET    /org                       your org: name, owner, seats, seats used, standing, your role

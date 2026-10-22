@@ -1108,7 +1108,7 @@ anything built on top:
    admin would, with `source: "purchase"`. One read path, so a paid plan
    inherits the ownership checks, expiry and audit trail rather than being a
    second source with its own semantics.
-4. **An org is a record, and its members are its grants** (ADR 0023). `org:<orgId>`
+4. **An org is a record, and its members are its grants** (ADR 0024). `org:<orgId>`
    in `RegistryDO` holds the name, the one owner, the seats and the standing; a
    member is a grant naming the org, and the seat cap is decided inside the
    guarded grant write. A team purchase creates the record with the seats it

@@ -380,11 +380,11 @@ PR 1: `src/types.ts` (`Org`, `OrgDomain`), `src/store.ts` (the methods, `MemoryS
 `src/grant-audit.ts` (`orgAuditEntries`), `src/billing/subscription.ts`, `src/billing/ledger.ts`,
 `src/billing/grants.ts`, `src/oauth/routes.ts` (`standingOf`, `PlanStore`, `/admin/orgs`),
 `src/http/orgs.ts`, `src/http/audit.ts` (`entryView`), `src/worker.ts`, `src/app.ts`,
-`docs/adr/0023-orgs-as-a-record.md`, `README.md`, `docs/ARCHITECTURE.md` sections 5 and 6,
+`docs/adr/0024-orgs-as-a-record.md`, `README.md`, `docs/ARCHITECTURE.md` sections 5 and 6,
 `docs-site/src/content/docs/guides/teams.md`.
 
 PR 2: `src/types.ts` (`OrgIdp`), `src/oauth/providers.ts` (the `sso` profile, keys and ids),
 `src/oauth/oidc.ts`, `src/oauth/dns.ts`, `src/oauth/sealed.ts`, `src/oauth/routes.ts` (the pages,
 `/authorize/sso`, `/callback/sso/:orgId`, `SsoRequired`, `ssoRefusal`), `src/http/orgs.ts` (IdP and
 domains, `require_sso`), `src/store.ts`, `src/store-do.ts`, `src/worker.ts` (`BELLMAN_SEAL_SECRET`),
-`docs/adr/0024-sso-per-org-oidc.md`, `README.md`, `docs/ARCHITECTURE.md` section 6, the teams guide.
+`docs/adr/0025-sso-per-org-oidc.md`, `README.md`, `docs/ARCHITECTURE.md` section 6, the teams guide.

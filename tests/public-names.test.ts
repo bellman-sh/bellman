@@ -138,7 +138,7 @@ describe("bellman_start's public_name (D4)", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const out = await jesse.call("bellman_start", { manifest: OPEN, public_name: "bellman-dev", brief: brief() });
     expect(out.isError, out.text).toBe(false);
-    expect(out.data.public_url).toBe("https://dash.bellman.sh/r/bellman-dev");
+    expect(out.data.public_url).toBe("https://bellman.sh/r/bellman-dev");
     expect((out.data.room as { public_name: string | null }).public_name).toBe("bellman-dev");
     expect((await roomNamed(h.store, "bellman-dev"))?.id).toBe(out.data.session_id);
   });
@@ -146,7 +146,7 @@ describe("bellman_start's public_name (D4)", () => {
   it("keeps the session id's link for a public room with no name", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const out = await jesse.call("bellman_start", { manifest: OPEN, brief: brief() });
-    expect(out.data.public_url).toBe(`https://dash.bellman.sh/r/${String(out.data.session_id)}`);
+    expect(out.data.public_url).toBe(`https://bellman.sh/r/${String(out.data.session_id)}`);
     expect((out.data.room as { public_name: string | null }).public_name).toBeNull();
   });
 
@@ -214,7 +214,7 @@ describe("bellman_public_name (D3)", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const { room } = await start(jesse, { public_name: "first-name" });
     const set = await jesse.call("bellman_public_name", { name: "second-name", session_id: room });
-    expect(set.data).toEqual({ name: "second-name", public_url: "https://dash.bellman.sh/r/second-name" });
+    expect(set.data).toEqual({ name: "second-name", public_url: "https://bellman.sh/r/second-name" });
     expect((await jesse.call("bellman_public_name", { name: "first-name" })).data.free).toBe(true);
     // Review Focus 2: back to the first name, whose entry still points at the room.
     expect((await jesse.call("bellman_public_name", { name: "first-name", room_id: room })).isError).toBe(false);
@@ -226,7 +226,7 @@ describe("bellman_public_name (D3)", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const { room } = await start(jesse, { public_name: "bellman-dev" });
     expect((await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: room })).data)
-      .toEqual({ name: "bellman-dev", public_url: "https://dash.bellman.sh/r/bellman-dev" });
+      .toEqual({ name: "bellman-dev", public_url: "https://bellman.sh/r/bellman-dev" });
     const other = await start(jesse);
     expect((await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: other.room })).text)
       .toContain('public name "bellman-dev" is taken: choose another');
@@ -361,6 +361,6 @@ describe("giving a claim back (D5 as amended)", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const room = String((await jesse.call("bellman_start", { manifest: { room: "Dev", preset: "pair", public: true }, brief: brief() })).data.session_id);
     const out = await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: room });
-    expect(out.data.public_url).toBe(`https://dash.bellman.sh/r/${room}`);
+    expect(out.data.public_url).toBe(`https://bellman.sh/r/${room}`);
   });
 });

@@ -74,8 +74,10 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text"]);
-    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", by: null });
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "public_url", "status", "text"]);
+    expect(body).toMatchObject({
+      id: PUB, status: "active", closed_at: null, mode: "pair", by: null, public_url: "https://bellman.sh/r/qs_public",
+    });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });
@@ -330,6 +332,8 @@ describe("a public room read by its name (public names spec, D6)", () => {
 
   it("reads the room, its surface and its log by its name as by its session id", async () => {
     await name(PUB, "open-review");
+    // The room's one link, whichever way it was read: its name's while it holds one.
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).public_url).toBe("https://bellman.sh/r/open-review");
     for (const part of ["", "/surface", "/events"]) {
       const byName = (await read(`/public/rooms/open-review${part}`))!;
       expect(byName.status, part).toBe(200);

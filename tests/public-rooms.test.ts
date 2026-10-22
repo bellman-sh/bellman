@@ -97,7 +97,7 @@ describe("the creator's public link", () => {
       const jesse = await h.connect(DEV_KEY.jesse);
       const open = await jesse.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
       expect(open.data.public_url).not.toBe(open.data.join_url);
       const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "pair" }, brief: brief() });
       expect("public_url" in shut.data).toBe(false);
@@ -146,7 +146,7 @@ describe("a public room's plan", () => {
       const pro = await h.connectAs({ userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" });
       const open = await pro.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
     } finally {
       await h.close();
     }

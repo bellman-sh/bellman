@@ -76,10 +76,19 @@ describe("discovery", () => {
     expect(await error(ISSUER, { discovery: { issuer: ISSUER, authorization_endpoint: `http://idp.test/a`, token_endpoint: `${ISSUER}/t` } })).toMatch(/https/);
   });
 
-  it("strips a trailing slash from the issuer before asking, and keeps it stripped", async () => {
-    const { fetchImpl, fake } = fakeIdp();
-    expect(await discover(`${ISSUER}/`, fetchImpl)).toEqual(endpoints);
-    expect(fake.seen[0].url).toBe(`${ISSUER}/.well-known/openid-configuration`);
+  /** Auth0 and some Keycloak and Ping configurations state their issuer with a trailing slash, and their id tokens carry it. */
+  it("asks at the slashless well-known URL, and keeps the issuer exactly as the document states it", async () => {
+    const slashed = fakeIdp({ discovery: { issuer: `${ISSUER}/`, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token` } });
+    expect(await discover(`${ISSUER}/`, slashed.fetchImpl)).toMatchObject({ issuer: `${ISSUER}/` });
+    expect(slashed.fake.seen[0].url).toBe(`${ISSUER}/.well-known/openid-configuration`);
+    expect((await discover(ISSUER, slashed.fetchImpl)) as { error: string }).toMatchObject({ error: expect.stringContaining("issuer") });
+    expect(await discover(` ${ISSUER} `, fakeIdp().fetchImpl)).toEqual(endpoints);
+  });
+
+  it("checks iss against the issuer as stated, slash and all", async () => {
+    const { fetchImpl } = fakeIdp({ token: { access_token: "at", id_token: idToken(claims({ iss: `${ISSUER}/` })) } });
+    await expect(oidcExchange({ ...idp, issuer: `${ISSUER}/` }, "c", REDIRECT, "the-nonce", fetchImpl)).resolves.toMatchObject({ sub: "00u1abc" });
+    await expect(oidcExchange(idp, "c", REDIRECT, "the-nonce", fetchImpl)).rejects.toThrow(/iss/);
   });
 });
 

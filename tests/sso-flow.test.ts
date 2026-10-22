@@ -291,6 +291,23 @@ describe("require_sso (D13)", () => {
     expect(target.searchParams.get("error_description")).toContain("Acme requires single sign-on");
   });
 
+  /**
+   * The documented path: an admin seats an address as admin, turns the switch on, and the person
+   * clicks GitHub once by mistake. The refusal must leave the address grant where the SSO sign-in
+   * will claim it; moving it onto the refused GitHub subject first would strand the role and burn
+   * a seat when SSO then provisions a fresh member.
+   */
+  it("refuses before it claims, so a mistaken GitHub click costs the address grant nothing", async () => {
+    await plans.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "admin", source: "org" }, "org_acme", by);
+    github = { id: 777, email: "bo@acme.test" };
+    expect((await signInThroughGithub()).identity).toBeNull();
+    expect(await plans.getGrant("email:bo@acme.test")).toMatchObject({ role: "admin" });
+    expect(await plans.getGrant("github:777")).toBeUndefined();
+    idp = { ...idp, sub: "00u777", email: "bo@acme.test", name: "Bo" };
+    expect((await signInThroughSso("bo@acme.test")).identity).toMatchObject({ role: "admin", userId: ssoUserId("org_acme", "00u777") });
+    expect(await plans.countOrgMembers("org_acme")).toBe(3);
+  });
+
   it("admits the owner, an operator override and the IdP's own sign-in", async () => {
     github = { id: 1, email: "owner@acme.test" };
     expect((await signInThroughGithub()).identity).toMatchObject({ userId: "u_github_1", role: "admin", orgId: "org_acme" });

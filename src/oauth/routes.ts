@@ -225,10 +225,13 @@ async function decidePlan(
     // can pin an address-keyed grant to the subject behind it. Where the grant is
     // filed afterwards is the key worth reporting: one moved onto the subject is
     // found there at every re-check, and one that could not be moved is not.
-    const filed = await claimGrant(config.plans!, match.grant, match.key, profile);
     const { grant } = match;
     const identity: Identity = { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId };
+    // Refused before the claim (SSO spec, D13): a mistaken GitHub click by someone the switch
+    // covers must leave an address grant where their SSO sign-in will claim it, or the role is
+    // stranded under a subject the switch never admits and SSO seats a fresh member beside it.
     await refuseUnlessSso(config.plans, identity, keys);
+    const filed = await claimGrant(config.plans!, match.grant, match.key, profile);
     return {
       identity,
       source: "grant",

@@ -23,8 +23,13 @@ export interface OidcIdentity {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** The issuer as stored: https, no query, no fragment, no trailing slash; or why not. */
-function usableIssuer(issuer: string): { issuer: string } | { error: string } {
+/**
+ * The issuer as stored: https, no query, no fragment, and otherwise exactly as given, since the
+ * discovery document must state it that way and every id token's `iss` is compared to it. Auth0
+ * states its issuer with a trailing slash, Okta and Entra without; neither is normalised.
+ */
+function usableIssuer(given: string): { issuer: string } | { error: string } {
+  const issuer = given.trim();
   let url: URL;
   try {
     url = new URL(issuer);
@@ -34,8 +39,11 @@ function usableIssuer(issuer: string): { issuer: string } | { error: string } {
   if (url.protocol !== "https:") return { error: "issuer must be an https URL" };
   if (url.search) return { error: "issuer must carry no query string" };
   if (url.hash || issuer.includes("#")) return { error: "issuer must carry no fragment" };
-  return { issuer: issuer.replace(/\/+$/, "") };
+  return { issuer };
 }
+
+/** Where the document lives (OIDC Discovery 4.1): the well-known path appended to the issuer, one slash between. */
+const discoveryUrl = (issuer: string): string => `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
 
 const httpsEndpoint = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
@@ -56,7 +64,7 @@ export async function discover(issuer: string, fetchImpl: typeof fetch = fetch):
   if ("error" in usable) return usable;
   let res: Response;
   try {
-    res = await fetchImpl(`${usable.issuer}/.well-known/openid-configuration`, { headers: { accept: "application/json" } });
+    res = await fetchImpl(discoveryUrl(usable.issuer), { headers: { accept: "application/json" } });
   } catch (err) {
     return { error: `the discovery document could not be fetched: ${err instanceof Error ? err.message : String(err)}` };
   }

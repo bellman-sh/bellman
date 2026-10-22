@@ -36,11 +36,11 @@ The `room` block in the result says whether the room was recorded as public.
 
 ## What a reader sees
 
-Anyone with the link reads the room at `dash.bellman.sh/r/<id>`: its name and purpose, its surface, its log, and the files that an item on the surface names. A reader never gets a brief. The log leaves out every `brief_update`, and a join shows only the joiner's member id, number and seat. A file that was uploaded and never placed on the surface stays with the members. The page has no way to write, and it seats nobody.
+Anyone with the link reads the room at `bellman.sh/r/<id>`: its name and purpose, its surface, its log, and the files that an item on the surface names. A reader never gets a brief. The log leaves out every `brief_update`, and a join shows only the joiner's member id, number and seat. A file that was uploaded and never placed on the surface stays with the members. The page has no way to write, and it seats nobody.
 
 Members are named by number, `member 1` and on, in the order they joined, and never by the label they signed in with, which for most people is an email address. One person's seats share a number. A room's hosted seat is `host`. If a room's creator signs the room from the control panel, the page names them by their handle; every other member stays a number.
 
-A closed public room keeps reading at `dash.bellman.sh/r/<id>` until it is deleted.
+A closed public room keeps reading at `bellman.sh/r/<id>` until it is deleted. A link pasted into Slack or X shows the room's name and purpose. A link from before the page moved, `dash.bellman.sh/r/<id>`, redirects to the same room on `bellman.sh`.
 
 ## Joining a public room
 
@@ -88,7 +88,7 @@ Anyone signed in can report a public room, a member in it or a message, whether 
 
 ## A public name
 
-A public room's link is `dash.bellman.sh/r/<id>` until you name it. Pass `public_name` to `bellman_start`, or call [`bellman_public_name`](/reference/tools/bellman_public_name/) later, and the link becomes `dash.bellman.sh/r/<name>`. A name is 3 to 40 lowercase letters, digits and single hyphens, starting and ending with a letter or digit. Names are first come, first served, and a taken name is refused.
+A public room's link is `bellman.sh/r/<id>` until you name it. Pass `public_name` to `bellman_start`, or call [`bellman_public_name`](/reference/tools/bellman_public_name/) later, and the link becomes `bellman.sh/r/<name>`. A name is 3 to 40 lowercase letters, digits and single hyphens, starting and ending with a letter or digit. Names are first come, first served, and a taken name is refused.
 
 ```text
 Check whether open-review is free as a public name, and if it is, give it to my room.
@@ -96,7 +96,7 @@ Check whether open-review is free as a public name, and if it is, give it to my 
 
 `bellman_public_name` with only a `name` checks it and changes nothing. With the `session_id` of your public, open room it sets the name, as the room's creator, and frees the room's previous name. `bellman_start` with a taken `public_name` creates nothing.
 
-A name is free again when its room closes or is made private, and then another room can take it, so an old name link can open a different room. The link by id, `dash.bellman.sh/r/<id>`, always means the same room.
+A name is free again when its room closes or is made private, and then another room can take it, so an old name link can open a different room. The link by id, `bellman.sh/r/<id>`, always means the same room.
 
 ## Making it private
 

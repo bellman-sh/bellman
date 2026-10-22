@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
-last-verified-against-source: 32b6c28
-last-updated: 2026-10-17
+last-verified-against-source: de3b2bd
+last-updated: 2026-10-21
 ---
 
 # Bellman Architecture
@@ -524,7 +524,22 @@ that cannot be read (a bridge restarting, say) keeps its socket and the last
 status it gave, so its rooms stay on screen, reading reconnecting, and the gate
 stays shut on them; every tick reads the same socket again, and the mod's next
 hook asks the bridge's `bellman_whoami` again, which names the new socket of a
-bridge that restarted.
+bridge that restarted. A bridge that answers naming no door has come back older
+than the door, and is one: its last status and its seats go, out of the view and
+the gate.
+
+**What the mod keeps is what it reads, within bounds.** The engine refuses a
+`$.state` value whose JSON runs past 4,194,304 characters, and peers' payloads
+would take the mod's there: two requests nested as deep as the server allows
+did, held drawn, and so did 250 large messages kept whole. So a room's log events
+are kept as the lines their rows draw (`kept`, `src/mod/view.ts`), a request
+waiting on the person whole, since the Approve tab draws it from there and the
+list of pending requests holds no drawing; every room's log within a million
+characters (`LOGS_MAX`, `fitLogs`), letting go of the oldest lines first, each
+room's newest kept, then of the oldest waiting requests' payloads, which can
+then only be denied; each door's recent events as lines; each room as the fields
+the mod reads, its first 25 members, each note one line; and the shown room's
+canvas alone, cleaned, within what the engine could draw of it (`CANVAS_MAX`).
 
 ## 5. Storage
 
@@ -1412,11 +1427,14 @@ loud:
   pressing Approve (`judgeSend`, `src/mod/gate.ts`). Each hook has a `.catch`
   that refuses when it failed before answering, so a broken gate stays shut and
   breaks nothing else. A door that cannot be read keeps the seats it last
-  listed, so the gate stays shut on their rooms while a bridge restarts. Approve
-  is offered only on the Approve tab, where the request is drawn whole: every
-  field of the payload Claude reads, each character that draws nothing spelled
-  out, and nothing the server accepts cut short; a request that cannot be
-  drawn whole there can only be denied, and a Log row leads there with Review. The person's Deny is answered through the door and never through
+  listed, so the gate stays shut on their rooms while a bridge restarts, until
+  the bridge answers naming a door, or none. Approve
+  is offered only on the Approve tab, where requests are shown one at a time,
+  each drawn whole in a frame of its own, so that no line of one reads as the tab's
+  or as another request: every field of the payload Claude reads, the characters
+  that would draw nothing or act on the terminal spelled out (D10 in the spec
+  says which), and nothing the server accepts cut short; a request that cannot
+  be drawn whole there can only be denied, and a Log row's Review leads to it. The person's Deny is answered through the door and never through
   here, so Claude's own `approved: false` is refused too. Approve tells Claude
   once, by a prompt of the mod's own that queues behind any turn running, and an
   approval that does not reach Claude is taken back. This is
@@ -1457,9 +1475,10 @@ loud:
   made, checked first. Every peer string the mod draws (a label, a room name, a
   message, a request, a canvas body) passes `cleanText` or `cleanBlock`
   (`src/door-protocol.ts`) first, so a toast, a title or a row never carries an
-  escape sequence, a line break or a character that draws nothing or turns the
-  direction a line reads in; what an action request asks is drawn whole, each
-  such character spelled out as its code point instead. A link in a peer's
+  escape sequence, a line break or one of the characters, named there, that draw
+  nothing or turn the direction a line reads in; what an action request asks is
+  drawn whole, each such character spelled out as its code point instead, and
+  with them every variation selector that could carry a hidden run. A link in a peer's
   canvas text opens only if it is `http` or `https` (`safeLinks`,
   `src/mod/view.ts`), a link definition inside a blockquote or a list item
   included. The model still

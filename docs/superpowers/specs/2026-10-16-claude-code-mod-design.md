@@ -1,7 +1,7 @@
 # The Claude Code mod. Design
 
 **Date:** 2026-10-16
-**Status:** built on the branch `mcfearsome/mods`, with the branch review's fixes; the decisions below say what the code does, and the implementation plan (`docs/superpowers/plans/2026-10-16-claude-code-mod.md`) is its history
+**Status:** built on the branch `mcfearsome/mods`, with the branch review's fixes and its re-review's; the decisions below say what the code does, and the implementation plan (`docs/superpowers/plans/2026-10-16-claude-code-mod.md`) is its history
 **Builds on:** the room delivery spec (`2026-09-29-room-delivery-design.md`), the MCP Apps UI spec (`2026-10-06-mcp-apps-ui-design.md`, D3 and D4), the MCP Apps canvas spec (`2026-10-08-mcp-apps-canvas-design.md`, D1), and attention (#111, `src/attention.ts`)
 **Citations:** Bellman by symbol, of the code as it stood when this was written. Claude Code's mod API by its names in the declaration file Claude Code 2.1.301 writes (`claude-code.d.ts`: `PaneOpenArgs`, `UiOpenResult` and the rest). That API is early access and changes between releases. The declaration file of the build in hand is the authority, and every claim here about the API is read from that file, not yet tested.
 
@@ -160,11 +160,13 @@ count.
   from `GET /rooms/:id/events` (`readEventsRoute`, `MAX_EVENTS_READ` a page),
   which moves no one's `lastSeenAt` and no bridge's cursor (D9): the newest
   page, then what arrives after it, the newest 500 events kept and as many rows
-  drawn as fit. Paging back past those is not built. A row is the time, the
+  drawn as fit. Each is kept as the line its row draws, a request waiting on the
+  person whole, and every room's within a bound (D9), the oldest let go first.
+  Paging back past those is not built. A row is the time, the
   sender's label and the event drawn by type: a message's text, a canvas edit
   as its title or key, a join, an action request with Review while it waits on
   the person. A row is one line of what a request asks, so Review opens the
-  Approve tab, where the request is answered, drawn whole.
+  Approve tab on that request, where it is answered, drawn whole.
 - **Canvas:** read-only, read through the door from `GET /rooms/:id/surface`,
   which is `bellman_surface`'s answer (MCP Apps canvas spec D1), and drawn per
   kind: `text` as `Markdown`; `link` as a `Link`; `diagram` as its mermaid
@@ -174,23 +176,27 @@ count.
   they are the panel's.
 - **Members:** each member's role, presence and beat (`silent_for_seconds`,
   `note`).
-- **Approve:** *(person)* each pending request drawn whole: who asked and the
-  time left, then what was asked, then Approve and Deny after it. What was asked
+- **Approve:** *(person)* the pending requests one at a time, the oldest first:
+  while there are several, `request <i> of <n>` with ‹ and › to go round them;
+  then who asked and the time left, then what was asked, in a frame of its own
+  so that no line of it can read as the tab's own or as another request's, then
+  Approve and Deny after it. What was asked
   is drawn as plain text, not Markdown, since what is drawn is what Claude
   reads: the payload's `text` when that is its one key and a string, else the
-  whole payload as JSON, two spaces to a level, every field of it, with each
-  character that draws nothing or acts on the terminal spelled out as its code
-  point (D10), and cut only past the longest anything the server accepts can
-  draw. A request whose
-  drawing was cut all the same, or that would not fit in what the tab draws
-  whole (the engine draws a tree's first 100,000 characters and no button past
-  them), reads `too long to show in full here, so it can only be denied` beside
-  Deny, and the requests after it keep their buttons. A request the person
-  approved draws `approved · waiting for Claude` in place of its buttons, here
-  and in the Log's row, until Claude's answer lands or the request expires
-  (D8). `Approve n` counts only the requests still waiting on the person: on
-  the tab, the room's; in the sidebar and the band, every room's, and pressing
-  it there opens the room that holds the oldest.
+  whole payload as JSON, two spaces to a level, every field of it, with what
+  would draw nothing or act on the terminal spelled out as its code point (D10
+  says which), and cut only past the longest anything the server accepts can
+  draw. The request shown has all of what the tab draws whole (the engine draws
+  a tree's first 100,000 characters and no button past them), so a request reads
+  `too long to show in full here, so it can only be denied` beside Deny only when
+  it is itself too long for that, was cut all the same, or gave up its payload
+  to keep the logs within their bound (D9). A Log row's Review opens the tab on
+  that request. A request the person
+  approved stays in the list and draws `approved · waiting for Claude` in place
+  of its buttons, here and in the Log's row, until Claude's answer lands or the
+  request expires (D8). `Approve n` counts only the requests still waiting on
+  the person: on the tab, the room's; in the sidebar and the band, every room's,
+  and pressing it there opens the tab on the oldest of them, in its room.
 
 **D6. Toasts.** *(person: a toast for the latest message; an action request
 raises a toast and never takes the keyboard)*
@@ -271,8 +277,8 @@ person)*
   `bellman_send`, on any server, and an `mcp.call` hook on the same tools for
   another plugin calling through `$.mcp.call`. It acts on
   `type: "action_response"` in a room the pane shows (D1: a room some door's
-  last reading listed a seat in, which a door that cannot be read keeps, D9);
-  an answer in any other room passes as today.
+  last reading listed a seat in, which a door that cannot be read keeps until
+  its bridge answers again, D9); an answer in any other room passes as today.
   In the pane's rooms it passes `approved: true` with a `ref_id` the person
   approved, and refuses every other action response, Claude's own
   `approved: false` included, since the person's Deny goes through the door and
@@ -351,10 +357,26 @@ reconnecting (D4), and the gate stays shut on them (D8). Every tick reads the
 same socket again, and the first read that answers clears the error; the
 mod's next hook asks that bridge's `bellman_whoami` again, so a bridge that
 restarted on a new socket is read through it from then on, its last status
-standing until the new socket answers. The way the builder settled on
-keeps all four properties: a door per bridge (a session with two bridges has
-two), the credential stays in the bridge, no new tool the model sees, nothing
-drained.
+standing until the new socket answers. A bridge whose `bellman_whoami` answers,
+without failing, naming no door has come back older than the door: its last
+status and seats go, so its rooms leave the view and the gate, and the status
+line speaks for it as for any bridge older than the door. A `bellman_whoami`
+that fails changes nothing. The way the builder settled on keeps all four
+properties: a door per bridge (a session with two bridges has two), the
+credential stays in the bridge, no new tool the model sees, nothing drained.
+
+What the mod keeps in `$.state` of what the doors answer is what it reads, within
+bounds, since the engine refuses a value whose JSON runs past 4,194,304
+characters and peers' payloads would take one past it: each room's log event
+as the line its row draws, a request waiting on the person whole (the Approve
+tab draws it from there, so the list of pending requests holds no drawing),
+and every room's log within a million characters (`LOGS_MAX`), the oldest lines
+let go first, each room's newest kept; past that the oldest waiting requests'
+payloads, which then read too long to show and can only be denied (D5), and
+past that whatever is oldest. Each door's recent events are kept as lines; each
+room as the fields the mod reads, its first 25 members, each note one line;
+and the shown room's canvas alone, cleaned, within the characters the engine
+could draw of it (`CANVAS_MAX`).
 
 **D10. Peer text is untrusted on screen too.** Every peer-controlled string the
 mod draws has control characters stripped first, and the characters that draw
@@ -363,8 +385,13 @@ U+202A to U+202E, U+2060, U+2066 to U+2069, U+FEFF; the zero-width non-joiner
 and joiner stay, as emoji and some scripts need them), so one peer's label
 cannot pass for another's (`cleanText`, `cleanBlock`); pane titles refuse
 controls anyway (`PaneOpenArgs.title`). What an action request asks is drawn
-whole instead, each such character spelled out as its code point, since the
-person approves what Claude reads (D5). Links from peers' canvas text open only
+whole instead, each such character spelled out as its code point, and so is
+every variation selector that could carry a hidden run: each of the supplement
+(U+E0100 to U+E01EF), and each of the sixteen (U+FE00 to U+FE0F) but one directly
+after a character that is not a selector, which picks how that character draws.
+The person approves what Claude reads (D5). What else draws nothing passes as it
+is: the one selector after each character, a joiner included, and the few marks,
+fillers and Mongolian selectors that draw nothing (`spelledOut` names them). Links from peers' canvas text open only
 when they are `http` or `https`: `safeLinks` turns any other into text, a link
 definition included wherever a block may start, inside a blockquote or a list
 item and nested to any depth. Nothing peer-controlled is passed to

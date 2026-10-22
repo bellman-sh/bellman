@@ -5,9 +5,6 @@ var isOwnCall = (tool, origin) => OWN_TOOL.test(tool) && origin?.plugin === "bel
 // mod/src/doors.ts
 import { read as read2, update } from "claude-code";
 
-// src/action-state.ts
-var ACTION_REQUEST_TTL_MS = 30 * 6e4;
-
 // src/door-protocol.ts
 var CSI = /\u{1b}\[[0-?]*[ -/]*[@-~]/gu;
 var OSC = /\u{1b}\][^\u{7}\u{1b}]*(?:\u{7}|\u{1b}\\)/gu;
@@ -70,6 +67,9 @@ function lineOf(e) {
   return text || (e.type === "action_request" && p != null ? JSON.stringify(p) : e.type);
 }
 
+// src/action-state.ts
+var ACTION_REQUEST_TTL_MS = 30 * 6e4;
+
 // src/payload.ts
 var MAX_PAYLOAD_CHARS = 2e4;
 var MAX_PAYLOAD_DEPTH = 64;
@@ -93,6 +93,17 @@ function sidebarMove(p) {
   const seatless = !seated && p.doors.some((d) => d.status !== null) && p.doors.every((d) => d.error === null);
   return seatless ? "close" : null;
 }
+function kept(e) {
+  if (e.line !== void 0) return e;
+  const { payload, ...envelope } = e;
+  return {
+    ...envelope,
+    from_label: cleanText(e.from_label, NAME_MAX),
+    ref_id: e.type === "action_response" ? e.ref_id : null,
+    line: eventLine({ type: e.type, payload, ref_id: e.ref_id })
+  };
+}
+var lineOf2 = (e) => e.line ?? eventLine({ type: e.type, payload: e.payload, ref_id: e.ref_id });
 function roomLog(events, sessionId) {
   const byCursor = /* @__PURE__ */ new Map();
   for (const e of events) if (e.session_id === sessionId) byCursor.set(e.cursor, e);
@@ -117,7 +128,7 @@ function toastFor(events, p) {
   const room2 = cleanText(p.labels.get(newest.session_id) || newest.session_id.slice(-6), NAME_MAX);
   const verb = newest.type === "action_request" ? " asks" : "";
   return {
-    text: cleanText(`${who} in ${room2}${verb}: ${eventLine(newest)}`, TOAST_MAX),
+    text: cleanText(`${who} in ${room2}${verb}: ${lineOf2(newest)}`, TOAST_MAX),
     session_id: newest.session_id,
     cursor: newest.cursor
   };
@@ -146,15 +157,40 @@ function pendingRequests(log, p) {
     if (e.type !== "action_request" || e.from_member_id === p.seatMemberId || answered.has(String(e.cursor))) continue;
     const expiresAt = Date.parse(e.at) + REQUEST_TTL_MS;
     if (!(p.now < expiresAt)) continue;
-    pending2.push({
-      session_id: e.session_id,
-      cursor: e.cursor,
-      from_label: cleanText(e.from_label, NAME_MAX),
-      ...drawingOf(e.payload),
-      expires_at: expiresAt
-    });
+    pending2.push({ session_id: e.session_id, cursor: e.cursor, from_label: cleanText(e.from_label, NAME_MAX), expires_at: expiresAt });
   }
   return pending2;
+}
+var LOGS_MAX = 1e6;
+function fitLogs(byRoom, waiting, max = LOGS_MAX) {
+  let total = JSON.stringify(byRoom).length;
+  if (total <= max) return byRoom;
+  const size2 = (e) => JSON.stringify(e).length;
+  const newest = new Set(Object.values(byRoom).flatMap((list) => list.slice(-1)));
+  const left = new Map(Object.entries(byRoom).map(([id, list]) => [id, list.length]));
+  const oldestFirst = Object.entries(byRoom).flatMap(([id, list]) => list.map((e) => [id, e])).sort(([, a], [, b]) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0) || a.cursor - b.cursor);
+  const now = /* @__PURE__ */ new Map();
+  const pass = (change) => {
+    for (const [id, e] of oldestFirst) {
+      if (total <= max) return;
+      const was = now.has(e) ? now.get(e) : e;
+      const to = was === null ? void 0 : change(was);
+      if (to === void 0) continue;
+      if (to !== null) total -= size2(was) - size2(to);
+      else {
+        const count = left.get(id);
+        total -= size2(was) + (count > 1 ? 1 : 0);
+        left.set(id, count - 1);
+      }
+      now.set(e, to);
+    }
+  };
+  pass((e) => waiting(e) || newest.has(e) ? void 0 : null);
+  pass((e) => waiting(e) && e.line === void 0 && size2(kept(e)) < size2(e) ? kept(e) : void 0);
+  pass(() => null);
+  return Object.fromEntries(
+    Object.entries(byRoom).map(([id, list]) => [id, list.flatMap((e) => now.has(e) ? now.get(e) ?? [] : e)])
+  );
 }
 var memberLine = (m) => [m.presence === "present" ? "\u25CF" : "\u25CC", cleanText(m.room_role, NAME_MAX), cleanText(m.label, NAME_MAX)].filter(Boolean).join(" ");
 var PRESET_MAX = 31;
@@ -162,6 +198,33 @@ function roomLabel(room2) {
   const name = cleanText(room2.public_name ?? "", NAME_MAX);
   if (name) return name;
   return cleanText(`${cleanText(room2.preset ?? "", PRESET_MAX) || "room"} ${room2.session_id.slice(-6)}`, NAME_MAX);
+}
+function noteLine(note) {
+  const data = note?.data;
+  const said = data?.note ?? data;
+  return typeof said === "string" ? cleanText(said) : said == null ? "" : cleanText(JSON.stringify(said));
+}
+var CANVAS_MAX = 25e4;
+function canvasOf(answer) {
+  const listed = answer?.surface?.items;
+  const items = [];
+  let left = CANVAS_MAX;
+  for (const envelope of Array.isArray(listed) ? listed : []) {
+    const data = envelope?.data;
+    if (typeof data !== "object" || data === null) continue;
+    const { kind, title, body, blob } = data;
+    const file = typeof blob === "object" && blob !== null ? blob : null;
+    const item = {
+      kind: typeof kind === "string" ? kind : "",
+      title: typeof title === "string" ? cleanText(title) : null,
+      body: typeof body === "string" ? cleanBlock(body) : null,
+      blob: file && { name: typeof file.name === "string" ? cleanText(file.name, NAME_MAX) : null, bytes: typeof file.bytes === "number" ? file.bytes : null }
+    };
+    left -= JSON.stringify(item).length + 1;
+    if (left < 0) break;
+    items.push(item);
+  }
+  return items;
 }
 var GOLD = "#D9A521";
 var GROUND = "#11161D";
@@ -221,6 +284,7 @@ var layout = atom({ plugin: "bellman-mod", key: "layout" }, "band");
 var tab = atom({ plugin: "bellman-mod", key: "tab" }, "log");
 var wake = atom({ plugin: "bellman-mod", key: "wake" }, { paused: false });
 var pending = atom({ plugin: "bellman-mod", key: "pending" }, {});
+var request = atom({ plugin: "bellman-mod", key: "request" }, null);
 var approved = atom({ plugin: "bellman-mod", key: "approved" }, []);
 var logs = atom({ plugin: "bellman-mod", key: "logs" }, {});
 var canvas = atom({ plugin: "bellman-mod", key: "canvas" }, {});
@@ -290,13 +354,31 @@ async function pollDoors($, list) {
     list.map(async (door) => {
       if (door.socketPath === null) return door;
       try {
-        return { ...door, status: await fromDoor($, door.socketPath, "/status"), error: null };
+        const status = await fromDoor($, door.socketPath, "/status");
+        return { ...door, status: { ...status, recent: (status.recent ?? []).map(kept) }, error: null };
       } catch (error) {
         return { ...door, error: message(error) };
       }
     })
   );
 }
+var MEMBERS_KEPT = 25;
+var keptRoom = (r, server) => ({
+  server,
+  session_id: r.session_id,
+  max_members: r.max_members,
+  active_members: r.active_members,
+  ...r.your_seats === void 0 ? {} : { your_seats: r.your_seats },
+  room: { preset: r.room.preset, public_name: r.room.public_name, your_verbs: r.room.your_verbs },
+  members: r.members.slice(0, MEMBERS_KEPT).map((m) => ({
+    member_id: m.member_id,
+    label: cleanText(m.label, NAME_MAX),
+    room_role: cleanText(m.room_role, NAME_MAX),
+    presence: m.presence,
+    beat: { silent: m.beat.silent, silent_for_seconds: m.beat.silent_for_seconds, note: noteLine(m.beat.note) }
+  })),
+  last_event: r.last_event
+});
 async function readRooms($, list, known) {
   const each = await Promise.all(
     list.map(async (door) => {
@@ -304,7 +386,7 @@ async function readRooms($, list, known) {
       if (seated.size === 0 || door.socketPath === null) return [];
       try {
         const listed = (await fromDoor($, door.socketPath, "/rooms")).rooms;
-        return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
+        return listed.filter((r) => seated.has(r.session_id)).map((r) => keptRoom(r, door.server));
       } catch (error) {
         $.ui.log(`bellman-mod: the rooms through ${door.server}'s door: ${message(error)}`, { to: "debug" });
         return known.filter((r) => r.server === door.server && seated.has(r.session_id));
@@ -366,28 +448,30 @@ async function readLogs($, list, ids) {
       }
     })
   );
-  const kept = await update(
-    $,
-    logs,
-    (current) => Object.fromEntries([...seated.keys()].map((id) => [id, merged(current[id] ?? [], fresh.get(id) ?? [])]))
-  );
   const views = await read2($, rooms);
   const now = await $.clock.now();
-  await update(
-    $,
-    pending,
-    () => Object.fromEntries(
-      [...seated].map(([id, { seat }]) => [
-        id,
-        pendingRequests(kept[id] ?? [], {
-          sessionId: id,
-          seatMemberId: seat.member_id,
-          canRespond: verbsOf(views.find((r) => r.session_id === id), seat.member_id).includes("respond_actions"),
-          now
-        })
-      ])
-    )
+  const waitingIn = (byRoom) => Object.fromEntries(
+    [...seated].map(([id, { seat }]) => [
+      id,
+      pendingRequests(byRoom[id] ?? [], {
+        sessionId: id,
+        seatMemberId: seat.member_id,
+        canRespond: verbsOf(views.find((r) => r.session_id === id), seat.member_id).includes("respond_actions"),
+        now
+      })
+    ])
   );
+  let waiting = {};
+  await update($, logs, (current) => {
+    const all = Object.fromEntries([...seated.keys()].map((id) => [id, merged(current[id] ?? [], fresh.get(id) ?? [])]));
+    const asked = new Set(Object.values(waitingIn(all)).flatMap((list2) => list2.map((r) => `${r.session_id} ${r.cursor}`)));
+    const isWaiting = (e) => asked.has(`${e.session_id} ${e.cursor}`);
+    const trimmed = Object.fromEntries(Object.entries(all).map(([id, events]) => [id, events.map((e) => isWaiting(e) ? e : kept(e))]));
+    const fitted = fitLogs(trimmed, isWaiting);
+    waiting = waitingIn(fitted);
+    return fitted;
+  });
+  await update($, pending, () => waiting);
 }
 var readingLog = false;
 async function readShownLog($, list) {
@@ -412,8 +496,8 @@ async function readCanvas($) {
   const socketPath = id === null ? null : seatIn(await read2($, doors), id)?.door.socketPath ?? null;
   if (id === null || socketPath === null) return;
   try {
-    const surface = await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`);
-    await update($, canvas, (was) => ({ ...was, [id]: surface }));
+    const items = canvasOf(await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`));
+    await update($, canvas, () => ({ [id]: items }));
   } catch (error) {
     $.ui.log(`bellman-mod: the canvas through the door: ${message(error)}`, { to: "debug" });
   }
@@ -459,7 +543,7 @@ async function tick($) {
 }
 async function startDoors($) {
   await findDoors($);
-  $.clock.every(DOOR_POLL_MS, () => void tick($));
+  $.clock.every(DOOR_POLL_MS, () => void tick($).catch((error) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" })));
   $.clock.every(ROOMS_POLL_MS, () => {
     read2($, doors).then((list) => refreshRooms($, list)).catch((error) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
   });
@@ -627,11 +711,6 @@ function clock(at) {
   const two = (n) => String(n).padStart(2, "0");
   return Number.isNaN(d.getTime()) ? "--:--" : `${two(d.getHours())}:${two(d.getMinutes())}`;
 }
-function noteOf(note) {
-  const data = note?.data;
-  const said = data?.note ?? data;
-  return typeof said === "string" ? cleanText(said) : said == null ? "" : cleanText(JSON.stringify(said));
-}
 var LINK_MAX = 2048;
 function webHref(body) {
   if (body.length > LINK_MAX) return null;
@@ -643,14 +722,6 @@ function webHref(body) {
   }
 }
 var size = (bytes) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-function canvasItems(result) {
-  const items = result?.surface?.items;
-  if (!Array.isArray(items)) return [];
-  return items.flatMap((envelope) => {
-    const data = envelope?.data;
-    return typeof data === "object" && data !== null ? [data] : [];
-  });
-}
 function drawItem(ui, item) {
   const { Box, Code, Link, Markdown, Text } = ui;
   const body = typeof item.body === "string" ? item.body : "";
@@ -686,11 +757,25 @@ function drawItem(ui, item) {
 }
 var CHROME_ROWS = 2;
 var DRAWINGS_MAX = 9e4;
+var drawings = /* @__PURE__ */ new Map();
+function drawingFor(r, log) {
+  const e = log.find((x) => x.cursor === r.cursor);
+  if (e === void 0 || e.line !== void 0) return null;
+  const key = keyOf(r);
+  if (!drawings.has(key)) {
+    const { drawing, cut: cut2 } = drawingOf(e.payload);
+    drawings.set(key, !cut2 && drawing.length <= DRAWINGS_MAX ? drawing : null);
+  }
+  return drawings.get(key) ?? null;
+}
 async function drawPane($, ui, site, s, p) {
   const { Box, Button, Text } = ui;
   const shown = await read4($, tab);
-  const waiting = (await read4($, pending))[s.picked] ?? [];
+  const held = await read4($, pending);
+  const waiting = held[s.picked] ?? [];
   const given = await read4($, approved);
+  const live = new Set(Object.values(held).flatMap((list) => list.map(keyOf)));
+  for (const key of drawings.keys()) if (!live.has(key)) drawings.delete(key);
   const act = (work) => () => {
     personActed();
     work().catch((error) => $.ui.log(`bellman-mod: ${message2(error)}`, { to: "debug" }));
@@ -698,6 +783,7 @@ async function drawPane($, ui, site, s, p) {
   const waitsOnClaude = (r) => given.includes(keyOf(r));
   const onClaude = () => /* @__PURE__ */ h(Text, { dimColor: true }, "approved \xB7 waiting for Claude");
   const denyIt = (r) => /* @__PURE__ */ h(Button, { key: `deny-${r.cursor}`, label: "Deny", onPress: act(() => deny($, r)) });
+  const review = (r) => act(() => Promise.all([update2($, request, () => ({ session_id: r.session_id, cursor: r.cursor })), update2($, tab, () => "approve")]));
   const tabs = [
     ["log", "Log"],
     ["canvas", "Canvas"],
@@ -710,12 +796,12 @@ async function drawPane($, ui, site, s, p) {
     const log = (await read4($, logs))[s.picked] ?? [];
     body = log.length === 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing in the room's log yet.")] : log.slice(-Math.max(1, site.bodyRows - CHROME_ROWS)).map((e) => {
       const r = open.get(e.cursor);
-      return /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${clock(e.at)} ${cleanText(e.from_label, NAME_MAX)} ${eventLine(e)}`), r !== void 0 && (waitsOnClaude(r) ? onClaude() : /* @__PURE__ */ h(Button, { key: `review-${r.cursor}`, label: "Review", onPress: act(() => turnTo($, "approve")) })));
+      return /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${clock(e.at)} ${cleanText(e.from_label, NAME_MAX)} ${cleanText(lineOf2(e))}`), r !== void 0 && (waitsOnClaude(r) ? onClaude() : /* @__PURE__ */ h(Button, { key: `review-${r.cursor}`, label: "Review", onPress: review(r) })));
     });
   } else if (shown === "canvas") {
-    const result = (await read4($, canvas))[s.picked];
-    const items = canvasItems(result).flatMap((item) => drawItem(ui, item) ?? []);
-    body = result === void 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Reading the canvas\u2026")] : items.length === 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing on the canvas.")] : items;
+    const listed = (await read4($, canvas))[s.picked];
+    const items = (listed ?? []).flatMap((item) => drawItem(ui, item) ?? []);
+    body = listed === void 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Reading the canvas\u2026")] : items.length === 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing on the canvas.")] : items;
   } else if (shown === "members") {
     const view = (await read4($, rooms)).find((r) => r.session_id === s.picked);
     const mine = new Set((await read4($, doors)).flatMap((d) => d.status?.seats ?? []).filter((seat) => seat.session_id === s.picked).map((seat) => seat.member_id));
@@ -725,19 +811,28 @@ async function drawPane($, ui, site, s, p) {
         memberLine(m),
         mine.has(m.member_id) ? "you" : "",
         beat,
-        noteOf(m.beat.note)
+        cleanText(m.beat.note)
       ];
       return /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, line.filter((part) => part !== "").join(" \xB7 "));
     });
+    const more = (view?.active_members ?? 0) - (view?.members.length ?? 0);
+    if (more > 0) body.push(/* @__PURE__ */ h(Text, { dimColor: true }, `and ${more} more`));
   } else {
     const now = await $.clock.now();
-    let left = DRAWINGS_MAX;
-    body = waiting.length === 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing waits on you.")] : waiting.map((r) => {
-      const whole = !r.cut && r.drawing.length <= left;
-      if (whole) left -= r.drawing.length;
-      const minutes = Math.max(0, Math.ceil((r.expires_at - now) / 6e4));
-      return /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${r.from_label} asks \xB7 ${minutes} min left`), whole && /* @__PURE__ */ h(Text, { wrap: "wrap" }, r.drawing), /* @__PURE__ */ h(Box, { columnGap: 1 }, waitsOnClaude(r) ? onClaude() : whole ? [/* @__PURE__ */ h(Button, { key: `approve-${r.cursor}`, label: "Approve", variant: "primary", onPress: act(() => approve($, r)) }), denyIt(r)] : [/* @__PURE__ */ h(Text, { dimColor: true }, "too long to show in full here, so it can only be denied"), denyIt(r)]));
-    });
+    const chosen = await read4($, request);
+    const indexOf = (pick) => Math.max(0, waiting.findIndex((w) => w.session_id === pick?.session_id && w.cursor === pick?.cursor));
+    const at = indexOf(chosen);
+    const r = waiting[at];
+    const step = (by) => act(
+      () => update2($, request, (was) => {
+        const to = waiting[(indexOf(was) + by + waiting.length) % waiting.length];
+        return { session_id: to.session_id, cursor: to.cursor };
+      })
+    );
+    const drawing = r === void 0 ? null : drawingFor(r, (await read4($, logs))[s.picked] ?? []);
+    body = r === void 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing waits on you.")] : [
+      /* @__PURE__ */ h(Box, { flexDirection: "column" }, waiting.length > 1 && /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, null, `request ${at + 1} of ${waiting.length}`), /* @__PURE__ */ h(Button, { key: "approve-prev", label: "\u2039", onPress: step(-1) }), /* @__PURE__ */ h(Button, { key: "approve-next", label: "\u203A", onPress: step(1) })), /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${r.from_label} asks \xB7 ${Math.max(0, Math.ceil((r.expires_at - now) / 6e4))} min left`), drawing !== null && /* @__PURE__ */ h(Box, { borderStyle: "round", flexDirection: "column" }, /* @__PURE__ */ h(Text, { wrap: "wrap" }, drawing)), /* @__PURE__ */ h(Box, { columnGap: 1 }, waitsOnClaude(r) ? onClaude() : drawing !== null ? [/* @__PURE__ */ h(Button, { key: `approve-${r.cursor}`, label: "Approve", variant: "primary", onPress: act(() => approve($, r)) }), denyIt(r)] : [/* @__PURE__ */ h(Text, { dimColor: true }, "too long to show in full here, so it can only be denied"), denyIt(r)]))
+    ];
   }
   return /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, { bold: true }, "Bellman"), p.picker, p.connection, p.about, site.placement === "dock" ? /* @__PURE__ */ h(Button, { key: "narrow", label: "\u203A", onPress: act(() => $.ui.open({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS })) }) : p.close), /* @__PURE__ */ h(Box, { columnGap: 1 }, tabs.map(([to, label]) => /* @__PURE__ */ h(Button, { key: `tab-${to}`, label, variant: to === shown ? "primary" : void 0, onPress: act(() => turnTo($, to)) }))), body);
 }
@@ -765,7 +860,7 @@ async function openPane($, to, pick) {
   await Promise.all([
     $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }),
     update3($, tab, () => to),
-    ...pick === void 0 ? [] : [update3($, room, () => pick)]
+    ...pick === void 0 ? [] : [update3($, room, () => pick.session_id), update3($, request, () => ({ session_id: pick.session_id, cursor: pick.cursor }))]
   ]);
   if (to === "canvas") await readCanvas($);
 }
@@ -828,7 +923,7 @@ async function shownOf($, list, seats) {
       { sessionId: picked, seatMemberId: mine[0].member_id, openedThrough: (await read5($, openedThrough))[picked] ?? -1 }
     ),
     approve: waiting.length,
-    approveIn: waiting[0]?.session_id ?? null,
+    approveFirst: waiting[0] === void 0 ? null : { session_id: waiting[0].session_id, cursor: waiting[0].cursor },
     paused: (await read5($, wake)).paused
   };
 }
@@ -857,8 +952,8 @@ function pieces($, ui, s) {
       // first row, a plain one, it drew "b: " and pushed that row out of line with the other three (L7).
       /* @__PURE__ */ h(Button, { key: "open-log", label: "Log", hotkey: "b", onPress: press("log") }),
       /* @__PURE__ */ h(Button, { key: "open-canvas", label: "Canvas", onPress: press("canvas") }),
-      // Every room's count, and it opens the room that has waited longest.
-      s.approve > 0 && /* @__PURE__ */ h(Button, { key: "open-approve", label: `Approve ${s.approve}`, onPress: press("approve", s.approveIn ?? void 0) })
+      // Every room's count, and it opens the request that has waited longest, in its room.
+      s.approve > 0 && /* @__PURE__ */ h(Button, { key: "open-approve", label: `Approve ${s.approve}`, onPress: press("approve", s.approveFirst ?? void 0) })
     ],
     peers: s.peers.map((peer) => /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, peer)),
     unread: s.unread > 0 && /* @__PURE__ */ h(Text, { color: "claude" }, `${s.unread} new`),
@@ -990,8 +1085,10 @@ function register(on) {
 }
 export {
   APPROVALS_SECTION,
+  CANVAS_MAX,
   DOOR_POLL_MS,
   GATE_REASON,
+  LOGS_MAX,
   PANE_COLUMNS,
   PANE_ID,
   ROOMS_POLL_MS,

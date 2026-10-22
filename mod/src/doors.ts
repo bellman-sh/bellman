@@ -20,13 +20,18 @@
  * that read, and one never starts while another runs. Each room's log comes through its door at the same moments, what
  * is new past the newest event held (the newest page while none is), and on every tick while the room pane shows that
  * room's Log; its canvas through the door as well, only while the pane shows the Canvas.
+ *
+ * What is kept of each answer in `$.state` is what the mod reads of it, within bounds, since the engine refuses a value
+ * over 4,194,304 characters and peers' payloads would pass that: events as their lines and a request waiting on the
+ * person whole (`kept`, `fitLogs`), each room trimmed (`keptRoom`), and the shown room's canvas alone (`canvasOf`).
  * Nothing here calls `bellman_sync` or takes from an inbox: those belong to Claude.
  */
 import { read, update } from "claude-code";
 import type { EngineInterface, HttpInit, Timer } from "claude-code";
-import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
+import { cleanText } from "../../src/door-protocol.js";
+import { DOOR_POLL_MS, NAME_MAX, ROOMS_POLL_MS, canvasOf, fitLogs, kept, noteLine, pendingRequests } from "../../src/mod/view.js";
 import { resultData } from "../../src/result-data.js";
-import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
+import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, KeptEvent, PendingRequest, RoomMember, RoomView } from "../types";
 import { shownTab } from "./drawn";
 import { canvas, doors, logs, openedThrough, pending, room, rooms } from "./state";
 
@@ -103,10 +108,10 @@ async function fromDoor($: EngineInterface, socketPath: string, path: string, in
 }
 
 /**
- * Each door's status, read over its socket, in the order given. A door that cannot be read keeps its socket and the
- * last status it gave, and gets the error: the next tick reads the same socket again, the first read that answers
- * clears it, and the mod's next hook asks the bridge for its door, in case it restarted on a new one. A door with no
- * socket is not read.
+ * Each door's status, read over its socket, in the order given, its recent events kept as their lines (`kept`): fifty
+ * whole peer payloads run to a million characters. A door that cannot be read keeps its socket and the last status it
+ * gave, and gets the error: the next tick reads the same socket again, the first read that answers clears it, and the
+ * mod's next hook asks the bridge for its door, in case it restarted on a new one. A door with no socket is not read.
  */
 async function pollDoors($: EngineInterface, list: readonly DoorView[]): Promise<DoorView[]> {
   return Promise.all(
@@ -114,7 +119,8 @@ async function pollDoors($: EngineInterface, list: readonly DoorView[]): Promise
       if (door.socketPath === null) return door;
       try {
         // ponytail: read as DoorStatus version 1 unchecked; check `version` the day the door has a second.
-        return { ...door, status: (await fromDoor($, door.socketPath, "/status")) as DoorStatus, error: null };
+        const status = (await fromDoor($, door.socketPath, "/status")) as DoorStatus;
+        return { ...door, status: { ...status, recent: (status.recent ?? []).map(kept) }, error: null };
       } catch (error) {
         return { ...door, error: message(error) };
       }
@@ -122,10 +128,40 @@ async function pollDoors($: EngineInterface, list: readonly DoorView[]): Promise
   );
 }
 
+/** How many of a room's members `rooms` keeps: the first the server lists, about a screen of them; the Members tab counts the rest. */
+const MEMBERS_KEPT = 25;
+
+/** A room as the door's `/rooms` lists it (`bellman_rooms`', `roomSummary` in src/projections.ts): what is kept of it. */
+type ListedRoom = Omit<RoomView, "server" | "members"> & {
+  members: (Omit<RoomMember, "beat"> & { beat: Omit<RoomMember["beat"], "note"> & { note: unknown } })[];
+};
+
+/**
+ * A room as `rooms` keeps it: the fields the mod reads, each member's label and role cleaned as a line draws them and
+ * its note the line the Members tab draws, and the first `MEMBERS_KEPT` members. As served, a room of the server's
+ * largest runs to millions of characters: 5,000 members, each note a whole payload of the member's latest progress.
+ */
+const keptRoom = (r: ListedRoom, server: string): RoomView => ({
+  server,
+  session_id: r.session_id,
+  max_members: r.max_members,
+  active_members: r.active_members,
+  ...(r.your_seats === undefined ? {} : { your_seats: r.your_seats }),
+  room: { preset: r.room.preset, public_name: r.room.public_name, your_verbs: r.room.your_verbs },
+  members: r.members.slice(0, MEMBERS_KEPT).map((m) => ({
+    member_id: m.member_id,
+    label: cleanText(m.label, NAME_MAX),
+    room_role: cleanText(m.room_role, NAME_MAX),
+    presence: m.presence,
+    beat: { silent: m.beat.silent, silent_for_seconds: m.beat.silent_for_seconds, note: noteLine(m.beat.note) },
+  })),
+  last_event: r.last_event,
+});
+
 /**
  * The rooms the doors' seats are in, each from its own door's `/rooms`: `bellman_rooms`' rooms, cut by the bridge to
- * its own seats, a read that moves nobody's `lastSeenAt`. Only a door that lists a seat is asked; a door that cannot
- * answer keeps the rooms it had.
+ * its own seats, a read that moves nobody's `lastSeenAt`, each kept as `keptRoom` keeps it. Only a door that lists a
+ * seat is asked; a door that cannot answer keeps the rooms it had.
  */
 async function readRooms($: EngineInterface, list: readonly DoorView[], known: readonly RoomView[]): Promise<RoomView[]> {
   const each = await Promise.all(
@@ -134,8 +170,8 @@ async function readRooms($: EngineInterface, list: readonly DoorView[], known: r
       if (seated.size === 0 || door.socketPath === null) return [];
       try {
         // ponytail: read as roomSummary's shape unchecked; it is our own bridge's answer.
-        const listed = ((await fromDoor($, door.socketPath, "/rooms")) as { rooms: Omit<RoomView, "server">[] }).rooms;
-        return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
+        const listed = ((await fromDoor($, door.socketPath, "/rooms")) as { rooms: ListedRoom[] }).rooms;
+        return listed.filter((r) => seated.has(r.session_id)).map((r) => keptRoom(r, door.server));
       } catch (error) {
         $.ui.log(`bellman-mod: the rooms through ${door.server}'s door: ${message(error)}`, { to: "debug" });
         return known.filter((r) => r.server === door.server && seated.has(r.session_id));
@@ -209,7 +245,7 @@ async function fetchLog($: EngineInterface, socketPath: string, sessionId: strin
 }
 
 /** `was` and `fresh` as one log, each cursor once, oldest first, the newest `LOG_KEPT` kept. */
-function merged(was: readonly DoorEvent[], fresh: readonly DoorEvent[]): DoorEvent[] {
+function merged(was: readonly KeptEvent[], fresh: readonly DoorEvent[]): KeptEvent[] {
   const byCursor = new Map(was.map((e) => [e.cursor, e]));
   for (const e of fresh) byCursor.set(e.cursor, e);
   return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor).slice(-LOG_KEPT);
@@ -217,8 +253,10 @@ function merged(was: readonly DoorEvent[], fresh: readonly DoorEvent[]): DoorEve
 
 /**
  * Reads the logs of the rooms `ids` through their doors: what is new past the newest cursor kept, or the newest page
- * while none is kept. Then every seated room's requests waiting on the person are counted again from its log. A room
- * no door lists a seat in any more is dropped; a log that cannot be read keeps what it had.
+ * while none is kept. Every event but a request waiting on the person is kept as its line (`kept`), and the whole within
+ * `LOGS_MAX` (`fitLogs`, src/mod/view.ts), so no number of large messages makes `logs` too long to write; then every
+ * seated room's requests waiting on the person are counted again from its log as written. A room no door lists a seat
+ * in any more is dropped; a log that cannot be read keeps what it had.
  */
 async function readLogs($: EngineInterface, list: readonly DoorView[], ids: readonly string[]): Promise<void> {
   const seated = seatedRooms(list);
@@ -235,24 +273,32 @@ async function readLogs($: EngineInterface, list: readonly DoorView[], ids: read
       }
     }),
   );
-  const kept = await update($, logs, (current) =>
-    Object.fromEntries([...seated.keys()].map((id) => [id, merged(current[id] ?? [], fresh.get(id) ?? [])])),
-  );
   const views = await read($, rooms);
   const now = await $.clock.now();
-  await update($, pending, () =>
+  const waitingIn = (byRoom: Record<string, KeptEvent[]>): Record<string, PendingRequest[]> =>
     Object.fromEntries(
       [...seated].map(([id, { seat }]): [string, PendingRequest[]] => [
         id,
-        pendingRequests(kept[id] ?? [], {
+        pendingRequests(byRoom[id] ?? [], {
           sessionId: id,
           seatMemberId: seat.member_id,
           canRespond: verbsOf(views.find((r) => r.session_id === id), seat.member_id).includes("respond_actions"),
           now,
         }),
       ]),
-    ),
-  );
+    );
+  // `update` runs again on a lost race, so this is what the write that landed counted.
+  let waiting: Record<string, PendingRequest[]> = {};
+  await update($, logs, (current) => {
+    const all = Object.fromEntries([...seated.keys()].map((id) => [id, merged(current[id] ?? [], fresh.get(id) ?? [])]));
+    const asked = new Set(Object.values(waitingIn(all)).flatMap((list) => list.map((r) => `${r.session_id} ${r.cursor}`)));
+    const isWaiting = (e: KeptEvent): boolean => asked.has(`${e.session_id} ${e.cursor}`);
+    const trimmed = Object.fromEntries(Object.entries(all).map(([id, events]) => [id, events.map((e) => (isWaiting(e) ? e : kept(e)))]));
+    const fitted = fitLogs(trimmed, isWaiting);
+    waiting = waitingIn(fitted);
+    return fitted;
+  });
+  await update($, pending, () => waiting);
 }
 
 /** True while a read of the shown Log runs: one slower than `DOOR_POLL_MS` (the door asks the server) is not stacked on. */
@@ -284,15 +330,16 @@ export async function readShownLog($: EngineInterface, list: readonly DoorView[]
 /**
  * The canvas of the room the pane shows, through the door that lists its seat: `/rooms/<id>/surface`, which is
  * `bellman_surface`'s answer, a read that keeps no seat alive. Called while the pane shows the Canvas, and when the
- * person turns to it.
+ * person turns to it. `canvas` keeps that room's alone, as `canvasOf` (src/mod/view.ts) keeps it, in place of any
+ * other's: one room's canvas as served can run to millions of characters.
  */
 export async function readCanvas($: EngineInterface): Promise<void> {
   const id = await read($, room);
   const socketPath = id === null ? null : (seatIn(await read($, doors), id)?.door.socketPath ?? null);
   if (id === null || socketPath === null) return;
   try {
-    const surface = await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`);
-    await update($, canvas, (was) => ({ ...was, [id]: surface }));
+    const items = canvasOf(await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`));
+    await update($, canvas, () => ({ [id]: items }));
   } catch (error) {
     $.ui.log(`bellman-mod: the canvas through the door: ${message(error)}`, { to: "debug" });
   }
@@ -360,7 +407,8 @@ async function tick($: EngineInterface): Promise<void> {
  */
 export async function startDoors($: EngineInterface): Promise<void> {
   await findDoors($);
-  $.clock.every(DOOR_POLL_MS, () => void tick($));
+  // A tick that fails (a write the engine refused) leaves a line in the debug log, as a failing read does.
+  $.clock.every(DOOR_POLL_MS, () => void tick($).catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" })));
   $.clock.every(ROOMS_POLL_MS, () => {
     read($, doors)
       .then((list) => refreshRooms($, list))

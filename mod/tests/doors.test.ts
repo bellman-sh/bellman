@@ -227,6 +227,19 @@ test("a bridge that comes back without a door drops its rooms, out of the view a
   expect(asked(w)).toBe(2);
 });
 
+test("each door's recent events are kept as the lines they draw: fifty of the longest messages keep doors small, and the toast reads the same", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  w.status.recent = Array.from({ length: 50 }, (_, i) => peerEvent({ cursor: i + 2, payload: { text: `${i + 2} ${"y".repeat(19_980)}` } }));
+  await tick(w);
+  expect(JSON.stringify(w.state.doors).length).toBeLessThan(50_000);
+  const recent = w.state.doors?.[0]?.status?.recent ?? [];
+  expect(recent.map((e) => e.cursor)).toEqual(Array.from({ length: 50 }, (_, i) => i + 2));
+  expect(recent.every((e) => e.payload === undefined && e.line?.startsWith(`${e.cursor} yyy`))).toBe(true);
+  expect(w.toasts).toHaveLength(1);
+  expect(w.toasts[0]).toMatch(/^ada in swarm _room1: 51 y+…$/);
+});
+
 test("a rooms read asks each room's log only for what is new past the newest event held", async ($, on) => {
   const w = await world($, on);
   w.log.qs_room1 = { events: [peerEvent({ cursor: 4 }), peerEvent({ cursor: 7, payload: { text: "later" } })], cursor: 7 };

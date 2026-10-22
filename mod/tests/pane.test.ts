@@ -1,8 +1,8 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
-import { GATE_REASON, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvalKey, approvedText, declinedText } from "../hooks/register.mjs";
+import { CANVAS_MAX, GATE_REASON, LOGS_MAX, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvalKey, approvedText, declinedText } from "../hooks/register.mjs";
 import type { RoomMember } from "../types";
-import { NOW, PANE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, roomsTick, shown, tick, world } from "./harness";
+import { NOW, PANE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, refusedWrites, roomsTick, shown, tick, world } from "./harness";
 import type { World } from "./harness";
 
 /** A C0 or C1 control character, DEL included: what a cleaned string never holds. */
@@ -11,8 +11,11 @@ const CONTROL = /[\u{0}-\u{1f}\u{7f}-\u{9f}]/u;
 const BLOCK_CONTROL = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}]/u;
 const TWO_MINUTES_AGO = new Date(NOW - 2 * 60_000).toISOString();
 
+/** ada's action request at `cursor`, two minutes old, asking `payload`. */
+const asked = (cursor: number, payload: unknown) => peerEvent({ cursor, type: "action_request", at: TWO_MINUTES_AGO, payload });
+
 /** ada's action request at cursor 5, two minutes old, after a message of hers. */
-const REQUEST = peerEvent({ cursor: 5, type: "action_request", at: TWO_MINUTES_AGO, payload: { text: "run the migration" } });
+const REQUEST = asked(5, { text: "run the migration" });
 const LOG = { events: [peerEvent({ cursor: 4, at: TWO_MINUTES_AGO, payload: { text: "hello" } }), REQUEST], cursor: 5 };
 
 /** What a `bellman_send` that ran answers beneath the mod (the harness's own success). */
@@ -47,6 +50,13 @@ async function reviewing($: Engine, w: World, cursor = 5) {
   await room.press({ key: `review-${cursor}` });
   return room;
 }
+
+/** The framed boxes a drawing holds: on the Approve tab, the one that holds what the request shown asks. */
+const frames = async (room: Awaited<ReturnType<typeof opened>>) => (await room.findAll({ type: "Box" })).filter((b) => b.props.borderStyle !== undefined);
+
+/** The Approve buttons drawn: one for the one request the tab shows, while it waits on the person. */
+const approveButtons = async (room: Awaited<ReturnType<typeof opened>>) =>
+  (await room.findAll({ type: "Button" })).flatMap((b) => (/^approve-\d+$/.test(b.key ?? "") ? [b.key] : []));
 
 /** An item of the room's surface as the door serves it (`bellman_surface`'s, as the bridge relays it), in the writer's envelope. */
 const item = (data: Record<string, unknown>) => ({
@@ -134,43 +144,177 @@ test("what draws nothing or acts on the terminal is spelled out in a request, so
   expect(await room.find({ key: "approve-5" })).toBeDefined();
 });
 
-test("a request too long to show in full here can only be denied, and the requests after it keep their buttons", async ($, on) => {
+test("a request too long to show in full here can only be denied, and the next keeps its buttons", async ($, on) => {
   // As long as the server lets a payload be, and nested deep enough that its JSON drawn two spaces to a level runs
   // past what the pane can draw of its texts.
   const payload = { a: { b: { c: { d: Array.from({ length: 9_000 }, () => 0) } } } };
   expect(JSON.stringify(payload).length).toBeLessThanOrEqual(20_000);
   expect(JSON.stringify(payload, null, 2).length).toBeGreaterThan(100_000);
   const w = await world($, on);
-  w.log.qs_room1 = {
-    events: [
-      peerEvent({ cursor: 5, type: "action_request", at: TWO_MINUTES_AGO, payload }),
-      peerEvent({ cursor: 6, type: "action_request", at: TWO_MINUTES_AGO, payload: { text: "deploy" } }),
-    ],
-    cursor: 6,
-  };
+  w.log.qs_room1 = { events: [asked(5, payload), asked(6, { text: "deploy" })], cursor: 6 };
   const room = await reviewing($, w);
   expect(await room.find({ key: "approve-5" })).toBeUndefined();
   expect(await room.find({ key: "deny-5" })).toBeDefined();
   expect(await shown(room)).toContain("ada asks · 28 min left too long to show in full here, so it can only be denied Deny");
+  await room.press({ key: "approve-next" });
   expect(await room.find({ key: "approve-6" })).toBeDefined();
   expect(await room.find({ key: "deny-6" })).toBeDefined();
+  await room.press({ key: "approve-prev" });
   await room.press({ key: "deny-5" });
   expect(w.declined).toEqual([{ socket: w.door, room: "qs_room1", body: { ref_id: "5" } }]);
 });
 
-test("a request whose drawing was cut can only be denied", async ($, on) => {
-  // Longer than any payload the server accepts can be drawn: a door that served one is cut, and that cut is no approval.
+test("a request longer than any the server accepts can only be denied, and logs stays within its bounds", async ($, on) => {
+  // A door that served one: its payload is let go of to keep logs within LOGS_MAX, and what is not drawn is no approval.
   const w = await world($, on);
-  w.log.qs_room1 = {
-    events: [peerEvent({ cursor: 5, type: "action_request", at: TWO_MINUTES_AGO, payload: { text: "x".repeat(2_600_001) } })],
-    cursor: 5,
-  };
+  w.log.qs_room1 = { events: [asked(5, { text: "x".repeat(2_600_001) })], cursor: 5 };
   const room = await reviewing($, w);
-  // Read as the cursor and the flag alone: a failure that printed the drawing would print 2.6 million characters.
-  expect(w.state.pending?.qs_room1?.map((r) => [r.cursor, r.cut])).toEqual([[5, true]]);
+  // Read as cursors and a length: a failure that printed the request would print 2.6 million characters.
+  expect(w.state.pending?.qs_room1?.map((r) => r.cursor)).toEqual([5]);
+  expect(JSON.stringify(w.state.logs).length).toBeLessThanOrEqual(LOGS_MAX);
   expect(await room.find({ key: "approve-5" })).toBeUndefined();
   expect(await room.find({ key: "deny-5" })).toBeDefined();
   expect(await shown(room)).toContain("too long to show in full here, so it can only be denied");
+});
+
+/** A payload as deep and as wide as the server lets one be, which drawn two spaces to a level runs past two million characters. */
+function deepest(): unknown {
+  let row: unknown = 0;
+  for (let i = 0; i < 7; i++) row = [row];
+  let payload: unknown = Array.from({ length: 1_240 }, () => row);
+  for (let i = 0; i < 56; i++) payload = [payload];
+  return payload;
+}
+
+test("two requests from one peer that draw as long as any accepted payload can both reach the Approve tab, and no state write is refused", async ($, on) => {
+  // The scoped re-review's case: held drawn in pending, two of these ran past the engine's limit on one value, so no
+  // later request was listed, and these could not be denied.
+  expect(JSON.stringify(deepest()).length).toBeLessThanOrEqual(20_000);
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, deepest()), asked(6, deepest())], cursor: 6 };
+  const room = await reviewing($, w);
+  expect(refusedWrites(w)).toEqual([]);
+  expect(w.state.pending?.qs_room1?.map((r) => r.cursor)).toEqual([5, 6]);
+  for (const cursor of [5, 6]) {
+    // Each too long to draw whole on the tab, and each can be denied.
+    expect(await shown(room)).toContain(`request ${cursor - 4} of 2 ‹ › ada asks · 28 min left too long to show in full here, so it can only be denied Deny`);
+    expect(await room.find({ key: `deny-${cursor}` })).toBeDefined();
+    await room.press({ key: "approve-next" });
+  }
+  await room.press({ key: "deny-5" });
+  expect(w.declined).toEqual([{ socket: w.door, room: "qs_room1", body: { ref_id: "5" } }]);
+});
+
+test("two maximum-size action requests from one peer both reach the Approve tab, drawn in full, and no state write is refused", async ($, on) => {
+  // Each as long as bellman_send lets a payload be, drawn two spaces to a level near seventy thousand characters: the
+  // tab gives all its room for a drawing to the one request it shows.
+  const payload = { values: Array.from({ length: 9_994 }, () => 0) };
+  expect(JSON.stringify(payload).length).toBe(20_000);
+  const drawn = JSON.stringify(payload, null, 2);
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, payload), asked(6, payload)], cursor: 6 };
+  const room = await reviewing($, w);
+  for (const cursor of [5, 6]) {
+    expect(await shown(room)).toContain(`request ${cursor - 4} of 2`);
+    // Compared, not printed: a failure would print seventy thousand characters.
+    expect((await frames(room)).map((f) => f.text === drawn)).toEqual([true]);
+    expect(await approveButtons(room)).toEqual([`approve-${cursor}`]);
+    await room.press({ key: "approve-next" });
+  }
+  expect(refusedWrites(w)).toEqual([]);
+});
+
+test("250 messages of 19,980 characters leave the Log updating, and a request after them approvable", async ($, on) => {
+  // Kept whole, they ran past the engine's limit on one value: no later write of logs landed, nor of pending after it.
+  const w = await world($, on);
+  w.log.qs_room1 = { events: Array.from({ length: 250 }, (_, i) => peerEvent({ cursor: i + 1, payload: { text: "m".repeat(19_980) } })), cursor: 250 };
+  const room = await opened($, w);
+  expect(w.state.logs?.qs_room1).toHaveLength(250);
+  w.log.qs_room1.events.push(peerEvent({ cursor: 251, payload: { text: "the last word" } }), asked(252, { text: "ship it" }));
+  await tick(w);
+  expect(await shown(room)).toContain("ada the last word");
+  await room.press({ key: "review-252" });
+  expect(await approveButtons(room)).toEqual(["approve-252"]);
+  expect(refusedWrites(w)).toEqual([]);
+  expect(JSON.stringify(w.state.logs).length).toBeLessThanOrEqual(LOGS_MAX);
+});
+
+test("requests past what logs holds read too long to show in full here, with Deny alone, and the newest keep their Approve", async ($, on) => {
+  const big = (cursor: number) => asked(cursor, { text: `${cursor} ${"r".repeat(19_970)}` });
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [big(1)], cursor: 1 };
+  const room = await opened($, w);
+  await room.press({ key: "tab-approve" });
+  // Alone, it is drawn whole.
+  expect(await approveButtons(room)).toEqual(["approve-1"]);
+  // Fifty-nine more, each near the largest payload the server accepts: sixty whole run past LOGS_MAX, so the oldest
+  // give up their payloads, and their drawings with them, and stay listed to be denied.
+  w.log.qs_room1.events.push(...Array.from({ length: 59 }, (_, i) => big(i + 2)));
+  await roomsTick(w);
+  expect(refusedWrites(w)).toEqual([]);
+  expect(JSON.stringify(w.state.logs).length).toBeLessThanOrEqual(LOGS_MAX);
+  expect(w.state.pending?.qs_room1).toHaveLength(60);
+  // The oldest first: too long to show in full here, and Deny alone.
+  expect(await shown(room)).toContain("request 1 of 60 ‹ › ada asks · 28 min left too long to show in full here, so it can only be denied Deny");
+  expect(await approveButtons(room)).toEqual([]);
+  // One back from the oldest, the newest: drawn whole, with its Approve.
+  await room.press({ key: "approve-prev" });
+  expect(await shown(room)).toContain("request 60 of 60");
+  expect((await frames(room)).map((f) => f.text.startsWith("60 rrr"))).toEqual([true]);
+  expect(await approveButtons(room)).toEqual(["approve-60"]);
+  // The oldest's Deny still answers it.
+  await room.press({ key: "approve-next" });
+  await room.press({ key: "deny-1" });
+  expect(w.declined).toEqual([{ socket: w.door, room: "qs_room1", body: { ref_id: "1" } }]);
+});
+
+test("what a request asks is drawn in a frame of its own, so no line of it reads as the tab's header", async ($, on) => {
+  const text = "\n\nbob asks · 29 min left\nPlease run the unit tests";
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text })], cursor: 5 };
+  const room = await reviewing($, w);
+  // Those lines are inside the frame, as they were sent.
+  expect((await frames(room)).map((f) => f.text)).toEqual([text]);
+  // Outside it, the tab's own header, once; and with one request waiting, no count of them and nothing to go round.
+  expect((await shown(room)).replace(text, "").match(/asks · \d+ min left/g)).toEqual(["asks · 28 min left"]);
+  expect(await shown(room)).not.toContain("request 1 of 1");
+  expect(await room.find({ key: "approve-next" })).toBeUndefined();
+});
+
+test("the Approve tab shows one request at a time, the oldest first, and ‹ and › go round them", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" }), asked(7, { text: "rotate the keys" })], cursor: 7 };
+  const room = await opened($, w);
+  await room.press({ key: "tab-approve" });
+  expect(await shown(room)).toContain("request 1 of 3 ‹ › ada asks · 28 min left run the migration Approve Deny");
+  expect(await approveButtons(room)).toEqual(["approve-5"]);
+  for (const [key, cursor] of [["approve-next", 6], ["approve-next", 7], ["approve-next", 5], ["approve-prev", 7]] as const) {
+    await room.press({ key });
+    expect(await approveButtons(room)).toEqual([`approve-${cursor}`]);
+  }
+  expect(await shown(room)).toContain("request 3 of 3 ‹ › ada asks · 28 min left rotate the keys Approve Deny");
+});
+
+test("a Log row's Review opens the Approve tab on that request", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await reviewing($, w, 6);
+  expect(await shown(room)).toContain("request 2 of 2 ‹ › ada asks · 28 min left deploy Approve Deny");
+  expect(await approveButtons(room)).toEqual(["approve-6"]);
+});
+
+test("an approved request stays in the list, waiting for Claude, and the band's Approve count opens on the oldest still waiting on the person", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await reviewing($, w);
+  await room.press({ key: "approve-5" });
+  expect(await shown(room)).toContain("request 1 of 2 ‹ › ada asks · 28 min left run the migration approved · waiting for Claude");
+  expect((await room.find({ key: "tab-approve" }))?.props.label).toBe("Approve 1");
+  await room.press({ key: "tab-log" });
+  const top = await band($);
+  expect((await top.find({ key: "open-approve" }))?.props.label).toBe("Approve 1");
+  await top.press({ key: "open-approve" });
+  expect(await shown(room)).toContain("request 2 of 2 ‹ › ada asks · 28 min left deploy Approve Deny");
 });
 
 test("Approve while idle wakes Claude with the request's cursor, and the gate then passes Claude's answer", async ($, on) => {
@@ -416,7 +560,7 @@ test("a whole session calls no tool but bellman_whoami: the rooms, the canvas an
   for (const key of ["open-log", "open-canvas"]) await top.press({ key });
   w.panes = [SHOWN];
   const room = await pane($, PANE_COLUMNS);
-  const presses = ["tab-canvas", "tab-members", "tab-approve", "approve-5", "deny-6", "tab-log", "tab-canvas", "narrow"];
+  const presses = ["tab-canvas", "tab-members", "tab-approve", "approve-5", "approve-next", "deny-6", "tab-log", "tab-canvas", "narrow"];
   for (const key of presses) {
     await room.press({ key });
     await tick(w);
@@ -489,6 +633,56 @@ test("a hostile canvas is cleaned wherever it is drawn", async ($, on) => {
   // Markdown and a diagram keep a line break, and no other control.
   expect((await room.findAll({ type: "Markdown" })).map((m) => m.props.text)).toEqual(["evil\n"]);
   expect((await room.find({ type: "Code" }))?.props.source).not.toMatch(BLOCK_CONTROL);
+});
+
+test("the canvas kept is the shown room's alone, within CANVAS_MAX", async ($, on) => {
+  // One bridge with seats in two rooms, each canvas as large as the server lets one be: 64 items of 8,000 characters,
+  // each of which JSON writes as two.
+  const w = await world($, on);
+  w.status.seats.push({ session_id: "qs_room2", member_id: "m-me2", retrying: false });
+  w.rooms.push({ ...structuredClone(ROOMS[0]!), session_id: "qs_room2", your_member_id: "m-me2" });
+  const body = '"'.repeat(8_000);
+  for (const id of ["qs_room1", "qs_room2"]) {
+    w.surface[id] = { session_id: id, surface: { cursor: 64, items: Array.from({ length: 64 }, (_, i) => item({ key: `k${i}`, kind: "text", body })) } };
+  }
+  const room = await opened($, w);
+  await room.press({ key: "tab-canvas" });
+  expect(Object.keys(w.state.canvas ?? {})).toEqual(["qs_room1"]);
+  expect(JSON.stringify(w.state.canvas).length).toBeLessThanOrEqual(CANVAS_MAX);
+  // What the engine draws of it is all there: the first items, whole.
+  expect((await room.findAll({ type: "Markdown" })).slice(0, 2).map((m) => m.props.text === body)).toEqual([true, true]);
+  // Another room picked and its canvas read: that one is kept, in place of the first.
+  await room.select({ key: "room", value: "qs_room2" });
+  await room.press({ key: "tab-canvas" });
+  expect(Object.keys(w.state.canvas ?? {})).toEqual(["qs_room2"]);
+});
+
+test("a room is kept as the mod reads it: its first members, each note one line, and the rest counted", async ($, on) => {
+  // As the server can serve one: hundreds of members, each note a whole payload of the member's latest progress.
+  const w = await world($, on);
+  w.rooms[0]!.members = Array.from({ length: 300 }, (_, i) => ({
+    member_id: `m-${i}`,
+    label: `peer ${i}`,
+    room_role: "builder",
+    presence: "present" as const,
+    beat: {
+      asked: true,
+      last_report_at: null,
+      silent_for_seconds: null,
+      silent: false,
+      note: { trust: "untrusted", origin: { memberId: `m-${i}`, label: `peer ${i}` }, data: { note: `step ${i} ${"n".repeat(19_000)}` } },
+    },
+  }));
+  w.rooms[0]!.active_members = 300;
+  const room = await opened($, w);
+  expect(w.state.rooms).toHaveLength(1);
+  expect(JSON.stringify(w.state.rooms).length).toBeLessThan(25_000);
+  await room.press({ key: "tab-members" });
+  const text = await shown(room);
+  expect(text).toContain("● builder peer 0 · step 0 nnn");
+  expect(text).toContain("● builder peer 24 · step 24");
+  expect(text).not.toContain("peer 25 ·");
+  expect(text).toContain("and 275 more");
 });
 
 test("members show role and presence", async ($, on) => {

@@ -1,7 +1,8 @@
 /**
  * What the Claude Code mod's view shows, as pure functions: which layout, which toast, how many
- * unread, which requests wait on the person, how a room is named, and the bell. The mod draws and
- * reads the door; this file decides what the door's events come to.
+ * unread, which requests wait on the person, how a room is named, and the bell; and what the mod keeps
+ * of the door's events and a room's canvas, within bounds. The mod draws and reads the door; this file
+ * decides what the door's events come to.
  *
  * Every string a peer controls (label, room name, message) leaves here through `cleanText`, so a toast,
  * a picker entry or a title never carries an escape sequence or a line break; what an action request
@@ -81,15 +82,42 @@ export interface Seat {
   member_id: string;
 }
 
+/**
+ * An event as the mod keeps it (`logs`, and each door's `recent`): the door's envelope, and in place of its payload
+ * `line`, the line the Log and a toast draw for it. Only an action request waiting on the person keeps its payload,
+ * whole, for the Approve tab to draw, and has no `line`. A door's event, payload and all, passes for one.
+ */
+export type KeptEvent = Omit<DoorEvent, "payload"> & { payload?: unknown; line?: string };
+
+/**
+ * `e` trimmed to what the mod reads of it: its cursor, type, time, sender and the rest of the envelope, the sender's
+ * label cleaned as every line draws it, and in place of its payload the line `eventLine` draws. Its `ref_id` stays on an
+ * `action_response`, where the server checked it is a request's cursor and the mod reads it; on any other event it is a
+ * peer's string of any length that nothing here reads, and goes. One already trimmed comes back as it was.
+ */
+export function kept(e: KeptEvent): KeptEvent {
+  if (e.line !== undefined) return e;
+  const { payload, ...envelope } = e;
+  return {
+    ...envelope,
+    from_label: cleanText(e.from_label, NAME_MAX),
+    ref_id: e.type === "action_response" ? e.ref_id : null,
+    line: eventLine({ type: e.type, payload, ref_id: e.ref_id }),
+  };
+}
+
+/** The line the Log and a toast draw for `e`: the one it was trimmed to, else its `eventLine`. */
+export const lineOf = (e: KeptEvent): string => e.line ?? eventLine({ type: e.type, payload: e.payload, ref_id: e.ref_id });
+
 /** The room's events once each, oldest first. A room seen through two bridges lists every event twice. */
-function roomLog(events: readonly DoorEvent[], sessionId: string): DoorEvent[] {
-  const byCursor = new Map<number, DoorEvent>();
+function roomLog<E extends KeptEvent>(events: readonly E[], sessionId: string): E[] {
+  const byCursor = new Map<number, E>();
   for (const e of events) if (e.session_id === sessionId) byCursor.set(e.cursor, e);
   return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor);
 }
 
 /** `a` came after `b`: by time, which orders events across rooms, then by cursor, which orders one room's. */
-function later(a: DoorEvent, b: DoorEvent): boolean {
+function later(a: KeptEvent, b: KeptEvent): boolean {
   const apart = (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0);
   return apart !== 0 ? apart > 0 : a.cursor >= b.cursor;
 }
@@ -110,10 +138,10 @@ const TOAST_MAX = 120;
  * what keeps it to one toast.
  */
 export function toastFor(
-  events: readonly DoorEvent[],
+  events: readonly KeptEvent[],
   p: { seats: readonly Seat[]; seen: ReadonlyMap<string, number>; logOpenFor: string | null; labels: ReadonlyMap<string, string> },
 ): { text: string; session_id: string; cursor: number } | undefined {
-  let newest: DoorEvent | undefined;
+  let newest: KeptEvent | undefined;
   for (const e of events) {
     if (e.ambient === true || e.session_id === p.logOpenFor) continue;
     if (e.cursor <= (p.seen.get(e.session_id) ?? -1)) continue;
@@ -125,7 +153,7 @@ export function toastFor(
   const room = cleanText(p.labels.get(newest.session_id) || newest.session_id.slice(-6), NAME_MAX);
   const verb = newest.type === "action_request" ? " asks" : "";
   return {
-    text: cleanText(`${who} in ${room}${verb}: ${eventLine(newest)}`, TOAST_MAX),
+    text: cleanText(`${who} in ${room}${verb}: ${lineOf(newest)}`, TOAST_MAX),
     session_id: newest.session_id,
     cursor: newest.cursor,
   };
@@ -133,7 +161,7 @@ export function toastFor(
 
 /** The room's interrupting peer events after the cursor the person last opened its Log through. */
 export function unreadCount(
-  events: readonly DoorEvent[],
+  events: readonly KeptEvent[],
   p: { sessionId: string; seatMemberId: string; openedThrough: number },
 ): number {
   return roomLog(events, p.sessionId)
@@ -141,15 +169,15 @@ export function unreadCount(
     .length;
 }
 
+/**
+ * An action request waiting on the person. What it asks is not here: the Approve tab draws that from the request's own
+ * event in `logs` (`drawingOf`), so the value that lists every room's requests stays small.
+ */
 export interface PendingRequest {
   session_id: string;
   /** The request's cursor: the `ref_id` an answer carries. */
   cursor: number;
   from_label: string;
-  /** What the request asks, whole, as the Approve tab draws it (`drawingOf`). */
-  drawing: string;
-  /** The drawing was cut all the same, so it is not the whole request: the person may only deny it. */
-  cut: boolean;
   /** Epoch milliseconds. */
   expires_at: number;
 }
@@ -172,8 +200,8 @@ export const REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1)
  * one directly after a character that is not a selector, which picks how that character draws, so `❤️` draws as it is
  * and a run after it shows. A carriage return before a line break goes.
  * ponytail: by those categories and ranges. What else draws nothing passes: the one selector after each character, a
- * joiner included, and the marks and fillers that draw nothing (U+034F, U+115F, U+1160, U+3164, U+FFA0); spell one out
- * here the day it hides a request.
+ * joiner included, and the marks, fillers and Mongolian selectors that draw nothing (U+034F, U+115F, U+1160, U+17B4,
+ * U+17B5, U+180B to U+180D, U+180F, U+3164, U+FFA0); spell one out here the day it hides a request.
  */
 const spelledOut = (text: string): string =>
   text
@@ -205,7 +233,7 @@ export function drawingOf(payload: unknown): { drawing: string; cut: boolean } {
  * exact match, so `"05"` never answers cursor 5, and any member's answer, approval or refusal, ends the wait.
  */
 export function pendingRequests(
-  log: readonly DoorEvent[],
+  log: readonly KeptEvent[],
   p: { sessionId: string; seatMemberId: string; canRespond: boolean; now: number },
 ): PendingRequest[] {
   if (!p.canRespond) return [];
@@ -218,15 +246,58 @@ export function pendingRequests(
     const expiresAt = Date.parse(e.at) + REQUEST_TTL_MS;
     // Written so that a time that does not parse (NaN) lists nothing.
     if (!(p.now < expiresAt)) continue;
-    pending.push({
-      session_id: e.session_id,
-      cursor: e.cursor,
-      from_label: cleanText(e.from_label, NAME_MAX),
-      ...drawingOf(e.payload),
-      expires_at: expiresAt,
-    });
+    pending.push({ session_id: e.session_id, cursor: e.cursor, from_label: cleanText(e.from_label, NAME_MAX), expires_at: expiresAt });
   }
   return pending;
+}
+
+/**
+ * The most `logs` holds, in characters of its JSON: a quarter of the 4,194,304 the engine allows one `$.state` value.
+ * Every drawing of the Log reads it whole and every read of a log writes it whole, so it is kept well short of the
+ * limit, and a quarter still holds the newest events of several rooms, a few hundred characters each once trimmed, or
+ * some fifty requests waiting on the person whole at the largest payload the server accepts.
+ */
+export const LOGS_MAX = 1_000_000;
+
+/**
+ * `byRoom` within `max` characters of JSON, by letting go of the oldest first: first the events the Log draws only a
+ * line for, but each room's newest, so that the room's next read still asks only for what is new; then the payloads of
+ * the requests waiting on the person (`waiting`), each still listed, to be denied, though it can no longer be drawn; then
+ * whatever is left. Every event in `byRoom` is trimmed (`kept`) but the waiting requests.
+ */
+export function fitLogs(byRoom: Record<string, KeptEvent[]>, waiting: (e: KeptEvent) => boolean, max = LOGS_MAX): Record<string, KeptEvent[]> {
+  let total = JSON.stringify(byRoom).length;
+  if (total <= max) return byRoom;
+  const size = (e: KeptEvent): number => JSON.stringify(e).length;
+  const newest = new Set(Object.values(byRoom).flatMap((list) => list.slice(-1)));
+  const left = new Map(Object.entries(byRoom).map(([id, list]) => [id, list.length]));
+  const oldestFirst = Object.entries(byRoom)
+    .flatMap(([id, list]) => list.map((e) => [id, e] as const))
+    .sort(([, a], [, b]) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0) || a.cursor - b.cursor);
+  // What each event has become: itself trimmed, or null once it is let go.
+  const now = new Map<KeptEvent, KeptEvent | null>();
+  const pass = (change: (e: KeptEvent) => KeptEvent | null | undefined): void => {
+    for (const [id, e] of oldestFirst) {
+      if (total <= max) return;
+      const was = now.has(e) ? now.get(e)! : e;
+      const to = was === null ? undefined : change(was);
+      if (to === undefined) continue;
+      if (to !== null) total -= size(was!) - size(to);
+      else {
+        // Out of its list, an event takes its JSON with it, and a comma while another stays.
+        const count = left.get(id)!;
+        total -= size(was!) + (count > 1 ? 1 : 0);
+        left.set(id, count - 1);
+      }
+      now.set(e, to);
+    }
+  };
+  pass((e) => (waiting(e) || newest.has(e) ? undefined : null));
+  pass((e) => (waiting(e) && e.line === undefined && size(kept(e)) < size(e) ? kept(e) : undefined));
+  pass(() => null);
+  return Object.fromEntries(
+    Object.entries(byRoom).map(([id, list]) => [id, list.flatMap((e) => (now.has(e) ? (now.get(e) ?? []) : e))]),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +324,60 @@ export function roomLabel(room: { session_id: string; preset?: string | null; pu
   const name = cleanText(room.public_name ?? "", NAME_MAX);
   if (name) return name;
   return cleanText(`${cleanText(room.preset ?? "", PRESET_MAX) || "room"} ${room.session_id.slice(-6)}`, NAME_MAX);
+}
+
+/** A member's latest progress note as one line: its payload's `note`, out of the untrusted envelope `bellman_rooms` puts it in. */
+export function noteLine(note: unknown): string {
+  const data = (note as { data?: unknown } | null)?.data;
+  const said = (data as { note?: unknown } | null)?.note ?? data;
+  return typeof said === "string" ? cleanText(said) : said == null ? "" : cleanText(JSON.stringify(said));
+}
+
+// ---------------------------------------------------------------------------
+// The canvas
+// ---------------------------------------------------------------------------
+
+/** A canvas item as the mod keeps it: the fields the Canvas tab draws, each string a peer wrote cleaned as it is drawn. */
+export interface CanvasItem {
+  kind: string;
+  title: string | null;
+  body: string | null;
+  blob: { name: string | null; bytes: number | null } | null;
+}
+
+/**
+ * The most of a canvas the mod keeps, in characters of its JSON: two and a half times the 100,000 characters of a
+ * tree's text the engine draws. An item past it could not be drawn even were every character before it one that JSON
+ * writes as two, so nothing the Canvas tab could show is let go.
+ */
+export const CANVAS_MAX = 250_000;
+
+/**
+ * The items of a door's canvas answer (`bellman_surface`'s; `surfaceItem` in src/projections.ts), each out of its
+ * envelope, as the mod keeps them: in the canvas's order while they fit in `CANVAS_MAX`, a body cleaned as a block and
+ * a title and a file's name as a line, as the Canvas tab draws them. A body as the server takes it runs to 8,000
+ * characters, and JSON writes a control character as six, so the answer itself can run to millions.
+ */
+export function canvasOf(answer: unknown): CanvasItem[] {
+  const listed = (answer as { surface?: { items?: unknown } } | null)?.surface?.items;
+  const items: CanvasItem[] = [];
+  let left = CANVAS_MAX;
+  for (const envelope of Array.isArray(listed) ? listed : []) {
+    const data = (envelope as { data?: unknown } | null)?.data;
+    if (typeof data !== "object" || data === null) continue;
+    const { kind, title, body, blob } = data as Record<string, unknown>;
+    const file = typeof blob === "object" && blob !== null ? (blob as { name?: unknown; bytes?: unknown }) : null;
+    const item: CanvasItem = {
+      kind: typeof kind === "string" ? kind : "",
+      title: typeof title === "string" ? cleanText(title) : null,
+      body: typeof body === "string" ? cleanBlock(body) : null,
+      blob: file && { name: typeof file.name === "string" ? cleanText(file.name, NAME_MAX) : null, bytes: typeof file.bytes === "number" ? file.bytes : null },
+    };
+    left -= JSON.stringify(item).length + 1;
+    if (left < 0) break;
+    items.push(item);
+  }
+  return items;
 }
 
 const GOLD = "#D9A521";

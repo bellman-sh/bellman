@@ -178,6 +178,11 @@ export type World = {
   origins: PromptOrigin[];
   toasts: string[];
   statuses: (string | undefined)[];
+  /**
+   * Every line the mod wrote to the log, in order. A write of the mod's state that the engine refuses, as it does one
+   * over its limit on a value, never reaches the state hooks: the mod's line saying it failed is where it shows.
+   */
+  logged: string[];
   opened: PaneOpenArgs[];
   closed: string[];
   /**
@@ -251,6 +256,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     origins: [],
     toasts: [],
     statuses: [],
+    logged: [],
     opened: [],
     closed: [],
     trail: [],
@@ -404,6 +410,10 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     w.toasts.push(e.text);
     return { value: undefined };
   });
+  on("ui.log", ($, e) => {
+    w.logged.push(e.text);
+    return { value: undefined };
+  });
   on("ui.status", ($, e) => {
     w.statuses.push(e.text);
     return { value: undefined };
@@ -428,6 +438,9 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
   await $.session.start({ cwd: "/work", surface: w.surfaces[0] ?? null, isInteractive: true });
   return w;
 }
+
+/** The mod's lines saying a write of its state was refused: none, while every value it keeps is within the engine's limit. */
+export const refusedWrites = (w: World): string[] => w.logged.filter((line) => line.includes("$.state.set"));
 
 /** One door poll: the clock moves on by the mod's `DOOR_POLL_MS`. */
 export const tick = (w: World): Promise<void> => w.clock.advance(DOOR_POLL_MS);

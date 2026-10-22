@@ -31,7 +31,7 @@ import { readCanvas, seatIn } from "./doors";
 import { markDrawn, markPaneWide, shownTab } from "./drawn";
 import { awaitingPerson, drawPane, message } from "./pane";
 import { personActed } from "./person";
-import { approved, doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
+import { approved, doors, layout, openedThrough, pending, request, room, rooms, seen, tab, wake } from "./state";
 
 /** Whether the terminal docks a pane, as the band last drawn saw it (`RenderViewport.isFullscreen`). */
 let isFullscreen: boolean | undefined;
@@ -70,18 +70,20 @@ function statusLine(list: readonly DoorView[]): string | undefined {
 }
 
 /**
- * Opens the room pane on `to`, wide, showing the room `pick` when the press names one. The person's press is behind
- * every call, so it is placed at any width, but only while the engine reads the open as the press's: an `$.ui.open`
- * made after an await is unasked (L13), and a pane the person has docked then ignores it. So the open is called before
- * the first await, the tab and the room are written while it is under way (the pane's drawing reads them, so it
- * redraws when the writes land), and all are awaited together.
+ * Opens the room pane on `to`, wide, showing the request `pick` and its room when the press names one. The person's
+ * press is behind every call, so it is placed at any width, but only while the engine reads the open as the press's:
+ * an `$.ui.open` made after an await is unasked (L13), and a pane the person has docked then ignores it. So the open
+ * is called before the first await, the tab, the room and the request are written while it is under way (the pane's
+ * drawing reads them, so it redraws when the writes land), and all are awaited together.
  */
-export async function openPane($: EngineInterface, to: Tab, pick?: string): Promise<void> {
+export async function openPane($: EngineInterface, to: Tab, pick?: { session_id: string; cursor: number }): Promise<void> {
   refused = false;
   await Promise.all([
     $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }),
     update($, tab, () => to),
-    ...(pick === undefined ? [] : [update($, room, () => pick)]),
+    ...(pick === undefined
+      ? []
+      : [update($, room, () => pick.session_id), update($, request, () => ({ session_id: pick.session_id, cursor: pick.cursor }))]),
   ]);
   if (to === "canvas") await readCanvas($);
 }
@@ -140,8 +142,8 @@ export type Shown = {
   unread: number;
   /** The action requests waiting on the person in every room of the session's seats: the pending ones not approved. */
   approve: number;
-  /** The room of the oldest of those, which the Approve count opens; null while none waits. */
-  approveIn: string | null;
+  /** The oldest of those, by its room and cursor, which the Approve count opens the pane on; null while none waits. */
+  approveFirst: { session_id: string; cursor: number } | null;
   paused: boolean;
 };
 
@@ -171,7 +173,7 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
       { sessionId: picked, seatMemberId: mine[0]!.member_id, openedThrough: (await read($, openedThrough))[picked] ?? -1 },
     ),
     approve: waiting.length,
-    approveIn: waiting[0]?.session_id ?? null,
+    approveFirst: waiting[0] === undefined ? null : { session_id: waiting[0].session_id, cursor: waiting[0].cursor },
     paused: (await read($, wake)).paused,
   };
 }
@@ -182,7 +184,7 @@ export type Pieces = ReturnType<typeof pieces>;
 /** The pieces the band, the sidebar and the room pane lay out differently. Every press is the person's, so each says so first. */
 function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
   const { Button, Select, Text } = ui;
-  const press = (to: Tab, pick?: string) => () => {
+  const press = (to: Tab, pick?: { session_id: string; cursor: number }) => () => {
     personActed();
     void openPane($, to, pick);
   };
@@ -221,8 +223,8 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
       // first row, a plain one, it drew "b: " and pushed that row out of line with the other three (L7).
       <Button key="open-log" label="Log" hotkey="b" onPress={press("log")} />,
       <Button key="open-canvas" label="Canvas" onPress={press("canvas")} />,
-      // Every room's count, and it opens the room that has waited longest.
-      s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve", s.approveIn ?? undefined)} />,
+      // Every room's count, and it opens the request that has waited longest, in its room.
+      s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve", s.approveFirst ?? undefined)} />,
     ],
     peers: s.peers.map((peer) => <Text wrap="truncate-end">{peer}</Text>),
     unread: s.unread > 0 && <Text color="claude">{`${s.unread} new`}</Text>,

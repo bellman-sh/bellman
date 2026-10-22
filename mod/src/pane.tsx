@@ -1,24 +1,25 @@
 /**
  * The room pane at full width (spec D5): a header, four tabs, and the tab shown. Log is the room's history, newest
  * last; Canvas its surface, drawn by kind; Members each member with role, presence and beat; Approve the action
- * requests waiting on the person, each drawn whole, every field Claude reads, with Approve and Deny after it. The Log's
- * row of a waiting request leads there with Review, so a request is approved only where it is seen in full. A request
- * the person approved keeps its place, and reads that it waits on Claude where the buttons were.
+ * requests waiting on the person, one at a time and the oldest first: who asks, what it asks drawn whole in a frame of
+ * its own, every field Claude reads, and Approve and Deny after it. The Log's row of a waiting request leads to it with
+ * Review, so a request is approved only where it is seen in full. A request the person approved keeps its place, and
+ * reads that it waits on Claude where the buttons were.
  *
  * Every string a peer controls reaches the screen cleaned: through `cleanText` or `cleanBlock`, through what
- * `pendingRequests` and `roomLabel` (src/mod/view.ts) cleaned already, and a canvas text's Markdown through
- * `safeLinks` as well. What reaches the model is `approvedText` and `declinedText` and nothing else: fixed text
- * around a room's id and a request's cursor, both server-made, and checked here.
+ * `pendingRequests`, `kept`, `canvasOf` and `roomLabel` (src/mod/view.ts) cleaned already, and a canvas text's Markdown
+ * through `safeLinks` as well. What reaches the model is `approvedText` and `declinedText` and nothing else: fixed
+ * text around a room's id and a request's cursor, both server-made, and checked here.
  */
 import { read, update } from "claude-code";
 import type { Elements, EngineInterface, RenderElement } from "claude-code";
-import { cleanBlock, cleanText, eventLine } from "../../src/door-protocol.js";
+import { cleanBlock, cleanText } from "../../src/door-protocol.js";
 import { approvalKey } from "../../src/mod/gate.js";
-import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, memberLine, safeLinks } from "../../src/mod/view.js";
-import type { DoorEvent, PendingRequest, RoomView, Tab } from "../types";
+import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, drawingOf, lineOf, memberLine, safeLinks } from "../../src/mod/view.js";
+import type { CanvasItem, KeptEvent, PendingRequest, RoomView, Tab } from "../types";
 import { decline, readCanvas, seatIn } from "./doors";
 import { personActed } from "./person";
-import { approved, canvas, doors, logs, pending, rooms, tab } from "./state";
+import { approved, canvas, doors, logs, pending, request, rooms, tab } from "./state";
 import type { Pieces, Shown } from "./view";
 
 /** A room's id as the server makes one (`qs_…`), and nothing a peer could slip a line break or an instruction into. */
@@ -137,13 +138,6 @@ function clock(at: string): string {
   return Number.isNaN(d.getTime()) ? "--:--" : `${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
-/** A member's latest progress note as one line: its payload's `note`, out of the untrusted envelope it came in. */
-function noteOf(note: unknown): string {
-  const data = (note as { data?: unknown } | null)?.data;
-  const said = (data as { note?: unknown } | null)?.note ?? data;
-  return typeof said === "string" ? cleanText(said) : said == null ? "" : cleanText(JSON.stringify(said));
-}
-
 /** The longest address a `Link` carries (`LinkProps.href`): a longer one would refuse the whole tree, so it is drawn as text. */
 const LINK_MAX = 2_048;
 
@@ -165,20 +159,10 @@ function webHref(body: string): string | null {
 const size = (bytes: number): string =>
   bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
-/** The fields of a canvas item the pane reads. A peer wrote them all, so each is checked where it is drawn. */
-type CanvasItem = { kind?: unknown; title?: unknown; body?: unknown; blob?: unknown };
-
-/** The items of the door's canvas answer, `bellman_surface`'s (`surfaceItem` in src/projections.ts), each out of its envelope. */
-function canvasItems(result: unknown): CanvasItem[] {
-  const items = (result as { surface?: { items?: unknown } } | null)?.surface?.items;
-  if (!Array.isArray(items)) return [];
-  return items.flatMap((envelope: unknown) => {
-    const data = (envelope as { data?: unknown } | null)?.data;
-    return typeof data === "object" && data !== null ? [data as CanvasItem] : [];
-  });
-}
-
-/** One canvas item by its kind, under its title; null for a kind the pane does not draw. */
+/**
+ * One canvas item by its kind, under its title; null for a kind the pane does not draw. `canvasOf` cleaned what a peer
+ * wrote as it kept it, and each string is cleaned again here, where it is drawn.
+ */
 function drawItem(ui: Elements["terminal"], item: CanvasItem): RenderElement | null {
   const { Box, Code, Link, Markdown, Text } = ui;
   const body = typeof item.body === "string" ? item.body : "";
@@ -229,13 +213,36 @@ function drawItem(ui: Elements["terminal"], item: CanvasItem): RenderElement | n
 const CHROME_ROWS = 2;
 
 /**
- * How much of the Approve tab's drawings it draws whole, all told. The engine draws the first 100,000 characters of a
- * tree's texts and no Button past them, so a drawing that runs past would take its own buttons and those of every
- * request after it; the rest of the 100,000 is the header's, the tabs' and each request's own line and buttons.
- * ponytail: a fixed share; a tab of hundreds of requests runs past it all the same, and then what the engine cuts has
- * no button, so nothing undrawn is approved.
+ * The longest drawing of a request the Approve tab draws whole. The engine draws the first 100,000 characters of a
+ * tree's texts and no Button past them, so a drawing that ran past would take its own buttons with it. The tab shows
+ * one request, and the rest of the 100,000 is the header's, the tabs' and the request's own lines and buttons, so a
+ * drawing past this is too long to show here whatever else waits, and it can only be denied.
+ * ponytail: a fixed share; a picker of hundreds of rooms in the header would leave the request less than it.
  */
 const DRAWINGS_MAX = 90_000;
+
+/**
+ * What each request asks as the Approve tab draws it, by its room and cursor: made once from its event, since
+ * `drawingOf` is the work of a whole payload, and let go once the request no longer waits. Null for one too long to
+ * draw whole here.
+ * ponytail: an entry for each waiting request the tab has shown; the shown one's alone, the day memory says so.
+ */
+const drawings = new Map<string, string | null>();
+
+/**
+ * What `r` asks, whole, from its event in the room's log (`log`), or null: it would not fit in `DRAWINGS_MAX`, or its
+ * payload was let go to keep `logs` within bounds (`fitLogs`, src/mod/view.ts), and either way it can only be denied.
+ */
+function drawingFor(r: PendingRequest, log: readonly KeptEvent[]): string | null {
+  const e = log.find((x) => x.cursor === r.cursor);
+  if (e === undefined || e.line !== undefined) return null;
+  const key = keyOf(r);
+  if (!drawings.has(key)) {
+    const { drawing, cut } = drawingOf(e.payload);
+    drawings.set(key, !cut && drawing.length <= DRAWINGS_MAX ? drawing : null);
+  }
+  return drawings.get(key) ?? null;
+}
 
 /**
  * The room pane drawn wide (view.tsx's `Pane` hook, at `COMPACT_BELOW` body columns or more), from what the band
@@ -254,8 +261,11 @@ export async function drawPane(
 ): Promise<RenderElement> {
   const { Box, Button, Text } = ui;
   const shown = await read($, tab);
-  const waiting = (await read($, pending))[s.picked] ?? [];
+  const held = await read($, pending);
+  const waiting = held[s.picked] ?? [];
   const given = await read($, approved);
+  const live = new Set(Object.values(held).flatMap((list) => list.map(keyOf)));
+  for (const key of drawings.keys()) if (!live.has(key)) drawings.delete(key);
   const act = (work: () => Promise<unknown>) => () => {
     personActed();
     work().catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
@@ -265,6 +275,8 @@ export async function drawPane(
   const waitsOnClaude = (r: PendingRequest) => given.includes(keyOf(r));
   const onClaude = () => <Text dimColor>approved · waiting for Claude</Text>;
   const denyIt = (r: PendingRequest) => <Button key={`deny-${r.cursor}`} label="Deny" onPress={act(() => deny($, r))} />;
+  const review = (r: PendingRequest) =>
+    act(() => Promise.all([update($, request, () => ({ session_id: r.session_id, cursor: r.cursor })), update($, tab, () => "approve" as const)]));
   const tabs: [Tab, string][] = [
     ["log", "Log"],
     ["canvas", "Canvas"],
@@ -275,7 +287,7 @@ export async function drawPane(
   let body: RenderElement[];
   if (shown === "log") {
     const open = new Map(waiting.map((r) => [r.cursor, r]));
-    const log: readonly DoorEvent[] = (await read($, logs))[s.picked] ?? [];
+    const log: readonly KeptEvent[] = (await read($, logs))[s.picked] ?? [];
     body =
       log.length === 0
         ? [<Text dimColor>Nothing in the room's log yet.</Text>]
@@ -284,17 +296,16 @@ export async function drawPane(
             // A row says only a line of what a request asks, so it is answered on the Approve tab, where all of it shows.
             return (
               <Box columnGap={1}>
-                <Text wrap="truncate-end">{`${clock(e.at)} ${cleanText(e.from_label, NAME_MAX)} ${eventLine(e)}`}</Text>
-                {r !== undefined &&
-                  (waitsOnClaude(r) ? onClaude() : <Button key={`review-${r.cursor}`} label="Review" onPress={act(() => turnTo($, "approve"))} />)}
+                <Text wrap="truncate-end">{`${clock(e.at)} ${cleanText(e.from_label, NAME_MAX)} ${cleanText(lineOf(e))}`}</Text>
+                {r !== undefined && (waitsOnClaude(r) ? onClaude() : <Button key={`review-${r.cursor}`} label="Review" onPress={review(r)} />)}
               </Box>
             );
           });
   } else if (shown === "canvas") {
-    const result = (await read($, canvas))[s.picked];
-    const items = canvasItems(result).flatMap((item) => drawItem(ui, item) ?? []);
+    const listed = (await read($, canvas))[s.picked];
+    const items = (listed ?? []).flatMap((item) => drawItem(ui, item) ?? []);
     body =
-      result === undefined
+      listed === undefined
         ? [<Text dimColor>Reading the canvas…</Text>]
         : items.length === 0
           ? [<Text dimColor>Nothing on the canvas.</Text>]
@@ -308,37 +319,59 @@ export async function drawPane(
         memberLine(m),
         mine.has(m.member_id) ? "you" : "",
         beat,
-        noteOf(m.beat.note),
+        cleanText(m.beat.note),
       ];
       return <Text wrap="truncate-end">{line.filter((part) => part !== "").join(" · ")}</Text>;
     });
+    // `rooms` keeps a room's first members (`MEMBERS_KEPT`, doors.ts): the rest are counted, so the list does not pass for all.
+    const more = (view?.active_members ?? 0) - (view?.members.length ?? 0);
+    if (more > 0) body.push(<Text dimColor>{`and ${more} more`}</Text>);
   } else {
     const now = await $.clock.now();
-    // Each request drawn whole, as plain text and not Markdown, since what is drawn is what Claude reads, and its
-    // buttons after it. One whose drawing was cut, or would not fit in what is left of `DRAWINGS_MAX`, is drawn for
-    // its Deny alone.
-    let left = DRAWINGS_MAX;
+    const chosen = await read($, request);
+    const indexOf = (pick: { session_id: string; cursor: number } | null): number =>
+      Math.max(0, waiting.findIndex((w) => w.session_id === pick?.session_id && w.cursor === pick?.cursor));
+    // The request the person turned to, while it waits; else the oldest. ‹ and › go round.
+    const at = indexOf(chosen);
+    const r = waiting[at];
+    const step = (by: number) =>
+      act(() =>
+        update($, request, (was) => {
+          const to = waiting[(indexOf(was) + by + waiting.length) % waiting.length]!;
+          return { session_id: to.session_id, cursor: to.cursor };
+        }),
+      );
+    // Drawn as plain text and not Markdown, since what is drawn is what Claude reads, and in a frame, so that no line of
+    // what a peer wrote can read as the tab's own or as another request. One too long to draw whole is drawn for its
+    // Deny alone.
+    const drawing = r === undefined ? null : drawingFor(r, (await read($, logs))[s.picked] ?? []);
     body =
-      waiting.length === 0
+      r === undefined
         ? [<Text dimColor>Nothing waits on you.</Text>]
-        : waiting.map((r) => {
-            const whole = !r.cut && r.drawing.length <= left;
-            if (whole) left -= r.drawing.length;
-            const minutes = Math.max(0, Math.ceil((r.expires_at - now) / 60_000));
-            return (
-              <Box flexDirection="column">
-                <Text wrap="truncate-end">{`${r.from_label} asks · ${minutes} min left`}</Text>
-                {whole && <Text wrap="wrap">{r.drawing}</Text>}
+        : [
+            <Box flexDirection="column">
+              {waiting.length > 1 && (
                 <Box columnGap={1}>
-                  {waitsOnClaude(r)
-                    ? onClaude()
-                    : whole
-                      ? [<Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />, denyIt(r)]
-                      : [<Text dimColor>too long to show in full here, so it can only be denied</Text>, denyIt(r)]}
+                  <Text>{`request ${at + 1} of ${waiting.length}`}</Text>
+                  <Button key="approve-prev" label="‹" onPress={step(-1)} />
+                  <Button key="approve-next" label="›" onPress={step(1)} />
                 </Box>
+              )}
+              <Text wrap="truncate-end">{`${r.from_label} asks · ${Math.max(0, Math.ceil((r.expires_at - now) / 60_000))} min left`}</Text>
+              {drawing !== null && (
+                <Box borderStyle="round" flexDirection="column">
+                  <Text wrap="wrap">{drawing}</Text>
+                </Box>
+              )}
+              <Box columnGap={1}>
+                {waitsOnClaude(r)
+                  ? onClaude()
+                  : drawing !== null
+                    ? [<Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />, denyIt(r)]
+                    : [<Text dimColor>too long to show in full here, so it can only be denied</Text>, denyIt(r)]}
               </Box>
-            );
-          });
+            </Box>,
+          ];
   }
 
   return (

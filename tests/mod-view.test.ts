@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { DoorEvent } from "../src/door-protocol.js";
-import { BELL_COLUMNS, BELL_ROWS, REQUEST_DRAWN_MAX, bellRows, chooseLayout, drawingOf, pendingRequests, roomLabel, safeLinks, sidebarMove, toastFor, unreadCount } from "../src/mod/view.js";
+import { eventLine, type DoorEvent } from "../src/door-protocol.js";
+import {
+  BELL_COLUMNS, BELL_ROWS, CANVAS_MAX, LOGS_MAX, REQUEST_DRAWN_MAX, bellRows, canvasOf, chooseLayout, drawingOf, fitLogs, kept, lineOf,
+  pendingRequests, roomLabel, safeLinks, sidebarMove, toastFor, unreadCount, type KeptEvent,
+} from "../src/mod/view.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, assertPayloadDepth } from "../src/payload.js";
 
 const seats = [{ session_id: "qs_room1", member_id: "m-me" }];
@@ -66,7 +69,7 @@ describe("pendingRequests", () => {
       ev({ cursor: 8, type: "action_request", from_member_id: "m-me", payload: { text: "mine" } }),
     ];
     expect(pendingRequests(log, { sessionId: "qs_room1", seatMemberId: "m-me", canRespond: true, now })).toEqual([
-      { session_id: "qs_room1", cursor: 5, from_label: "ada", drawing: "run smoke", cut: false, expires_at: Date.parse("2026-10-16T12:40:00.000Z") },
+      { session_id: "qs_room1", cursor: 5, from_label: "ada", expires_at: Date.parse("2026-10-16T12:40:00.000Z") },
     ]);
     expect(pendingRequests(log, { sessionId: "qs_room1", seatMemberId: "m-me", canRespond: false, now })).toEqual([]);
   });
@@ -158,7 +161,7 @@ describe("pendingRequests, more", () => {
   const now = Date.parse("2026-10-16T12:20:00.000Z");
   const asked = (cursor: number, at: string, over: Partial<DoorEvent> = {}) =>
     ev({ cursor, type: "action_request", at, payload: { text: "do it" }, ...over });
-  const cursors = (log: DoorEvent[]) => pendingRequests(log, { ...seat, now }).map((r) => r.cursor);
+  const cursors = (log: KeptEvent[]) => pendingRequests(log, { ...seat, now }).map((r) => r.cursor);
 
   it("lists a request until the instant it turns thirty minutes old", () => {
     const log = [asked(5, "2026-10-16T12:00:00.000Z")];
@@ -189,16 +192,26 @@ describe("pendingRequests, more", () => {
   it("lists a request seen through two bridges once", () => {
     expect(cursors([asked(5, "2026-10-16T12:10:00.000Z"), asked(5, "2026-10-16T12:10:00.000Z")])).toEqual([5]);
   });
-  it("cleans and cuts a hostile sender label, and draws a hostile request whole, every control spelled out", () => {
+  it("cleans and cuts a hostile sender label, and leaves what it asks to its drawing, every control spelled out", () => {
     const hostile = asked(5, "2026-10-16T12:10:00.000Z", {
       from_label: "\u{1b}[2Jada\n",
       payload: { text: "\u{1b}]0;title\u{7}run\nsmoke " + "z".repeat(10_000) },
     });
     const [request] = pendingRequests([hostile], { ...seat, now });
-    expect(request.from_label).toBe("ada");
-    expect(request.drawing).toBe("\\u{1b}]0;title\\u{7}run\nsmoke " + "z".repeat(10_000));
-    expect(request.cut).toBe(false);
-    expect(request.drawing).toMatch(NO_BLOCK_CONTROLS);
+    expect(request).toEqual({ session_id: "qs_room1", cursor: 5, from_label: "ada", expires_at: Date.parse("2026-10-16T12:40:00.000Z") });
+    const { drawing, cut } = drawingOf(hostile.payload);
+    expect(drawing).toBe("\\u{1b}]0;title\\u{7}run\nsmoke " + "z".repeat(10_000));
+    expect(cut).toBe(false);
+    expect(drawing).toMatch(NO_BLOCK_CONTROLS);
+  });
+  it("lists the same requests from events kept trimmed as from whole ones", () => {
+    const log = [
+      asked(5, "2026-10-16T12:10:00.000Z"),
+      asked(6, "2026-10-16T12:11:00.000Z"),
+      ev({ cursor: 7, type: "action_response", ref_id: "6", from_member_id: "m-rook", payload: { approved: false } }),
+    ];
+    expect(pendingRequests(log.map(kept), { ...seat, now })).toEqual(pendingRequests(log, { ...seat, now }));
+    expect(cursors(log.map(kept))).toEqual([5]);
   });
 });
 
@@ -272,6 +285,131 @@ describe("drawingOf, variation selectors", () => {
     expect(drawingOf({ text: `ok 😀${smuggled}` }).drawing).toBe(
       `ok 😀${[..."rm -rf ~"].map((c) => `\\u{${(0xe0100 + c.charCodeAt(0) - 16).toString(16)}}`).join("")}`,
     );
+  });
+});
+
+describe("kept, an event as the mod keeps it", () => {
+  it("lets go of the payload for the line the Log draws, the sender's label cleaned, and draws the same line", () => {
+    const e = ev({ cursor: 2, from_label: "\u{1b}[2Jada\n", payload: { text: "y".repeat(10_000) } });
+    const k = kept(e);
+    expect(k).toEqual({ session_id: "qs_room1", member_id: "m-me", cursor: 2, type: "message", from_member_id: "m-ada", from_label: "ada", ref_id: null, at: e.at, line: `${"y".repeat(199)}…` });
+    expect("payload" in k).toBe(false);
+    expect(lineOf(k)).toBe(lineOf(e));
+    // Trimmed once, as it was: kept again, it is the same event.
+    expect(kept(k)).toBe(k);
+  });
+
+  it("draws every kind of event trimmed as it draws it whole", () => {
+    const events = [
+      ev({ type: "member_joined", payload: { member: { room_role: "builder" } } }),
+      ev({ type: "member_evicted", payload: { label: "rook" } }),
+      ev({ type: "invite_issued", payload: { role: "auditor" } }),
+      ev({ type: "invite_revoked", payload: { roles: ["builder", "lead"] } }),
+      ev({ type: "action_response", ref_id: "5", payload: { approved: true } }),
+      ev({ type: "action_response", ref_id: "6", payload: { approved: false } }),
+      ev({ type: "surface", payload: { key: "plan", title: "The plan" } }),
+      ev({ type: "progress", payload: { note: "on step 2" } }),
+      ev({ type: "action_request", payload: { text: "deploy", why: "now" } }),
+      ev({ payload: "a string payload" }),
+    ];
+    for (const e of events) expect(lineOf(kept(e)), e.type).toBe(eventLine(e));
+  });
+
+  it("keeps an action_response's ref_id, which the server checked, and lets any other event's go", () => {
+    expect(kept(ev({ type: "action_response", ref_id: "5", payload: { approved: true } })).ref_id).toBe("5");
+    expect(kept(ev({ ref_id: "x".repeat(100_000) })).ref_id).toBeNull();
+  });
+
+  it("toasts a trimmed event by the line it was trimmed to", () => {
+    const joined = kept(ev({ cursor: 2, type: "member_joined", payload: { member: { room_role: "builder" } } }));
+    expect(toastFor([joined], p)?.text).toBe("ada in swarm room1: joined as builder");
+  });
+});
+
+describe("fitLogs, logs within its bounds", () => {
+  const at = (minute: number) => `2026-10-16T12:${String(minute).padStart(2, "0")}:00.000Z`;
+  const line = (room: string, cursor: number, minute: number): KeptEvent => kept(ev({ session_id: room, cursor, at: at(minute), payload: { text: `${room} ${cursor} ${"w".repeat(100)}` } }));
+  const request = (cursor: number, minute: number): KeptEvent => ev({ cursor, at: at(minute), type: "action_request", payload: { text: `${cursor} ${"q".repeat(1_000)}` } });
+  const cursorsOf = (byRoom: Record<string, KeptEvent[]>) => Object.fromEntries(Object.entries(byRoom).map(([id, list]) => [id, list.map((e) => e.cursor)]));
+  const none = () => false;
+
+  it("leaves logs as they are while they fit", () => {
+    const byRoom = { qs_a: [line("qs_a", 1, 1)] };
+    expect(fitLogs(byRoom, none)).toBe(byRoom);
+    expect(LOGS_MAX).toBe(1_000_000);
+  });
+
+  it("lets go of the oldest lines first, in every room, but each room's newest", () => {
+    const byRoom = { qs_a: [line("qs_a", 1, 1), line("qs_a", 2, 3), line("qs_a", 3, 5)], qs_b: [line("qs_b", 1, 2), line("qs_b", 2, 4)] };
+    const max = JSON.stringify(byRoom).length - 1;
+    const fitted = fitLogs(byRoom, none, max);
+    expect(cursorsOf(fitted)).toEqual({ qs_a: [2, 3], qs_b: [1, 2] });
+    // A room whose newest is older than another room's lines keeps it, and the newer line goes in its place.
+    const quiet = { qs_a: [line("qs_a", 1, 3), line("qs_a", 2, 4), line("qs_a", 3, 5)], qs_b: [line("qs_b", 1, 1), line("qs_b", 2, 2)] };
+    const two = JSON.stringify({ qs_a: quiet.qs_a.slice(1), qs_b: quiet.qs_b.slice(1) }).length;
+    expect(cursorsOf(fitLogs(quiet, none, two))).toEqual({ qs_a: [2, 3], qs_b: [2] });
+    // Exactly at the bound, nothing more goes.
+    const tight = fitLogs(byRoom, none, JSON.stringify({ qs_a: [byRoom.qs_a[2]], qs_b: [byRoom.qs_b[1]] }).length);
+    expect(cursorsOf(tight)).toEqual({ qs_a: [3], qs_b: [2] });
+  });
+
+  it("then lets go of the oldest waiting requests' payloads, each still listed, and then of whatever is left", () => {
+    const waiting = new Set([10, 11, 12]);
+    const isWaiting = (e: KeptEvent) => waiting.has(e.cursor);
+    const byRoom = { qs_room1: [line("qs_room1", 1, 1), request(10, 2), request(11, 3), request(12, 4), line("qs_room1", 13, 5)] };
+    // Room for two of the three requests whole, once the oldest line has gone.
+    const fitted = fitLogs(byRoom, isWaiting, JSON.stringify({ qs_room1: byRoom.qs_room1.slice(1) }).length - 600);
+    expect(cursorsOf(fitted)).toEqual({ qs_room1: [10, 11, 12, 13] });
+    expect(fitted.qs_room1!.map((e) => e.payload === undefined)).toEqual([true, false, false, true]);
+    expect(fitted.qs_room1![0]!.line).toBe(lineOf(byRoom.qs_room1[1]!));
+    // With room for almost nothing, the oldest go, whatever they are.
+    const last = fitLogs(byRoom, isWaiting, 400);
+    expect(cursorsOf(last)).toEqual({ qs_room1: [13] });
+  });
+
+  it("always ends within the bounds it is given", () => {
+    const byRoom = Object.fromEntries(
+      ["qs_a", "qs_b", "qs_c"].map((room, r) => [room, Array.from({ length: 20 }, (_, i) => (i % 3 === 0 ? request(i + 1, i + r) : line(room, i + 1, i + r)))]),
+    );
+    const isWaiting = (e: KeptEvent) => e.type === "action_request";
+    for (const max of [30, 500, 2_000, 5_000, 10_000, 20_000]) {
+      expect(JSON.stringify(fitLogs(structuredClone(byRoom), isWaiting, max)).length, String(max)).toBeLessThanOrEqual(Math.max(max, '{"qs_a":[],"qs_b":[],"qs_c":[]}'.length));
+    }
+  });
+});
+
+describe("canvasOf, a canvas as the mod keeps it", () => {
+  const item = (data: Record<string, unknown>) => ({ trust: "untrusted", origin: { memberId: "m-ada", label: "ada" }, data });
+
+  it("keeps the fields the Canvas tab draws, each string cleaned as it is drawn", () => {
+    const answer = {
+      session_id: "qs_room1",
+      room: { roles: { lead: { description: "d".repeat(10_000) } } },
+      surface: {
+        cursor: 3,
+        items: [
+          item({ key: "k", kind: "text", title: "\u{1b}[2Jtitle\n", body: "a\u{7}b\nc", ends: null, placement: { x: 1 }, blob: null, shape: null, cursor: 1, at: "x" }),
+          item({ key: "f", kind: "file", title: null, body: null, blob: { id: "a".repeat(32), name: "plan\u{1b}[2J.pdf", bytes: 1536, type: "application/pdf" } }),
+          "not an envelope",
+          item(null as unknown as Record<string, unknown>),
+        ],
+      },
+    };
+    expect(canvasOf(answer)).toEqual([
+      { kind: "text", title: "title", body: "ab\nc", blob: null },
+      { kind: "file", title: null, body: null, blob: { name: "plan.pdf", bytes: 1536 } },
+    ]);
+    for (const nothing of [null, 5, {}, { surface: { items: "x" } }]) expect(canvasOf(nothing)).toEqual([]);
+  });
+
+  it("keeps the first items within CANVAS_MAX, more than the engine can draw of them", () => {
+    // The largest canvas the server takes, in the characters JSON writes as two: 64 bodies of 8,000.
+    const body = '"'.repeat(8_000);
+    const items = canvasOf({ surface: { items: Array.from({ length: 64 }, (_, i) => item({ kind: "text", title: `t${i}`, body })) } });
+    expect(JSON.stringify(items).length).toBeLessThanOrEqual(CANVAS_MAX);
+    expect(items.map((i) => i.title)).toEqual(Array.from({ length: items.length }, (_, i) => `t${i}`));
+    // At least the 100,000 characters of a tree's text the engine draws.
+    expect(items.reduce((n, i) => n + (i.body?.length ?? 0), 0)).toBeGreaterThan(100_000);
   });
 });
 

@@ -12,8 +12,9 @@ import { startView, viewTick } from "./view";
 import { promptSubmitted, registerWake, turnEnded, turnStarted, wakeTick } from "./waking";
 
 // For the kit tests, which tick the mocked clock by the bundle's own intervals, hold what the mod opens to its
-// own widths, and compare what the gate says to the words it is meant to say (mod/tests/harness.ts).
-export { DOOR_POLL_MS, PANE_COLUMNS, PANE_ID, ROOMS_POLL_MS, SIDEBAR_COLUMNS } from "../../src/mod/view.js";
+// own widths and what it keeps to its own bounds, and compare what the gate says to the words it is meant to say
+// (mod/tests/harness.ts).
+export { CANVAS_MAX, DOOR_POLL_MS, LOGS_MAX, PANE_COLUMNS, PANE_ID, ROOMS_POLL_MS, SIDEBAR_COLUMNS } from "../../src/mod/view.js";
 export { GATE_REASON, approvalKey } from "../../src/mod/gate.js";
 export { APPROVALS_SECTION } from "./gate";
 export { approvedText, declinedText } from "./pane";

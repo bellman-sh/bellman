@@ -123,6 +123,11 @@ hosted room's month turn all stop a deprovisioned person within `ACCESS_TOKEN_TT
 stop one `require_sso` refuses. A deprovisioned person has no free account left under their SSO
 identity: the finding is the login, not only the org.
 
+The refusal applies to a subject the org's IdP minted, an `sso:` key of that org, and to no other key. A
+personal GitHub or Google account that an address linked to the org (a SCIM user whose key a sign-in
+claimed onto `github:` or `google:`) loses the org's grant on deactivation and keeps its sign-in, as free;
+otherwise an org could end a stranger's sign-in by pushing their address.
+
 ### D5. Provisioning
 
 `POST /scim/v2/Users` runs `createScimUser(orgId, { id, userName, externalId, active }, now, audit)`,
@@ -162,6 +167,9 @@ names nobody and has no rooms. For an `sso:`, `github:` or `google:` key the use
   room's orgs with the reason. Members stay, history stays readable, writes are refused, which is
   #47's rule and the first production use of it. Rooms from `sessionsCreatedBy`, called until it
   answers nothing, since it may return fewer than asked. A room frozen already is left as it is.
+- **The walk's scope follows the key.** Every room for a subject the org's IdP minted, whose sign-in the
+  deprovision ends outright; only rooms whose `orgId` is this org for a personal account an address linked,
+  which keeps its sign-in and its rooms elsewhere.
 - **Nothing is closed or transferred.** The frozen room may be the only place a piece of work lives.
   The org's admins see the `room_frozen` rows and the deactivation in the audit log, and can read a
   frozen room as they read a closed one. Transfer to another member is a follow-up; until then the

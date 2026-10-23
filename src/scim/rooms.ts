@@ -8,6 +8,18 @@ import { audit, evictionRequest } from "../rooms.js";
 import { JOINED_SCAN, isActiveMember, type BellmanStore } from "../store.js";
 import type { Identity } from "../types.js";
 
+/**
+ * Which rooms a walk touches (SCIM spec, D6): every room for a subject the org's IdP minted, whose sign-in the
+ * deprovision ends outright; only the org's own rooms for a personal account that an address linked to the org,
+ * which keeps its sign-in and its rooms elsewhere.
+ */
+export interface WalkScope {
+  orgId: string;
+  everywhere: boolean;
+}
+
+const inScope = (room: { orgId: string | null }, scope: WalkScope): boolean => scope.everywhere || room.orgId === scope.orgId;
+
 /** The identity SCIM acts as in a room's events and rows: the org's own connector. */
 export const scimIdentity = (orgId: string): Identity => ({ userId: "scim", orgId, plan: "team", role: "admin", label: "SCIM" });
 
@@ -33,11 +45,13 @@ async function createdRooms(store: BellmanStore, userId: string): Promise<string
  * every open room they created frozen, with a `room_frozen` row to its orgs. The removals first, since a room of
  * theirs that empties closes rather than freezes. A room already frozen is left as it is.
  */
-export async function departedRooms(store: BellmanStore, userId: string, actor: Identity, now: number): Promise<{ left: number; frozen: string[] }> {
+export async function departedRooms(
+  store: BellmanStore, userId: string, actor: Identity, now: number, scope: WalkScope,
+): Promise<{ left: number; frozen: string[] }> {
   let left = 0;
   for (const id of await store.sessionsJoinedBy(userId, JOINED_SCAN)) {
     const room = await store.getSession(id);
-    if (!room || room.closed) continue;
+    if (!room || room.closed || !inScope(room, scope)) continue;
     let removed = false;
     for (const m of room.members.filter((mm) => mm.userId === userId && isActiveMember(mm))) {
       const request = evictionRequest(room, m, actor, undefined, undefined, { frozen: "allow", byUserId: undefined, reason: "deprovisioned" });
@@ -51,7 +65,7 @@ export async function departedRooms(store: BellmanStore, userId: string, actor: 
   const frozen: string[] = [];
   for (const id of await createdRooms(store, userId)) {
     const room = await store.getSession(id);
-    if (!room || room.closed || room.frozenAt !== null) continue;
+    if (!room || room.closed || room.frozenAt !== null || !inScope(room, scope)) continue;
     await store.freezeSession(id, now);
     await audit(store, room, actor, "room_frozen", { reason: "deprovisioned", user_id: userId });
     frozen.push(id);
@@ -60,11 +74,11 @@ export async function departedRooms(store: BellmanStore, userId: string, actor: 
 }
 
 /** Every open, frozen room they created thawed, with a `room_thawed` row. Nothing freezes a room but a deprovision, so each is one it froze. */
-export async function thawRooms(store: BellmanStore, userId: string, actor: Identity, now: number): Promise<string[]> {
+export async function thawRooms(store: BellmanStore, userId: string, actor: Identity, now: number, scope: WalkScope): Promise<string[]> {
   const thawed: string[] = [];
   for (const id of await createdRooms(store, userId)) {
     const room = await store.getSession(id);
-    if (!room || room.closed || room.frozenAt === null) continue;
+    if (!room || room.closed || room.frozenAt === null || !inScope(room, scope)) continue;
     await store.freezeSession(id, null);
     await audit(store, room, actor, "room_thawed", { reason: "reprovisioned", user_id: userId, frozen_at: room.frozenAt, at: now });
     thawed.push(id);

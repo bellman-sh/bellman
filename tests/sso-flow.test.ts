@@ -316,6 +316,18 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
     expect(identity).toMatchObject({ orgId: "org_acme", plan: "team", role: "member" });
     expect(await plans.countOrgMembers("org_acme")).toBe(2);
   });
+
+  it("leaves a personal account that an address linked to the org signing in once deprovisioned, as free", async () => {
+    await plans.updateOrg("org_acme", { requireSso: false }, by);
+    await plans.createScimUser(pushed({ userName: "jesse@example.dev", key: "email:jesse@example.dev" }), scimIntent("org_acme"));
+    const linked = await signInThroughGithub();
+    expect(linked.identity).toMatchObject({ userId: "u_github_4242", orgId: "org_acme", plan: "team" });
+    expect(await plans.scimUserByKey("github:4242")).toMatchObject({ id: "x1" });
+    await plans.updateScimUser("org_acme", "x1", { active: false }, Date.now(), scimIntent("org_acme"));
+    const after = await signInThroughGithub();
+    expect(after.identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
+    expect((await refresh(linked.clientId, linked.tokens!.refresh_token)).status).toBe(200);
+  });
 });
 
 describe("the panel's sign-in through single sign-on", () => {

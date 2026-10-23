@@ -10,6 +10,7 @@
  */
 import { scimIntent } from "../grant-audit.js";
 import { sha256Base64url, randomId } from "../oauth/tokens.js";
+import { parseSsoKey } from "../oauth/providers.js";
 import { userIdForKey } from "../orgs.js";
 import { parseFilter } from "../scim/filter.js";
 import { applyOperations, readUser } from "../scim/patch.js";
@@ -162,6 +163,8 @@ export async function scimRoutes(request: Request, deps: ScimRouteDeps): Promise
 async function rooms(store: BellmanStore, orgId: string, was: ScimUser, user: ScimUser, now: number): Promise<void> {
   const userId = userIdForKey(user.key);
   if (userId === null) return;
-  if (!user.active) await departedRooms(store, userId, scimIdentity(orgId), now);
-  else if (!was.active) await thawRooms(store, userId, scimIdentity(orgId), now);
+  // Every room for the IdP's own subject, whose sign-in is over; the org's rooms alone for a personal account.
+  const scope = { orgId, everywhere: parseSsoKey(user.key)?.orgId === orgId };
+  if (!user.active) await departedRooms(store, userId, scimIdentity(orgId), now, scope);
+  else if (!was.active) await thawRooms(store, userId, scimIdentity(orgId), now, scope);
 }

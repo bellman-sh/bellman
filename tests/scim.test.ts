@@ -245,6 +245,21 @@ describe("a deprovision's rooms (SCIM spec, D6, D7)", () => {
     expect((await store.getSession("qs_joined"))!.members.map((m) => m.memberId)).toEqual(["m_al"]);
   });
 
+  it("touches only the org's rooms for a personal account an address linked, and never its sign-in", async () => {
+    const { body } = await push("cy@acme.test");
+    await store.moveGrant("email:cy@acme.test", "github:555");
+    const cy = (roomRole: string) => member({ memberId: "m_cy", userId: "u_github_555", label: "cy@acme.test", orgId: "org_acme", roomRole });
+    await store.createSession(session({ id: "qs_org", createdBy: "u_github_1", orgId: "org_acme", members: [al("peer_a"), cy("peer_b")] }));
+    await store.createSession(session({ id: "qs_org_mine", createdBy: "u_github_555", orgId: "org_acme", members: [cy("peer_a"), al("peer_b")] }));
+    await store.createSession(session({ id: "qs_personal", createdBy: "u_github_555", orgId: null, members: [{ ...cy("peer_a"), orgId: null }, { ...al("peer_b"), orgId: null }] }));
+    expect((await patch(body.id, [{ op: "replace", value: { active: false } }]))!.status).toBe(200);
+    expect((await store.getSession("qs_org"))!.members.map((m) => m.memberId)).toEqual(["m_al"]);
+    expect((await store.getSession("qs_org_mine"))!.frozenAt).not.toBeNull();
+    const personal = (await store.getSession("qs_personal"))!;
+    expect(personal.frozenAt).toBeNull();
+    expect(personal.members.map((m) => m.memberId)).toEqual(["m_cy", "m_al"]);
+  });
+
   it("an address nobody claimed has no rooms", async () => {
     const { body } = await push("cy@acme.test");
     expect((await patch(body.id, [{ op: "replace", value: { active: false } }]))!.status).toBe(200);

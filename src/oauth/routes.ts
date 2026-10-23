@@ -8,7 +8,7 @@ import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userI
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
 import type { Identity, Org, Plan, PlanGrant } from "../types.js";
-import {
+import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
@@ -161,10 +161,14 @@ async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys
   if (!plans) return null;
   // A person the org's identity provider deprovisioned (SCIM spec, D4): one read per stable key, here so that a
   // token refresh, a panel session's re-check and a hosted room's month turn all stop them, as the switch stops
-  // its people. Before the exemption below: the subject the IdP deprovisioned is an `sso:` key.
+  // its people. Before the exemption below: the subject the IdP deprovisioned is an `sso:` key. Only that key: a
+  // personal GitHub or Google account that an address linked to the org loses the org's grant and nothing else,
+  // or an org could end a stranger's sign-in by pushing their address.
   for (const key of grantKeys(keys)) {
     const managed = await plans.scimUserByKey(key);
-    if (managed && !managed.active) return new AccessRemoved((await plans.getOrg(managed.orgId))?.name ?? managed.orgId);
+    if (managed && !managed.active && parseSsoKey(key)?.orgId === managed.orgId) {
+      return new AccessRemoved((await plans.getOrg(managed.orgId))?.name ?? managed.orgId);
+    }
   }
   if (keys.some((key) => key.startsWith("sso:"))) return null;
   const orgIds = new Set<string>();

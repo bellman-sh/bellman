@@ -10,7 +10,7 @@
  * `clearSilence` in store.ts rather than heartbeat.ts.
  */
 import { z } from "zod";
-import type { SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
+import type { ApprovedBy, SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
@@ -60,11 +60,16 @@ export type SurfaceWrite = { key: string; item: SurfaceItem | null };
  * `createdAt` is stamped from the event on a key's first write and carried over by `createdAtOf` on every
  * edit, so a row from before the field keeps its `at`; a removal leaves no row, so a key written again finds
  * none and is stamped afresh.
+ *
+ * `approvedBy` is stamped beside the author when the append carries one (topic rooms spec, D2). The row is
+ * built from the item and the event and never from `existing`, so a write without an approver stores a row
+ * without one: an edit does not keep the name of a member who approved the words it replaced (R20).
  */
 export function applySurfaceWrite(
   existing: SurfaceRow | undefined,
   event: SessionEvent,
   write: SurfaceWrite,
+  approvedBy?: ApprovedBy,
 ): SurfaceRow | "remove" | null {
   if (existing !== undefined && existing.cursor >= event.cursor) return null;
   if (write.item === null) return existing === undefined ? null : "remove";
@@ -75,6 +80,7 @@ export function applySurfaceWrite(
     createdAt: existing === undefined ? event.at : createdAtOf(existing),
     byMemberId: event.fromMemberId,
     byLabel: event.fromLabel,
+    ...(approvedBy === undefined ? {} : { approvedBy }),
   };
 }
 
@@ -160,7 +166,7 @@ const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape })
  * The blob a `file`, an `image` or an `html` item names (#183, D5): the id and nothing else.
  * `bytes`, `type` and `name` are the server's to set from the object, so an item
  * sent back as it was read is refused for them until the sender takes them off,
- * as it is for `cursor`, `at`, `created_at` and `changed_at`.
+ * as it is for `cursor`, `at`, `created_at`, `changed_at` and `approved_by`.
  */
 const BlobShape = z.strictObject({
   id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
@@ -203,9 +209,9 @@ const boundedText = (max: number) =>
 
 /**
  * An item as the wire carries it. Strict, so an unknown field is refused rather
- * than dropped: `cursor`, `at`, `created_at` and `changed_at` are the server's to
- * set, and an item sent back as it was read is refused for them until the sender
- * takes them off.
+ * than dropped: `cursor`, `at`, `created_at`, `changed_at` and `approved_by` are the
+ * server's to set, and an item sent back as it was read is refused for them until the
+ * sender takes them off.
  *
  * `null` is absence, for the six fields a read spells that way: an item as a
  * member reads it carries `null` for each it left out, and read, edit, send back

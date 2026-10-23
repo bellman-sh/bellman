@@ -289,7 +289,7 @@ async function extraRows(
   let surfaceCursor = s.surfaceCursor ?? 0;
   if (extras.surface !== undefined) {
     const key = surfaceKey(extras.surface.key);
-    const verdict = applySurfaceWrite(await txn.get<SurfaceRow>(key), event, extras.surface);
+    const verdict = applySurfaceWrite(await txn.get<SurfaceRow>(key), event, extras.surface, extras.approvedBy);
     if (verdict === "remove") deletes.push(key);
     else if (verdict !== null) puts[key] = verdict;
     if (verdict !== null) surfaceCursor = Math.max(surfaceCursor, event.cursor);

@@ -156,6 +156,23 @@ describe("GET /public/rooms/:id/surface", () => {
       vi.useRealTimers();
     }
   });
+
+  // Topic rooms spec, section 2 and R20: the approver is named as the author is, by the public name rule.
+  it("names a card's approver by number, as it names its author", async () => {
+    const item = { key: "plan", kind: "text" as const, title: "The plan", body: "hello", ends: null, placement: null, blob: null, shape: null };
+    await store.appendEvent(
+      PUB,
+      { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: "plan", item }, approvedBy: { memberId: "m_peer", label: "peer@codenerd" } },
+    );
+    const { items } = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as unknown as {
+      items: { origin: { label: string }; data: { approved_by: { member_id: string; label: string } | null } }[];
+    };
+    expect(items[0].origin.label).toBe("member 1");
+    expect(items[0].data.approved_by).toEqual({ member_id: "m_peer", label: "member 2" });
+    // The sign-in label is nowhere in what a reader gets, whichever key a later change files the approver under.
+    expect(JSON.stringify(items)).not.toContain("peer@codenerd");
+  });
 });
 
 describe("GET /public/rooms/:id/events", () => {

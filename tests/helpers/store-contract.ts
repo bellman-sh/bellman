@@ -2763,6 +2763,44 @@ export function describeStoreContract(
         expect(await cursorOf(s.id)).toBe(second.cursor);
       });
 
+      // Topic rooms spec, D2, in both stores: the approver rides the append beside the write.
+      it("keeps who approved a row beside who wrote it, and a later write without an approver drops it", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const approver = { memberId: "m_maint", label: "maint@codenerd" };
+
+        const approved = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() }, approvedBy: approver }))!;
+        expect((await store.surfaceOf(s.id))[0]).toMatchObject({ cursor: approved.cursor, byMemberId: "m_creator", approvedBy: approver });
+
+        await store.appendEvent(s.id, wrote(plan("revised")), { surface: { key: "plan", item: plan("revised") } });
+        expect("approvedBy" in (await store.surfaceOf(s.id))[0]).toBe(false);
+      });
+
+      // `approvedBy` rides with `surface`, and a replay applies no surface write (see the replay cases below), so in
+      // both stores the row keeps what the first append stamped and a key removed since stays removed.
+      it("keeps the first approver when a keyed write is replayed with another, and puts nothing back once the key is removed", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = { memberId: "m_maint", label: "maint@codenerd" };
+        const other = { memberId: "m_other", label: "other@codenerd" };
+        const send = (approvedBy: typeof first) =>
+          store.appendEventOnce(s.id, wrote(), "sf-approve-1", { surface: { key: "plan", item: plan() }, approvedBy });
+
+        const sent = await send(first);
+        if (sent.outcome !== "appended") throw new Error(`first write said ${sent.outcome}`);
+
+        const retry = await send(other);
+        expect(retry.outcome).toBe("replayed");
+        expect((await store.surfaceOf(s.id))[0]).toMatchObject({ cursor: sent.event.cursor, approvedBy: first });
+
+        const gone = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        const again = await send(other);
+        expect(again.outcome).toBe("replayed");
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id), "the replay moved nothing").toBe(gone.cursor);
+        expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
+      });
+
       // Room pages spec, D4, in both stores: the time the page orders and dates a post by.
       it("stamps when a key was first written, keeps it across edits, and starts over when the key is removed and written again", async () => {
         const s = session({});

@@ -1,5 +1,5 @@
 import type {
-  AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
+  AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
@@ -934,6 +934,13 @@ export interface AppendExtras {
    * before the event is built, and neither does it on a replay.
    */
   surface?: SurfaceWrite;
+  /**
+   * The member whose approval put this version on the surface, or who restored it (topic rooms spec, D2 and
+   * D5), stamped on the row the `surface` write stores. It is read with `surface` and so, like `surface`, NOT
+   * applied on an idempotent replay: the row keeps what the first append stamped. A `surface` write without
+   * one stores a row without one, whatever the key held before (R20).
+   */
+  approvedBy?: ApprovedBy;
 }
 
 /**
@@ -2714,7 +2721,7 @@ export class MemoryStore implements BellmanStore {
     }
     if (extras.surface !== undefined) {
       const rows = this.surfaces.get(s.id) ?? new Map<string, SurfaceRow>();
-      const verdict = applySurfaceWrite(rows.get(extras.surface.key), event, extras.surface);
+      const verdict = applySurfaceWrite(rows.get(extras.surface.key), event, extras.surface, extras.approvedBy);
       if (verdict !== null) {
         // Copied in, as the event is in `appendNow`: the item holds objects of its
         // own (`placement`, `ends`), and storing the caller's would let a caller

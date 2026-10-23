@@ -437,6 +437,10 @@ export function surfaceItem(r: SurfaceRow) {
       // `at` stays beside them for the readers that have it (R3): it is `changed_at` under its older name.
       created_at: new Date(createdAtOf(r)).toISOString(),
       changed_at: new Date(r.at).toISOString(),
+      // Topic rooms spec, D2 and R20: who approved this version, named by label as the origin names the author.
+      // `label` is the key the public routes rename to `member N`, so a reader outside the room never gets the
+      // sign-in. `null` for a row nobody approved, as `blob` and `shape` read for a row from before them.
+      approved_by: r.approvedBy === undefined ? null : { member_id: r.approvedBy.memberId, label: r.approvedBy.label },
     },
   );
 }

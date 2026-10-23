@@ -497,6 +497,25 @@ describe("GET /rooms/:id/surface", () => {
     expect(items[0].data.changed_at).toBe(items[0].data.at);
   });
 
+  // Topic rooms spec, D2 and R20: a member reads the approver by the label the roster holds, and a direct write to the key drops it.
+  it("reads a card's approver by label for a member, and a direct write to the key drops it", async () => {
+    const item = { key: "plan", kind: "text" as const, title: null, body: "hello", ends: null, placement: null, blob: null, shape: null };
+    await store.appendEvent(
+      ROOM,
+      { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: "plan", item }, approvedBy: { memberId: "m_peer", label: "peer@codenerd" } },
+    );
+    const approverRead = async () => {
+      const { items } = (await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))) as unknown as { items: { data: Record<string, unknown> }[] };
+      return items[0].data.approved_by;
+    };
+    expect(await approverRead()).toEqual({ member_id: "m_peer", label: "peer@codenerd" });
+
+    const edited = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method: "PUT", body: { kind: "text", body: "edited by hand" } }))!;
+    expect(edited.status, await edited.clone().text()).toBe(200);
+    expect(await approverRead()).toBeNull();
+  });
+
   it("answers 304 from the record alone when If-None-Match names the cursor, and 200 once a write moves it", async () => {
     const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
     const reads = { n: 0 };
@@ -807,6 +826,17 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(res.status, field).toBe(400);
       expect(String((await bodyOf(res)).error_description), field).toContain(field);
     }
+  });
+
+  // Topic rooms spec, R20: read, edit, send back. The server's approver is refused by name, as cursor and at are.
+  // This passes before the change too: it pins the refusal the strict shape already gives.
+  it("refuses an item sent back with approved_by, naming the field, and writes nothing", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, {
+      method: "PUT", body: { kind: "text", body: "hello", approved_by: { member_id: "m_peer", label: "peer@codenerd" } },
+    }))!;
+    expect(res.status).toBe(400);
+    expect(String((await bodyOf(res)).error_description)).toContain("approved_by");
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
   });
 
   it("refuses a body whose key disagrees with the path, and accepts one that agrees", async () => {

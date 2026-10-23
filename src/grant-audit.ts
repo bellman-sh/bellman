@@ -160,3 +160,11 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
   if (Object.keys(changed).length === 0) return [];
   return [row("org_updated", { ...changed, ...intent.detail })];
 }
+
+/** What an org's IdP and domain changes record (SSO spec, D9, D11): one row each, under `org:<orgId>`, the org's own affair. */
+export type OrgEvent = "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released";
+
+export function orgEventEntry(orgId: string, action: OrgEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
+  return auditRow(orgId, [orgId], { at: now, sessionId: `org:${orgId}`, action, roomName: null, detail: { ...detail, ...intent.detail } },
+    { userId: intent.actorUserId, label: intent.actorLabel ?? null, orgId: intent.actorOrgId ?? null });
+}

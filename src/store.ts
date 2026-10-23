@@ -1,7 +1,7 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
-  Org, OrgPatch,
+  Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -16,7 +16,7 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent, orgAuditEntries } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -1732,6 +1732,37 @@ export interface BellmanStore {
    */
   deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased">;
 
+  /**
+   * An org's identity provider (SSO spec, D9), kept apart from the record under its own key. The
+   * secret arrives sealed and is stored as given. `missing` for an org with no record. Records
+   * `idp_configured` with the issuer.
+   */
+  putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing">;
+  getOrgIdp(orgId: string): Promise<OrgIdp | undefined>;
+  /** Records `idp_removed`; `missing` when there was none. */
+  deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing">;
+  /**
+   * A claim on the record (D11): `{ domain, token, verifiedAt: null }`, routing nothing until it is
+   * verified. `exists` when this org already claims it, the token kept; `missing` for no record.
+   */
+  claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing">;
+  /**
+   * ONE operation (D11): `unknown` when the org has no such claim; `taken` when the index names
+   * another org, the claim left unverified; otherwise the claim is marked (its first time kept)
+   * and the index written. `domain_verified` is recorded on the first verification only.
+   */
+  verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown">;
+  /** Drops the claim, and the index row when it is this org's. `unknown` when there is no claim. */
+  releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown">;
+  /** The org a verified domain routes a sign-in to (D12), and nothing for a claimed one. */
+  orgForDomain(domain: string): Promise<string | undefined>;
+  /**
+   * The seat an SSO sign-in takes on first use (D13), ONE operation: `exists` when the key already
+   * holds a live grant (an sso key names its org, so that grant is this org's), `full` at the seats,
+   * `no_org` for no record, else a team member grant from `sso` with its `plan_granted` row.
+   */
+  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
+
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
@@ -1802,6 +1833,10 @@ export class MemoryStore implements BellmanStore {
   private grants = new Map<string, PlanGrant>();
   /** The org records (orgs spec, D1), by id. Members are the grants above that name one. */
   private orgs = new Map<string, Org>();
+  /** Each org's IdP (SSO spec, D9), apart from its record. */
+  private idps = new Map<string, OrgIdp>();
+  /** The one index a verified domain writes (D11): domain to org. */
+  private domainIndex = new Map<string, string>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -3163,6 +3198,71 @@ export class MemoryStore implements BellmanStore {
     this.orgs.set(orgId, detach(next));
     this.recordAudit(orgAuditEntries(previous, next, audit, Date.now()));
     return "updated";
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    if (!this.orgs.has(orgId)) return "missing";
+    this.idps.set(orgId, detach(idp));
+    this.recordAudit([orgEventEntry(orgId, "idp_configured", { issuer: idp.issuer }, audit, Date.now())]);
+    return "written";
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    const idp = this.idps.get(orgId);
+    return idp && detach(idp);
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    if (!this.idps.delete(orgId)) return "missing";
+    this.recordAudit([orgEventEntry(orgId, "idp_removed", {}, audit, Date.now())]);
+    return "deleted";
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    const org = this.orgs.get(orgId);
+    if (!org) return "missing";
+    if (org.domains.some((d) => d.domain === domain)) return "exists";
+    this.orgs.set(orgId, { ...org, domains: [...org.domains, { domain, token, verifiedAt: null }] });
+    this.recordAudit([orgEventEntry(orgId, "domain_claimed", { domain }, audit, now)]);
+    return "claimed";
+  }
+
+  /** Synchronous throughout, as the guarded grant writes are: the index read and the claim's write must not be split. */
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    const org = this.orgs.get(orgId);
+    const claim = org?.domains.find((d) => d.domain === domain);
+    if (!org || !claim) return "unknown";
+    const holder = this.domainIndex.get(domain);
+    if (holder !== undefined && holder !== orgId) return "taken";
+    this.domainIndex.set(domain, orgId);
+    if (claim.verifiedAt !== null) return "verified";
+    this.orgs.set(orgId, { ...org, domains: org.domains.map((d) => (d.domain === domain ? { ...d, verifiedAt: now } : d)) });
+    this.recordAudit([orgEventEntry(orgId, "domain_verified", { domain }, audit, now)]);
+    return "verified";
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    const org = this.orgs.get(orgId);
+    if (!org || !org.domains.some((d) => d.domain === domain)) return "unknown";
+    this.orgs.set(orgId, { ...org, domains: org.domains.filter((d) => d.domain !== domain) });
+    if (this.domainIndex.get(domain) === orgId) this.domainIndex.delete(domain);
+    this.recordAudit([orgEventEntry(orgId, "domain_released", { domain }, audit, Date.now())]);
+    return "released";
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.domainIndex.get(domain);
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    const org = this.orgs.get(orgId);
+    if (!org) return "no_org";
+    if (this.liveGrant(key)) return "exists";
+    if (this.liveMembers(orgId) >= org.seats) return "full";
+    const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
+    this.grants.set(key, detach(grant));
+    this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
+    return "written";
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

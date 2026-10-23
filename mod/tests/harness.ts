@@ -336,10 +336,20 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
         : next(e),
   );
 
-  // The engine's permission verdict: every call put to the person, as one no rule allows is. The kit raises no
-  // `tool.check` for a plugin's own `$.mcp.call`, where the engine does, so the mod's allow of its own calls
-  // (register.tsx) shows only in a real session; here, a test's `$.tool.check`, the engine's own, reaches this.
-  on("tool.check", ($, e) => ({ decision: "ask", reason: `the person is asked about ${e.tool}` }));
+  // The engine's permission verdict, for a person who allowed Claude's own bellman_send (on any server) and Bash, the
+  // calls the hook above answers. From 2.1.307 the kit checks a test's `$.tool.call` as a session checks the model's
+  // (2.1.305's raised no check there), and an `ask` with nobody to ask is a denial. Only that call is allowed: a real
+  // call, which carries a `tool_use_id` where a `$.tool.check` query does not, and which the engine raised
+  // (`next.origin`, `engine` for a test's `$`), where a plugin's own `$.tool.call` names the plugin; a check with no
+  // `tool_use_id` never reads `next.origin`. Everything else is put to the person, as one no rule allows is. The kit
+  // raises no `tool.check` for a plugin's own `$.mcp.call`, where the engine does, so the mod's allow of its own calls
+  // (register.tsx) shows only in a real session; here, a test's `$.tool.check`, the engine's own, reaches this and is
+  // asked.
+  on("tool.check", ($, e, next) =>
+    (e.tool === "Bash" || e.tool.endsWith("__bellman_send")) && e.tool_use_id !== undefined && next.origin.plugin === "engine"
+      ? { decision: "allow", reason: `the person allowed ${e.tool}` }
+      : { decision: "ask", reason: `the person is asked about ${e.tool}` },
+  );
 
   // The engine's own sections, which the mod adds to and never replaces.
   on("prompt.compose", () => ({ sections: [{ id: "intro", text: "You are Claude Code.", scope: "shared" }] }));

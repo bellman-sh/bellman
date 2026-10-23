@@ -215,6 +215,21 @@ export function describeStoreContract(
       });
     });
 
+    // Room pages spec, D3: how a public room opens, on its record beside its name.
+    it("writes how a public room opens on its record and nothing else, reads the canvas for one never set, and leaves a room that is not there not there", async () => {
+      // Named, so a write that touches `publicName` shows in the whole-record comparison below.
+      const s = session({ id: "qs_viewed", manifest: roomManifest({ public: true }), publicName: "viewed-room" });
+      await store.createSession(s);
+      const before = (await store.getSession(s.id))!;
+      expect(before.publicView).toBe("canvas");
+      await store.setPublicView(s.id, "page");
+      expect(await store.getSession(s.id)).toEqual({ ...before, publicView: "page" });
+      await store.setPublicView(s.id, "canvas");
+      expect((await store.getSession(s.id))?.publicView).toBe("canvas");
+      await store.setPublicView("qs_nope", "page");
+      expect(await store.getSession("qs_nope")).toBeUndefined();
+    });
+
     it("returns undefined for an unknown session", async () => {
       expect((await store.getSession("qs_nope"))).toBeUndefined();
     });
@@ -2697,7 +2712,7 @@ export function describeStoreContract(
         const event = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
 
         expect(await store.surfaceOf(s.id)).toEqual([
-          { ...plan(), cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+          { ...plan(), cursor: event.cursor, at: event.at, createdAt: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
         ]);
         expect(await cursorOf(s.id)).toBe(event.cursor);
       });
@@ -2716,7 +2731,7 @@ export function describeStoreContract(
         await store.appendEvent(s.id, wrote(plan()), { surface: { key: "plan", item: plan() } });
 
         expect(await store.surfaceOf(s.id)).toEqual([
-          { ...box, cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+          { ...box, cursor: event.cursor, at: event.at, createdAt: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
           expect.objectContaining({ key: "plan", shape: null }),
         ]);
       });
@@ -2743,6 +2758,29 @@ export function describeStoreContract(
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({ body: "revised", cursor: second.cursor });
         expect(await cursorOf(s.id)).toBe(second.cursor);
+      });
+
+      // Room pages spec, D4, in both stores: the time the page orders and dates a post by.
+      it("stamps when a key was first written, keeps it across edits, and starts over when the key is removed and written again", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
+        vi.advanceTimersByTime(60_000);
+        const edit = (await store.appendEvent(s.id, wrote(plan("revised")), { surface: { key: "plan", item: plan("revised") } }))!;
+        expect(edit.at).toBeGreaterThan(first.at);
+        expect(await store.surfaceOf(s.id)).toEqual([expect.objectContaining({ createdAt: first.at, at: edit.at })]);
+
+        // A second edit reads the row the first edit left, whose `at` has moved on.
+        vi.advanceTimersByTime(60_000);
+        const second = (await store.appendEvent(s.id, wrote(plan("revised again")), { surface: { key: "plan", item: plan("revised again") } }))!;
+        expect(await store.surfaceOf(s.id)).toEqual([expect.objectContaining({ createdAt: first.at, at: second.at })]);
+
+        vi.advanceTimersByTime(60_000);
+        await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } });
+        vi.advanceTimersByTime(60_000);
+        const again = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
+        expect(again.at).toBeGreaterThan(edit.at);
+        expect(await store.surfaceOf(s.id)).toEqual([expect.objectContaining({ createdAt: again.at, at: again.at })]);
       });
 
       it("sorts rows by key", async () => {

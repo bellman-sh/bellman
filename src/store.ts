@@ -1331,6 +1331,12 @@ export interface BellmanStore {
    */
   publicNameEntry(name: string): Promise<PublicNameEntry | null>;
   /**
+   * The first `limit` entries of the public name index, by name: the rooms that may hold a name
+   * (public names spec, D5). Hints, as `publicNameEntry` is: a reader checks each room's record.
+   * The only listing of public rooms there is: a room public by its id alone is in no index.
+   */
+  publicNameEntries(limit: number): Promise<{ name: string; entry: PublicNameEntry }[]>;
+  /**
    * Set `name`'s entry to `entry` if it is still `expected` (null for no entry), compared whole and in
    * one step, so of two claims that read the same entry exactly one wins. True when this one did.
    */
@@ -2618,6 +2624,10 @@ export class MemoryStore implements BellmanStore {
   async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
     const entry = this.byPublicName.get(name);
     return entry ? { ...entry } : null;
+  }
+
+  async publicNameEntries(limit: number): Promise<{ name: string; entry: PublicNameEntry }[]> {
+    return [...this.byPublicName].sort(([a], [b]) => (a < b ? -1 : 1)).slice(0, limit).map(([name, entry]) => ({ name, entry: { ...entry } }));
   }
 
   async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {

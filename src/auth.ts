@@ -69,6 +69,27 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
 };
 
+/** The plans on sale, cheapest first, and the Payment Link that sells each. Max joins when it sells (#18). */
+const ON_SALE: readonly [Plan, string][] = [["pro", "pro_monthly"], ["team", "team_seat_monthly"]];
+
+/** Where this server sells plans: its origin, which serves /upgrade/<link>, and its configured Payment Links. */
+export interface UpgradeLinks { origin: string; paymentLinks: Record<string, string> }
+
+/**
+ * The sentence a plan refusal ends with (#203): where to buy the cheapest plan on sale whose
+ * entitlements pass `need`. It rides in the refusal's text, so every client shows it unchanged.
+ * Empty when no plan on sale passes, or this server has no Payment Link for it (self-hosted
+ * without billing), so the refusal reads as it did.
+ */
+export function upgradeHint(shop: UpgradeLinks | undefined, need: (e: Entitlements) => boolean): string {
+  for (const [plan, link] of ON_SALE) {
+    if (shop && need(ENTITLEMENTS[plan]) && Object.hasOwn(shop.paymentLinks, link)) {
+      return ` Upgrade to ${plan}: ${shop.origin}/upgrade/${link}`;
+    }
+  }
+  return "";
+}
+
 /**
  * Identity resolution for static bearer keys: the operator's BELLMAN_KEYS map,
  * or the dev table below when no map is set. The Worker never calls

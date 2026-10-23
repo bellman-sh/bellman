@@ -8,7 +8,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { resolveIdentity } from "../../src/auth.js";
+import { resolveIdentity, type UpgradeLinks } from "../../src/auth.js";
 import { buildServer } from "../../src/server.js";
 import { MemoryStore, type BellmanStore } from "../../src/store.js";
 import { MemoryBlobStore, type BlobStore } from "../../src/blobs.js";
@@ -71,17 +71,20 @@ export class Harness {
   private readonly hostedSeat: boolean;
   /** What a report's email goes through (`bellman_report`); a test passes one that records, and none means the server's own default. */
   private readonly mailReport: ReportMailer | undefined;
+  /** Where this server sells plans (#203); none means a server with no Payment Links, as self-hosted. */
+  private readonly upgrade: UpgradeLinks | undefined;
   private readonly peers: Peer[] = [];
 
   constructor(
     store: BellmanStore = new MemoryStore(),
     blobs: BlobStore = new MemoryBlobStore(),
-    opts: { hostedSeat?: boolean; mailReport?: ReportMailer } = {},
+    opts: { hostedSeat?: boolean; mailReport?: ReportMailer; upgrade?: UpgradeLinks } = {},
   ) {
     this.store = store;
     this.blobs = blobs;
     this.hostedSeat = opts.hostedSeat ?? true;
     this.mailReport = opts.mailReport;
+    this.upgrade = opts.upgrade;
   }
 
   /** Connect a new client bound to a dev bearer key. */
@@ -93,7 +96,7 @@ export class Harness {
 
   /** Connect a client bound to an arbitrary identity (for plan-matrix tests). */
   async connectAs(identity: Identity): Promise<Peer> {
-    const server = buildServer(identity, this.store, this.blobs, { hostedSeat: this.hostedSeat, mailReport: this.mailReport });
+    const server = buildServer(identity, this.store, this.blobs, { hostedSeat: this.hostedSeat, mailReport: this.mailReport, upgrade: this.upgrade });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: `test-${identity.userId}`, version: "0.0.1" });
     await Promise.all([

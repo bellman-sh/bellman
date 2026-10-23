@@ -23,7 +23,7 @@ import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
-import { chainHash } from "../../src/audit-sink.js";
+import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
@@ -5994,6 +5994,23 @@ export function describeStoreContract(
       expect(a.hash).toBe(chainHash(a.seq, "", stripSeq(a)));
       expect(b.prevHash).toBe(a.hash);
       expect(b.hash).toBe(chainHash(b.seq, a.hash!, stripSeq(b)));
+    });
+
+    // ---------------------------------------------------------- verifying the chain (ADR 0033)
+    const chainRow = (at: number): AuditEntry => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+
+    it("verifyAudit over an intact stream is ok and counts every hashed row", async () => {
+      for (const at of [1, 2, 3]) await store.appendAudit(chainRow(at));
+      expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 1, through_seq: 3, checked: 3, unhashed: 0, anchor: NO_ANCHOR });
+    });
+
+    it("verifyAudit resumes from a seq", async () => {
+      for (const at of [1, 2, 3]) await store.appendAudit(chainRow(at));
+      expect(await store.verifyAudit("org_a", 2)).toMatchObject({ ok: true, from_seq: 2, through_seq: 3, checked: 2 });
+    });
+
+    it("verifyAudit over an empty stream is ok with zero counts", async () => {
+      expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 0, through_seq: 0, checked: 0, unhashed: 0, anchor: NO_ANCHOR });
     });
 
     // ------------------------------------------------------------- the audit query (audit trail spec, D6)

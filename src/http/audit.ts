@@ -149,13 +149,18 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
   if (request.method === "OPTIONS") return preflightResponse(origin);
   try {
     const exporting = path === "/audit/export";
-    if (path !== "/audit" && !exporting) return problem(404, "not_found", "no such route", origin);
+    if (path !== "/audit" && !exporting && path !== "/audit/verify") return problem(404, "not_found", "no such route", origin);
     if (request.method !== "GET") return methodNotAllowed("GET", origin);
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
     const refused = auditRefusal(who.identity);
     if (refused) return problem(403, "forbidden", refused, origin);
     const orgId = who.identity.orgId as string; // auditRefusal refuses an identity with no org
+    if (path === "/audit/verify") {
+      const from = url.searchParams.get("from");
+      if (from !== null && !/^[1-9]\d*$/.test(from)) return problem(400, "invalid_request", "from must be a positive integer", origin);
+      return json(200, await deps.store.verifyAudit(orgId, from === null ? undefined : Number(from)), origin);
+    }
     const parsed = parseAuditQuery(url.searchParams, exporting);
     if ("invalid" in parsed) return problem(400, "invalid_request", parsed.invalid, origin);
     if (parsed.format) return await exportAudit(orgId, parsed.query, parsed.format, url.searchParams, origin, deps);

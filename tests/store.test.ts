@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
 import { MemoryStore, hostSentEntries, rosterParties } from "../src/store.js";
-import type { Session } from "../src/types.js";
+import type { AuditEntry, Session } from "../src/types.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
@@ -613,5 +613,14 @@ describe("rosterParties", () => {
   it("has no null when the only member with no org is the hosted seat", () => {
     const s = session({ members: [member({ orgId: "org_a" }), member({ memberId: "m_host", userId: HOST_USER_ID, orgId: null })] });
     expect(rosterParties(s)).toEqual(["org_a"]);
+  });
+});
+
+describe("verifyAudit sees a row edited behind the store's back", () => {
+  it("reports the edited row as the break", async () => {
+    const store = new MemoryStore();
+    for (const at of [1, 2, 3]) await store.appendAudit({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+    (store as unknown as { audit: { seq: number; entry: AuditEntry }[] }).audit[1]!.entry.action = "edited";
+    expect(await store.verifyAudit("org_a")).toMatchObject({ ok: false, broken_at: 2 });
   });
 });

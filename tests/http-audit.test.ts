@@ -289,3 +289,17 @@ describe("GET /audit/export", () => {
     await expect(res.text()).rejects.toThrow();
   });
 });
+
+describe("GET /audit/verify", () => {
+  it("walks the org's chain, from a seq on request, and refuses a bad from", async () => {
+    for (const at of [1, 2, 3]) await store.appendAudit(row({ at }));
+    const res = (await call("admin-a", "/audit/verify"))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, from_seq: 1, through_seq: 3, checked: 3, unhashed: 0 });
+    expect(await (await call("admin-a", "/audit/verify?from=2"))!.json()).toMatchObject({ ok: true, from_seq: 2, checked: 2 });
+    expect((await call("admin-a", "/audit/verify?from=x"))!.status).toBe(400);
+    expect(await said(await call("admin-a", "/audit/verify?from=0"))).toBe("from must be a positive integer");
+    expect((await call("member-a", "/audit/verify"))!.status).toBe(403);
+    expect((await call("free-a", "/audit/verify"))!.status).toBe(403);
+  });
+});

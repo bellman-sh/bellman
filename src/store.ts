@@ -19,7 +19,7 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { chainHash } from "./audit-sink.js";
+import { chainHash, chainWalk, NO_ANCHOR, type AuditVerification } from "./audit-sink.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -1895,6 +1895,8 @@ export interface BellmanStore {
   queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
   /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
   auditFacets(orgId: string): Promise<AuditFacets>;
+  /** Walks the chain from the anchor, or from `from` taking that row's prev_hash on trust (ADR 0033, D1). */
+  verifyAudit(orgId: string, from?: number): Promise<AuditVerification>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
@@ -3790,6 +3792,13 @@ export class MemoryStore implements BellmanStore {
 
   async auditFacets(orgId: string): Promise<AuditFacets> {
     return detach(facetsOf(this.streamOf(orgId), orgId));
+  }
+
+  async verifyAudit(orgId: string, from?: number): Promise<AuditVerification> {
+    // ponytail: one feed over the whole stream; a memory store never holds a stream worth paging.
+    const walk = chainWalk(NO_ANCHOR, from);
+    walk.feed(this.audit.filter((r) => r.entry.orgId === orgId && (from === undefined || r.seq >= from)).map((r) => ({ seq: r.seq, prevHash: r.prevHash, hash: r.hash, entry: r.entry })));
+    return detach(walk.result());
   }
 
   private streamOf(orgId: string): SeqEntry[] {

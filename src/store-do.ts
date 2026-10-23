@@ -40,7 +40,7 @@ import {
 } from "./audit.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { chainHash } from "./audit-sink.js";
+import { chainHash, chainWalk, NO_ANCHOR, VERIFY_PAGE, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
@@ -4933,6 +4933,19 @@ export class AuditDO extends DurableObject {
     return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
   }
 
+  /** Walks the chain a page at a time from the anchor a sweep left (ADR 0033), or from `from`. */
+  async verify(from?: number): Promise<AuditVerification> {
+    const anchor = (await this.ctx.storage.get<ChainAnchor>("chain_anchor")) ?? NO_ANCHOR;
+    const walk = chainWalk(anchor, from);
+    let next = from ?? 0;
+    for (;;) {
+      const rows = this.ctx.storage.sql.exec<AuditRecord>("SELECT * FROM entries WHERE seq >= ? ORDER BY seq LIMIT ?", next, VERIFY_PAGE).toArray();
+      const fed = walk.feed(rows.map((r) => { const { seq, hash, prevHash, ...entry } = entryOf(r); return { seq, hash, prevHash, entry }; }));
+      if (!fed || rows.length < VERIFY_PAGE) return walk.result();
+      next = rows.at(-1)!.seq + 1;
+    }
+  }
+
   /**
    * What the filters offer (D6), newest first. A label or a room's name comes from its newest
    * row: SQLite reads a bare column of a MAX() group from the row that holds the max.
@@ -5754,6 +5767,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async auditFacets(orgId: string): Promise<AuditFacets> {
     return this.audit(orgId).facets();
+  }
+
+  async verifyAudit(orgId: string, from?: number): Promise<AuditVerification> {
+    return this.audit(orgId).verify(from);
   }
 
   /**

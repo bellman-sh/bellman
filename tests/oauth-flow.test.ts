@@ -4,6 +4,7 @@ import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { MemoryStore } from "../src/store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 import { ssoUserId, type ProviderProfile } from "../src/oauth/providers.js";
 
 /**
@@ -1413,7 +1414,7 @@ describe("an org's standing (orgs spec, D5)", () => {
   // A purchased org: the one kind billing deactivates. An operator org is always active.
   const acme = {
     orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase" as const,
-    active: true, createdAt: 1, requireSso: false, domains: [],
+    active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
   };
   const owner = {
     key: "github:1", plan: "team" as const, role: "admin" as const, orgId: "org_acme", source: "operator",
@@ -1495,7 +1496,7 @@ describe("signedInPlan", () => {
     const plans = new MemoryStore();
     const by = { actorUserId: "u_op" };
     await plans.createOrg(
-      { orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true, createdAt: 1, requireSso: false, domains: [] },
+      { orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY },
       { key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null }, by,
     );
     await plans.putGrantIfOwned({ key: "sso:org_acme:00u1abc", plan: "team", role: "member", orgId: "org_acme", source: "sso", grantedAt: 1, grantedBy: "sso", expiresAt: null }, "org_acme", by);

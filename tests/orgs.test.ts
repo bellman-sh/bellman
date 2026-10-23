@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, forbiddenCapabilityRefusal, joinRefusal, liftOrg, orgView, parseOrgName, parsePolicyPatch, parseSeats, policyView, userIdForKey } from "../src/orgs.js";
+import { patchedOrg } from "../src/store.js";
 import { ssoUserId } from "../src/oauth/providers.js";
-import type { Org } from "../src/types.js";
+import { DEFAULT_POLICY, type Capability, type Org } from "../src/types.js";
 
 /** The runtime-free rules the org routes share (orgs spec, D6, D7). */
 
@@ -78,6 +79,7 @@ describe("the org as the routes show it", () => {
       { domain: "acme.com", token: "the-secret-token", verifiedAt: Date.parse("2026-10-22T00:00:00Z") },
       { domain: "acme.dev", token: "another", verifiedAt: null },
     ],
+    policy: DEFAULT_POLICY,
   };
 
   it("formats the dates, carries the seats used and the caller's role, and never a domain's token", () => {
@@ -89,8 +91,98 @@ describe("the org as the routes show it", () => {
         { domain: "acme.dev", verified_at: null },
       ],
       your_role: "admin",
+      policy: policyView(DEFAULT_POLICY),
     });
     expect(JSON.stringify(orgView(org, 2, null))).not.toContain("secret");
     expect(orgView(org, 0, null).your_role).toBeNull();
+  });
+});
+
+describe("liftOrg", () => {
+  const org: Org = {
+    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase", active: true,
+    createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
+  };
+
+  it("gives a row written before the field the default policy, and leaves a policy it has", () => {
+    const legacy = { ...org, policy: undefined } as unknown as Org;
+    expect(liftOrg(legacy).policy).toEqual(DEFAULT_POLICY);
+    expect(liftOrg(legacy).policy).not.toBe(DEFAULT_POLICY);
+    expect(liftOrg({ ...org, policy: { ...DEFAULT_POLICY, requireOrgOnly: true } }).policy.requireOrgOnly).toBe(true);
+  });
+
+  it("is what patchedOrg starts from: a legacy previous takes a field over the default, untouched itself", () => {
+    const legacy = { ...org, policy: undefined } as unknown as Org;
+    expect(patchedOrg(legacy, { policy: { whoMayCreate: "admins_only" } }).policy).toEqual({ ...DEFAULT_POLICY, whoMayCreate: "admins_only" });
+    expect(legacy.policy).toBeUndefined();
+  });
+});
+
+describe("policyView", () => {
+  it("is the policy in snake case", () => {
+    expect(policyView({ ...DEFAULT_POLICY, forbiddenCapabilities: ["request_actions"], allowedCounterpartyOrgs: [] }))
+      .toEqual({ require_org_only: false, forbidden_capabilities: ["request_actions"], allowed_counterparty_orgs: [], who_may_create: "any_member", allow_operator_impersonation: true });
+  });
+});
+
+describe("parsePolicyPatch", () => {
+  it("takes each field by its type and leaves the rest out", () => {
+    expect(parsePolicyPatch({ require_org_only: true, allowed_counterparty_orgs: ["org_b", "org_c"] })).toEqual({ patch: { requireOrgOnly: true, allowedCounterpartyOrgs: ["org_b", "org_c"] } });
+    expect(parsePolicyPatch({ allowed_counterparty_orgs: null, who_may_create: "admins_only", forbidden_capabilities: [] })).toEqual({ patch: { allowedCounterpartyOrgs: null, whoMayCreate: "admins_only", forbiddenCapabilities: [] } });
+  });
+  it("names the first fault", () => {
+    const faults: [unknown, string][] = [
+      [null, "policy must be an object"], [[], "policy must be an object"], [{}, "policy names no field"],
+      [{ max_ttl: 1 }, "max_ttl is not a field of policy"],
+      [{ require_org_only: "yes" }, "require_org_only must be true or false"],
+      [{ allow_operator_impersonation: 1 }, "allow_operator_impersonation must be true or false"],
+      [{ forbidden_capabilities: ["request_actions", "request_actions"] }, "forbidden_capabilities must list read_context, receive_messages or request_actions, each once"],
+      [{ forbidden_capabilities: "request_actions" }, "forbidden_capabilities must list read_context, receive_messages or request_actions, each once"],
+      [{ allowed_counterparty_orgs: ["not an org"] }, "allowed_counterparty_orgs must be null or a list of at most 50 distinct org ids"],
+      [{ allowed_counterparty_orgs: ["org_b", "org_b"] }, "allowed_counterparty_orgs must be null or a list of at most 50 distinct org ids"],
+      [{ allowed_counterparty_orgs: Array.from({ length: 51 }, (_, i) => `org_${i}`) }, "allowed_counterparty_orgs must be null or a list of at most 50 distinct org ids"],
+      [{ who_may_create: "owner" }, "who_may_create must be any_member or admins_only"],
+    ];
+    for (const [value, error] of faults) expect(parsePolicyPatch(value), JSON.stringify(value)).toEqual({ error });
+  });
+});
+
+describe("forbiddenCapabilityRefusal", () => {
+  it("names the first forbidden capability the declaration holds", () => {
+    const policy = { ...DEFAULT_POLICY, forbiddenCapabilities: ["request_actions", "read_context"] as Capability[] };
+    expect(forbiddenCapabilityRefusal(policy, ["read_context", "request_actions"])).toBe("your org's policy forbids granting request_actions to peers; call again without it.");
+    expect(forbiddenCapabilityRefusal(policy, ["receive_messages"])).toBeNull();
+    expect(forbiddenCapabilityRefusal(DEFAULT_POLICY, ["request_actions"])).toBeNull();
+  });
+});
+
+describe("joinRefusal", () => {
+  const org: Org = {
+    orgId: "org_x", name: "X", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true,
+    createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
+  };
+  const orgs: Record<string, Org> = {
+    org_open: { ...org, orgId: "org_open" },
+    org_b_only: { ...org, orgId: "org_b_only", policy: { ...DEFAULT_POLICY, allowedCounterpartyOrgs: ["org_b"] } },
+    org_none: { ...org, orgId: "org_none", policy: { ...DEFAULT_POLICY, allowedCounterpartyOrgs: [] } },
+    org_b: { ...org, orgId: "org_b" },
+  };
+  const getOrg = async (id: string) => orgs[id];
+  it("allows a room of open orgs, and one the joiner's org lists", async () => {
+    expect(await joinRefusal(getOrg, "org_b", ["org_open"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_b_only", ["org_b"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, null, ["org_open"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_none", ["org_none"], false)).toBeNull();
+  });
+  it("refuses from the joiner's side, naming the room's org, a a member outside any org included", async () => {
+    expect(await joinRefusal(getOrg, "org_b_only", ["org_open"], false)).toBe('your org\'s policy does not allow rooms with org "org_open".');
+    expect(await joinRefusal(getOrg, "org_none", [], true)).toBe("your org's policy does not allow rooms with a member outside any org.");
+  });
+  it("refuses from the room's side, naming the org whose rule refused", async () => {
+    expect(await joinRefusal(getOrg, "org_open", ["org_b_only"], false)).toBe('org "org_b_only"\'s policy does not allow members of your org in its rooms.');
+    expect(await joinRefusal(getOrg, null, ["org_open", "org_none"], false)).toBe('org "org_none"\'s policy does not allow members of your org in its rooms.');
+  });
+  it("reads a room org that has no record as open", async () => {
+    expect(await joinRefusal(getOrg, "org_open", ["org_string"], false)).toBeNull();
   });
 });

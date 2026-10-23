@@ -11,6 +11,7 @@ import { sha256Base64url } from "../src/oauth/tokens.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Org, PlanGrant } from "../src/types.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -21,7 +22,7 @@ const BO = ssoUserId("org_acme", "00u1");
 
 const acme: Org = {
   orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true,
-  createdAt: 1, requireSso: false, domains: [],
+  createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
 };
 const ownerGrant: PlanGrant = { key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null };
 

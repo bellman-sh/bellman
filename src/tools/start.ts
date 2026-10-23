@@ -10,6 +10,7 @@ import { entitlementsFor, upgradeHint, type UpgradeLinks } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, isTopicRoom, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
+import { forbiddenCapabilityRefusal } from "../orgs.js";
 import { claimName, publicNameRefusal } from "../public-names.js";
 import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING } from "../store.js";
@@ -45,11 +46,11 @@ Args:
   - org_only (boolean): restrict joining to members of your org (team plan)
   - public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true). A taken name is refused and nothing is created; check or set one with bellman_public_name.
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, public_url (a public room only: its name's link when named), plan, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, public_url (a public room only: its name's link when named), plan, org_only (as recorded: your org's policy can make it true), room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
-Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "a public room requires..." (plan), "public_name needs a public room", "public name "...": use 3 to 40 lowercase letters...", "public name "..." is taken: choose another..." (nothing is created), "org_only sessions require..." (plan), "org_only was set but..." (no org), "hosted room limit reached: ... open" (your plan's hosted rooms are all open; one that closes frees its slot), "monthly session limit..." (quota). A plan or quota refusal ends with "Upgrade to <plan>: <url>" when this server sells a plan that allows it: show your human that link.`,
+Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "a public room requires..." (plan), "public_name needs a public room", "public name "...": use 3 to 40 lowercase letters...", "public name "..." is taken: choose another..." (nothing is created), "org_only sessions require..." (plan), "org_only was set but..." (no org), "your org's policy lets only admins start rooms." and "your org's policy forbids granting ... to peers" (policy), "hosted room limit reached: ... open" (your plan's hosted rooms are all open; one that closes frees its slot), "monthly session limit..." (quota). A plan or quota refusal ends with "Upgrade to <plan>: <url>" when this server sells a plan that allows it: show your human that link.`,
       inputSchema: {
         manifest: ManifestShape,
         brief: BriefShape,
@@ -130,6 +131,16 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       if (org_only && !identity.orgId) {
         return fail("org_only was set but your identity has no org.");
       }
+      // The creator's org's policy (ADR 0031), read once: who may start, what a member may not grant,
+      // and whether every room its members start is org-only, whatever the call said.
+      const org = identity.orgId ? await s.getOrg(identity.orgId) : undefined;
+      const policy = org?.policy;
+      if (policy?.whoMayCreate === "admins_only" && identity.role !== "admin") {
+        return fail("your org's policy lets only admins start rooms.");
+      }
+      const forbidden = policy ? forbiddenCapabilityRefusal(policy, capabilities) : null;
+      if (forbidden) return fail(forbidden);
+      const orgOnly = org_only || policy?.requireOrgOnly === true;
       const used = await s.countCreatesThisMonth(identity.userId);
       if (used >= ent.monthlyCreates) {
         return fail(`monthly session limit reached (${ent.monthlyCreates} on the "${identity.plan}" plan).${upgrade((e) => e.monthlyCreates > ent.monthlyCreates)}`);
@@ -179,7 +190,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         manifest,
         createdBy: identity.userId,
         orgId: identity.orgId,
-        orgOnly: org_only,
+        orgOnly,
         joinCodes: { [manifest.defaultRole]: defaultCode },
         // The room's own byte ceiling (#183), from the plan creating it. Nothing
         // downstream asks a plan again.
@@ -226,7 +237,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       const room = await s.getSession(session.id);
       if (!room) throw new Error(`room ${session.id} was created and cannot be read back`);
       await audit(s, room, identity, "session_created", {
-        mode: manifest.mode, org_only, preset: manifest.preset, hosted: manifest.host !== null,
+        mode: manifest.mode, org_only: orgOnly, preset: manifest.preset, hosted: manifest.host !== null,
       });
 
       return ok({
@@ -242,6 +253,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // for "the link", an agent holding only join_url would hand out a seat.
         ...(manifest.public === true ? { public_url: publicRoomUrl(room) } : {}),
         plan: identity.plan,
+        // As recorded: a policy can make a room org-only that the call did not ask to be.
+        org_only: orgOnly,
         // What the server recorded, seen from the creator's seat. Without it the
         // author of a manifest, especially one parsed from .bellman/room.yaml,
         // cannot see a preset or role that validated but is not what they meant.

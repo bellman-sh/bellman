@@ -13,6 +13,7 @@ import { seal } from "../src/oauth/sealed.js";
 import { MemoryStore } from "../src/store.js";
 import { scimIntent } from "../src/grant-audit.js";
 import type { Identity, Org, PlanGrant, ScimUser } from "../src/types.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 
 const ISSUER = "https://mcp.example.test";
 const RESOURCE = "https://mcp.example.test/mcp";
@@ -50,7 +51,7 @@ let config: OAuthConfig;
 let plans: MemoryStore;
 const acme: Org = {
   orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true,
-  createdAt: 1, requireSso: false, domains: [],
+  createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
 };
 const ownerGrant: PlanGrant = { key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null };
 const by = { actorUserId: "u_op" };

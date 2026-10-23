@@ -1,5 +1,6 @@
 import { auditRow } from "./audit.js";
 import type { AuditEntry, Org, PlanGrant } from "./types.js";
+import { liftOrg } from "./orgs.js";
 
 /**
  * What a grant change becomes in the audit log.
@@ -155,6 +156,9 @@ export function revokeAuditEntries(
  * files a line. Filed under `org:<orgId>` as a grant row is under `grant:<key>`: the org's own
  * affair, one party, internal, no room.
  */
+const sameList = (a: readonly string[] | null, b: readonly string[] | null): boolean =>
+  a === b || (a !== null && b !== null && a.length === b.length && a.every((x, i) => x === b[i]));
+
 export function orgAuditEntries(previous: Org | undefined, next: Org, intent: AuditIntent, now: number): AuditEntry[] {
   const row = (action: "org_created" | "org_updated", detail: Record<string, unknown>): AuditEntry =>
     auditRow(next.orgId, [next.orgId], { at: now, sessionId: `org:${next.orgId}`, action, roomName: null, detail },
@@ -170,6 +174,14 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
   if (previous.seats !== next.seats) changed.seats = next.seats;
   if (previous.active !== next.active) changed.active = next.active;
   if (previous.requireSso !== next.requireSso) changed.require_sso = next.requireSso;
+  const policy: Record<string, unknown> = {};
+  const was = liftOrg(previous).policy, is = liftOrg(next).policy;
+  if (was.requireOrgOnly !== is.requireOrgOnly) policy.require_org_only = is.requireOrgOnly;
+  if (!sameList(was.forbiddenCapabilities, is.forbiddenCapabilities)) policy.forbidden_capabilities = is.forbiddenCapabilities;
+  if (!sameList(was.allowedCounterpartyOrgs, is.allowedCounterpartyOrgs)) policy.allowed_counterparty_orgs = is.allowedCounterpartyOrgs;
+  if (was.whoMayCreate !== is.whoMayCreate) policy.who_may_create = is.whoMayCreate;
+  if (was.allowOperatorImpersonation !== is.allowOperatorImpersonation) policy.allow_operator_impersonation = is.allowOperatorImpersonation;
+  if (Object.keys(policy).length > 0) changed.policy = policy;
   if (Object.keys(changed).length === 0) return [];
   return [row("org_updated", { ...changed, ...intent.detail })];
 }

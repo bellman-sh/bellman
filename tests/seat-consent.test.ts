@@ -17,6 +17,7 @@ import { sha256Base64url } from "../src/oauth/tokens.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 import { brief, manifestFixture, member as seatOf, session } from "./helpers/fixtures.js";
 import { Harness } from "./helpers/harness.js";
 
@@ -39,7 +40,7 @@ const fakeFetch = (async (input: RequestInfo | URL) => {
 
 const acme: Org = {
   orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true,
-  createdAt: 1, requireSso: false, domains: [],
+  createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
 };
 const ownerGrant: PlanGrant = { key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null };
 const ACME_ADMIN: Identity = { userId: "u_github_1", orgId: "org_acme", plan: "team", role: "admin", label: "ana@acme.test" };

@@ -7,7 +7,8 @@ import { MAX_REPORTS_LISTED, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import type { Report } from "../src/reports.js";
 import { MemoryStore } from "../src/store.js";
-import type { Identity } from "../src/types.js";
+import { DEFAULT_POLICY, type Identity } from "../src/types.js";
+import { policyView } from "../src/orgs.js";
 import { COOKIE, ISSUER, PANEL, panelConfig, routeWith, seedSession } from "./helpers/panel.js";
 
 const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
@@ -196,7 +197,7 @@ describe("/admin/orgs (orgs spec, D7)", () => {
     const res = await send("POST", "/admin/orgs", auth, acme);
     expect([res.status, await res.json()]).toEqual([201, { org: {
       org_id: "org_acme", name: "Acme", owner_user_id: "u_github_1", seats: 3, seats_used: 1, active: true,
-      source: "operator", created_at: expect.any(String), require_sso: false, domains: [], your_role: null,
+      source: "operator", created_at: expect.any(String), require_sso: false, domains: [], your_role: null, policy: policyView(DEFAULT_POLICY),
     } }]);
     expect(await store.getGrant("github:1")).toMatchObject({
       plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedBy: OPERATOR.userId, expiresAt: null,

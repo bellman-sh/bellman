@@ -4,12 +4,13 @@ import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
+import { joinRefusal } from "../orgs.js";
 import { seesBrief } from "../public-event.js";
 import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf } from "../store.js";
+import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf, rosterHasOrgless } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -31,7 +32,7 @@ surface lists what the room's working surface holds — keys, kinds and sizes, n
 public: true means anyone with the room's public page can read its surface and its log, with members named by number and never a brief: tell your human before they accept.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
-Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, a member of its seat is evicted, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. Evicting a member of its seat does not end it. "session is org-restricted" — creator limited joining to their org.`,
+Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, a member of its seat is evicted, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. Evicting a member of its seat does not end it. "session is org-restricted" — creator limited joining to their org. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join).`,
       inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         // `readOnlyHint` is FALSE, and this tool previews rather than joins (#119).
@@ -80,6 +81,9 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
       if (session.orgOnly && session.orgId !== identity.orgId) {
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
+      // Both sides' counterparty rules (ADR 0031), read again at confirm.
+      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, rosterHasOrgless(session));
+      if (barred) return fail(barred);
       // Seated, not active: a room held full by a session that died is
       // previewable rather than refused here and at every retry for good
       // (#103). This only counts. The stale seat is reclaimed by the

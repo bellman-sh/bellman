@@ -8,10 +8,11 @@ import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
 import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
+import { policyView } from "../src/orgs.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
-import type { Identity, Org, PlanGrant } from "../src/types.js";
+import { DEFAULT_POLICY, type Identity, type Org, type PlanGrant } from "../src/types.js";
 
 const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";
@@ -37,7 +38,7 @@ const caller = async (request: Request): Promise<RoomCaller | null> => {
 /** A purchased org, so billing's deactivation applies to it; the routes read the same of either kind. */
 const acme: Org = {
   orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase", active: true,
-  createdAt: Date.parse("2026-10-21T00:00:00Z"), requireSso: false, domains: [],
+  createdAt: Date.parse("2026-10-21T00:00:00Z"), requireSso: false, domains: [], policy: DEFAULT_POLICY,
 };
 const ownerGrant: PlanGrant = {
   key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
@@ -111,7 +112,7 @@ describe("GET /org", () => {
     expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([200, PANEL]);
     expect(await res.json()).toEqual({
       org_id: "org_acme", name: "Acme", owner_user_id: "u_github_1", seats: 3, seats_used: 1, active: true,
-      source: "purchase", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin",
+      source: "purchase", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin", policy: policyView(DEFAULT_POLICY),
     });
   });
 
@@ -144,6 +145,27 @@ describe("PATCH /org", () => {
     }
     expect((await call("member", "/org", "PATCH", { name: "X" }))!.status).toBe(403);
     expect((await store.getOrg("org_acme"))?.name).toBe("Acme");
+  });
+  it("sets policy fields for an admin, merging over the rest, and shows them to a member on GET", async () => {
+    const res = (await call("owner", "/org", "PATCH", { policy: { require_org_only: true, forbidden_capabilities: ["request_actions"] } }))!;
+    expect([res.status, (await json(res)).policy]).toEqual([200, { require_org_only: true, forbidden_capabilities: ["request_actions"], allowed_counterparty_orgs: null, who_may_create: "any_member", allow_operator_impersonation: true }]);
+    await call("owner", "/org", "PATCH", { policy: { allowed_counterparty_orgs: ["org_b"] }, name: "Acme Ltd" });
+    expect((await json(await call("member", "/org"))).policy).toMatchObject({ require_org_only: true, allowed_counterparty_orgs: ["org_b"] });
+    expect((await store.auditForOrg("org_acme", 10)).at(-1)).toMatchObject({ action: "org_updated", detail: { name: "Acme Ltd", policy: { allowed_counterparty_orgs: ["org_b"] } } });
+  });
+
+  it("refuses a policy that is empty, names a stray field, or gives a field the wrong shape, and a member", async () => {
+    for (const [body, error] of [
+      [{ policy: {} }, "policy names no field"],
+      [{ policy: { who_may_create: "owner" } }, "who_may_create must be any_member or admins_only"],
+      [{ policy: { allowed_counterparty_orgs: ["not an org"] } }, "allowed_counterparty_orgs must be null or a list of at most 50 distinct org ids"],
+      [{ policy: null }, "policy must be an object"],
+    ] as [unknown, string][]) {
+      const res = (await call("owner", "/org", "PATCH", body))!;
+      expect([res.status, await said(res)], JSON.stringify(body)).toEqual([400, error]);
+    }
+    expect((await call("member", "/org", "PATCH", { policy: { require_org_only: true } }))!.status).toBe(403);
+    expect((await store.getOrg("org_acme"))?.policy).toEqual(DEFAULT_POLICY);
   });
 });
 

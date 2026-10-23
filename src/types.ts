@@ -408,7 +408,28 @@ export interface Org {
   requireSso: boolean;
   /** The domains the org has claimed (SSO, D11); only a verified one routes a sign-in. Written empty until then. */
   domains: OrgDomain[];
+  /** What the org lets its members do in rooms (org policy, D1). A row written before the field reads as `DEFAULT_POLICY`. */
+  policy: OrgPolicy;
 }
+
+/**
+ * An org's rules for its members' rooms (org policy spec, D1, D2): every room they start is org-only,
+ * capabilities they may not declare, which other orgs' members may share a room with them (null is any),
+ * who may start a room, and whether the operator may act as one of them. Checked at a start, a preview
+ * and a seat; a running room is never re-judged (D4).
+ */
+export interface OrgPolicy {
+  requireOrgOnly: boolean;
+  forbiddenCapabilities: Capability[];
+  allowedCounterpartyOrgs: string[] | null;
+  whoMayCreate: "any_member" | "admins_only";
+  allowOperatorImpersonation: boolean;
+}
+
+/** The policy every org starts with, and every row written before the field reads as: nothing forbidden. */
+export const DEFAULT_POLICY: OrgPolicy = {
+  requireOrgOnly: false, forbiddenCapabilities: [], allowedCounterpartyOrgs: null, whoMayCreate: "any_member", allowOperatorImpersonation: true,
+};
 
 /** One domain claim: the token its DNS record must carry, and when it was seen there, or null while it has not been. */
 export interface OrgDomain {
@@ -417,8 +438,8 @@ export interface OrgDomain {
   verifiedAt: number | null;
 }
 
-/** What `updateOrg` may change: the name (its admin), the seats (the operator), the SSO switch (its admin). */
-export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
+/** What `updateOrg` may change: the name (its admin), the seats (the operator), the SSO switch and the policy, a field at a time (its admin). */
+export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">> & { policy?: Partial<OrgPolicy> };
 
 /**
  * A seat an org's admin offered to a person the org does not own by its form (ADR 0027): stored

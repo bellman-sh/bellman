@@ -3,7 +3,8 @@ import type {
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { DEFAULT_POLICY } from "./types.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -132,6 +133,13 @@ export const HOST_LABEL = "host@bellman";
  * these: one predicate, so the three cannot disagree about who is there.
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
+
+/**
+ * Whether the room holds a member outside any org (ADR 0031): the hosted seat has no org and is not one, since it
+ * is Bellman's and no counterparty. The creator is on the roster, so `orgId` is read for a room with none yet.
+ */
+export const rosterHasOrgless = (s: Pick<StoredSession, "orgId" | "members">): boolean =>
+  s.orgId === null || s.members.some((m) => m.orgId === null && !isHostMember(m));
 
 /** A member as it comes to be seated: a brief to keep beside the room, or the agent of one kept there already. */
 export type Seating = Omit<Member, "agent" | "seq" | "publicNumber"> & { agent?: AgentInfo; brief?: Brief };
@@ -1979,16 +1987,19 @@ const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > 
  * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
  */
 export function patchedOrg(previous: Org, patch: OrgPatch): Org {
-  const next: Org = { ...previous };
+  const next: Org = liftOrg(previous);
   if (patch.name !== undefined) next.name = patch.name;
   if (patch.seats !== undefined) next.seats = patch.seats;
   if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
+  for (const [field, value] of Object.entries(patch.policy ?? {})) {
+    if (value !== undefined) (next.policy as unknown as Record<string, unknown>)[field] = value;
+  }
   return next;
 }
 
 /** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
 export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
-  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [] };
+  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [], policy: DEFAULT_POLICY };
 }
 
 export class MemoryStore implements BellmanStore {
@@ -3486,7 +3497,7 @@ export class MemoryStore implements BellmanStore {
 
   async getOrg(orgId: string): Promise<Org | undefined> {
     const org = this.orgs.get(orgId);
-    return org && detach(org);
+    return org && liftOrg(detach(org));
   }
 
   async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {

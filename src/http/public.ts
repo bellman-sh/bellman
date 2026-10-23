@@ -4,7 +4,7 @@
  * byline when its creator signed it (bylines spec D4), its surface with the surface cursor as an
  * ETag, its log, and the bytes of a blob an item on its surface names. And `GET
  * /public/handles/:handle`: the public rooms a handle has signed (D5). And `GET /public/rooms`: the
- * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml. Nothing else.
+ * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml and the directory at bellman.sh/r/. Nothing else.
  *
  * No credential is read here, by design. A cookie or a bearer changes nothing, so a member's
  * credential cannot open a private room through these paths, and every origin is answered
@@ -244,6 +244,7 @@ async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response>
  * The named public rooms, name order, at most `MAX_ROOMS_LISTED`: each index entry checked against its room's
  * record, as a read by name is, so a name whose room closed or went private is left out. A room public by its id
  * alone is in no index and so not here: its link is shared, not listed. `HANDLE_PAGE_BATCH` rooms are read at once.
+ * Each carries its name and purpose in the envelope its own read gives, creator named by number, for bellman.sh/r/.
  * ponytail: the first MAX_ROOMS_LISTED names of the index, dead ones included; a cursor when the index outgrows it.
  */
 async function namedRooms(deps: PublicRouteDeps): Promise<Response> {
@@ -252,9 +253,13 @@ async function namedRooms(deps: PublicRouteDeps): Promise<Response> {
   for (let at = 0; at < entries.length; at += HANDLE_PAGE_BATCH) {
     const batch = entries.slice(at, at + HANDLE_PAGE_BATCH);
     const sessions = await Promise.all(batch.map(({ entry }) => deps.store.getSession(entry.id)));
-    for (const [k, s] of sessions.entries()) {
-      if (holdsName(s, batch[k].name)) rooms.push({ id: s!.id, name: batch[k].name, public_url: publicRoomUrl(s!) });
-    }
+    const listed = sessions.flatMap((s, k) => (holdsName(s, batch[k].name) ? [{ s: s!, name: batch[k].name }] : []));
+    rooms.push(...(await Promise.all(listed.map(({ s, name }) => numbered(deps.store, s.id, {
+      id: s.id,
+      name,
+      public_url: publicRoomUrl(s),
+      text: untrusted({ memberId: s.creator.memberId, label: s.creator.label }, { room: s.manifest.room, purpose: s.manifest.purpose }),
+    })))));
   }
   return answer(200, { rooms });
 }

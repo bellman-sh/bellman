@@ -511,9 +511,9 @@ describe("renderCard", () => {
   it("shows a public room's link, and who can read it, only for a public room", () => {
     const r = startFixture();
     expect(renderCard(r, () => {}, NOW).textContent).not.toContain("Anyone with this link");
-    r.public_url = "https://dash.bellman.sh/r/qs_new";
+    r.public_url = "https://bellman.sh/r/qs_new";
     const text = renderCard(r, () => {}, NOW).textContent!;
-    expect(text).toContain("https://dash.bellman.sh/r/qs_new");
+    expect(text).toContain("https://bellman.sh/r/qs_new");
     expect(text).toContain("Anyone with this link can read the room");
   });
 

@@ -3,6 +3,7 @@
  * when the room starts. Tasks 1, 2 and 4 of the plan add to this file; the routes
  * are tests/http-public.test.ts.
  */
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
@@ -97,7 +98,7 @@ describe("the creator's public link", () => {
       const jesse = await h.connect(DEV_KEY.jesse);
       const open = await jesse.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
       expect(open.data.public_url).not.toBe(open.data.join_url);
       const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "pair" }, brief: brief() });
       expect("public_url" in shut.data).toBe(false);
@@ -146,9 +147,23 @@ describe("a public room's plan", () => {
       const pro = await h.connectAs({ userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" });
       const open = await pro.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
     } finally {
       await h.close();
     }
+  });
+});
+
+describe("a public room's link", () => {
+  // The dash's Worker answers /r/* on bellman.sh, and dash.bellman.sh/r/ only redirects there.
+  it("names no old host in a tool description, the README or the docs site", () => {
+    const docs = "docs-site/src/content/docs";
+    const files = [
+      "README.md",
+      ...readdirSync("src", { recursive: true, encoding: "utf8" }).map((f) => `src/${f}`),
+      ...readdirSync(docs, { recursive: true, encoding: "utf8" }).map((f) => `${docs}/${f}`),
+    ].filter((f) => /\.(ts|mdx?)$/.test(f));
+    expect(files.length).toBeGreaterThan(50);
+    for (const file of files) expect(readFileSync(file, "utf8"), file).not.toContain("dash.bellman.sh/r/");
   });
 });

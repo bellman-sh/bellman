@@ -62,11 +62,11 @@ export function joinUrl(code: string): string {
 }
 
 /**
- * The page a public room is read at (public rooms spec D6): dash, outside sign-in, by the room's name
+ * The page a public room is read at (public rooms spec D6): the dash's page on bellman.sh, outside sign-in, by the room's name
  * while it holds one (public names spec, D7) and by its id otherwise.
  * A page to read and not a door: it seats nobody, where a join URL hands a seat to whoever redeems it until it expires.
  */
-export const PUBLIC_ROOM_URL_BASE = "https://dash.bellman.sh/r/";
+export const PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/";
 
 /** A public room's page (public names spec, D7): its name's link while it holds one, its session id's otherwise. */
 export function publicRoomUrl(s: Pick<StoredSession, "id" | "publicName" | "manifest" | "unpublishedAt" | "closed">): string {

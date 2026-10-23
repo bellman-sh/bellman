@@ -10,7 +10,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { hostMember } from "../src/host.js";
 import {
-  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
@@ -1869,6 +1869,104 @@ describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
       expect(mine).toMatchObject({ viewer: "admin", mine: true });
       expect(mine.preview.text.data.host_instructions).toBe(TEXT);
     });
+  });
+});
+
+/**
+ * Room pages spec, D3: a public room's creator chooses whether its page opens on the canvas or as a page. Admitted as
+ * the byline is (R7): 401, the CSRF check, one 404 for a stranger and an unknown room, then 403; then the body, then 409
+ * for a room that is not public.
+ */
+describe("PUT /rooms/:id/view (how a public room opens)", () => {
+  const PUB = "qs_viewed";
+  const set = (key: string | null, body: unknown, over: CallOptions = {}, room = PUB) =>
+    call(key, `/rooms/${room}/view`, { method: "PUT", body, ...over });
+  const stored = async (room = PUB) => (await store.getSession(room))!.publicView;
+
+  beforeEach(async () => {
+    await store.createSession(session({ id: PUB, manifest: roomManifest({ public: true }), members: [member(), peer()] }));
+  });
+
+  it("lets the creator choose the page or the canvas, answering with what is stored", async () => {
+    for (const view of ["page", "canvas", "page"] as const) {
+      const res = (await set(DEV_KEY.jesse, { view }))!;
+      expect([res.status, await bodyOf(res)]).toEqual([200, { view }]);
+      expect(await stored()).toBe(view);
+    }
+  });
+
+  it("refuses any other view or shape with 400, and a body over the bound with 413, changing nothing", async () => {
+    const shapes: unknown[] = [{}, { view: "log" }, { view: "Page" }, { view: null }, { view: 1 }, { view: "page", extra: 1 }, [], "page", null];
+    for (const body of shapes) expect((await set(DEV_KEY.jesse, body))!.status, JSON.stringify(body)).toBe(400);
+    for (const rawBody of ["not json", ""]) expect((await set(DEV_KEY.jesse, undefined, { rawBody }))!.status, rawBody).toBe(400);
+    const big = (await set(DEV_KEY.jesse, undefined, { rawBody: '{"view":"page"}', headers: { "content-length": String(MAX_VIEW_BYTES + 1) } }))!;
+    expect(big.status).toBe(413);
+    expect(await stored()).toBe("canvas");
+  });
+
+  it("refuses a member who is not the creator with 403, a stranger and an unknown room with the one 404, and no credential with 401", async () => {
+    const notCreator = (await set(DEV_KEY.peer, { view: "page" }))!;
+    expect([notCreator.status, await bodyOf(notCreator)])
+      .toEqual([403, { error: "forbidden", error_description: "only the room's creator may choose how it opens" }]);
+    const stranger = (await set(DEV_KEY.outsider, { view: "page" }))!;
+    const unknown = (await set(DEV_KEY.jesse, { view: "page" }, {}, "qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+    expect((await set(null, { view: "page" }))!.status).toBe(401);
+    expect(await stored()).toBe("canvas");
+  });
+
+  it("answers 409 for a room that is not public, and for one made private, changing nothing", async () => {
+    const privateRoom = (await set(DEV_KEY.jesse, { view: "page" }, {}, ROOM))!;
+    expect([privateRoom.status, await bodyOf(privateRoom)])
+      .toEqual([409, { error: "room_not_public", error_description: "only a public room opens as a page" }]);
+    expect((await store.getSession(ROOM))!.publicView).toBe("canvas");
+    await store.unpublishSession(PUB, Date.now());
+    expect((await set(DEV_KEY.jesse, { view: "page" }))!.status).toBe(409);
+    expect(await stored()).toBe("canvas");
+  });
+
+  // The 409 comes after the admission, so it tells a stranger nothing: against a room that is not public, a person with no
+  // handle in it still gets the one 404, and a member who is not its creator the 403.
+  it("keeps the 409 behind the admission: a stranger to a room that is not public gets the one 404, a member who is not its creator the 403", async () => {
+    const stranger = (await set(DEV_KEY.outsider, { view: "page" }, {}, ROOM))!;
+    const unknown = (await set(DEV_KEY.jesse, { view: "page" }, {}, "qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+    expect((await set(DEV_KEY.peer, { view: "page" }, {}, ROOM))!.status).toBe(403);
+  });
+
+  // R7: a closed public room reads until it is deleted, so its creator may still change how its page opens.
+  it("takes the choice of a closed public room, which reads until it is deleted", async () => {
+    await store.closeSession(PUB);
+    const res = (await set(DEV_KEY.jesse, { view: "page" }))!;
+    expect([res.status, await bodyOf(res)]).toEqual([200, { view: "page" }]);
+    expect(await stored()).toBe("page");
+  });
+
+  it("refuses a cookie write without the panel's Origin, and takes the panel's", async () => {
+    expect((await set(null, { view: "page" }, { cookie: DEV_KEY.jesse }))!.status).toBe(403);
+    expect(await stored()).toBe("canvas");
+    const real = (await set(null, { view: "page" }, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect([real.status, real.headers.get("access-control-allow-origin"), await bodyOf(real)]).toEqual([200, PANEL, { view: "page" }]);
+  });
+
+  it("takes PUT alone", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${PUB}/view`))!;
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "PUT"]);
+  });
+
+  it("is read back by GET /rooms/:id as view, for every member", async () => {
+    expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${PUB}`))).toMatchObject({ view: "canvas" });
+    await set(DEV_KEY.jesse, { view: "page" });
+    expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${PUB}`))).toMatchObject({ view: "page" });
+    expect(await bodyOf(await call(DEV_KEY.peer, `/rooms/${PUB}`))).toMatchObject({ view: "page" });
+  });
+
+  // The detail is built in two places, the member's and the org admin's read of a closed room (#65), and each carries it.
+  it("is read back on an org admin's read of a closed room, which is the detail's other branch", async () => {
+    await store.createSession(orgRoom({ id: "qs_admin_view", manifest: roomManifest({ public: true }), publicView: "page" }));
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_admin_view"))).toMatchObject({ viewer: "admin", view: "page" });
   });
 });
 

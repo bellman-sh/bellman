@@ -173,6 +173,9 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       status: sessionStatus(session),
       closed_at: retentionOf(session).closed_at,
       mode: session.manifest.mode,
+      // How the room opens (room pages spec D3): top level, beside `mode` and outside the envelope, since it is a value the
+      // server checked and not the creator's prose (R9).
+      view: session.publicView,
       text: untrusted(
         { memberId: creator.memberId, label: creator.label },
         { room: session.manifest.room, purpose: session.manifest.purpose },

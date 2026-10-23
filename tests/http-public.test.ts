@@ -74,11 +74,17 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text"]);
-    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", by: null });
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text", "view"]);
+    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", view: "canvas", by: null });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });
+  });
+
+  it("carries how the room opens, the canvas until its creator chooses the page", async () => {
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("canvas");
+    await store.setPublicView(PUB, "page");
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("page");
   });
 
   it("answers a private, an unpublished, an unknown and a purged room, and their sub-routes, with one 404", async () => {

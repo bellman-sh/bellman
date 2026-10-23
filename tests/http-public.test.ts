@@ -348,7 +348,10 @@ describe("a public room read by its name (public names spec, D6)", () => {
     }));
     await name("qs_closed_pub", "closed-room");
     expect((await read("/public/rooms/closed-room"))!.status).toBe(404);
-    expect((await read("/public/rooms/qs_closed_pub"))!.status).toBe(200);
+    const byId = (await read("/public/rooms/qs_closed_pub"))!;
+    expect(byId.status).toBe(200);
+    // The record still carries the name, which the room no longer holds, so its one link is its id's.
+    expect((await bodyOf(byId)).public_url).toBe("https://bellman.sh/r/qs_closed_pub");
     await name(PUB, "open-review");
     // The positive control: the name reads while its room holds it, so the 404 below is the release.
     expect((await read("/public/rooms/open-review"))!.status).toBe(200);

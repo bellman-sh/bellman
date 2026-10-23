@@ -468,7 +468,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -1108,6 +1108,13 @@ anything built on top:
    admin would, with `source: "purchase"`. One read path, so a paid plan
    inherits the ownership checks, expiry and audit trail rather than being a
    second source with its own semantics.
+4. **An org is a record, and its members are its grants** (ADR 0024). `org:<orgId>`
+   in `RegistryDO` holds the name, the one owner, the seats and the standing; a
+   member is a grant naming the org, and the seat cap is decided inside the
+   guarded grant write. A team purchase creates the record with the seats it
+   sells, and a subscription that stops paying marks it inactive: every grant in
+   an inactive org resolves to `free` with its role and org kept, through
+   `standingOf` in `firstGrant`, which every re-check passes through.
 
 ### How each surface gets a credential
 
@@ -1267,7 +1274,7 @@ loud:
   An operator suspends an account with `POST /admin/suspensions/:userId`, through the
   bearer-only gate that releases a handle (`BELLMAN_OPERATORS`; with it unset, nobody
   passes). The Worker then answers `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`,
-  `/account/handle`, `/account/bans*` and `/operator/stats` with `This account is suspended.`, and leaves
+  `/org*`, `/account/handle`, `/account/bans*` and `/operator/stats` with `This account is suspended.`, and leaves
   `/auth/*`, the `/account` page, `/token`, `/authorize`, `/upgrade` and `/admin/*` alone,
   so the person can still sign out. It asks the registry once per identity per isolate a
   minute (`SuspensionCache`).

@@ -23,6 +23,9 @@ export function isOrgId(value: string): boolean {
 
 export const grantKey = (key: string): string => `gr:${key}`;
 
+/** The org record's row (orgs spec, D1): its own prefix, beside the grant's and the index's. */
+export const orgKey = (orgId: string): string => `org:${orgId}`;
+
 /**
  * `go:<org>:<key>` is only unambiguous if the org segment cannot itself contain
  * the separator. Otherwise the encoding is not injective and two different

@@ -34,6 +34,14 @@ Members inside the org join as they do in any room. The [rooms guide](/guides/ro
 
 A person's org role is `member` or `admin`, and it is not a room role. Inside a room an org admin holds exactly what their seat holds: the org role buys nothing there. An admin whose seat lacks `invite` cannot mint a code, and an admin with no seat has no verbs in the room at all. The admin role matters in two places, the audit log and the read of closed rooms below.
 
+## Your org and its seats
+
+An org is a record: a name, one owner, a count of seats, and whether anyone is paying for it. Buying the team plan creates one, named for the buyer until they rename it, and makes the buyer its owner and admin. A seat is a person in the org, the owner included, and the subscription says how many there are.
+
+An admin seats a teammate by a stable identity: `github:<numeric id>`, `google:<numeric id>`, or an email address, which the first sign-in with that address claims onto its subject. The control panel does this; underneath, it is `POST /org/members` with `{ key, role }`, and `GET /org` shows the name, the seats and how many are used. The owner stays an admin and cannot be removed. When every seat is taken, adding one more is refused until a seat is freed or more are bought.
+
+When the subscription stops paying, the org keeps its members and loses the plan: everyone in it is on the free plan, with their org and role kept, until a payment brings it back. Nothing is removed by a failed card. An org set up by the operator rather than bought is always active.
+
 ## The audit log
 
 [`bellman_audit`](/reference/tools/bellman_audit/) returns the latest entries of your org's log, oldest first. `limit` defaults to 50 and goes up to 500. It needs the team plan, the admin role and an org, and refuses without them:
@@ -52,6 +60,7 @@ Each entry is `{ at, session_id, actor, action, detail }`, where `actor` is a us
 - A creator changing what a hosted room's host is told to ask (`host_instructions_changed`). Its entry records the length of the new text, not the text, and none is written when the text did not change.
 - The end of a room's record: `room_deleted` when its creator or an org admin asked for it to be deleted, and `room_purged` when it was purged.
 - Plan grants and revocations, `plan_granted` and `plan_revoked`. A team purchase or cancellation appears here with `stripe` as the actor.
+- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats or its standing.
 
 A room that crosses organisations writes to both orgs' logs, so each side sees the crossings that touched its own boundary and nothing else.
 

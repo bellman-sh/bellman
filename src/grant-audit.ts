@@ -1,5 +1,5 @@
 import { auditRow } from "./audit.js";
-import type { AuditEntry, PlanGrant } from "./types.js";
+import type { AuditEntry, Org, PlanGrant } from "./types.js";
 
 /**
  * What a grant change becomes in the audit log.
@@ -132,4 +132,31 @@ export function revokeAuditEntries(
 ): AuditEntry[] {
   if (!hasOrg(removed.orgId)) return [];
   return [entry(removed.orgId, removed.key, "plan_revoked", intent, { plan: removed.plan }, now)];
+}
+
+/**
+ * What an org change should record (orgs spec, D8): `org_created` with the record's facts, or
+ * `org_updated` naming only what changed among the name, the seats, the standing and the SSO
+ * switch, and nothing when none of those moved. A redelivered Stripe event activates an org
+ * that is already active, and a domain claim changes nothing the stream says, so neither
+ * files a line. Filed under `org:<orgId>` as a grant row is under `grant:<key>`: the org's own
+ * affair, one party, internal, no room.
+ */
+export function orgAuditEntries(previous: Org | undefined, next: Org, intent: AuditIntent, now: number): AuditEntry[] {
+  const row = (action: "org_created" | "org_updated", detail: Record<string, unknown>): AuditEntry =>
+    auditRow(next.orgId, [next.orgId], { at: now, sessionId: `org:${next.orgId}`, action, roomName: null, detail },
+      { userId: intent.actorUserId, label: intent.actorLabel ?? null, orgId: intent.actorOrgId ?? null });
+  if (!previous) {
+    return [row("org_created", {
+      name: next.name, owner_user_id: next.ownerUserId, seats: next.seats, source: next.source, active: next.active,
+      ...intent.detail,
+    })];
+  }
+  const changed: Record<string, unknown> = {};
+  if (previous.name !== next.name) changed.name = next.name;
+  if (previous.seats !== next.seats) changed.seats = next.seats;
+  if (previous.active !== next.active) changed.active = next.active;
+  if (previous.requireSso !== next.requireSso) changed.require_sso = next.requireSso;
+  if (Object.keys(changed).length === 0) return [];
+  return [row("org_updated", { ...changed, ...intent.detail })];
 }

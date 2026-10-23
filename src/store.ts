@@ -1,6 +1,7 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  Org, OrgPatch,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -15,7 +16,7 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, revokeAuditEntries, type AuditIntent, orgAuditEntries } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -1664,7 +1665,7 @@ export interface BellmanStore {
    */
   putGrantIfOwned(
     grant: PlanGrant, expectedOrgId: string | null, audit: AuditIntent
-  ): Promise<"written" | "conflict">;
+  ): Promise<"written" | "conflict" | "full">;
   /** Delete a grant only if it belongs to `expectedOrgId`, and say what happened. */
   deleteGrantIfOwned(
     key: string, expectedOrgId: string | null, audit: AuditIntent
@@ -1697,6 +1698,40 @@ export interface BellmanStore {
   /** Scoped to one org when given: grants are org-tenanted data. */
   listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
 
+  /**
+   * The org record (orgs spec, D1), or undefined for an org that is only a string in grants
+   * and overrides. Such an org is not refused anywhere: it has no seat cap and is always active.
+   */
+  getOrg(orgId: string): Promise<Org | undefined>;
+  /**
+   * The operator's creation (D7): the record and the owner's admin grant in ONE operation, with
+   * `org_created` and the grant's rows. `exists` for an id that has a record; `conflict` when the
+   * owner's key holds a live grant in another org, writing nothing. A grant the key holds in this
+   * org is replaced: an org that lived as a string gets its record with its owner seated.
+   */
+  createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict">;
+  /**
+   * The record after the patch, or undefined when there is none. Records `org_updated` naming
+   * only what changed, and nothing for a patch that changed nothing (D8). A field given as
+   * undefined is left as it was.
+   */
+  updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined>;
+  /** How many live grants name the org: its members, the owner among them (D2, D3). */
+  countOrgMembers(orgId: string): Promise<number>;
+  /**
+   * Billing's write (D4): a record for an org that has none, named by its id, `source: "purchase"`
+   * and active; otherwise the seats and `active: true` and nothing else, so a name its owner gave
+   * it survives every Stripe event. `unchanged` writes and records nothing. `not_purchased` is an
+   * org the operator created: billing touches only what billing created (ADR 0014, decision 3),
+   * so it is left as it is, whatever id it was given.
+   */
+  activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased">;
+  /**
+   * The lapse (D5): `active: false`, the members kept. `missing` for no record; `unchanged` when
+   * already inactive; `not_purchased` for an operator org, which billing leaves active.
+   */
+  deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased">;
+
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
@@ -1727,6 +1762,23 @@ const foldKeyOf = (r: Pick<NewReport, "reporterUserId" | "sessionId" | "target">
 /** By id, which is the time filed and then a random suffix: the order the Durable Objects store's key listing gives. */
 const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
+/**
+ * A record with the patch applied (orgs spec, D6, D7): a field given as undefined is left as it
+ * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
+ */
+export function patchedOrg(previous: Org, patch: OrgPatch): Org {
+  const next: Org = { ...previous };
+  if (patch.name !== undefined) next.name = patch.name;
+  if (patch.seats !== undefined) next.seats = patch.seats;
+  if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
+  return next;
+}
+
+/** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
+export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
+  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [] };
+}
+
 export class MemoryStore implements BellmanStore {
   /**
    * The rooms, each with every member it has seated, those who have left included: one array
@@ -1748,6 +1800,8 @@ export class MemoryStore implements BellmanStore {
   private handleByUser = new Map<string, string>(); // userId -> handle
   private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
+  /** The org records (orgs spec, D1), by id. Members are the grants above that name one. */
+  private orgs = new Map<string, Org>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -2966,12 +3020,18 @@ export class MemoryStore implements BellmanStore {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     // liveGrant, not the raw map: a lapsed grant is defined as absent
     // everywhere else, and reading past that here would let a dead record from
     // another org hold a key hostage until some unrelated read swept it.
     const existing = this.liveGrant(grant.key);
     if (existing && existing.orgId !== expectedOrgId) return "conflict";
+    // The seat cap (D3), decided in the same synchronous span as the write: a key that is
+    // already a member of this org changes role for no seat; an org with no record has no cap.
+    if (grant.orgId !== null && !(existing && existing.orgId === grant.orgId)) {
+      const org = this.orgs.get(grant.orgId);
+      if (org && this.liveMembers(grant.orgId) >= org.seats) return "full";
+    }
     this.grants.set(grant.key, detach(grant));
     this.recordAudit(grantAuditEntries(existing, grant, audit, Date.now()));
     return "written";
@@ -3036,6 +3096,73 @@ export class MemoryStore implements BellmanStore {
       if (orgId === undefined || grant.orgId === orgId) live.push(grant);
     }
     return detach(live.slice(0, limit));
+  }
+
+  /** Synchronous, for the reason `liveGrant` is: `putGrantIfOwned` decides a seat on it without yielding. */
+  private liveMembers(orgId: string): number {
+    let count = 0;
+    for (const key of [...this.grants.keys()]) {
+      const grant = this.liveGrant(key);
+      if (grant && grant.orgId === orgId) count++;
+    }
+    return count;
+  }
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    const org = this.orgs.get(orgId);
+    return org && detach(org);
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    if (this.orgs.has(org.orgId)) return "exists";
+    const existing = this.liveGrant(ownerGrant.key);
+    if (existing && existing.orgId !== org.orgId) return "conflict";
+    this.orgs.set(org.orgId, detach(org));
+    this.grants.set(ownerGrant.key, detach(ownerGrant));
+    const now = Date.now();
+    this.recordAudit([...orgAuditEntries(undefined, org, audit, now), ...grantAuditEntries(existing, ownerGrant, audit, now)]);
+    return "created";
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    const previous = this.orgs.get(orgId);
+    if (!previous) return undefined;
+    const next = patchedOrg(previous, patch);
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, Date.now()));
+    return detach(next);
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.liveMembers(orgId);
+  }
+
+  async activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
+    const previous = this.orgs.get(orgId);
+    const now = Date.now();
+    if (!previous) {
+      const org = purchasedOrg(orgId, ownerUserId, seats, now);
+      this.orgs.set(orgId, detach(org));
+      this.recordAudit(orgAuditEntries(undefined, org, audit, now));
+      return "created";
+    }
+    if (previous.source !== "purchase") return "not_purchased";
+    if (previous.seats === seats && previous.active) return "unchanged";
+    const next: Org = { ...previous, seats, active: true };
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, now));
+    return "updated";
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
+    const previous = this.orgs.get(orgId);
+    if (!previous) return "missing";
+    if (previous.source !== "purchase") return "not_purchased";
+    if (!previous.active) return "unchanged";
+    const next: Org = { ...previous, active: false };
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, Date.now()));
+    return "updated";
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

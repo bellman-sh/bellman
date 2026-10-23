@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { auditRoutes } from "./http/audit.js";
+import { orgRoutes } from "./http/orgs.js";
 import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
@@ -317,6 +318,19 @@ export default {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await auditRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The org's record and its roster (orgs spec, D6), on the room routes' rules and behind the same guard:
+    // what its members read and its admins seat people through, the panel's cookie included.
+    if (url.pathname === "/org" || url.pathname.startsWith("/org/")) {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await orgRoutes(request, {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],

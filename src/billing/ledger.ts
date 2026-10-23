@@ -30,6 +30,11 @@ export interface SubscriptionState {
    * subscription, because it reads and writes one subscription at a time.
    */
   eventAt: number;
+  /**
+   * The seats it sells (orgs spec, D4). Absent on a state recorded before seats were read, and
+   * read as one: the safe count, corrected when the next Stripe event re-reads the subscription.
+   */
+  seats?: number;
 }
 
 export interface CustomerRecord {
@@ -40,6 +45,8 @@ export interface CustomerRecord {
 export interface PaidPlan {
   plan: Plan;
   customerId: string;
+  /** The chosen subscription's seats (orgs spec, D4): what its org may hold. */
+  seats: number;
 }
 
 export interface BillingStorage {
@@ -189,7 +196,13 @@ export class BillingLedger implements BillingStorage {
       if (record?.userId !== userId) continue;
       for (const sub of Object.values(record.subscriptions)) {
         if (!sub.plan || !GRANTING.has(sub.status)) continue;
-        if (!best || RANK.indexOf(sub.plan) > RANK.indexOf(best.plan)) best = { plan: sub.plan, customerId };
+        const seats = sub.seats ?? 1;
+        // The higher plan wins; between two selling the same plan, the one with more seats.
+        // ponytail: two team subscriptions for one person is a catalogue mistake, not a sum.
+        const rank = RANK.indexOf(sub.plan);
+        if (!best || rank > RANK.indexOf(best.plan) || (rank === RANK.indexOf(best.plan) && seats > best.seats)) {
+          best = { plan: sub.plan, customerId, seats };
+        }
       }
     }
     return best;

@@ -175,7 +175,7 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
   if (previous.active !== next.active) changed.active = next.active;
   if (previous.requireSso !== next.requireSso) changed.require_sso = next.requireSso;
   const policy: Record<string, unknown> = {};
-  const was = liftOrg(previous).policy, is = next.policy;
+  const was = liftOrg(previous).policy, is = liftOrg(next).policy;
   if (was.requireOrgOnly !== is.requireOrgOnly) policy.require_org_only = is.requireOrgOnly;
   if (!sameList(was.forbiddenCapabilities, is.forbiddenCapabilities)) policy.forbidden_capabilities = is.forbiddenCapabilities;
   if (!sameList(was.allowedCounterpartyOrgs, is.allowedCounterpartyOrgs)) policy.allowed_counterparty_orgs = is.allowedCounterpartyOrgs;

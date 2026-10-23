@@ -4499,6 +4499,24 @@ export function describeStoreContract(
         expect(await store.putGrantIfOwned(member("github:3"), "org_acme", by)).toBe("written");
       });
 
+      /**
+       * Every org that existed before the policy field is a row without one. The Stripe writers rebuild the
+       * record from that row, and the audit diff reads its policy: a row written before the field must lift
+       * through both, or the first seat change or cancellation after the deploy throws and rolls back.
+       */
+      it("activates, deactivates and updates a purchased org whose row was written before the policy field", async () => {
+        const stripe = { actorUserId: "stripe" };
+        const old = acme({ orgId: "org_u_github_7", ownerUserId: "u_github_7", source: "purchase" });
+        delete (old as Partial<Org>).policy;
+        await store.createOrg(old, owner({ key: "github:7", orgId: "org_u_github_7" }), by);
+        expect(await store.activatePurchasedOrg("org_u_github_7", "u_github_7", 5, stripe)).toBe("updated");
+        expect(await store.deactivateOrg("org_u_github_7", stripe)).toBe("updated");
+        expect(await store.updateOrg("org_u_github_7", { name: "Seven" }, by)).toMatchObject({ name: "Seven", seats: 5, active: false, policy: DEFAULT_POLICY });
+        expect(await store.getOrg("org_u_github_7")).toMatchObject({ policy: DEFAULT_POLICY });
+        expect((await store.auditForOrg("org_u_github_7", 20)).map((e) => e.action))
+          .toEqual(["org_created", "plan_granted", "org_updated", "org_updated", "org_updated"]);
+      });
+
       it("activates a purchased org: created named by its id, then updated, then unchanged", async () => {
         const stripe = { actorUserId: "stripe" };
         expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("created");

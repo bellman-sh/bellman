@@ -10,7 +10,7 @@ import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
-import { isActiveMember, lastSeen } from "../store.js";
+import { isActiveMember, lastSeen, rosterHasOrgless } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -66,7 +66,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect. "your org
       // The policies the preview checked, read again over the room as it is now (ADR 0031): the
       // orgs in it may have grown since, and a policy may have tightened. Then the joiner's own
       // org's rule on what it may grant, which only the capabilities given here can meet.
-      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, session.orgId === null || session.members.some((m) => m.orgId === null));
+      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, rosterHasOrgless(session));
       if (barred) return fail(barred);
       const joinerOrg = identity.orgId ? await s.getOrg(identity.orgId) : undefined;
       const forbidden = joinerOrg ? forbiddenCapabilityRefusal(joinerOrg.policy, capabilities) : null;

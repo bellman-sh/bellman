@@ -31,7 +31,7 @@ all. Each of those was decided by whichever member was calling.
    declared capabilities. A caller with no org reads nothing and is bound by nothing of their own.
 4. **Counterparty orgs bind both sides of a join.** The joiner's org must allow every org in the
    room (`session.orgs`, every org that has sat in it, ADR 0019), and every org in the room must allow
-   the joiner's. A member outside any org, the creator or anyone on the roster, is outside every list,
+   the joiner's. A member outside any org, the creator or anyone on the roster, is outside every list (the hosted seat is Bellman's, not a member outside any org),
    so a list, even an empty one, refuses a room holding one, and an org's list refuses a joiner with
    no org. The refusal says which side's policy refused and names the org: `your org's policy does not
    allow rooms with org "acme".`, `your org's policy does not allow rooms with a member outside any

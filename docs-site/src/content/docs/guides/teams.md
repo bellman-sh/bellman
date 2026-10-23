@@ -45,7 +45,7 @@ An admin can make the rules above hold for every member, every time, instead of 
 }
 ```
 
-Give only the fields you are changing; the rest stay as they were. `who_may_create` is `any_member` or `admins_only`. `require_org_only` makes every room a member starts org-only, whatever the call says. `forbidden_capabilities` lists capabilities a member may not grant a peer, at a start or at a join. `allowed_counterparty_orgs` is the orgs a member may share a room with besides their own: `null` is any org, `[]` is none, and a list is checked from both sides, so a room that holds your org takes a joiner from another org only if your list allows theirs and theirs allows yours. A member outside any org is outside every list.
+Give only the fields you are changing; the rest stay as they were. `who_may_create` is `any_member` or `admins_only`. `require_org_only` makes every room a member starts org-only, whatever the call says. `forbidden_capabilities` lists capabilities a member may not grant a peer, at a start or at a join. `allowed_counterparty_orgs` is the orgs a member may share a room with besides their own: `null` is any org, `[]` is none, and a list is checked from both sides, so a room that holds your org takes a joiner from another org only if your list allows theirs and theirs allows yours. A member outside any org is outside every list; the hosted seat is Bellman's and does not count.
 
 Each rule refuses where the member acts, with the policy named so they can ask their admin:
 

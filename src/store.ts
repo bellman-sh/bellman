@@ -133,6 +133,13 @@ export const HOST_LABEL = "host@bellman";
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
 
+/**
+ * Whether the room holds a member outside any org (ADR 0031): the hosted seat has no org and is not one, since it
+ * is Bellman's and no counterparty. The creator is on the roster, so `orgId` is read for a room with none yet.
+ */
+export const rosterHasOrgless = (s: Pick<StoredSession, "orgId" | "members">): boolean =>
+  s.orgId === null || s.members.some((m) => m.orgId === null && !isHostMember(m));
+
 /** A member as it comes to be seated: a brief to keep beside the room, or the agent of one kept there already. */
 export type Seating = Omit<Member, "agent" | "seq" | "publicNumber"> & { agent?: AgentInfo; brief?: Brief };
 

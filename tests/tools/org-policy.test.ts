@@ -87,6 +87,16 @@ describe("allowed_counterparty_orgs", () => {
     expect((await join(await h.connectAs(who("org_a")), inB.join_code)).text).toBe("Error: your org's policy does not allow rooms with a member outside any org.");
   });
 
+  /** The hosted seat has no org, and is Bellman's, not a counterparty: a colleague's hosted room is still an org-only room. */
+  it("does not count the hosted seat as a member outside any org", async () => {
+    await h.store.createOrg(org("org_a", { allowedCounterpartyOrgs: [] }), grant("org_a"), by);
+    const hosted = { room: "mornings", mode: "swarm", heartbeat_on: "2h", roles: { lead: { can: ["send", "invite"] }, guest: { can: ["send"] }, emcee: { can: ["send"] } }, default_role: "guest", creator_role: "lead", host: { role: "emcee", model: "haiku" } };
+    const started = await start(await h.connectAs(who("org_a", "member", 1)), { manifest: hosted });
+    expect([started.isError, started.text]).toEqual([false, started.text]);
+    const colleague = await join(await h.connectAs(who("org_a", "member", 2)), (started.data as { join_code: string }).join_code);
+    expect([colleague.isError, colleague.text]).toEqual([false, colleague.text]);
+  });
+
   it("is read again at confirm, so a policy tightened between preview and seat refuses the seat", async () => {
     await h.store.createOrg(org("org_a"), grant("org_a"), by);
     await h.store.createOrg(org("org_b"), grant("org_b"), by);

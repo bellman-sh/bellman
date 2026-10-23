@@ -10,7 +10,7 @@ import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf } from "../store.js";
+import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf, rosterHasOrgless } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -82,7 +82,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
       // Both sides' counterparty rules (ADR 0031), read again at confirm.
-      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, session.orgId === null || session.members.some((m) => m.orgId === null));
+      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, rosterHasOrgless(session));
       if (barred) return fail(barred);
       // Seated, not active: a room held full by a session that died is
       // previewable rather than refused here and at every retry for good

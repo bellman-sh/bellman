@@ -19,7 +19,7 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { chainHash, chainWalk, NO_ANCHOR, type AuditVerification } from "./audit-sink.js";
+import { chainHash, chainWalk, NO_ANCHOR, SWEEP_EVERY_MS, SYSTEM_INTENT, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -1897,6 +1897,12 @@ export interface BellmanStore {
   auditFacets(orgId: string): Promise<AuditFacets>;
   /** Walks the chain from the anchor, or from `from` taking that row's prev_hash on trust (ADR 0033, D1). */
   verifyAudit(orgId: string, from?: number): Promise<AuditVerification>;
+  /** The org's retention window and sink (ADR 0033): both unset until an admin sets them. */
+  auditSettings(orgId: string): Promise<AuditSettings>;
+  /** Sets or clears the window (D2) and records `audit_retention_set` by the caller; the sweep is the store's own alarm. */
+  setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings>;
+  /** One sweep at `now`: deletes the rows past the window in seq order and returns how many (D2). */
+  sweepAudit(orgId: string, now: number): Promise<number>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
@@ -1982,6 +1988,7 @@ export class MemoryStore implements BellmanStore {
   /** Each org's stream, with each row's seq and chain link: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry; prevHash: string; hash: string }[] = [];
   private auditSeq = new Map<string, number>();
+  private auditState = new Map<string, { retentionDays: number | null; anchor: ChainAnchor; sweepAt: number | null; sink: AuditSink | null; sinkAt: number | null }>();
   private waiters = new Map<string, Waiter[]>();
   /**
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
@@ -3222,7 +3229,7 @@ export class MemoryStore implements BellmanStore {
       if (!entry.orgId) continue;
       const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
       this.auditSeq.set(entry.orgId, seq);
-      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? "";
+      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? this.auditStateOf(entry.orgId).anchor.hash;
       this.audit.push({ seq, entry: detach(entry), prevHash, hash: chainHash(seq, prevHash, entry) });
     }
   }
@@ -3796,9 +3803,42 @@ export class MemoryStore implements BellmanStore {
 
   async verifyAudit(orgId: string, from?: number): Promise<AuditVerification> {
     // ponytail: one feed over the whole stream; a memory store never holds a stream worth paging.
-    const walk = chainWalk(NO_ANCHOR, from);
+    const walk = chainWalk(this.auditStateOf(orgId).anchor, from);
     walk.feed(this.audit.filter((r) => r.entry.orgId === orgId && (from === undefined || r.seq >= from)).map((r) => ({ seq: r.seq, prevHash: r.prevHash, hash: r.hash, entry: r.entry })));
     return detach(walk.result());
+  }
+
+  private auditStateOf(orgId: string) {
+    let state = this.auditState.get(orgId);
+    if (!state) this.auditState.set(orgId, (state = { retentionDays: null, anchor: NO_ANCHOR, sweepAt: null, sink: null, sinkAt: null }));
+    return state;
+  }
+
+  async auditSettings(orgId: string): Promise<AuditSettings> {
+    const { retentionDays, sink } = this.auditStateOf(orgId);
+    return { retentionDays, sink: sink && sinkStatus(sink, this.auditSeq.get(orgId) ?? 0) };
+  }
+
+  async setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    state.retentionDays = days;
+    state.sweepAt = days === null ? null : now;
+    this.recordAudit([orgEventEntry(orgId, "audit_retention_set", { days }, audit, now)]);
+    return this.auditSettings(orgId);
+  }
+
+  async sweepAudit(orgId: string, now: number): Promise<number> {
+    const state = this.auditStateOf(orgId);
+    if (state.retentionDays === null) return 0;
+    // ponytail: one plan over the whole stream, where the DO goes a batch at a time.
+    const plan = sweepPlan(this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ seq: r.seq, at: r.entry.at, hash: r.hash })), now - state.retentionDays * 86_400_000);
+    if (state.sweepAt !== null) state.sweepAt = now + SWEEP_EVERY_MS;
+    if (!plan) return 0;
+    this.audit = this.audit.filter((r) => r.entry.orgId !== orgId || r.seq > plan.through);
+    state.anchor = plan.anchor;
+    this.recordAudit([orgEventEntry(orgId, "audit_swept", { through_seq: plan.through, count: plan.count }, SYSTEM_INTENT, now)]);
+    return plan.count;
   }
 
   private streamOf(orgId: string): SeqEntry[] {

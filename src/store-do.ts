@@ -39,8 +39,8 @@ import {
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { chainHash, chainWalk, NO_ANCHOR, VERIFY_PAGE, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { DUE_PREFIX, OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, dueNames, earliestDue, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { chainHash, chainWalk, NO_ANCHOR, SWEEP_BATCH, SWEEP_EVERY_MS, SYSTEM_INTENT, VERIFY_PAGE, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
@@ -4800,23 +4800,31 @@ const AUDIT_SCHEMA = [
   "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
 ];
 
+/** The chain anchor a sweep left (ADR 0033, D2): the newest deleted row's seq and hash, so the chain survives the sweep. */
+const anchorOf = (storage: DurableObjectStorage): ChainAnchor => storage.kv.get<ChainAnchor>("chain_anchor") ?? NO_ANCHOR;
+
 /**
  * Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next.
- * An appended row is chained (ADR 0033): prev_hash is the newest row's hash, "" when there is none
- * or it predates the chain, and hash is `chainHash` over the seq the insert gave it. A moved row
- * is left unhashed, as it was.
+ * An appended row is chained (ADR 0033): prev_hash is the newest row's hash, the sweep's anchor when
+ * there is no row, "" when the newest predates the chain, and hash is `chainHash` over the seq the
+ * insert gave it. A moved row is left unhashed, as it was.
  */
-function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = null): number {
+function insertAuditRow(storage: DurableObjectStorage, e: AuditEntry, seq: number | null = null): number {
+  const sql = storage.sql;
   const got = sql.exec<{ seq: number }>(
     `INSERT INTO entries (seq, ${AUDIT_COLUMNS.join(", ")}) VALUES (?, ${AUDIT_COLUMNS.map(() => "?").join(", ")}) RETURNING seq`,
     seq, ...recordOf(e),
   ).one().seq;
   if (seq === null) {
-    const prev = sql.exec<{ hash: string | null }>("SELECT hash FROM entries WHERE seq < ? ORDER BY seq DESC LIMIT 1", got).toArray()[0]?.hash ?? "";
+    const newest = sql.exec<{ hash: string | null }>("SELECT hash FROM entries WHERE seq < ? ORDER BY seq DESC LIMIT 1", got).toArray()[0];
+    const prev = newest === undefined ? anchorOf(storage).hash : newest.hash ?? "";
     sql.exec("UPDATE entries SET prev_hash = ?, hash = ? WHERE seq = ?", prev, chainHash(got, prev, e), got);
   }
   return got;
 }
+
+/** The `settings` row (ADR 0033): the window, in days, or null for none, and the org the stream belongs to. */
+interface AuditRetention { retentionDays: number | null; orgId: string }
 
 /** The columns ADR 0033 added, for a table created before them. */
 const AUDIT_ADDED_COLUMNS = ["prev_hash", "hash"];
@@ -4862,7 +4870,7 @@ function migrateAudit(storage: DurableObjectStorage): void {
   const have = new Set(storage.sql.exec<{ name: string }>("PRAGMA table_info(entries)").toArray().map((c) => c.name));
   for (const col of AUDIT_ADDED_COLUMNS) if (!have.has(col)) storage.sql.exec(`ALTER TABLE entries ADD COLUMN ${col} TEXT`);
   const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
-  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
+  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage, entry, keepKeySeqs ? Number(key.slice(2)) : null));
   // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
   moveKv<number>(storage, "d:", (key, seq) => {
     storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
@@ -4896,7 +4904,7 @@ export class AuditDO extends DurableObject {
       if (intentId !== undefined && sql.exec("SELECT 1 FROM delivered WHERE intent_id = ?", intentId).toArray().length > 0) {
         return;
       }
-      const seq = insertAuditRow(sql, entry);
+      const seq = insertAuditRow(this.ctx.storage, entry);
       if (intentId !== undefined) sql.exec("INSERT INTO delivered (intent_id, seq) VALUES (?, ?)", intentId, seq);
     });
   }
@@ -4935,8 +4943,7 @@ export class AuditDO extends DurableObject {
 
   /** Walks the chain a page at a time from the anchor a sweep left (ADR 0033), or from `from`. */
   async verify(from?: number): Promise<AuditVerification> {
-    const anchor = (await this.ctx.storage.get<ChainAnchor>("chain_anchor")) ?? NO_ANCHOR;
-    const walk = chainWalk(anchor, from);
+    const walk = chainWalk(anchorOf(this.ctx.storage), from);
     let next = from ?? 0;
     for (;;) {
       const rows = this.ctx.storage.sql.exec<AuditRecord>("SELECT * FROM entries WHERE seq >= ? ORDER BY seq LIMIT ?", next, VERIFY_PAGE).toArray();
@@ -4944,6 +4951,85 @@ export class AuditDO extends DurableObject {
       if (!fed || rows.length < VERIFY_PAGE) return walk.result();
       next = rows.at(-1)!.seq + 1;
     }
+  }
+
+  /** The org's window and sink (ADR 0033), both unset until an admin sets them. */
+  async settings(): Promise<AuditSettings> {
+    const kv = this.ctx.storage.kv;
+    const sink = kv.get<AuditSink>("sink") ?? null;
+    return { retentionDays: kv.get<AuditRetention>("settings")?.retentionDays ?? null, sink: sink && sinkStatus(sink, this.#newestSeq()) };
+  }
+
+  #newestSeq(): number {
+    return this.ctx.storage.sql.exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM entries").one().seq ?? 0;
+  }
+
+  /**
+   * D2: the window and its audit row in one transaction, then the sweep armed for now or disarmed.
+   * The org's id is kept beside the window: a Durable Object cannot read its own name, and the alarm
+   * has no caller to tell it.
+   */
+  async setRetention(orgId: string, days: number | null, intent: AuditIntent, now: number): Promise<AuditSettings> {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put<AuditRetention>("settings", { retentionDays: days, orgId });
+      insertAuditRow(this.ctx.storage, orgEventEntry(orgId, "audit_retention_set", { days }, intent, now));
+    });
+    if (days === null) this.#disarm("sweep"); else this.#arm("sweep", now);
+    await this.#reArm();
+    return this.settings();
+  }
+
+  /**
+   * D2: delete the rows past the window in seq order, a batch at a time, each batch one transaction that
+   * moves the anchor with it, so a sweep cut short leaves a chain that still verifies. One `audit_swept`
+   * row after the loop, by the system, chained from the anchor when it emptied the table.
+   */
+  async sweep(now: number): Promise<number> {
+    const storage = this.ctx.storage;
+    const settings = storage.kv.get<AuditRetention>("settings");
+    if (!settings || settings.retentionDays === null) return 0;
+    const cutoff = now - settings.retentionDays * 86_400_000;
+    let through = 0, count = 0;
+    for (;;) {
+      const rows = storage.sql.exec<{ seq: number; at: number; hash: string | null }>("SELECT seq, at, hash FROM entries ORDER BY seq LIMIT ?", SWEEP_BATCH).toArray();
+      const plan = sweepPlan(rows, cutoff);
+      if (!plan) break;
+      storage.transactionSync(() => {
+        storage.sql.exec("DELETE FROM entries WHERE seq <= ?", plan.through);
+        storage.sql.exec("DELETE FROM delivered WHERE seq <= ?", plan.through);
+        storage.kv.put<ChainAnchor>("chain_anchor", plan.anchor);
+      });
+      through = plan.through; count += plan.count;
+      if (plan.count < rows.length || rows.length < SWEEP_BATCH) break;
+    }
+    if (count > 0) await this.append(orgEventEntry(settings.orgId, "audit_swept", { through_seq: through, count }, SYSTEM_INTENT, now));
+    this.#arm("sweep", now + SWEEP_EVERY_MS);
+    return count;
+  }
+
+  #arm(name: string, at: number): void { this.ctx.storage.kv.put(dueKey(name), at); }
+  #disarm(name: string): void { this.ctx.storage.kv.delete(dueKey(name)); }
+
+  /** One alarm per object, pointed at the earliest `due:` row, or none (the outbox's pattern). */
+  async #reArm(): Promise<void> {
+    const at = earliestDue([...this.ctx.storage.kv.list<number>({ prefix: DUE_PREFIX })].map(([, at]) => at));
+    if (at === null) await this.ctx.storage.deleteAlarm(); else await this.ctx.storage.setAlarm(at);
+  }
+
+  /** RegistryDO's loop: every due name, consumed before it runs, then the alarm pointed at what is still due. */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const due = new Map([...this.ctx.storage.kv.list<number>({ prefix: DUE_PREFIX })].map(([k, at]) => [k.slice(DUE_PREFIX.length), at]));
+    for (const name of dueNames(due, now)) {
+      this.#disarm(name);
+      try {
+        if (name === "sweep") await this.sweep(now);
+      } catch (error) {
+        console.error(`alarm handler "${name}" failed for the audit stream:`, error);
+        throw error;
+      }
+    }
+    await this.#reArm();
   }
 
   /**
@@ -5771,6 +5857,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async verifyAudit(orgId: string, from?: number): Promise<AuditVerification> {
     return this.audit(orgId).verify(from);
+  }
+
+  async auditSettings(orgId: string): Promise<AuditSettings> {
+    return this.audit(orgId).settings();
+  }
+
+  async setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings> {
+    return this.audit(orgId).setRetention(orgId, days, audit, Date.now());
+  }
+
+  async sweepAudit(orgId: string, now: number): Promise<number> {
+    return this.audit(orgId).sweep(now);
   }
 
   /**

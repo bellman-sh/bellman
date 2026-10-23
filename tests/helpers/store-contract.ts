@@ -6013,6 +6013,51 @@ export function describeStoreContract(
       expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 0, through_seq: 0, checked: 0, unhashed: 0, anchor: NO_ANCHOR });
     });
 
+    // ---------------------------------------------------------- retention and the sweep (ADR 0033, D2)
+    describe("retention", () => {
+      const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+      const day = (n: number) => Date.parse("2026-03-01T00:00:00Z") + n * 24 * 3_600_000;
+
+      it("auditSettings defaults to no retention and no sink", async () => {
+        expect(await store.auditSettings("org_a")).toEqual({ retentionDays: null, sink: null });
+      });
+
+      it("setAuditRetention stores the window and audits audit_retention_set by the caller", async () => {
+        expect(await store.setAuditRetention("org_a", 90, by)).toEqual({ retentionDays: 90, sink: null });
+        expect(await store.auditSettings("org_a")).toEqual({ retentionDays: 90, sink: null });
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_retention_set", detail: { days: 90 }, actorUserId: "u_admin" });
+      });
+
+      it("sweepAudit deletes rows older than the window in seq order, stops at the first young row, anchors the chain and appends audit_swept", async () => {
+        for (const at of [day(1), day(2), day(40), day(3)]) await store.appendAudit(chainRow(at));
+        const second = (await store.queryAudit("org_a", { limit: 10 })).entries.find((e) => e.seq === 2)!;
+        await store.setAuditRetention("org_a", 30, by);
+        expect(await store.sweepAudit("org_a", day(40) + 3_600_000)).toBe(2);
+        const after = (await store.queryAudit("org_a", { limit: 10 })).entries;
+        expect(after.map((e) => [e.seq, e.action, e.at])).toEqual([
+          [6, "audit_swept", after[0]!.at], [5, "audit_retention_set", after[1]!.at], [4, "sent_message", day(3)], [3, "sent_message", day(40)],
+        ]);
+        expect(after[0]).toMatchObject({ actorUserId: "system", detail: { through_seq: 2, count: 2 } });
+        expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 3, through_seq: 6, checked: 4, unhashed: 0, anchor: { seq: 2, hash: second.hash } });
+      });
+
+      it("sweepAudit with no window deletes nothing", async () => {
+        await store.appendAudit(chainRow(day(1)));
+        expect(await store.sweepAudit("org_a", day(400))).toBe(0);
+        expect((await store.queryAudit("org_a", { limit: 10 })).total).toBe(1);
+      });
+
+      it("sweepAudit past the whole stream leaves an empty stream whose next row chains from the anchor", async () => {
+        for (const at of [day(1), day(2)]) await store.appendAudit(chainRow(at));
+        await store.setAuditRetention("org_a", 30, by);
+        const third = (await store.queryAudit("org_a", { limit: 10 })).entries[0]!;
+        expect(await store.sweepAudit("org_a", Date.now() + 40 * 24 * 3_600_000)).toBe(3);
+        const [swept] = (await store.queryAudit("org_a", { limit: 10 })).entries;
+        expect(swept).toMatchObject({ seq: 4, orgId: "org_a", action: "audit_swept", prevHash: third.hash, detail: { through_seq: 3, count: 3 } });
+        expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 4, through_seq: 4, checked: 1, unhashed: 0, anchor: { seq: 3, hash: third.hash } });
+      });
+    });
+
     // ------------------------------------------------------------- the audit query (audit trail spec, D6)
     describe("the audit query", () => {
       const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);

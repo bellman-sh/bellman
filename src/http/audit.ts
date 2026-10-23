@@ -5,9 +5,10 @@
  * org is always the caller's own, never a parameter.
  */
 import { auditRefusal, type AuditPage, type AuditQuery, type SeqEntry } from "../audit.js";
+import { RETENTION_FLOOR_DAYS, retentionDaysOf, type AuditSettings } from "../audit-sink.js";
 import { attachmentDisposition } from "../blobs.js";
 import { allowedOrigin, corsHeaders, preflightResponse } from "../oauth/browser.js";
-import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
+import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type AuditRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
 
@@ -15,6 +16,11 @@ export type AuditRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrig
 export const AUDIT_PAGE = 100;
 
 export type AuditParams = Omit<AuditQuery, "limit">;
+
+const MAX_SETTINGS_BYTES = 4096;
+
+/** `GET` and `PATCH /audit/settings` answer the same shape: the window and the sink as the admin set them. */
+const settingsView = (s: AuditSettings) => ({ retention_days: s.retentionDays, sink: s.sink });
 
 const LIST_PARAMS = ["from", "to", "actor", "room", "org", "action", "scope", "before", "through"];
 const EXPORT_PARAMS = ["from", "to", "actor", "room", "org", "action", "scope", "through", "format"];
@@ -149,13 +155,24 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
   if (request.method === "OPTIONS") return preflightResponse(origin);
   try {
     const exporting = path === "/audit/export";
-    if (path !== "/audit" && !exporting && path !== "/audit/verify") return problem(404, "not_found", "no such route", origin);
-    if (request.method !== "GET") return methodNotAllowed("GET", origin);
+    const settings = path === "/audit/settings";
+    if (path !== "/audit" && !exporting && path !== "/audit/verify" && !settings) return problem(404, "not_found", "no such route", origin);
+    if (settings ? request.method !== "GET" && request.method !== "PATCH" : request.method !== "GET") return methodNotAllowed(settings ? "GET, PATCH" : "GET", origin);
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
     const refused = auditRefusal(who.identity);
     if (refused) return problem(403, "forbidden", refused, origin);
     const orgId = who.identity.orgId as string; // auditRefusal refuses an identity with no org
+    if (settings) {
+      if (request.method === "GET") return json(200, settingsView(await deps.store.auditSettings(orgId)), origin);
+      const refusedLength = lengthRefusal(request, MAX_SETTINGS_BYTES, "an audit setting", origin);
+      if (refusedLength) return refusedLength;
+      const body: unknown = await request.json().catch(() => undefined);
+      const days = retentionDaysOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).retention_days : "invalid");
+      if (days === "invalid") return problem(400, "invalid_request", `retention_days must be an integer of at least ${RETENTION_FLOOR_DAYS}, or null`, origin);
+      const intent = { actorUserId: who.identity.userId, actorLabel: who.identity.label, actorOrgId: who.identity.orgId };
+      return json(200, settingsView(await deps.store.setAuditRetention(orgId, days, intent)), origin);
+    }
     if (path === "/audit/verify") {
       const from = url.searchParams.get("from");
       if (from !== null && !/^[1-9]\d*$/.test(from)) return problem(400, "invalid_request", "from must be a positive integer", origin);

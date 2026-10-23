@@ -39,11 +39,13 @@ beforeEach(() => {
   deps = { store, caller, panelOrigins: [PANEL] };
 });
 
-const call = (who: string | null, path: string, method = "GET") =>
+const call = (who: string | null, path: string, method = "GET", body?: string) =>
   auditRoutes(new Request(`${ISSUER}${path}`, {
     method,
-    headers: { origin: PANEL, ...(who ? { authorization: `Bearer ${who}` } : {}) },
+    headers: { origin: PANEL, ...(who ? { authorization: `Bearer ${who}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body,
   }), deps);
+const patch = (who: string, body: string) => call(who, "/audit/settings", "PATCH", body);
 
 interface ListBody {
   org_id: string;
@@ -301,5 +303,31 @@ describe("GET /audit/verify", () => {
     expect(await said(await call("admin-a", "/audit/verify?from=0"))).toBe("from must be a positive integer");
     expect((await call("member-a", "/audit/verify"))!.status).toBe(403);
     expect((await call("free-a", "/audit/verify"))!.status).toBe(403);
+  });
+});
+
+describe("/audit/settings", () => {
+  it("reads the org's window and sink, both unset to start", async () => {
+    const res = (await call("admin-a", "/audit/settings"))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ retention_days: null, sink: null });
+  });
+
+  it("sets the window, writes the row, and refuses a window under the floor, a string, a bad body and an empty one", async () => {
+    const res = (await patch("admin-a", JSON.stringify({ retention_days: 90 })))!;
+    expect([res.status, await res.json()]).toEqual([200, { retention_days: 90, sink: null }]);
+    expect((await store.auditForOrg("org_a", 10)).at(-1)).toMatchObject({ action: "audit_retention_set", actorUserId: "u_ana", detail: { days: 90 } });
+    expect(await said(await patch("admin-a", JSON.stringify({ retention_days: 29 })))).toBe("retention_days must be an integer of at least 30, or null");
+    expect((await patch("admin-a", JSON.stringify({ retention_days: "90" })))!.status).toBe(400);
+    expect((await patch("admin-a", "not json"))!.status).toBe(400);
+    expect((await patch("admin-a", "{}"))!.status).toBe(400);
+    const cleared = (await patch("admin-a", JSON.stringify({ retention_days: null })))!;
+    expect([cleared.status, await cleared.json()]).toEqual([200, { retention_days: null, sink: null }]);
+  });
+
+  it("is an admin's route, and takes no other method", async () => {
+    expect((await call("member-a", "/audit/settings"))!.status).toBe(403);
+    expect((await patch("member-a", JSON.stringify({ retention_days: 90 })))!.status).toBe(403);
+    expect((await call("admin-a", "/audit/settings", "PUT"))!.status).toBe(405);
   });
 });

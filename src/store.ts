@@ -3,7 +3,7 @@ import type {
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, takesUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -3547,11 +3547,19 @@ export class MemoryStore implements BellmanStore {
     // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
     const prior = entry?.scimId ? this.scimUsers.get(scimUserKey(user.orgId, entry.scimId)) : undefined;
     if (prior && prior.deletedAt === null) return { outcome: "exists" };
-    const key = entry?.key ?? user.key;
-    const held = this.liveGrant(key);
+    const kept = entry?.key ?? user.key;
+    let key = kept;
+    let held = this.liveGrant(key);
     if (held && held.orgId !== user.orgId) return { outcome: "conflict" };
+    // A seat this push creates or restores never lands on a personal account the org does not own by its form (ADR 0027).
+    if (!held) {
+      key = scimSeatKey(org, user.userName, kept);
+      held = key === kept ? undefined : this.liveGrant(key);
+      if (held && held.orgId !== user.orgId) return { outcome: "conflict" };
+    }
     const linked = held !== undefined;
     const entries: AuditEntry[] = [];
+    if (key !== kept && this.scimByKey.get(scimKeyIndex(kept))?.scimId === entry?.scimId) this.scimByKey.delete(scimKeyIndex(kept));
     if (!linked && user.active) {
       if (this.liveMembers(user.orgId) >= org.seats) return { outcome: "full" };
       const grant = scimGrant(key, user.orgId, user.createdAt);
@@ -3614,11 +3622,14 @@ export class MemoryStore implements BellmanStore {
       if (target) return { outcome: "exists" };
     }
     let reuse: PlanGrant | undefined;
+    // A reactivation never re-seats a personal account the org does not own by its form (ADR 0027): on the address instead.
+    const org = this.orgs.get(orgId);
+    const seatAt = active === true && org ? scimSeatKey(org, rename ?? was.userName, toKey) : toKey;
     if (active === true) {
-      const held = moves ? undefined : this.liveGrant(toKey);
+      const held = moves && seatAt === toKey ? undefined : this.liveGrant(seatAt);
       if (held && held.orgId !== orgId) return { outcome: "conflict" };
       reuse = held;
-      if (!reuse && this.liveMembers(orgId) >= (this.orgs.get(orgId)?.seats ?? Infinity)) return { outcome: "full" };
+      if (!reuse && this.liveMembers(orgId) >= (org?.seats ?? Infinity)) return { outcome: "full" };
     }
 
     const entries: AuditEntry[] = [];
@@ -3645,6 +3656,10 @@ export class MemoryStore implements BellmanStore {
     }
     let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
     if (active === true) {
+      if (seatAt !== next.key) {
+        this.scimByKey.delete(scimKeyIndex(next.key));
+        next = { ...next, key: seatAt };
+      }
       if (!reuse) {
         const grant = scimGrant(next.key, orgId, now);
         this.grants.set(next.key, grant);

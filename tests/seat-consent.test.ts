@@ -523,17 +523,26 @@ describe("a seat the org's identity provider pushes (ADR 0027, ADR 0029)", () =>
       await plans.issueScimToken(orgId, { tokenHash: await sha256Base64url(token), issuedAt: 2, issuedBy: "u_op" }, { actorUserId: "u_op" });
     }
   });
-  const scim = async (orgId: keyof typeof TOKENS, path: string, method: string, body: unknown) => {
-    const text = JSON.stringify(body);
+  const scim = async (orgId: keyof typeof TOKENS, path: string, method: string, body?: unknown) => {
+    const text = body === undefined ? undefined : JSON.stringify(body);
     return (await scimRoutes(new Request(`${ISSUER}${path}`, {
       method, body: text,
-      headers: { authorization: `Bearer ${TOKENS[orgId]}`, "content-type": SCIM_JSON, "content-length": String(text.length) },
+      headers: { authorization: `Bearer ${TOKENS[orgId]}`, "content-type": SCIM_JSON, ...(text ? { "content-length": String(text.length) } : {}) },
     }), { store: plans }))!;
   };
   const push = async (userName: string, orgId: keyof typeof TOKENS = "org_acme") =>
     (await (await scim(orgId, "/scim/v2/Users", "POST", { schemas: [USER_SCHEMA], userName })).json()) as { id: string };
-  const deactivate = (id: string, orgId: keyof typeof TOKENS = "org_acme") =>
-    scim(orgId, `/scim/v2/Users/${id}`, "PATCH", { schemas: [PATCH_SCHEMA], Operations: [{ op: "replace", value: { active: false } }] });
+  const setActive = (id: string, active: boolean, orgId: keyof typeof TOKENS = "org_acme") =>
+    scim(orgId, `/scim/v2/Users/${id}`, "PATCH", { schemas: [PATCH_SCHEMA], Operations: [{ op: "replace", value: { active } }] });
+  const deactivate = (id: string, orgId: keyof typeof TOKENS = "org_acme") => setActive(id, false, orgId);
+  /** A person who joined through a pushed seat on an address Acme does not own, then was deprovisioned. */
+  const joinedThenDeprovisioned = async () => {
+    const { id } = await push("jesse@example.dev");
+    expect((await signIn("join")).identity).toMatchObject({ orgId: "org_acme" });
+    expect((await deactivate(id)).status).toBe(200);
+    expect((await signIn()).identity).toMatchObject({ orgId: null });
+    return id;
+  };
 
   it("takes no effect for an address the org does not own by its form: the sign-in stays free, and the page offers it", async () => {
     await push("jesse@example.dev");
@@ -562,6 +571,41 @@ describe("a seat the org's identity provider pushes (ADR 0027, ADR 0029)", () =>
     const { identity, page } = await signIn();
     expect(page).toBeNull();
     expect(identity).toMatchObject({ orgId: "org_acme", plan: "team" });
+  });
+
+  it("offers a reactivated seat again rather than restoring it on the account the person joined with", async () => {
+    const id = await joinedThenDeprovisioned();
+    expect((await setActive(id, true)).status).toBe(200);
+    const again = await signIn("continue");
+    expect(again.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
+    expect(again.identity).toMatchObject({ orgId: null, plan: "free" });
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("offers a re-push after a delete again rather than seating the account the person joined with", async () => {
+    const { id } = await push("jesse@example.dev");
+    expect((await signIn("join")).identity).toMatchObject({ orgId: "org_acme" });
+    expect((await scim("org_acme", `/scim/v2/Users/${id}`, "DELETE")).status).toBe(204);
+    expect((await scim("org_acme", "/scim/v2/Users", "POST", { schemas: [USER_SCHEMA], userName: "jesse@example.dev" })).status).toBe(201);
+    const again = await signIn("continue");
+    expect(again.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
+    expect(again.identity).toMatchObject({ orgId: null, plan: "free" });
+  });
+
+  it("leaves a former member's own sign-in open when the IdP reactivates them with single sign-on required", async () => {
+    const id = await joinedThenDeprovisioned();
+    await plans.claimDomain("org_acme", "acme.test", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "acme.test", 2, by);
+    await plans.putOrgIdp("org_acme", {
+      protocol: "oidc", issuer: "https://idp.test", clientId: "0oa", clientSecret: await seal("test-seal-secret", "shh"), tokenAuth: "client_secret_basic",
+      authorizationEndpoint: "https://idp.test/authorize", tokenEndpoint: "https://idp.test/token", userinfoEndpoint: null, configuredAt: 3, configuredBy: "u_github_1",
+    }, by);
+    await plans.updateOrg("org_acme", { requireSso: true }, by);
+    expect((await setActive(id, true)).status).toBe(200);
+    const after = await signIn("continue");
+    expect(after.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
+    expect(after.target.searchParams.get("error")).toBeNull();
+    expect(after.identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
   });
 
   /** The domain's owner takes the address from another org's pushed seat; that org's IdP keeps no hold on the person it never seated. */

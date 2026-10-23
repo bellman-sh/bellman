@@ -130,13 +130,15 @@ async function signInThroughGithub(joining?: string) {
   }
   const target = new URL(callback.headers.get("location") ?? "https://no-redirect.test/");
   const code = target.searchParams.get("code");
-  if (!code) return { clientId, target, identity: null as Identity | null, tokens: null as Record<string, string> | null };
+  // The invites page, when the sign-in stopped at it unanswered (ADR 0027): a status of 200 and the page's text.
+  const page = callback.status === 200 ? await callback.text() : null;
+  if (!code) return { clientId, target, page, identity: null as Identity | null, tokens: null as Record<string, string> | null };
   const res = await call("/token", {
     method: "POST",
     body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: REDIRECT, code_verifier: VERIFIER, resource: RESOURCE }).toString(),
   });
   const tokens = (await res.json()) as Record<string, string>;
-  return { clientId, target, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
+  return { clientId, target, page, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
 }
 
 const refresh = (clientId: string, token: string) => call("/token", {
@@ -368,7 +370,9 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
   it("leaves a personal account that an address linked to the org signing in once deprovisioned, as free", async () => {
     await plans.updateOrg("org_acme", { requireSso: false }, by);
     await plans.createScimUser(pushed({ userName: "jesse@example.dev", key: "email:jesse@example.dev" }), scimIntent("org_acme"));
-    expect((await signInThroughGithub()).identity).toBeNull();
+    const stopped = await signInThroughGithub();
+    expect(stopped.page).toContain('action="/auth/invites"');
+    expect(stopped.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
     const linked = await signInThroughGithub("org_acme");
     expect(linked.identity).toMatchObject({ userId: "u_github_4242", orgId: "org_acme", plan: "team" });
     expect(await plans.scimUserByKey("github:4242")).toMatchObject({ id: "x1" });

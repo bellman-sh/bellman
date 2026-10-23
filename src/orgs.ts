@@ -44,6 +44,19 @@ export function isUnownedSeat(grant: PlanGrant, org: Org | undefined): boolean {
 }
 
 /**
+ * Where a SCIM write that creates or restores a seat puts it (ADR 0027, ADR 0029): a push, a re-push after a
+ * delete, a reactivation. On `key`, the key the person was last seated under, when the org owns it by its
+ * form or owns the address that linked it; otherwise on the address, `email:<userName>`, where the seat is
+ * offered at the person's next sign-in and answered there. So a push alone never seats a personal account the
+ * person once joined with: a deprovision ended that seat, and taking it again is theirs to answer. Writes that
+ * only end a seat follow `key` as it is.
+ */
+export function scimSeatKey(org: Org, userName: string, key: string): string {
+  const address = `email:${userName}`;
+  return key === address || ownsByForm(org, key) || ownsByForm(org, address) ? key : address;
+}
+
+/**
  * Whether a grant `next` written for its org takes the key from `previous`, another org's seat (ADR 0027):
  * the seat is unowned, so it holds nothing, and the writing org owns the address by its form, so the
  * address is that org's to seat. The guarded write then replaces the seat rather than refusing the key.

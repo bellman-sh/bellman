@@ -24,7 +24,7 @@ import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
-import { MAX_PENDING_INVITES } from "../../src/orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
@@ -4817,6 +4817,57 @@ export function describeStoreContract(
         expect(await store.scimUserByKey("email:nine@x.test")).toBeUndefined();
         expect((await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"))).outcome).toBe("updated");
         expect(await store.getGrant("github:9")).toBeUndefined();
+      });
+
+      /** A push alone never re-seats the account a person joined with (ADR 0027): a re-seat of a Join-linked user lands on the address. */
+      const linkedByJoin = async () => {
+        await seated();
+        await store.createScimUser(pushedUser(), scimIntent("org_acme"));
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1" });
+      };
+
+      it("restores a Join-linked person's seat on the address at a reactivation, never on their own account", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect((await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toMatchObject({ id: "x1", key: "email:nine@x.test", active: true });
+        expect(await store.scimUserByName("org_acme", "nine@x.test")).toMatchObject({ key: "email:nine@x.test" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("seats a re-push after a delete on the address, never on the account the person joined with", async () => {
+        await linkedByJoin();
+        await store.deleteScimUser("org_acme", "x1", 50, scimIntent("org_acme"));
+        expect((await store.createScimUser(pushedUser({ id: "x2", createdAt: 60, updatedAt: 60 }), scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toMatchObject({ id: "x2" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("restores the seat on the address with single sign-on required too, where it holds nothing until answered", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await store.updateOrg("org_acme", { requireSso: true }, by);
+        await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(isUnownedSeat((await store.getGrant("email:nine@x.test"))!, await store.getOrg("org_acme"))).toBe(true);
+      });
+
+      it("re-seats the account an owned address linked by its form, as the org owns that address", async () => {
+        await seated();
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        await store.createScimUser(pushedUser(), scimIntent("org_acme"));
+        await store.moveGrant("email:nine@x.test", "github:9");
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.getGrant("email:nine@x.test")).toBeUndefined();
       });
 
       it("lets the domain's owner take a key another org's IdP pushed, and leaves that org's IdP no index on it", async () => {

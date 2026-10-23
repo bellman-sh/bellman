@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, takesUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -3949,13 +3949,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
       const prior = entry?.scimId ? await txn.get<ScimUser>(scimUserKey(user.orgId, entry.scimId)) : undefined;
       if (prior && prior.deletedAt === null) return { outcome: "exists" as const };
-      const key = entry?.key ?? user.key;
-      const stored = await txn.get<PlanGrant>(grantKey(key));
-      const held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
+      const kept = entry?.key ?? user.key;
+      let key = kept;
+      let stored = await txn.get<PlanGrant>(grantKey(key));
+      let held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
       if (held && held.orgId !== user.orgId) return { outcome: "conflict" as const };
+      // A seat this push creates or restores never lands on a personal account the org does not own by its form (ADR 0027).
+      if (!held) {
+        key = scimSeatKey(org, user.userName, kept);
+        if (key !== kept) {
+          stored = await txn.get<PlanGrant>(grantKey(key));
+          held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
+          if (held && held.orgId !== user.orgId) return { outcome: "conflict" as const };
+        }
+      }
       const linked = held !== undefined;
       const entries: AuditEntry[] = [];
       const rows: Record<string, unknown> = {};
+      if (key !== kept && (await txn.get<{ scimId: string }>(scimKeyIndex(kept)))?.scimId === entry?.scimId) await txn.delete(scimKeyIndex(kept));
       if (!linked && user.active) {
         if ((await this.#countMembers(txn, user.orgId, user.createdAt)) >= org.seats) return { outcome: "full" as const };
         const grant = scimGrant(key, user.orgId, user.createdAt);
@@ -4030,11 +4041,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         if (target) return { outcome: "exists" as const };
       }
       let reuse: PlanGrant | undefined;
+      // A reactivation never re-seats a personal account the org does not own by its form (ADR 0027): on the address instead.
+      const org = await txn.get<Org>(orgKey(orgId));
+      const seatAt = active === true && org ? scimSeatKey(org, rename ?? was.userName, toKey) : toKey;
       if (active === true) {
-        const held = moves ? undefined : await liveAt(toKey);
+        const held = moves && seatAt === toKey ? undefined : await liveAt(seatAt);
         if (held && held.orgId !== orgId) return { outcome: "conflict" as const };
         reuse = held;
-        const org = await txn.get<Org>(orgKey(orgId));
         if (!reuse && org && (await this.#countMembers(txn, orgId, now)) >= org.seats) return { outcome: "full" as const };
       }
 
@@ -4065,6 +4078,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       }
       let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
       if (active === true) {
+        if (seatAt !== next.key) {
+          await txn.delete(scimKeyIndex(next.key));
+          next = { ...next, key: seatAt };
+        }
         if (!reuse) {
           const grant = scimGrant(next.key, orgId, now);
           const stale = rows[grantKey(next.key)] === undefined ? await txn.get<PlanGrant>(grantKey(next.key)) : undefined;

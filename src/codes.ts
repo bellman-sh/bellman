@@ -62,8 +62,8 @@ export function joinUrl(code: string): string {
 }
 
 /**
- * Where a public room is read (public rooms on bellman.sh spec, D1): `bellman.sh/r/`, a path the dash's
- * Worker serves, by the room's name while it holds one (public names spec, D7) and by its id otherwise.
+ * The page a public room is read at (public rooms spec D6): the dash's page on bellman.sh, outside sign-in, by the room's name
+ * while it holds one (public names spec, D7) and by its id otherwise.
  * A page to read and not a door: it seats nobody, where a join URL hands a seat to whoever redeems it until it expires.
  */
 export const PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/";

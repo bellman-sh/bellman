@@ -2032,11 +2032,12 @@ treat these as plus or minus ten percent:
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-22 for public rooms on bellman.sh, by the method below: 6 tokens
-under the 9,483 that main (`673ce71c`) measures. `bellman_start` is 2,492 to 2,490 and
-`bellman_public_name` 309 to 305, for the page's host. No other tool changed. That is 9,477.
-Main, run as the control, reproduced 9,483 (`bellman_start` 2,492, `bellman_public_name`
-309) before the new figures were read.
+Re-measured on 2026-10-22 for public rooms on bellman.sh, by the method below: 9,477, the
+same as main (`6e9b1ef4`) measures, with no tool differing, since this branch changes no tool
+text. That is 6 tokens under the 9,483 that main (`673ce71c`) measured before #296
+(`ab05459`), which moved the page's host in two texts: `bellman_start` 2,492 to 2,490 and
+`bellman_public_name` 309 to 305. Main at `673ce71c`, run as the control, reproduced 9,483
+(`bellman_start` 2,492, `bellman_public_name` 309) before the new figures were read.
 
 Re-measured on 2026-10-18 for read_context, by the method below: 46 tokens over the 9,437
 that main (`f130144f`) measures, a row that already includes the reports work

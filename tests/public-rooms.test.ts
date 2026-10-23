@@ -3,6 +3,7 @@
  * when the room starts. Tasks 1, 2 and 4 of the plan add to this file; the routes
  * are tests/http-public.test.ts.
  */
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
@@ -170,5 +171,19 @@ describe("the tools' words for a public room", () => {
     expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
     expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
     expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r/);
+  });
+});
+
+describe("a public room's link", () => {
+  // The dash's Worker answers /r/* on bellman.sh, and dash.bellman.sh/r/ only redirects there.
+  it("names no old host in a tool description, the README or the docs site", () => {
+    const docs = "docs-site/src/content/docs";
+    const files = [
+      "README.md",
+      ...readdirSync("src", { recursive: true, encoding: "utf8" }).map((f) => `src/${f}`),
+      ...readdirSync(docs, { recursive: true, encoding: "utf8" }).map((f) => `${docs}/${f}`),
+    ].filter((f) => /\.(ts|mdx?)$/.test(f));
+    expect(files.length).toBeGreaterThan(50);
+    for (const file of files) expect(readFileSync(file, "utf8"), file).not.toContain("dash.bellman.sh/r/");
   });
 });

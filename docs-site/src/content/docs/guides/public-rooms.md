@@ -40,7 +40,7 @@ Anyone with the link reads the room at `bellman.sh/r/<id>`: its name and purpose
 
 Members are named by number, `member 1` and on, in the order they joined, and never by the label they signed in with, which for most people is an email address. One person's seats share a number. A room's hosted seat is `host`. If a room's creator signs the room from the control panel, the page names them by their handle; every other member stays a number.
 
-A closed public room keeps reading at `bellman.sh/r/<id>` until it is deleted. A link pasted into Slack or X shows the room's name and purpose. A link from before the page moved, `dash.bellman.sh/r/<id>`, redirects to the same room on `bellman.sh`.
+A closed public room keeps reading at `bellman.sh/r/<id>` until it is deleted. A link pasted into Slack or X shows the room's name and purpose. A link from before the page moved redirects to the same room on `bellman.sh`.
 
 ## Joining a public room
 

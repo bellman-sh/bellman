@@ -47,7 +47,7 @@ Where the spec is silent, or the code disagrees with it, and what this plan does
 - **R1. The pure module is `src/search.ts`,** runtime-free beside `src/surface.ts`, importing types and `createdAtOf` only. Its exports (Task 1's Interfaces) are the one place a record is matched, ranked or cut: the tool and the four reads reach them through `src/rooms.ts` (R12), and the dash ranks nothing.
 - **R2. ★ Normalising.** `queryWords(query)`: `toLowerCase()`, split on `/\s+/`, then each word loses any run of characters at its start or end that are neither a letter nor a digit (`/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu`), and a word left empty is dropped. Characters inside a word stay (`node.js`, `a.b*`). Order kept, repeats kept. No stemming.
 - **R3. ★ The length is the trimmed query's `.length`** (UTF-16 units, as every surface bound counts), 3 to 200. A query that passes the length but has no word left after R2 (`"..."`, `"-- --"`) is refused, since every word of nothing appears in every card. Refusals, verbatim: `query must be 3 to 200 characters`; `query must hold a word of letters or digits`.
-- **R4. ★ A word matches as a substring** of the lower-cased field (`String.prototype.includes`): no regex, so a metacharacter is a character, and no word boundary, so `retry` finds `retries`. "Every word appears somewhere" is per word: each word in any one of the record's fields.
+- **R4. ★ A word matches as a substring** of the lower-cased field (`String.prototype.includes`): no regex, so a metacharacter is a character, and no word boundary, so `retry` finds `retrying` (not `retries`: no stemming, R2). "Every word appears somewhere" is per word: each word in any one of the record's fields.
 - **R5. The searched fields by kind (section 2).** `connector`: title. `file`, `image`: title and `blob.name`. Every other kind: title, body and key; an `html` item stored as a blob has no body, so title and key. A null field is no text.
 - **R6. Order.** A card is rank 1 when every word is in its title, else rank 2; cards sort by rank, `createdAtOf(row)` descending, then key ascending by code units (`pageItems`' tie order). A message has no title, so messages sort by cursor descending, which never ties.
 - **R7. ★ The snippet,** for the first query word `w` (section 2's "first query word"). The source is a card's body (none for a connector, a `file` or an `image`, whose body is not searched) or a message's text:
@@ -252,7 +252,7 @@ describe("a query (room search spec, section 2, D5)", () => {
 describe("matching cards", () => {
   it("needs every word, in any field, in any case, inside a longer word, with a metacharacter read as itself", () => {
     expect(keys(cards([row("a", { title: "Retry", body: "the SEND path" }), row("b", { body: "retry only" })], "retry send"))).toEqual(["a"]);
-    expect(keys(cards([row("a", { body: "two retries" })], "retry"))).toEqual(["a"]);
+    expect(keys(cards([row("a", { body: "keeps retrying" })], "retry"))).toEqual(["a"]);
     expect(keys(cards([row("a", { body: "use a.b* here" }), row("b", { body: "aXbbb" })], "a.b*"))).toEqual(["a"]);
   });
 

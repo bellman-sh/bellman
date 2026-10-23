@@ -1731,6 +1731,18 @@ export function describeStoreContract(
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
     });
 
+    it("keeps a person's rooms apart from someone whose id extends theirs past a colon, and drops none of theirs", async () => {
+      // An operator-issued user id may hold a colon, so `u_x:a` extends `u_x` (#295). The walk
+      // resolves each row it lists and drops the closed ones, so a row it listed that is not this
+      // person's would be dropped from the other person's index.
+      await store.createSession(session({ id: "qs_b_own", createdBy: "u_x" }));
+      await store.createSession(session({ id: "qs_a_other", createdBy: "u_x:a" }));
+
+      expect(await store.sessionsCreatedBy("u_x", 1)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsCreatedBy("u_x", 10)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsCreatedBy("u_x:a", 10)).toEqual(["qs_a_other"]);
+    });
+
     /**
      * A lapse freezes the rooms this names, so a closed one is budget spent on
      * nothing. The index was never pruned and `limit` was applied to raw rows,
@@ -1826,6 +1838,17 @@ export function describeStoreContract(
 
       expect(await store.sessionsJoinedBy("u_a", 10)).toEqual(["qs_of_a"]);
       expect(await store.sessionsJoinedBy("u_ab", 10)).toEqual(["qs_of_ab"]);
+    });
+
+    it("keeps a person apart from someone whose id extends theirs past a colon", async () => {
+      // An operator-issued user id may hold a colon, so `u_x:a` extends `u_x` (#295), and its rows
+      // must cost `u_x` no place in a short listing either.
+      await store.createSession(ownedBy("qs_b_own", "u_x"));
+      await store.createSession(ownedBy("qs_a_other", "u_x:a"));
+
+      expect(await store.sessionsJoinedBy("u_x", 1)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsJoinedBy("u_x", 10)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsJoinedBy("u_x:a", 10)).toEqual(["qs_a_other"]);
     });
 
     it("lists a room once for a person who joined it from two machines", async () => {
@@ -3389,6 +3412,13 @@ export function describeStoreContract(
         await store.releaseHostedRoom("u_slots", "qs_s2");
         expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: true });
         expect(await store.reserveHostedRoom("u_slots", "qs_s5", 2)).toEqual({ ok: false, open: 2 });
+      });
+
+      it("counts only a person's own slots, not those of someone whose id extends theirs past a colon", async () => {
+        // `u_x:a` extends `u_x` (#226, #295): its open hosted room is not one of u_x's.
+        expect(await store.reserveHostedRoom("u_x:a", "qs_a_other", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_x", "qs_b_own", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_x:a", "qs_a_again", 1)).toEqual({ ok: false, open: 1 });
       });
 
       it("admits one of two reservations made at once at the limit", async () => {

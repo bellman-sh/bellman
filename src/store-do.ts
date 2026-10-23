@@ -3765,17 +3765,21 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * `ho:<userId>:<sessionId>` — the hosted rooms a person holds open (I7), one row a
    * slot. The count and the record are one transaction, so two starts at the limit
    * cannot both pass, and a room's close gives its row back through its outbox
-   * (`hosted_release`). Neither segment can contain the separator, for the `us:` index's
-   * reason below. A plan's hosted rooms are the most a person holds open at once, not a
+   * (`hosted_release`). Only this person's rows count: one whose rest holds a colon belongs to
+   * someone whose id extends theirs, as the `us:` index says below (#226). A plan's hosted rooms
+   * are the most a person holds open at once, not a
    * count of creations a month: each room's allowance renews monthly, so a monthly count
    * let a creator's spend grow every month they kept rooms open.
    */
   async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
     return this.ctx.storage.transaction(async (txn) => {
-      const held = await txn.list({ prefix: `ho:${userId}:` });
-      if (held.has(`ho:${userId}:${sessionId}`)) return { ok: true };
-      if (held.size >= limit) return { ok: false, open: held.size };
-      await txn.put(`ho:${userId}:${sessionId}`, Date.now());
+      const prefix = `ho:${userId}:`;
+      const held = [...(await txn.list({ prefix })).keys()]
+        .map((key) => key.slice(prefix.length))
+        .filter((id) => !id.includes(":"));
+      if (held.includes(sessionId)) return { ok: true };
+      if (held.length >= limit) return { ok: false, open: held.length };
+      await txn.put(`${prefix}${sessionId}`, Date.now());
       return { ok: true };
     });
   }
@@ -3790,9 +3794,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * The create counts below cannot answer this: they are timestamps kept for
    * the monthly quota, with no session id in them. Freezing needs the ids.
    *
-   * Two variable segments, so the same injectivity question as the grant index
-   * applies, and the same answer: neither can contain the separator. A user id
-   * is `u_[A-Za-z0-9_-]+` and a session id is `qs_<uuid>`.
+   * Two variable segments, and only the second is sure to hold no separator: a session id is
+   * `qs_<uuid>`, but an operator-issued user id may hold a colon, so one person's prefix also
+   * covers the rows of someone whose id extends theirs past one (`u_x:a` extends `u_x`). Reads
+   * go through #ownIds, which skips a row whose rest holds a colon (#295).
    *
    * **Sessions created before this deploy are not in here, and cannot be.**
    * This registry has never known which sessions exist — it holds join codes,
@@ -3831,13 +3836,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * (#75).
    */
   async createdIndexPage(userId: string, limit: number, startAfter?: string): Promise<string[]> {
-    const prefix = `us:${userId}:`;
-    const map = await this.ctx.storage.list<number>({
-      prefix,
-      limit,
-      ...(startAfter === undefined ? {} : { startAfter: `${prefix}${startAfter}` }),
-    });
-    return [...map.keys()].map((k) => k.slice(prefix.length));
+    return this.#ownIds("us", userId, limit, startAfter);
   }
 
   /**
@@ -3867,9 +3866,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   /**
    * `um:<userId>:<sessionId>` — which rooms a person holds a handle in.
    *
-   * The same shape as `us:` above, and the same injectivity argument: two
-   * variable segments, and neither can contain the separator. A user id is
-   * `u_[A-Za-z0-9_-]+` and a session id is `qs_<uuid>`.
+   * The same shape as `us:` above, and the same collision, so it is read through #ownIds too.
    *
    * Keyed by user rather than by member, so a person who joined the same room
    * from two machines is one entry — the put is idempotent, and the panel wants
@@ -3896,9 +3893,33 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
-    const prefix = `um:${userId}:`;
-    const map = await this.ctx.storage.list<number>({ prefix, limit });
-    return [...map.keys()].map((k) => k.slice(prefix.length));
+    return this.#ownIds("um", userId, limit);
+  }
+
+  /**
+   * The session ids under `<tag>:<userId>:` in key order, at most `limit` of them, past
+   * `startAfter` when given; `us:` and `um:` read through here. A row whose rest holds a colon
+   * is someone else's, whose id extends this one past it, since a session id holds none (the
+   * reason `#signed` gives for `hs:`). It is listed past rather than returned, so it takes none
+   * of the window's places (#295).
+   */
+  async #ownIds(tag: "us" | "um", userId: string, limit: number, startAfter?: string): Promise<string[]> {
+    const prefix = `${tag}:${userId}:`;
+    const ids: string[] = [];
+    let after = startAfter === undefined ? undefined : `${prefix}${startAfter}`;
+    while (ids.length < limit) {
+      const want = limit - ids.length;
+      const page = await this.ctx.storage.list<number>({
+        prefix, limit: want, ...(after === undefined ? {} : { startAfter: after }),
+      });
+      for (const key of page.keys()) {
+        after = key;
+        const id = key.slice(prefix.length);
+        if (!id.includes(":")) ids.push(id);
+      }
+      if (page.size < want) break;
+    }
+    return ids;
   }
 
   /**

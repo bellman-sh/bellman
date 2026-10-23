@@ -78,6 +78,75 @@ export function applySurfaceWrite(
   };
 }
 
+/** The viewers' grid: four columns of cells 320 by 200, 40 apart. Copies `GRID` in ui/src/canvas-layout.ts and dash's src/lib/canvas.ts. */
+export const GRID = { cols: 4, w: 320, h: 200, gap: 40 } as const;
+
+/** Slot `index`, left to right and then down: `gridSlot` in both viewers. */
+export const gridSlot = (index: number): { x: number; y: number } => ({
+  x: (index % GRID.cols) * (GRID.w + GRID.gap),
+  y: Math.floor(index / GRID.cols) * (GRID.h + GRID.gap),
+});
+
+/** The kinds the server places when they arrive without a placement. */
+export const PLACED_KINDS: readonly SurfaceKind[] = ["text", "link", "diagram", "file", "image", "html"];
+
+/** The ceiling on the slot search (R7): a row of four slots for each item the surface can hold, 256. */
+// ponytail: a ceiling on the search, not tuned: a row of four slots for every item the surface can hold. A
+// rect behind a column covers more than one slot, and a box sized 1e300 covers every slot there is; a search
+// with no end would hang the room's object inside its transaction. Past it the item is stored unplaced, as
+// it was before this, and the write still succeeds; the upgrade is a search that skips a covered run in one step.
+export const MAX_SLOT_SEARCH = MAX_SURFACE_ITEMS * GRID.cols;
+
+/** Whether a write arrives without the placement the room gives it. */
+export const needsPlacement = (write: SurfaceWrite): write is { key: string; item: SurfaceItem } =>
+  write.item !== null && write.item.placement === null && PLACED_KINDS.includes(write.item.kind);
+
+interface Box { x: number; y: number; w: number; h: number }
+
+/** Whether two boxes share area. Boxes that only touch do not. */
+const overlaps = (a: Box, b: Box): boolean =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** Code-unit order, not `localeCompare`: the viewers' sort, so every reader derives the same grid. */
+const byKey = (a: { key: string }, b: { key: string }): number => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+
+/**
+ * What the rows cover as the viewers draw them (`layout` in `ui/src/canvas-layout.ts`, `toFlow` in dash): a
+ * row with a placement at it, the grid's size where it has none; a row with none at the next slot of the
+ * grid, counting in key order, as a viewer lays out a row nobody has placed. A connector has no box.
+ * `skipKey` is the row being written, which the write is about to place or replace.
+ */
+function coveredBoxes(rows: readonly SurfaceRow[], skipKey: string): Box[] {
+  let unplaced = 0;
+  return rows
+    .filter((r) => r.key !== skipKey && r.kind !== "connector")
+    .sort(byKey)
+    .map((r) => {
+      const at = r.placement ?? gridSlot(unplaced++);
+      return { x: at.x, y: at.y, w: r.placement?.w ?? GRID.w, h: r.placement?.h ?? GRID.h };
+    });
+}
+
+/**
+ * The write as the room stores it. A write that needs a placement gets the one its key already holds, so
+ * replacing an item moves nothing, and otherwise the lowest slot of the grid whose cell no row covers. A
+ * write that has one, a removal, a connector and a shape come back as they are, the same object, and so
+ * does a write for which every slot in the search is covered.
+ */
+export function withPlacement(rows: readonly SurfaceRow[], write: SurfaceWrite): SurfaceWrite {
+  if (!needsPlacement(write)) return write;
+  const stored = rows.find((r) => r.key === write.key)?.placement ?? null;
+  if (stored !== null) return { key: write.key, item: { ...write.item, placement: { ...stored } } };
+  const covered = coveredBoxes(rows, write.key);
+  for (let i = 0; i < MAX_SLOT_SEARCH; i++) {
+    const at = gridSlot(i);
+    if (!covered.some((b) => overlaps(b, { ...at, w: GRID.w, h: GRID.h }))) {
+      return { key: write.key, item: { ...write.item, placement: at } };
+    }
+  }
+  return write;
+}
+
 const PlacementShape = z.strictObject({
   x: z.number().finite(),
   y: z.number().finite(),

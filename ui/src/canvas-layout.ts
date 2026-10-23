@@ -6,7 +6,10 @@
 import type { SurfaceItemWire, Untrusted } from "./types.js";
 
 // ponytail: a four-column grid of fixed cells for items nobody has placed; dash
-// writes a real placement on the first drag and the grid forgets the item.
+// writes a real placement on the first drag and the grid forgets the item. The
+// server now places a new item on this same grid and stores the slot (`GRID` and
+// `withPlacement` in src/surface.ts), so what lands here is a row from before; the
+// two grids must stay equal, and tests/working-surface.test.ts holds them to it.
 export const GRID = { cols: 4, w: 320, h: 200, gap: 40 } as const;
 export const ZOOM = { min: 0.1, max: 2 } as const;
 export const FIT_MARGIN = 40;

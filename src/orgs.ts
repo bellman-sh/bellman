@@ -1,6 +1,7 @@
+import { isOrgId } from "./grant-index.js";
 import { domainOf } from "./oauth/dns.js";
 import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
-import type { Org, PlanGrant, Role } from "./types.js";
+import { DEFAULT_POLICY, type Capability, type Org, type OrgPolicy, type PlanGrant, type Role } from "./types.js";
 
 /**
  * What the org routes share (orgs spec, D6, D7): the rules a body is read by and the shape an org
@@ -10,6 +11,11 @@ import type { Org, PlanGrant, Role } from "./types.js";
 
 /** A display name, not an id: long enough for a company's legal name, short enough for a heading. */
 export const MAX_ORG_NAME_CHARS = 80;
+
+/** The record as the code reads it: a row written before `policy` carries the default, as its own object. */
+export function liftOrg(org: Org): Org {
+  return { ...org, policy: { ...(org.policy ?? DEFAULT_POLICY) } };
+}
 
 // ponytail: a ceiling on seats so a typo cannot store a number nothing counts up to; not a plan limit.
 export const MAX_SEATS = 100_000;
@@ -128,6 +134,7 @@ export interface OrgView {
   domains: { domain: string; verified_at: string | null }[];
   /** The caller's role in the org, or null for a caller who is not in it, such as the operator. */
   your_role: Role | null;
+  policy: PolicyView;
 }
 
 export function orgView(org: Org, seatsUsed: number, yourRole: Role | null): OrgView {
@@ -143,5 +150,100 @@ export function orgView(org: Org, seatsUsed: number, yourRole: Role | null): Org
     require_sso: org.requireSso,
     domains: org.domains.map((d) => ({ domain: d.domain, verified_at: d.verifiedAt === null ? null : new Date(d.verifiedAt).toISOString() })),
     your_role: yourRole,
+    policy: policyView(org.policy),
   };
+}
+
+/** The most org ids `allowed_counterparty_orgs` may list (policy spec, D6). */
+export const MAX_COUNTERPARTY_ORGS = 50;
+
+export interface PolicyView {
+  require_org_only: boolean;
+  forbidden_capabilities: Capability[];
+  allowed_counterparty_orgs: string[] | null;
+  who_may_create: OrgPolicy["whoMayCreate"];
+  allow_operator_impersonation: boolean;
+}
+
+export function policyView(policy: OrgPolicy): PolicyView {
+  return {
+    require_org_only: policy.requireOrgOnly,
+    forbidden_capabilities: [...policy.forbiddenCapabilities],
+    allowed_counterparty_orgs: policy.allowedCounterpartyOrgs && [...policy.allowedCounterpartyOrgs],
+    who_may_create: policy.whoMayCreate,
+    allow_operator_impersonation: policy.allowOperatorImpersonation,
+  };
+}
+
+const CAPABILITIES: readonly Capability[] = ["read_context", "receive_messages", "request_actions"];
+const distinct = (list: readonly unknown[]): boolean => new Set(list).size === list.length;
+
+/** The patch a PATCH /org body's `policy` names, or the text of the first fault. An empty object is a fault. */
+export function parsePolicyPatch(value: unknown): { patch: Partial<OrgPolicy> } | { error: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { error: "policy must be an object" };
+  const fields = Object.entries(value);
+  if (fields.length === 0) return { error: "policy names no field" };
+  const patch: Partial<OrgPolicy> = {};
+  for (const [field, v] of fields) {
+    switch (field) {
+      case "require_org_only":
+      case "allow_operator_impersonation":
+        if (typeof v !== "boolean") return { error: `${field} must be true or false` };
+        patch[field === "require_org_only" ? "requireOrgOnly" : "allowOperatorImpersonation"] = v;
+        break;
+      case "forbidden_capabilities":
+        if (!Array.isArray(v) || !v.every((c) => CAPABILITIES.includes(c)) || !distinct(v)) {
+          return { error: "forbidden_capabilities must list read_context, receive_messages or request_actions, each once" };
+        }
+        patch.forbiddenCapabilities = v as Capability[];
+        break;
+      case "allowed_counterparty_orgs":
+        if (v !== null && !(Array.isArray(v) && v.length <= MAX_COUNTERPARTY_ORGS && v.every((id) => typeof id === "string" && isOrgId(id)) && distinct(v))) {
+          return { error: `allowed_counterparty_orgs must be null or a list of at most ${MAX_COUNTERPARTY_ORGS} distinct org ids` };
+        }
+        patch.allowedCounterpartyOrgs = v as string[] | null;
+        break;
+      case "who_may_create":
+        if (v !== "any_member" && v !== "admins_only") return { error: "who_may_create must be any_member or admins_only" };
+        patch.whoMayCreate = v;
+        break;
+      default:
+        return { error: `${field} is not a field of policy` };
+    }
+  }
+  return { patch };
+}
+
+/** The first forbidden capability a declaration holds, as the refusal text, or null. */
+export function forbiddenCapabilityRefusal(policy: OrgPolicy, capabilities: readonly string[]): string | null {
+  const hit = policy.forbiddenCapabilities.find((c) => capabilities.includes(c));
+  return hit ? `your org's policy forbids granting ${hit} to peers; call again without it.` : null;
+}
+
+/** Whether `list` (an org's allowed counterparties) admits `other`; `null` on the other side is a member outside any org. */
+const admits = (list: string[] | null, other: string | null): boolean => list === null || (other !== null && list.includes(other));
+
+/**
+ * Spec D3, both sides: the joiner's org must allow every org in the room, and every org in the room
+ * must allow the joiner's. `roomOrgIds` is `session.orgs`; `roomHasOrgless` is true when the creator
+ * or any member on the roster is outside any org, which no list admits. A room org with no record
+ * reads as open.
+ */
+export async function joinRefusal(
+  getOrg: (orgId: string) => Promise<Org | undefined>,
+  joinerOrgId: string | null,
+  roomOrgIds: readonly string[],
+  roomHasOrgless: boolean,
+): Promise<string | null> {
+  const others = roomOrgIds.filter((id) => id !== joinerOrgId);
+  const mine = joinerOrgId === null ? null : (await getOrg(joinerOrgId))?.policy.allowedCounterpartyOrgs ?? null;
+  if (mine !== null) {
+    if (roomHasOrgless) return "your org's policy does not allow rooms with a member outside any org.";
+    for (const id of others) if (!admits(mine, id)) return `your org's policy does not allow rooms with org "${id}".`;
+  }
+  for (const id of others) {
+    const theirs = (await getOrg(id))?.policy.allowedCounterpartyOrgs ?? null;
+    if (!admits(theirs, joinerOrgId)) return `org "${id}"'s policy does not allow members of your org in its rooms.`;
+  }
+  return null;
 }

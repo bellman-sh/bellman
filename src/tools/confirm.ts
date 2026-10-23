@@ -5,11 +5,12 @@ import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.j
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
+import { forbiddenCapabilityRefusal, joinRefusal } from "../orgs.js";
 import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
-import { isActiveMember, lastSeen } from "../store.js";
+import { isActiveMember, lastSeen, rosterHasOrgless } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -37,7 +38,7 @@ Returns: { session_id, member_id, members[] (each with room_role), room (the sam
 surface is the room's working surface in full; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
-Errors: "connect token invalid or expired" — re-run bellman_connect.`,
+Errors: "connect token invalid or expired" — re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join, read again here so a policy tightened since the preview still binds), "your org's policy forbids granting ... to peers" (policy).`,
       inputSchema: {
         connect_token: z.string().min(8).max(60),
         brief: BriefShape,
@@ -51,6 +52,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       _meta: APP_UI_META,
     },
     async ({ connect_token, brief, capabilities }): Promise<ToolResult> => {
+      // The joiner's own org's rule on what it may grant, read before the token is taken: the token
+      // is single-use, and the refusal says "call again without it" (ADR 0006, every refusal before
+      // any write). The checks that need the room follow the take, since they read the room as it is now.
+      const joinerOrg = identity.orgId ? await s.getOrg(identity.orgId) : undefined;
+      const forbidden = joinerOrg ? forbiddenCapabilityRefusal(joinerOrg.policy, capabilities) : null;
+      if (forbidden) return fail(forbidden);
       const pending = await s.takePendingConnect(connect_token);
       if (!pending || pending.userId !== identity.userId) {
         return fail("connect token invalid or expired. Re-run bellman_connect with the join code.");
@@ -62,6 +69,10 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // here, from the registry, as the preview read it. A ban on this room alone is the seating's,
       // below, where the room's own record cannot move under the read.
       if (await s.isBannedByCreator(session.createdBy, identity.userId)) return fail(BANNED);
+      // The policies the preview checked, read again over the room as it is now (ADR 0031): the
+      // orgs in it may have grown since, and a policy may have tightened.
+      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, rosterHasOrgless(session));
+      if (barred) return fail(barred);
       // No capacity check here. It used to be one, and a read-then-write
       // capacity check is the bug: `seatMember` below decides and writes inside
       // the object, so there is no gap for a second confirm to agree on the same

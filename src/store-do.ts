@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -3582,7 +3582,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   // transaction that takes it, and the rows an org change owes go out through the same outbox.
 
   async getOrg(orgId: string): Promise<Org | undefined> {
-    return this.ctx.storage.get<Org>(orgKey(orgId));
+    const org = await this.ctx.storage.get<Org>(orgKey(orgId));
+    return org && liftOrg(org);
   }
 
   /**

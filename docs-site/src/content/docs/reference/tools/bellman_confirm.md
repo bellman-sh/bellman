@@ -20,7 +20,7 @@ Returns: { session_id, member_id, members[] (each with room_role), room (the sam
 surface is the room's working surface in full; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.  
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.  
 Keep member_id and cursor — bellman_sync and bellman_send need them.  
-Errors: "connect token invalid or expired" — re-run bellman_connect.  
+Errors: "connect token invalid or expired" — re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join, read again here so a policy tightened since the preview still binds), "your org's policy forbids granting ... to peers" (policy).  
 
 ## Parameters
 

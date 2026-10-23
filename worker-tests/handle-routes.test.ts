@@ -8,6 +8,7 @@ import worker from "../src/worker.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
 import { DurableObjectStore } from "../src/store-do.js";
 import type { Identity } from "../src/types.js";
+import { member, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";
 const KEY = "qk_ws_test";
@@ -111,5 +112,35 @@ describe("the handle routes through the Worker", () => {
     expect(await registry.userOfHandle("wire-held")).toBeUndefined();
     expect(await registry.signedRooms("u_someone")).toEqual([]);
     expect((await release("wire-held", `Bearer ${operator}`)).status).toBe(404);
+  });
+
+  // The list is the same route over the real registry: the Worker hands it the secret's list, and the two reads behind
+  // a holder's label, a room and then its seat, go to the registry and to the room's own object.
+  it("lets a user id BELLMAN_OPERATORS lists read the holders at /admin/handles, each with the label of its seat, over the real registry", async () => {
+    const secret = "test-signing-secret";
+    const envWith = (operators: string | undefined) =>
+      ({ ...env, BELLMAN_TOKEN_SECRET: secret, BELLMAN_OPERATORS: operators }) as unknown as Parameters<typeof worker.fetch>[1];
+    const tokenFor = (identity: Identity, planSource: string) => signJwt(
+      { iss: ORIGIN, sub: identity.userId, aud: canonicalResource(`${ORIGIN}/mcp`), bellman: identity, plan_source: planSource },
+      secret, ACCESS_TOKEN_TTL_SECONDS,
+    );
+    const operator = await tokenFor({ userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" }, "default");
+    const teamAdmin = await tokenFor({ userId: "u_team_admin", orgId: "org_ops", plan: "team", role: "admin", label: "admin@example.dev" }, "operator");
+    const ask = (authorization: string, method = "GET", on = envWith("u_operator")) =>
+      worker.fetch(new Request(`${ORIGIN}/admin/handles`, { method, headers: { authorization } }), on, ctx);
+    const registry = new DurableObjectStore(env as never);
+    await registry.createSession(session({ id: "qs_wire_list", members: [member({ userId: "u_wire_seat", label: "wire@example.dev" })] }));
+    await registry.claimHandle("u_wire_seat", "wire-seated");
+    await registry.claimHandle("u_wire_nowhere", "wire-nowhere");
+
+    const listed = await ask(`Bearer ${operator}`);
+    expect([listed.status, await listed.json()]).toEqual([200, { holders: [
+      { handle: "wire-nowhere", user_id: "u_wire_nowhere", label: null },
+      { handle: "wire-seated", user_id: "u_wire_seat", label: "wire@example.dev" },
+    ] }]);
+    expect((await ask(`Bearer ${KEY}`)).status).toBe(401);
+    expect((await ask(`Bearer ${teamAdmin}`)).status).toBe(403);
+    expect((await ask(`Bearer ${operator}`, "GET", envWith(undefined))).status).toBe(403);
+    expect((await ask(`Bearer ${operator}`, "POST")).status).toBe(405);
   });
 });

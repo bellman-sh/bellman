@@ -1634,6 +1634,15 @@ export interface BellmanStore {
    */
   handleOf(userId: string): Promise<string | undefined>;
   userOfHandle(handle: string): Promise<string | undefined>;
+  /**
+   * Every account holding a handle, in user id order (public rooms on bellman.sh spec, D6). The notice that goes out
+   * before members are named by handle is addressed from it: the operator's `GET /admin/handles` pairs each holder
+   * with a sign-in label. An account that released its handle is not listed, and one that changed it is listed once,
+   * under the handle it holds now.
+   *
+   * ponytail: the whole list in one answer; a page when holders reach thousands.
+   */
+  handleHolders(): Promise<{ userId: string; handle: string }[]>;
   /** "taken" when another user holds it. Claiming a new one frees the old; claiming your own is "claimed". */
   claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
   /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
@@ -2977,6 +2986,12 @@ export class MemoryStore implements BellmanStore {
 
   async userOfHandle(handle: string): Promise<string | undefined> {
     return this.handles.get(handle);
+  }
+
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    return [...this.handleByUser]
+      .map(([userId, handle]) => ({ userId, handle }))
+      .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
   }
 
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {

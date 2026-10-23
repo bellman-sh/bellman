@@ -436,6 +436,41 @@ export interface OrgIdp {
 }
 
 /**
+ * A member as an org's identity provider pushed them (SCIM spec, D2): the row the IdP reads back by `id`,
+ * and the one place a key, an address and the IdP's own id for the person are tied together. Membership is
+ * still the grant: an active user holds a `team` member grant from `scim` under `key`, an inactive one none.
+ */
+export interface ScimUser {
+  /** Opaque and random: the IdP stores it and asks by it. */
+  id: string;
+  orgId: string;
+  /** The address, lowercased whole. */
+  userName: string;
+  externalId: string | null;
+  active: boolean;
+  /** The grant key the person is seated under, as it stands now: `email:<userName>` until a sign-in claims it onto a subject. */
+  key: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** What a push may change (SCIM spec, D8): the name, the IdP's id, and whether the person is active. */
+export type ScimUserPatch = Partial<Pick<ScimUser, "userName" | "externalId" | "active">>;
+
+/** An org's SCIM bearer token (SCIM spec, D1): its SHA-256 and its provenance, never the token itself. */
+export interface ScimToken {
+  tokenHash: string;
+  issuedAt: number;
+  issuedBy: string;
+}
+
+/** The directory row (SCIM spec, D3): the key an address is seated under, and the SCIM user managing it, if one does. */
+export interface DirectoryEntry {
+  key: string;
+  scimId: string | null;
+}
+
+/**
  * That a person exists.
  *
  * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org

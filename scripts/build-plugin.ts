@@ -2,10 +2,12 @@
  * src/channel.ts and src/stop-hook.ts → plugin/bridge/channel.mjs and plugin/bridge/stop-hook.mjs,
  * the files the Claude Code plugin runs. Claude Code copies plugin/ into its cache and installs
  * nothing beside it (plugin/ holds no package.json, on purpose), so each entry carries every
- * dependency it imports. The output is committed, and rebuilt in release PRs.
+ * dependency it imports. The output is committed, and rebuilt in release PRs, which rebuild the
+ * mod's mod/hooks/register.mjs here too (scripts/build-mod.ts).
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { build } from "esbuild";
+import { buildMod } from "./build-mod.js";
 
 const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
 
@@ -47,3 +49,6 @@ writeFileSync(
   "plugin/bridge/THIRD-PARTY-NOTICES.txt",
   entries.map(([id, text]) => `${id}\n\n${text}`).join("\n\n----\n\n") + "\n"
 );
+
+// The second plugin in the marketplace, released from the same source as the first.
+await buildMod();

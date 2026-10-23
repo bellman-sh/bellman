@@ -3,11 +3,15 @@
   "owner": {
     "name": "mcfearsome"
   },
-  "description": "Bellman for Claude Code: the bridge, the Stop hook and the room skills, in one plugin.",
+  "description": "Bellman for Claude Code: bellman, the bridge, the Stop hook and the room skills; and bellman-mod, the room in the terminal, its toasts and wake, and the approvals only you can give.",
   "plugins": [
     {
       "name": "bellman",
       "source": "./plugin"
+    },
+    {
+      "name": "bellman-mod",
+      "source": "./mod"
     }
   ]
 }

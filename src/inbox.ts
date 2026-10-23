@@ -160,6 +160,39 @@ export function pendingCount(dir: string): number {
   return queuedNames(dir).length;
 }
 
+/** One member's queued events, split by whether the server said they should interrupt. */
+interface MemberPending {
+  member_id: string;
+  interrupting: number;
+  ambient: number;
+}
+
+/**
+ * `pendingCount` by member, split by attention: the counts behind the door's `DoorWaiting`.
+ * Nothing is claimed, so the Stop hook still drains every event counted here. Sorted by member_id.
+ * ponytail: reads every queued file for its `ambient` flag; carry the flag in the file name if an
+ * inbox ever backs up far enough for the door's poll to feel it.
+ */
+export function pendingSummary(dir: string): MemberPending[] {
+  const byMember = new Map<string, MemberPending>();
+  for (const name of queuedNames(dir)) {
+    let ambient: boolean;
+    try {
+      ambient = (JSON.parse(readFileSync(join(dir, name), "utf8")) as PeerEvent).ambient === true;
+    } catch {
+      // Claimed by a drain since the listing, or an entry drain would drop as corrupt: either
+      // way it is not waiting to be delivered.
+      continue;
+    }
+    const memberId = EVENT_FILE.exec(name)![1]; // queuedNames lists only names EVENT_FILE matches
+    const row = byMember.get(memberId) ?? { member_id: memberId, interrupting: 0, ambient: 0 };
+    if (ambient) row.ambient++;
+    else row.interrupting++;
+    byMember.set(memberId, row);
+  }
+  return [...byMember.values()].sort((a, b) => (a.member_id < b.member_id ? -1 : 1));
+}
+
 /** Claim a queued file by renaming it; false when another consumer got it first. */
 function claim(dir: string, name: string): string | undefined {
   const claimed = join(dir, `.${name}.claimed.${process.pid}`);

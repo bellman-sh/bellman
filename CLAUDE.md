@@ -40,6 +40,13 @@ producing bugs. Read it before changing how the pieces fit together.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` — the Claude Code client side.
+- `src/door.ts` / `src/door-protocol.ts` — the bridge's door: a Unix socket per bridge that the mod in the
+  same session reads (five routes, one write: a decline). The protocol file is runtime-free and shared
+  with the mod.
+- `mod/` — `bellman-mod`, the second plugin in the marketplace: a Claude Code mod, a hooks module.
+  `mod/src/` is the wiring, `mod/hooks/register.mjs` the bundle that runs, `mod/tests/` the kit tests. It
+  calls no Bellman tool but `bellman_whoami`, and only inside its own hooks; what else it needs is a door route.
+- `src/mod/` — the mod's runtime-free logic, vitest-tested and bundled in.
 - `src/worker.ts` — Workers entry. `src/index.ts` + `src/app.ts` — the Node one.
 - `extension/` — the Claude Desktop `.mcpb` bundle: its manifest, and the script that packs it.
 - `plugin/` — the Claude Code plugin: the bridge in hook delivery (`.mcp.json`), the Stop hook
@@ -116,6 +123,21 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `npm publish`. `plugin/` holds no `package.json` and no lockfile: when a plugin root
   holds both, Claude Code installs their dependencies into its cache copy, and nothing
   turns that off (ADR 0019).
+- **`mod/hooks/register.mjs` follows the same rule.** `npm run build:mod` generates it, `build:plugin` runs
+  that too so every release PR rebuilds it, and the CI and `publish.yml` checks cover `mod/hooks` as they
+  cover `plugin/bridge`. The release PR also moves `mod/.claude-plugin/plugin.json` to `package.json`'s
+  version (`tests/plugin.test.ts` asserts it). The kit tests in `mod/tests/` run only through
+  `npm run test:mod`, part of `verify`, from a temp copy that holds what the plugin ships and nothing of
+  `src/`: a test importing from it fails there, and `mod/types/` repeats the door's shapes by hand. CI runs
+  no `test:mod` (`ci.yml` does not call it, and `scripts/test-mod.ts` skips in `publish.yml`'s `verify`, where
+  `CI` is set and no `claude` is on PATH), so the kit tests run only where `verify` runs locally.
+- **`verify` never type-checks `mod/src`.** esbuild strips the types without checking them, and Bun runs the
+  kit tests the same way, so a type error there passes every check. To check it, load Claude Code's
+  `plugin-authoring` skill, which writes this build's API (`types/claude-code.d.ts`) and names its path; put
+  the `tsconfig.json` from that file's header outside the repository, its `include` naming that file,
+  `mod/src` and `mod/types`, and run `npx tsc -p <that tsconfig>` from the root. It reports errors in
+  `src/inbox.ts`, which has no Node types there, and in `bellRows`' indexed access in `src/mod/view.ts`:
+  those are expected. One in `mod/` is real.
 
 ## Testing
 

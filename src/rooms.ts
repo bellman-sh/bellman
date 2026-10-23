@@ -993,6 +993,109 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
 }
 
 /**
+ * One removal's request, built from the member it removes: what `evictMember` asks the store for, and what a
+ * deprovision asks (SCIM spec, D6). `room` is the room the member is removed from, whose codes and orgs the
+ * request reads; `stored` is the ban the store is asked to write, `asked` the ban the call asked for, which the
+ * audit row carries whatever it is; `policy` is what differs between the two callers: whether a frozen room
+ * refuses (a creator's eviction) or not (the system acting on the org's instruction), whether the store's
+ * creator guard is armed, and a reason the event and the row name.
+ */
+export function evictionRequest(
+  room: StoredSession, m: Member, actor: Identity, stored: BanScope | undefined, asked: BanScope | undefined,
+  policy: { frozen: "allow" | "refuse"; byUserId: string | undefined; reason?: string },
+): RemovalRequest {
+  return {
+    now: Date.now(),
+    frozen: policy.frozen,
+    // An eviction cuts the feed (#113): the target is recorded out at the
+    // `member_evicted` event's own cursor, so their last readable event is the one
+    // telling them why (R4), and everything after it is refused. The store writes
+    // the cut in the same transaction as that event, because the two cannot be
+    // allowed to disagree — a cut naming a cursor no event carries, or a member
+    // recorded out with no cut at all, which IS the open feed this closes.
+    //
+    // A leave asks for no cut and a reclaimed seat gets none: see
+    // `RemovalRequest.cut` and the note in `announceReclaimed`. Nobody should add
+    // one there for symmetry with this.
+    cut: true,
+    // The caller, so that the store's creator guard is a real one: passing
+    // `session.createdBy` would compare the creator with itself and refuse nobody.
+    // The check above has already turned away anyone else, so on a real room this guard
+    // does not fire from here. It is the second belt, and it is what guards a removal
+    // wherever the removal is asked from.
+    ...(policy.byUserId === undefined ? {} : { byUserId: policy.byUserId }),
+    event: {
+      type: "member_evicted",
+      // No member handle to name: creator authority is on the user, and a
+      // creator who has left the room still holds it. "system" is the existing
+      // marker for a server-originated event; the creator is in fromUserId.
+      fromMemberId: "system",
+      fromUserId: actor.userId,
+      fromLabel: actor.label,
+      payload: { member_id: m.memberId, label: m.label, room_role: m.roomRole, ...(policy.reason ? { reason: policy.reason } : {}) },
+      refId: null,
+    },
+    // The door and the member go together now. Under the old shape the door shut
+    // FIRST and deliberately, so a failure left the member in with the door shut
+    // rather than out with it open: over-revoking is recoverable by minting again,
+    // and under-revoking leaves a door open behind someone who believes it shut.
+    // One transaction makes both land or neither, so the ordering no longer
+    // carries that. What is left of the bias is a repeat of an eviction, which
+    // retires a code minted for the seat since; minting again recovers it. The
+    // events are written in the order a person would tell it — the member went,
+    // then the door shut.
+    //
+    // Both paths record the door the same way: an `invite_revoked` event and an
+    // `invite_revoked` audit row, queued with the retirement and only when the
+    // store retires a code. That holds for a member who was already out too, whose
+    // live door the store still shuts. A `code_retired` field on the `member_evicted`
+    // row would be worse twice over. It is filled in before the store says whether
+    // a door shut, so it would be wrong whenever the door changed between the read
+    // above and the removal. And it could only describe a removal this call made,
+    // so the doors an eviction shut would sit in two places, a field for members who
+    // were present and a row for those who had already left, and a query for
+    // `invite_revoked` would find half of them. The row goes where revokeInvite's
+    // goes, to the orgs `auditEntries` names. Those include the evicted member's
+    // org while they are still in the room, since the door shuts as they leave and
+    // their org's `member_evicted` row beside it names them. A member who had
+    // already left is no party to it, and their org is not added: the row names a
+    // role and no person, so that org could not tell whom it concerned, and a row
+    // an org cannot resolve to anyone is worse than none.
+    //
+    // Except a public room's permanent code, which an eviction leaves open (see above). Read from
+    // the room as this call found it, so a code replaced since is the next eviction's to shut.
+    ...(room.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
+      retire: {
+        role: m.roomRole,
+        event: doorShutEvent(actor, m.roomRole),
+        audit: auditEntries(room, actor, "invite_revoked", { roles: [m.roomRole] }),
+      },
+    }),
+    ...(stored ? { ban: stored } : {}),
+    audit: auditEntries(
+      room, actor, "member_evicted",
+      {
+        // The seat and the person. member_id is per connection and only resolves
+        // inside the room, so user_id is what lets an org reading its own log see
+        // which of its people went; member_id stays for when one person holds two.
+        //
+        // No `code_retired`: whether a door shut is the store's answer, and this
+        // row is built before the store gives it. The door has its own row, see
+        // `retire`.
+        member_id: m.memberId, user_id: m.userId, room_role: m.roomRole,
+        // The ban, when the call asked for one, so an org reading its log finds every ban there. The
+        // event above never carries it: the log is public in a public room.
+        ...(asked ? { ban: asked } : {}),
+        ...(policy.reason ? { reason: policy.reason } : {}),
+      },
+      // The evicted member's org as well. The roster counts them only while they are
+      // still in the room, and a target who has already left still needs this row.
+      [m.orgId],
+    ),
+  };
+}
+
+/**
  * The room's creator removes a member, and cuts what they read after it.
  *
  * Creator-only, and outside the verb set — the same category as closing a
@@ -1101,95 +1204,8 @@ export async function evictMember(
   // for one handle it is the request this function has always made. `room` is the room the member is
   // removed from, whose codes and orgs the request reads; `stored` is the ban the store is asked to
   // write, and the audit row carries the call's `ban` whatever it is.
-  const request = (room: StoredSession, m: Member, stored: BanScope | undefined): RemovalRequest => ({
-    now: Date.now(),
-    frozen: "refuse",
-    // An eviction cuts the feed (#113): the target is recorded out at the
-    // `member_evicted` event's own cursor, so their last readable event is the one
-    // telling them why (R4), and everything after it is refused. The store writes
-    // the cut in the same transaction as that event, because the two cannot be
-    // allowed to disagree — a cut naming a cursor no event carries, or a member
-    // recorded out with no cut at all, which IS the open feed this closes.
-    //
-    // A leave asks for no cut and a reclaimed seat gets none: see
-    // `RemovalRequest.cut` and the note in `announceReclaimed`. Nobody should add
-    // one there for symmetry with this.
-    cut: true,
-    // The caller, so that the store's creator guard is a real one: passing
-    // `session.createdBy` would compare the creator with itself and refuse nobody.
-    // The check above has already turned away anyone else, so on a real room this guard
-    // does not fire from here. It is the second belt, and it is what guards a removal
-    // wherever the removal is asked from.
-    byUserId: actor.userId,
-    event: {
-      type: "member_evicted",
-      // No member handle to name: creator authority is on the user, and a
-      // creator who has left the room still holds it. "system" is the existing
-      // marker for a server-originated event; the creator is in fromUserId.
-      fromMemberId: "system",
-      fromUserId: actor.userId,
-      fromLabel: actor.label,
-      payload: { member_id: m.memberId, label: m.label, room_role: m.roomRole },
-      refId: null,
-    },
-    // The door and the member go together now. Under the old shape the door shut
-    // FIRST and deliberately, so a failure left the member in with the door shut
-    // rather than out with it open: over-revoking is recoverable by minting again,
-    // and under-revoking leaves a door open behind someone who believes it shut.
-    // One transaction makes both land or neither, so the ordering no longer
-    // carries that. What is left of the bias is a repeat of an eviction, which
-    // retires a code minted for the seat since; minting again recovers it. The
-    // events are written in the order a person would tell it — the member went,
-    // then the door shut.
-    //
-    // Both paths record the door the same way: an `invite_revoked` event and an
-    // `invite_revoked` audit row, queued with the retirement and only when the
-    // store retires a code. That holds for a member who was already out too, whose
-    // live door the store still shuts. A `code_retired` field on the `member_evicted`
-    // row would be worse twice over. It is filled in before the store says whether
-    // a door shut, so it would be wrong whenever the door changed between the read
-    // above and the removal. And it could only describe a removal this call made,
-    // so the doors an eviction shut would sit in two places, a field for members who
-    // were present and a row for those who had already left, and a query for
-    // `invite_revoked` would find half of them. The row goes where revokeInvite's
-    // goes, to the orgs `auditEntries` names. Those include the evicted member's
-    // org while they are still in the room, since the door shuts as they leave and
-    // their org's `member_evicted` row beside it names them. A member who had
-    // already left is no party to it, and their org is not added: the row names a
-    // role and no person, so that org could not tell whom it concerned, and a row
-    // an org cannot resolve to anyone is worse than none.
-    //
-    // Except a public room's permanent code, which an eviction leaves open (see above). Read from
-    // the room as this call found it, so a code replaced since is the next eviction's to shut.
-    ...(room.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
-      retire: {
-        role: m.roomRole,
-        event: doorShutEvent(actor, m.roomRole),
-        audit: auditEntries(room, actor, "invite_revoked", { roles: [m.roomRole] }),
-      },
-    }),
-    ...(stored ? { ban: stored } : {}),
-    audit: auditEntries(
-      room, actor, "member_evicted",
-      {
-        // The seat and the person. member_id is per connection and only resolves
-        // inside the room, so user_id is what lets an org reading its own log see
-        // which of its people went; member_id stays for when one person holds two.
-        //
-        // No `code_retired`: whether a door shut is the store's answer, and this
-        // row is built before the store gives it. The door has its own row, see
-        // `retire`.
-        member_id: m.memberId, user_id: m.userId, room_role: m.roomRole,
-        // The ban, when the call asked for one, so an org reading its log finds every ban there. The
-        // event above never carries it: the log is public in a public room.
-        ...(ban ? { ban } : {}),
-      },
-      // The evicted member's org as well. The roster counts them only while they are
-      // still in the room, and a target who has already left still needs this row.
-      [m.orgId],
-    ),
-  });
-
+  const request = (room: StoredSession, m: Member, stored: BanScope | undefined): RemovalRequest =>
+    evictionRequest(room, m, actor, stored, ban, { frozen: "refuse", byUserId: actor.userId });
   const outcome = await store.removeMember(sessionId, targetMemberId, request(session, target, ban));
 
   if (outcome.refused === "closed") return refuse("closed", "session is closed.");

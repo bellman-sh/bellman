@@ -61,8 +61,12 @@ export function auditRows(parties: (string | null)[], facts: AuditFacts, actor: 
   return parties.filter((p): p is string => p !== null).map((orgId) => auditRow(orgId, parties, facts, actor));
 }
 
-/** An entry with its place in its org's stream: the cursor `before` and `through` count in (D6). */
-export type SeqEntry = AuditEntry & { seq: number };
+/**
+ * An entry with its place in its org's stream: the cursor `before` and `through` count in (D6),
+ * and its link in the chain (ADR 0033): `hash` over seq, `prevHash` and the record, both null on
+ * a row from before the chain.
+ */
+export type SeqEntry = AuditEntry & { seq: number; hash: string | null; prevHash: string | null };
 
 /** The `entries` table's columns after `seq`, in the order `recordOf` binds them (D5). */
 export const AUDIT_COLUMNS = [
@@ -85,6 +89,8 @@ export type AuditRecord = {
   crossing: string | null;
   direction: string | null;
   detail: string;
+  prev_hash: string | null;
+  hash: string | null;
 };
 
 /**
@@ -109,7 +115,7 @@ export function recordOf(e: AuditEntry): (string | number | null)[] {
 export function entryOf(r: AuditRecord): SeqEntry {
   const base: SeqEntry = {
     seq: r.seq, at: r.at, orgId: r.org_id, sessionId: r.session_id, actorUserId: r.actor_id, action: r.action,
-    detail: JSON.parse(r.detail) as Record<string, unknown>,
+    detail: JSON.parse(r.detail) as Record<string, unknown>, hash: r.hash, prevHash: r.prev_hash,
   };
   if (r.crossing === null) return base;
   return {

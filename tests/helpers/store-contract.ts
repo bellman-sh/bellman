@@ -22,7 +22,8 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
+import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
+import { chainHash } from "../../src/audit-sink.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
@@ -5983,6 +5984,18 @@ export function describeStoreContract(
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
     });
 
+    it("chains appended rows: hash over seq, prev_hash and the record, the first prev_hash empty", async () => {
+      const row = (at: number): AuditEntry => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+      const stripSeq = ({ seq: _s, hash: _h, prevHash: _p, ...e }: SeqEntry): AuditEntry => e;
+      await store.appendAudit(row(1));
+      await store.appendAudit(row(2));
+      const [a, b] = (await store.queryAudit("org_a", { limit: 10 })).entries.slice().reverse();
+      expect(a.prevHash).toBe("");
+      expect(a.hash).toBe(chainHash(a.seq, "", stripSeq(a)));
+      expect(b.prevHash).toBe(a.hash);
+      expect(b.hash).toBe(chainHash(b.seq, a.hash!, stripSeq(b)));
+    });
+
     // ------------------------------------------------------------- the audit query (audit trail spec, D6)
     describe("the audit query", () => {
       const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);
@@ -6063,8 +6076,9 @@ export function describeStoreContract(
       it("hands back a recorded row with its fields, and a row from before them without", async () => {
         await fill();
         const entries = (await store.queryAudit("org_a", q())).entries;
-        expect(entries[3]).toEqual({ seq: 3, ...row({ at: day("12"), ...boInbound }) });
-        expect(entries[5]).toEqual({ seq: 1, ...legacy({ at: day("10") }) });
+        const hex64 = expect.stringMatching(/^[0-9a-f]{64}$/);
+        expect(entries[3]).toEqual({ seq: 3, hash: hex64, prevHash: hex64, ...row({ at: day("12"), ...boInbound }) });
+        expect(entries[5]).toEqual({ seq: 1, hash: hex64, prevHash: "", ...legacy({ at: day("10") }) });
       });
 
       it("offers the stream's actors, rooms, other orgs and actions, newest first", async () => {

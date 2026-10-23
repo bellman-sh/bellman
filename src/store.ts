@@ -19,6 +19,7 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { chainHash } from "./audit-sink.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -1976,8 +1977,8 @@ export class MemoryStore implements BellmanStore {
   private directory = new Map<string, DirectoryEntry>();
   private scimByKey = new Map<string, { orgId: string; scimId: string }>();
   private users = new Map<string, UserRecord>();
-  /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
-  private audit: { seq: number; entry: AuditEntry }[] = [];
+  /** Each org's stream, with each row's seq and chain link: one counter per org, as each AuditDO keeps its own. */
+  private audit: { seq: number; entry: AuditEntry; prevHash: string; hash: string }[] = [];
   private auditSeq = new Map<string, number>();
   private waiters = new Map<string, Waiter[]>();
   /**
@@ -3219,7 +3220,8 @@ export class MemoryStore implements BellmanStore {
       if (!entry.orgId) continue;
       const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
       this.auditSeq.set(entry.orgId, seq);
-      this.audit.push({ seq, entry: detach(entry) });
+      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? "";
+      this.audit.push({ seq, entry: detach(entry), prevHash, hash: chainHash(seq, prevHash, entry) });
     }
   }
 
@@ -3791,7 +3793,7 @@ export class MemoryStore implements BellmanStore {
   }
 
   private streamOf(orgId: string): SeqEntry[] {
-    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq }));
+    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq, hash: r.hash, prevHash: r.prevHash }));
   }
 
   async sweep(now: number): Promise<void> {

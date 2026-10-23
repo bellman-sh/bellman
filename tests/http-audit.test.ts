@@ -127,6 +127,7 @@ describe("GET /audit", () => {
     const seen = {
       seq: 1, at: expect.any(String), action: "sent_message", room: { id: "qs_q3", name: room.manifest.room },
       actor: { id: "u_ana", label: "Ana", org_id: "org_a" }, parties: ["org_a", "org_b"], crossing: "cross_org", detail: { chars: 5 },
+      hash: expect.stringMatching(/^[0-9a-f]{64}$/),
     };
     expect((await list("/audit", "admin-a")).entries).toEqual([{ ...seen, direction: "outbound" }]);
     expect((await list("/audit", "admin-b")).entries).toEqual([{ ...seen, direction: "inbound" }]);
@@ -163,7 +164,7 @@ describe("GET /audit", () => {
     expect(grant).toMatchObject({ room: null, crossing: "internal" });
     expect(old).toEqual({
       seq: 1, at: "1970-01-01T00:00:01.000Z", action: "member_left", room: { id: "qs_old", name: null },
-      actor: { id: "u_old" }, parties: null, crossing: null, direction: null, detail: {},
+      actor: { id: "u_old" }, parties: null, crossing: null, direction: null, detail: {}, hash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
   });
 });
@@ -185,8 +186,8 @@ describe("the CSV", () => {
   });
 
   it("writes a row in the columns' order, the parties joined with ; and a person with no org named so", () => {
-    const view = entryView({ seq: 3, ...row({ at: 7, parties: ["org_a", null], crossing: "cross_org", direction: "outbound", detail: { chars: 5 } }) });
-    expect(csvRow(view)).toBe(`3,1970-01-01T00:00:00.007Z,sent_message,qs_q3,q3-plan,u_ana,Ana,org_a,org_a;(no org),cross_org,outbound,"{""chars"":5}"\r\n`);
+    const view = entryView({ seq: 3, hash: "ab12", prevHash: "", ...row({ at: 7, parties: ["org_a", null], crossing: "cross_org", direction: "outbound", detail: { chars: 5 } }) });
+    expect(csvRow(view)).toBe(`3,1970-01-01T00:00:00.007Z,sent_message,qs_q3,q3-plan,u_ana,Ana,org_a,org_a;(no org),cross_org,outbound,"{""chars"":5}",ab12\r\n`);
   });
 
   it("writes an org id that would break a header as a safe file name", () => {
@@ -233,6 +234,8 @@ describe("GET /audit/export", () => {
     const csv = await (await call("admin-a", `/audit/export?${filter}&format=csv&through=${page.through}`))!.text();
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(CSV_COLUMNS.join(","));
+    expect(lines[0].endsWith(",hash")).toBe(true);
+    expect(lines[1].split(",").at(-1)).toBe(listed[0]!.hash);
     expect(lines.slice(1).map((l) => Number(l.split(",")[0]))).toEqual(listed.map((e) => e.seq));
   });
 
@@ -241,6 +244,7 @@ describe("GET /audit/export", () => {
     await store.appendAudit(row());
     const json = (await (await call("admin-a", "/audit/export?format=json&through=3"))!.json()) as { through: number; entries: AuditEntryView[] };
     expect([json.through, json.entries.map((e) => e.seq)]).toEqual([3, [3, 2, 1]]);
+    expect(json.entries.map((e) => e.hash)).toEqual([3, 2, 1].map(() => expect.stringMatching(/^[0-9a-f]{64}$/)));
   });
 
   it("writes a stream with no rows as the header alone, and as a list with none in it", async () => {

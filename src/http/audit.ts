@@ -85,6 +85,8 @@ export interface AuditEntryView {
   crossing: "internal" | "cross_org" | null;
   direction: "outbound" | "inbound" | null;
   detail: Record<string, unknown>;
+  /** The row's link in the chain (ADR 0033); null on a row from before it. `GET /audit/verify` walks them. */
+  hash: string | null;
 }
 
 export function entryView(e: SeqEntry): AuditEntryView {
@@ -102,6 +104,7 @@ export function entryView(e: SeqEntry): AuditEntryView {
     crossing: e.crossing ?? null,
     direction: recorded ? e.direction ?? null : null,
     detail: e.detail,
+    hash: e.hash ?? null,
   };
 }
 
@@ -110,7 +113,7 @@ export const AUDIT_EXPORT_PAGE = 500;
 
 export const CSV_COLUMNS = [
   "seq", "at", "action", "room_id", "room_name", "actor_id", "actor_label", "actor_org",
-  "parties", "crossing", "direction", "detail",
+  "parties", "crossing", "direction", "detail", "hash",
 ] as const;
 
 export const csvHeader = `${CSV_COLUMNS.join(",")}\r\n`;
@@ -129,7 +132,7 @@ export function csvCell(value: string | number | null | undefined): string {
 export function csvRow(v: AuditEntryView): string {
   return `${[
     v.seq, v.at, v.action, v.room?.id, v.room?.name, v.actor.id, v.actor.label, v.actor.org_id,
-    v.parties?.map((p) => p ?? "(no org)").join(";"), v.crossing, v.direction, JSON.stringify(v.detail),
+    v.parties?.map((p) => p ?? "(no org)").join(";"), v.crossing, v.direction, JSON.stringify(v.detail), v.hash,
   ].map(csvCell).join(",")}\r\n`;
 }
 

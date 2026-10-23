@@ -40,6 +40,7 @@ import {
 } from "./audit.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { chainHash } from "./audit-sink.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
@@ -4791,19 +4792,34 @@ const AUDIT_SCHEMA = [
     parties TEXT,
     crossing TEXT,
     direction TEXT,
-    detail TEXT NOT NULL
+    detail TEXT NOT NULL,
+    prev_hash TEXT,
+    hash TEXT
   )`,
   "CREATE INDEX IF NOT EXISTS entries_at ON entries (at)",
   "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
 ];
 
-/** Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next. */
+/**
+ * Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next.
+ * An appended row is chained (ADR 0033): prev_hash is the newest row's hash, "" when there is none
+ * or it predates the chain, and hash is `chainHash` over the seq the insert gave it. A moved row
+ * is left unhashed, as it was.
+ */
 function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = null): number {
-  return sql.exec<{ seq: number }>(
+  const got = sql.exec<{ seq: number }>(
     `INSERT INTO entries (seq, ${AUDIT_COLUMNS.join(", ")}) VALUES (?, ${AUDIT_COLUMNS.map(() => "?").join(", ")}) RETURNING seq`,
     seq, ...recordOf(e),
   ).one().seq;
+  if (seq === null) {
+    const prev = sql.exec<{ hash: string | null }>("SELECT hash FROM entries WHERE seq < ? ORDER BY seq DESC LIMIT 1", got).toArray()[0]?.hash ?? "";
+    sql.exec("UPDATE entries SET prev_hash = ?, hash = ? WHERE seq = ?", prev, chainHash(got, prev, e), got);
+  }
+  return got;
 }
+
+/** The columns ADR 0033 added, for a table created before them. */
+const AUDIT_ADDED_COLUMNS = ["prev_hash", "hash"];
 
 /** How many KV rows the move holds in memory at once, whatever the stream's size. */
 const MOVE_BATCH = 500;
@@ -4843,6 +4859,8 @@ function moveKv<T>(storage: DurableObjectStorage, prefix: string, move: (key: st
  */
 function migrateAudit(storage: DurableObjectStorage): void {
   for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
+  const have = new Set(storage.sql.exec<{ name: string }>("PRAGMA table_info(entries)").toArray().map((c) => c.name));
+  for (const col of AUDIT_ADDED_COLUMNS) if (!have.has(col)) storage.sql.exec(`ALTER TABLE entries ADD COLUMN ${col} TEXT`);
   const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
   moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
   // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
@@ -4883,14 +4901,14 @@ export class AuditDO extends DurableObject {
     });
   }
 
-  /** The newest `limit` entries, oldest first: `bellman_audit`'s read. */
+  /** The newest `limit` entries, oldest first: `bellman_audit`'s read, without the stream's seq and chain. */
   async recent(limit: number): Promise<AuditEntry[]> {
     return this.ctx.storage.sql
       .exec<AuditRecord>("SELECT * FROM entries ORDER BY seq DESC LIMIT ?", limit)
       .toArray()
       .reverse()
       .map(entryOf)
-      .map(({ seq: _seq, ...entry }) => entry);
+      .map(({ seq: _seq, hash: _hash, prevHash: _prev, ...entry }) => entry);
   }
 
   /** One page under the filters, newest first (D6): the same answer `pageOf` gives over memory. */

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { purchaseGrant } from "../src/billing/grants.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
+import {
+  grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimIntent, scimUserEntry, type AuditIntent,
+} from "../src/grant-audit.js";
 import type { Org, PlanGrant } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;
@@ -451,5 +453,16 @@ describe("an org event's row (SSO spec, D9, D11)", () => {
       at: 7, orgId: "org_acme", sessionId: "org:org_acme", actorUserId: "u_github_1", action: "domain_verified",
       detail: { domain: "acme.test" }, ...internal("org_acme", { label: "Ana", orgId: "org_acme" }),
     });
+  });
+});
+
+describe("a SCIM user's row (SCIM spec, D11)", () => {
+  it("is filed under scim:<id> with the SCIM actor, internal to the org", () => {
+    const row = scimUserEntry("org_a", "x1", "scim_user_deactivated", { user_name: "bo@acme.test", key: "email:bo@acme.test" }, scimIntent("org_a"), 7);
+    expect(row).toEqual({
+      at: 7, orgId: "org_a", sessionId: "scim:x1", actorUserId: "scim", action: "scim_user_deactivated",
+      detail: { user_name: "bo@acme.test", key: "email:bo@acme.test" }, ...internal("org_a", { label: "SCIM", orgId: "org_a" }),
+    });
+    expect(scimIntent("org_a")).toEqual({ actorUserId: "scim", actorLabel: "SCIM", actorOrgId: "org_a" });
   });
 });

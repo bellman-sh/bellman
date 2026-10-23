@@ -7,6 +7,7 @@ import type { BlobStore } from "./blobs.js";
 import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes } from "./http/moderation.js";
 import { orgRoutes } from "./http/orgs.js";
+import { scimRoutes } from "./http/scim.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes } from "./http/rooms.js";
@@ -82,6 +83,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
   // A fixed seal secret: this server keeps nothing between runs, so there is nothing a rotation could lock out.
   app.use("/org", serve(gated((request) => orgRoutes(request, { store, caller, panelOrigins: [], sealSecret: "local-dev-seal" }))));
+  // The org's token is the only credential, so no gate: the module answers 401 itself.
+  app.use("/scim/v2", serve((request) => scimRoutes(request, { store })));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [], publicPageOrigins: [] }))));
   // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of

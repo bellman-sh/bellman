@@ -161,10 +161,27 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
   return [row("org_updated", { ...changed, ...intent.detail })];
 }
 
-/** What an org's IdP and domain changes record (SSO spec, D9, D11): one row each, under `org:<orgId>`, the org's own affair. */
-export type OrgEvent = "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released";
+/**
+ * What an org's IdP, domain and SCIM token changes record (SSO spec, D9, D11; SCIM spec, D1): one row each, under
+ * `org:<orgId>`, the org's own affair.
+ */
+export type OrgEvent =
+  | "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released"
+  | "scim_token_issued" | "scim_token_revoked";
 
 export function orgEventEntry(orgId: string, action: OrgEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
   return auditRow(orgId, [orgId], { at: now, sessionId: `org:${orgId}`, action, roomName: null, detail: { ...detail, ...intent.detail } },
+    { userId: intent.actorUserId, label: intent.actorLabel ?? null, orgId: intent.actorOrgId ?? null });
+}
+
+/** The actor every SCIM write records (SCIM spec, D11): the IdP's connector, acting for the org whose token it holds. */
+export const scimIntent = (orgId: string): AuditIntent => ({ actorUserId: "scim", actorLabel: "SCIM", actorOrgId: orgId });
+
+/** What a SCIM user's life records (SCIM spec, D11), beside the grant rows the guarded writes file. */
+export type ScimUserEvent = "scim_user_created" | "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" | "scim_user_deleted";
+
+/** One row under `scim:<id>`: the org's own affair, one party, internal, no room, as a grant row is under `grant:<key>`. */
+export function scimUserEntry(orgId: string, id: string, action: ScimUserEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
+  return auditRow(orgId, [orgId], { at: now, sessionId: `scim:${id}`, action, roomName: null, detail: { ...detail, ...intent.detail } },
     { userId: intent.actorUserId, label: intent.actorLabel ?? null, orgId: intent.actorOrgId ?? null });
 }

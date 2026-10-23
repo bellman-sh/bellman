@@ -29,7 +29,9 @@ import {
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
-import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite } from "./surface.js";
+import {
+  MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
+} from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -1025,6 +1027,66 @@ export function surfaceAuditDetail(write: SurfaceWrite): Record<string, unknown>
     : { key: write.key, removed: true };
 }
 
+/** A version of a key as the log holds it, read for a restore. */
+interface RestoredVersion {
+  /** What `resolveSurfaceWrite` settles: the version's item with its blob cut to `{ id }`, or a removal. */
+  payload: unknown;
+  /** Who wrote the version, kept on the restored one. Null for a removal, which is the restorer's act now. */
+  author: Pick<SessionEvent, "fromMemberId" | "fromUserId" | "fromLabel"> | null;
+  /** The cursor read, which the audit row names. */
+  cursor: number;
+}
+
+/**
+ * The version `{ key, restore: <cursor> }` names, read back from the log (topic rooms spec, D5; plan R22). The log
+ * is the history: a version is the `surface` event of its key at its cursor, in whatever room it was written.
+ *
+ * Refused, each naming what the cursor is: a cursor no event holds, an event of another type, and a surface write for
+ * another key. The version is then handed back as a payload for `resolveSurfaceWrite`, the checker every write
+ * goes through, so a version is held to today's rules and not those of the day it was written: a blob since gone,
+ * a full surface and a missing connector end refuse it there, in that checker's words.
+ *
+ * The read rule comes first (read_context spec, section 3), as `fileRoomReport` applies it for a reported cursor: a
+ * `brief_update` whose author keeps their brief is no event to any account but the author's, so a cursor that holds
+ * one reads as a cursor that holds nothing, and the refusal that names an event's type never names that one.
+ * `reader` is the restoring account.
+ *
+ * Its `blob` is cut to `{ id }`. The log holds the object's size, type and name beside the id, and the wire takes the
+ * id alone (`BlobShape`); `settleBlob` reads the rest from the bucket as it stands, as for any write.
+ *
+ * A removal restores as a removal, with no author: it is the restorer's act now, and there is no row for it to
+ * have been written by. Any other version keeps its author, as an approved card does (R18).
+ */
+async function restoreVersion(
+  store: BellmanStore,
+  sessionId: string,
+  payload: unknown,
+  reader: string,
+): Promise<RoomResult<RestoredVersion>> {
+  const asked = normalizeRestore(payload);
+  if (!asked.ok) return refuse("invalid", asked.reason);
+  const { key, cursor } = asked;
+
+  const stored = await store.eventAt(sessionId, cursor);
+  const event = stored && readableEvent(stored, await store.getMember(sessionId, stored.fromMemberId), reader);
+  if (!event) return refuse("invalid", `restore: no event at cursor ${cursor}`);
+  if (event.type !== "surface") {
+    return refuse("invalid", `restore: cursor ${cursor} is a ${event.type} event, not a surface write`);
+  }
+  const version = event.payload as { key?: unknown; remove?: unknown; blob?: unknown } | null;
+  if (version?.key !== key) {
+    return refuse("invalid", `restore: cursor ${cursor} wrote "${String(version?.key)}", not "${key}"`);
+  }
+
+  if (version.remove === true) return succeed({ payload: { key, remove: true }, author: null, cursor });
+  const blob = typeof version.blob === "object" && version.blob !== null ? { id: (version.blob as { id?: unknown }).id } : null;
+  return succeed({
+    payload: { ...version, blob },
+    author: { fromMemberId: event.fromMemberId, fromUserId: event.fromUserId, fromLabel: event.fromLabel },
+    cursor,
+  });
+}
+
 /**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
@@ -1047,6 +1109,11 @@ export function surfaceAuditDetail(write: SurfaceWrite): Record<string, unknown>
  * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
  * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
  * dash's group drag writes one PUT per card and would pass 30.
+ *
+ * `{ key, restore: <cursor> }` re-applies a version of the key from the log (topic rooms spec, D5; plan R22), in every
+ * kind of room. `restoreVersion` reads it and `resolveSurfaceWrite` settles it like any item, and what follows is
+ * the code a plain write runs, with three differences: the event is authored by the version's author, the row takes
+ * the restoring seat as its approver, and the audit row names the cursor restored.
  */
 export async function writeSurface(
   store: BellmanStore,
@@ -1062,33 +1129,52 @@ export async function writeSurface(
   if (!gate.ok) return gate;
   const session = gate.value;
 
-  const resolved = await resolveSurfaceWrite(store, blobs, sessionId, payload);
+  // After the gate, so a seat without the verb is refused for it and reads nothing of the log.
+  let restored: RestoredVersion | null = null;
+  if (isRestorePayload(payload)) {
+    const version = await restoreVersion(store, sessionId, payload, actor.userId);
+    if (!version.ok) return version;
+    restored = version.value;
+  }
+
+  const resolved = await resolveSurfaceWrite(store, blobs, sessionId, restored === null ? payload : restored.payload);
   if (!resolved.ok) return resolved;
   const { write } = resolved.value;
 
+  // The gate has just found this handle, so this is the same read. A restore needs the seat for the approver it
+  // stamps, a counted send for the minute it spends.
+  const me = await findMember(store, session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
   if (countSend) {
-    const me = await findMember(store, session, memberId, actor);
-    if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
     const admitted = await admitSend(store, sessionId, me);
     if (!admitted.ok) return admitted;
   }
 
   const draft: EventBody = {
     type: "surface",
-    fromMemberId: memberId,
-    fromUserId: actor.userId,
-    fromLabel: actor.label,
+    // A restored version keeps its author (R22); every other write is the caller's.
+    ...(restored?.author ?? { fromMemberId: memberId, fromUserId: actor.userId, fromLabel: actor.label }),
     // The normalised item, so the event reads as the row does: every optional
     // field present as null. A removal's payload is the tombstone itself.
     payload: write.item ?? { key: write.key, remove: true },
     refId: null,
   };
-  const extras: AppendExtras = { surface: write };
+  const extras: AppendExtras = {
+    surface: write,
+    // The seat that restores a version approves it, whoever wrote it (D5).
+    ...(restored === null ? {} : { approvedBy: { memberId: me.memberId, label: me.label } }),
+  };
+
+  // A restore's event is authored by the version's author (R18), and a store scopes a key by the author of the
+  // event it keys (`idempotencyKey`). Two members restoring with the same words would meet under that author's id,
+  // and the second would be answered with the first's restore. The restorer's id goes in front of the caller's key
+  // so each restorer's keys are their own (R23); the refusal below still names the key as the caller wrote it.
+  const key = restored === null || !idempotencyKey ? idempotencyKey : `${memberId}:${idempotencyKey}`;
 
   let event: SessionEvent;
   let replayed = false;
-  if (idempotencyKey) {
-    const w = await store.appendEventOnce(sessionId, draft, idempotencyKey, extras);
+  if (key) {
+    const w = await store.appendEventOnce(sessionId, draft, key, extras);
     if (w.outcome === "conflict") {
       return refuse(
         "conflict",
@@ -1106,7 +1192,10 @@ export async function writeSurface(
 
   // Nothing below happens twice: a replay's original call did it.
   if (!replayed) {
-    await audit(store, session, actor, "sent_surface", surfaceAuditDetail(write));
+    await audit(store, session, actor, "sent_surface", {
+      ...surfaceAuditDetail(write),
+      ...(restored === null ? {} : { restored: restored.cursor }),
+    });
   }
 
   return succeed({

@@ -235,6 +235,15 @@ export const SurfaceRemoveShape = z.strictObject({
   remove: z.literal(true),
 });
 
+/**
+ * A restore (topic rooms spec, D5): `{ key, restore: <cursor> }` and nothing else. Strict, so a field beside the
+ * cursor is refused by name. The cursor is a whole number from 1, the first cursor an event can hold.
+ */
+export const RestoreShape = z.strictObject({
+  key: SurfaceKeyShape,
+  restore: z.number().int().positive(),
+});
+
 /** One issue as "path: message", the manifest resolver's wording. */
 const describeIssue = (i: { path: PropertyKey[]; message: string }): string => {
   const path = i.path.map(String).join(".");
@@ -341,4 +350,26 @@ export function normalizeSurfaceWrite(
     },
     blobId: v.blob?.id ?? null,
   };
+}
+
+/**
+ * Whether a `surface` payload asks for a restore: an object with a `restore` key, whatever else it holds. The
+ * shape then names what is wrong with it, as `normalizeSurfaceWrite` does for a removal, so `{ key, kind, body,
+ * restore }` is refused as a restore with a stray field and never read as an item.
+ */
+export const isRestorePayload = (payload: unknown): boolean =>
+  typeof payload === "object" && payload !== null && "restore" in payload;
+
+/**
+ * Read a restore payload: the key and the cursor of the version it names. Which version that is, and whether the
+ * log holds it, is `writeSurface`'s read (`restoreVersion`), as a connector's ends and a blob's presence are.
+ */
+export function normalizeRestore(
+  payload: unknown,
+): { ok: true; key: string; cursor: number } | { ok: false; reason: string } {
+  const parsed = RestoreShape.safeParse(payload);
+  if (!parsed.success) {
+    return { ok: false, reason: `surface restore must be { key, restore: <cursor> }: ${describeIssue(parsed.error.issues[0])}` };
+  }
+  return { ok: true, key: parsed.data.key, cursor: parsed.data.restore };
 }

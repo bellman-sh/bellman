@@ -115,20 +115,30 @@ async function signInThroughSso(email = "ana@acme.test") {
   return { clientId, callback, target, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
 }
 
-async function signInThroughGithub() {
+async function signInThroughGithub(joining?: string) {
   const clientId = await registerClient();
   const { req } = await chooser(clientId);
   await call(`/authorize/github?req=${encodeURIComponent(req)}`);
-  const callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
-  const target = new URL(callback.headers.get("location")!);
+  let callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+  // An org that offered this account a seat stops the sign-in at its page (ADR 0027); `joining` answers it with Join.
+  if (callback.status === 200 && joining) {
+    const held = /name="held" value="([^"]+)"/.exec(await callback.text())![1];
+    callback = await call("/auth/invites", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ held, choice: "join", org: joining }).toString(),
+    });
+  }
+  const target = new URL(callback.headers.get("location") ?? "https://no-redirect.test/");
   const code = target.searchParams.get("code");
-  if (!code) return { clientId, target, identity: null as Identity | null, tokens: null as Record<string, string> | null };
+  // The invites page, when the sign-in stopped at it unanswered (ADR 0027): a status of 200 and the page's text.
+  const page = callback.status === 200 ? await callback.text() : null;
+  if (!code) return { clientId, target, page, identity: null as Identity | null, tokens: null as Record<string, string> | null };
   const res = await call("/token", {
     method: "POST",
     body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId, redirect_uri: REDIRECT, code_verifier: VERIFIER, resource: RESOURCE }).toString(),
   });
   const tokens = (await res.json()) as Record<string, string>;
-  return { clientId, target, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
+  return { clientId, target, page, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
 }
 
 const refresh = (clientId: string, token: string) => call("/token", {
@@ -223,6 +233,16 @@ describe("the callback (D12, D13)", () => {
     expect(identity).toMatchObject({ label: "Ana@sso", plan: "team" });
     idp = { ...idp, email: "ana@elsewhere.test", emailVerified: true };
     expect((await signInThroughSso()).identity?.label).toBe("Ana@sso");
+  });
+
+  /** An IdP's sign-in is its org's by its form (ADR 0027): another org's invite of its address stops it at no page. */
+  it("stops at no invites page, though another org invited the address", async () => {
+    await plans.createOrg({ ...acme, orgId: "org_b", name: "Bee", ownerUserId: "u_github_2" }, { ...ownerGrant, key: "github:2", orgId: "org_b" }, by);
+    await plans.putOrgInvite({ orgId: "org_b", key: "email:ana@acme.test", role: "member", invitedBy: "u_github_2", invitedAt: 4 }, { actorUserId: "u_github_2" });
+    const { callback, identity } = await signInThroughSso();
+    expect(callback.status).toBe(302);
+    expect(identity).toMatchObject({ userId: ssoUserId("org_acme", "00u1abc"), orgId: "org_acme" });
+    expect(await plans.invitesFor(["email:ana@acme.test"])).toHaveLength(1);
   });
 
   it("refuses a full org before anything is minted", async () => {
@@ -346,10 +366,14 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
     expect((await signInThroughSso()).identity).toBeNull();
   });
 
+  /** example.dev is no domain of Acme's, so the pushed seat links the account only when the person joins (ADR 0027). */
   it("leaves a personal account that an address linked to the org signing in once deprovisioned, as free", async () => {
     await plans.updateOrg("org_acme", { requireSso: false }, by);
     await plans.createScimUser(pushed({ userName: "jesse@example.dev", key: "email:jesse@example.dev" }), scimIntent("org_acme"));
-    const linked = await signInThroughGithub();
+    const stopped = await signInThroughGithub();
+    expect(stopped.page).toContain('action="/auth/invites"');
+    expect(stopped.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
+    const linked = await signInThroughGithub("org_acme");
     expect(linked.identity).toMatchObject({ userId: "u_github_4242", orgId: "org_acme", plan: "team" });
     expect(await plans.scimUserByKey("github:4242")).toMatchObject({ id: "x1" });
     await plans.updateScimUser("org_acme", "x1", { active: false }, Date.now(), scimIntent("org_acme"));

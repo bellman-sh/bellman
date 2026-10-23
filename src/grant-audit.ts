@@ -124,6 +124,19 @@ export function grantAuditEntries(
   return entries;
 }
 
+/**
+ * What a guarded write records when it takes a key from an unowned seat another org held (ADR 0027): that
+ * seat's revocation in its own org's stream, by the system and naming no other org, and the new grant as a
+ * first grant in the writer's. So the seat's org learns that an org which proved the address's domain took
+ * it, and not which org, nor who.
+ */
+export function takenSeatAuditEntries(seat: PlanGrant, next: PlanGrant, intent: AuditIntent, now: number): AuditEntry[] {
+  return [
+    ...revokeAuditEntries(seat, { actorUserId: "system", detail: { reason: "its address is another org's by a verified domain" } }, now),
+    ...grantAuditEntries(undefined, next, intent, now),
+  ];
+}
+
 /** What a guarded grant DELETE should record. Nothing, for an org-less grant. */
 export function revokeAuditEntries(
   removed: PlanGrant,
@@ -162,12 +175,15 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
 }
 
 /**
- * What an org's IdP, domain and SCIM token changes record (SSO spec, D9, D11; SCIM spec, D1): one row each, under
- * `org:<orgId>`, the org's own affair.
+ * What an org's IdP, domain and SCIM token changes record (SSO spec, D9, D11; SCIM spec, D1), and its admins'
+ * invites (ADR 0027): one row each, under `org:<orgId>`, the org's own affair. An invite's row names the key the
+ * admin typed and nothing of the person; a person's answer to an invite files no row here, and a Join is the
+ * grant's row.
  */
 export type OrgEvent =
   | "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released"
-  | "scim_token_issued" | "scim_token_revoked";
+  | "scim_token_issued" | "scim_token_revoked"
+  | "member_invited" | "invite_withdrawn";
 
 export function orgEventEntry(orgId: string, action: OrgEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
   return auditRow(orgId, [orgId], { at: now, sessionId: `org:${orgId}`, action, roomName: null, detail: { ...detail, ...intent.detail } },

@@ -197,7 +197,9 @@ short is finished. The person's own tokens end on their next re-check (D4) whate
 role is `member`, since the grant that carried the old one is gone, and an admin promotes), records
 `scim_user_reactivated`, and the route thaws every open room they created that is frozen
 (`freezeSession(id, null)`, a `room_thawed` row). Nothing freezes a room but this, so every frozen
-room of theirs is one a deprovision froze.
+room of theirs is one a deprovision froze. Amended by ADR 0027: when the row's key is a personal account
+rather than the org's own `sso:` subject, the grant is written under the address instead, and the
+account takes it back at its next sign-in; the thaw still runs for the account the deprovision walked.
 
 ### D8. Renames and the rest of an update
 

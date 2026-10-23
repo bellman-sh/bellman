@@ -4,10 +4,10 @@ import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
-import type { Identity, Org, Plan, PlanGrant } from "../types.js";
+import type { Identity, Org, OrgInvite, Plan, PlanGrant } from "../types.js";
 import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
@@ -18,7 +18,7 @@ import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
 import { unseal } from "./sealed.js";
 import {
   SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
-  type AuthStorage, type PanelSession,
+  type AuthStorage, type PanelSession, type SettledAnswer,
 } from "./storage.js";
 import {
   clearedSessionCookie, clearedSigninNonce, readSessionCookie, readSigninNonce,
@@ -102,6 +102,7 @@ export type PlanStore = Pick<
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
   | "getOrgIdp" | "orgForDomain" | "provisionSsoMember" | "scimUserByKey"
+  | "invitesFor" | "acceptOrgInvite" | "declineOrg" | "declinedOrgs"
   | "countCreatesThisMonth"
   | "releaseHandleNamed" | "handleHolders" | "sessionsJoinedBy" | "membersOfUser"
   | "recordSignIn"
@@ -156,6 +157,10 @@ export class AccessRemoved extends SignInRefused {
  * verified domain of any of their addresses belongs to, each with the switch on, unless they are
  * that org's owner, whose original provider is the break-glass. An SSO profile is exempt, since it
  * came through the door the switch points at; an operator override never reaches this.
+ *
+ * The plan's org is a grant's, one that took effect, never an invite's (ADR 0027): an invite is kept
+ * apart from the grants and nothing that resolves a plan reads it, so an org that has only invited a
+ * person refuses none of their sign-ins. The domain half is the org's by its form, as before.
  */
 async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SignInRefused | null> {
   if (!plans) return null;
@@ -371,12 +376,16 @@ async function firstGrant(
   const stable = grantKeys(keys);
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
-    if (usableGrant(grant) && (honourPurchases || grant.source !== PURCHASE)) {
-      // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
-      // refresh, a panel session's re-check and a hosted room's month turn all come through
-      // this function, so a lapse reaches each of them as a revocation does.
-      return { grant: await standingOf(plans, grant), key: stable[i] };
-    }
+    if (!usableGrant(grant) || (!honourPurchases && grant.source === PURCHASE)) continue;
+    const org = grant.orgId === null ? undefined : await plans.getOrg(grant.orgId);
+    // An admin's seat on an address the org does not own by its form as it stands resolves nothing
+    // and is never claimed (ADR 0027): the sign-in's page offers it as an invite instead. Only a
+    // sign-in reads address keys, so a refresh never meets one.
+    if (isUnownedSeat(grant, org)) continue;
+    // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
+    // refresh, a panel session's re-check and a hosted room's month turn all come through
+    // this function, so a lapse reaches each of them as a revocation does.
+    return { grant: standingOf(grant, org), key: stable[i] };
   }
   return undefined;
 }
@@ -385,11 +394,9 @@ async function firstGrant(
  * The grant as the org it names stands (orgs spec, D5): the free plan while the org's record says
  * nobody is paying, the role and the org kept so the person is still a member of it; the grant
  * unchanged for an active org and for an org with no record, which is only a string in grants
- * and overrides and has no standing to lose. One read of the registry, for grants in an org only.
+ * and overrides and has no standing to lose.
  */
-export async function standingOf(plans: Pick<PlanStore, "getOrg">, grant: PlanGrant): Promise<PlanGrant> {
-  if (grant.orgId === null) return grant;
-  const org = await plans.getOrg(grant.orgId);
+export function standingOf(grant: PlanGrant, org: Org | undefined): PlanGrant {
   return org && !org.active ? { ...grant, plan: "free" } : grant;
 }
 
@@ -472,6 +479,8 @@ function storedIdentityKeys(stored: { identity_keys?: string[] }): string[] | nu
 const STATE_AUDIENCE = "bellman:authorize-state";
 const UPGRADE_AUDIENCE = "bellman:upgrade-state";
 const SESSION_AUDIENCE = "bellman:session-state";
+/** A sign-in held at the invites page (ADR 0027): accepted by its answer route and nowhere else. */
+const INVITES_AUDIENCE = "bellman:invites-state";
 const SCOPE = "bellman";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -640,28 +649,44 @@ async function finishAuthorize(
   config: OAuthConfig,
   via: string,
 ): Promise<Response> {
+  let profile: ProviderProfile;
+  try {
+    profile = await exchange();
+  } catch (err) {
+    return refuseAuthorize(pending, err, via);
+  }
+  return (await invitesHeld(profile, via, { authorize: pending }, config)) ?? completeAuthorize(profile, pending, config, via);
+}
+
+/** The client's refusal, as `finishAuthorize` describes it: `access_denied`, in words a person can act on. */
+function refuseAuthorize(pending: AuthorizeRequest, err: unknown, via: string): Response {
   const target = new URL(pending.redirect_uri);
   if (pending.state) target.searchParams.set("state", pending.state);
-  const refuse = (description: string) => {
-    target.searchParams.set("error", "access_denied");
-    target.searchParams.set("error_description", description);
-    return Response.redirect(target.toString(), 302);
-  };
+  let description = `${via} sign-in failed`;
+  if (err instanceof SsoRequired) description = `${err.message}: start again and enter your work email`;
+  else if (err instanceof SeatsFull || err instanceof AccessRemoved) description = err.message;
+  else console.error(`${via} sign-in failed:`, err);
+  target.searchParams.set("error", "access_denied");
+  target.searchParams.set("error_description", description);
+  return Response.redirect(target.toString(), 302);
+}
+
+/** The client's half once the provider's is done, and the invites page when there was one: the plan, and the code the client redeems. */
+async function completeAuthorize(profile: ProviderProfile, pending: AuthorizeRequest, config: OAuthConfig, via: string): Promise<Response> {
   let identity: Identity;
   let planSource: PlanSource = "default";
   let keys: string[] = [];
   try {
-    const resolved = await resolvePlan(await exchange(), config);
+    const resolved = await resolvePlan(profile, config);
     identity = resolved.identity;
     planSource = resolved.source;
     keys = resolved.keys;
   } catch (err) {
-    if (err instanceof SsoRequired) return refuse(`${err.message}: start again and enter your work email`);
-    if (err instanceof SeatsFull || err instanceof AccessRemoved) return refuse(err.message);
-    console.error(`${via} sign-in failed:`, err);
-    return refuse(`${via} sign-in failed`);
+    return refuseAuthorize(pending, err, via);
   }
 
+  const target = new URL(pending.redirect_uri);
+  if (pending.state) target.searchParams.set("state", pending.state);
   const authCode = randomId();
   await config.store.putCode(authCode, {
     client_id: pending.client_id,
@@ -775,15 +800,7 @@ async function finishSession(
 ): Promise<Response> {
   const panels = config.panelOrigins ?? [];
   const secure = new URL(config.issuer).protocol === "https:";
-  /**
-   * Every exit from here clears the nonce cookie. It is worth nothing after
-   * this request either way, and leaving a live one behind would let a second
-   * replay of the same state succeed.
-   */
-  const ending = (res: Response) => {
-    res.headers.append("set-cookie", clearedSigninNonce(secure));
-    return res;
-  };
+  const ending = (res: Response) => endSignin(res, secure);
 
   if (panels.length === 0) {
     return ending(html(`<h1>No control panel configured</h1><p>Nothing was signed in.</p>`, 503));
@@ -798,34 +815,63 @@ async function finishSession(
    * Compared before the code is exchanged, so a replay costs the attacker's
    * code nothing and tells them nothing.
    */
-  const presented = readSigninNonce(request, secure);
-  if (!presented || !pending.nonce || !timingSafeEqual(presented, pending.nonce)) {
-    return ending(html(
-      `<h1>That sign-in did not start here</h1>` +
-        `<p>Start it again from the control panel.</p>`,
-      400
-    ));
-  }
+  if (!signinNonceMatches(request, pending, secure)) return ending(signinElsewhere());
 
   if (!url.searchParams.get("code")) {
     return ending(html(`<h1>Sign-in did not complete</h1><p>No authorization code came back. Start again.</p>`, 400));
   }
 
+  let profile: ProviderProfile;
+  try {
+    profile = await exchange();
+  } catch (err) {
+    return ending(sessionRefusal(err));
+  }
+  // The invites page keeps the nonce cookie: its answer is bound to this browser, as this callback was.
+  return (await invitesHeld(profile, "the panel's", { session: pending }, config)) ?? completeSession(profile, pending, config);
+}
+
+/**
+ * Every exit from a panel sign-in clears the nonce cookie. It is worth nothing
+ * after the sign-in either way, and leaving a live one behind would let a second
+ * replay of the same state succeed. The one exception is the invites page, which
+ * is not an exit: its answer comes back to this browser and is checked against it.
+ */
+function endSignin(res: Response, secure: boolean): Response {
+  res.headers.append("set-cookie", clearedSigninNonce(secure));
+  return res;
+}
+
+const signinElsewhere = () =>
+  html(`<h1>That sign-in did not start here</h1><p>Start it again from the control panel.</p>`, 400);
+
+/** Whether the browser presenting a panel sign-in holds the nonce cookie of the one that started it (see finishSession). */
+function signinNonceMatches(request: Request, pending: SessionRequest, secure: boolean): boolean {
+  const presented = readSigninNonce(request, secure);
+  return Boolean(presented && pending.nonce && timingSafeEqual(presented, pending.nonce));
+}
+
+/** A panel sign-in's refusal, as a page: `require_sso` names the org (D13), a full org and a removed access say so, anything else is logged. */
+function sessionRefusal(err: unknown): Response {
+  if (err instanceof SsoRequired) {
+    return html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Start again from the control panel and enter your work email.</p>`, 403);
+  }
+  if (err instanceof SeatsFull) return html(`<h1>No free seat</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403);
+  if (err instanceof AccessRemoved) return html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403);
+  console.error("the panel's sign-in failed:", err);
+  return html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502);
+}
+
+/** The panel's half once the provider's is done, and the invites page when there was one: the plan, the session, the cookie. */
+async function completeSession(profile: ProviderProfile, pending: SessionRequest, config: OAuthConfig): Promise<Response> {
+  const panels = config.panelOrigins ?? [];
+  const secure = new URL(config.issuer).protocol === "https:";
+  const ending = (res: Response) => endSignin(res, secure);
   let resolved: Awaited<ReturnType<typeof resolvePlan>>;
   try {
-    resolved = await resolvePlan(await exchange(), config);
+    resolved = await resolvePlan(profile, config);
   } catch (err) {
-    if (err instanceof SsoRequired) {
-      return ending(html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Start again from the control panel and enter your work email.</p>`, 403));
-    }
-    if (err instanceof SeatsFull) {
-      return ending(html(`<h1>No free seat</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403));
-    }
-    if (err instanceof AccessRemoved) {
-      return ending(html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403));
-    }
-    console.error("the panel's sign-in failed:", err);
-    return ending(html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502));
+    return ending(sessionRefusal(err));
   }
 
   const now = Date.now();
@@ -852,6 +898,168 @@ async function finishSession(
       "referrer-policy": "no-referrer",
     },
   }));
+}
+
+/**
+ * A sign-in held at the invites page (ADR 0027): who the provider said this is, and the flow the page
+ * finishes, a client's authorization or the panel's session. Signed and short-lived, as the state the
+ * provider round trip carries, and carried the same way, in the page's forms; the first answer that
+ * comes back with it spends it, and every drawing of the page signs a fresh one.
+ */
+interface HeldSignIn {
+  profile: ProviderProfile;
+  via: string;
+  authorize?: AuthorizeRequest;
+  session?: SessionRequest;
+}
+
+/** A line the page shows after an answer: fixed text, and an org's name between, drawn apart from it. */
+interface Notice {
+  lead: string;
+  org?: Org;
+  tail?: string;
+}
+
+const subjectOf = (profile: ProviderProfile): string => `${profile.provider}:${profile.subject}`;
+
+/**
+ * What orgs have offered this sign-in (ADR 0027): their invites of its keys, and an admin's seat on one
+ * of its addresses that the org no longer owns by its form, which resolves nothing and is offered here in
+ * its place, read as the invite it would be; but no offer an org made by the time the person last declined
+ * it, while one made since shows. Most specific key first, as `firstGrant` picks a grant, and one an org.
+ */
+async function offersFor(plans: PlanStore, keys: string[], subjectKey: string): Promise<OrgInvite[]> {
+  const [invites, grants, declined] = await Promise.all([
+    plans.invitesFor(keys), Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
+  ]);
+  const seats: OrgInvite[] = [];
+  for (const grant of grants) {
+    if (grant?.orgId && isUnownedSeat(grant, await plans.getOrg(grant.orgId))) {
+      seats.push({ orgId: grant.orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt });
+    }
+  }
+  const declinedAt = new Map(declined.map((d) => [d.orgId, d.at]));
+  const seen = new Set<string>();
+  return [...invites, ...seats].filter((offer) =>
+    offer.invitedAt > (declinedAt.get(offer.orgId) ?? -Infinity) && !seen.has(offer.orgId) && Boolean(seen.add(offer.orgId)));
+}
+
+/**
+ * The page a sign-in stops at while an org has offered this person a seat (ADR 0027), or undefined to
+ * carry on. It sits after the provider's exchange and before the plan resolves, so a Join is the grant
+ * the plan then resolves through, and carrying on leaves every offer as it was. An SSO sign-in is its
+ * org's by its form and stops at nothing. A failed read of the offers costs the person nothing: no page
+ * this time, and the offers stand for the next.
+ */
+async function invitesHeld(
+  profile: ProviderProfile, via: string, next: Pick<HeldSignIn, "authorize" | "session">, config: OAuthConfig,
+): Promise<Response | undefined> {
+  if (!config.plans || profile.provider === "sso") return undefined;
+  let offers: OrgInvite[];
+  try {
+    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile));
+  } catch (err) {
+    console.error("could not read a sign-in's invites:", err);
+    return undefined;
+  }
+  if (offers.length === 0) return undefined;
+  return invitesPage({ profile, via, ...next }, offers, config, Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS);
+}
+
+/** An org's name as the page draws it: without what a name may not hold, escaped, and isolated so it reorders nothing around it. */
+const drawnName = (org: Org): string => `<bdi>${escape(drawnOrgName(org))}</bdi>`;
+
+/**
+ * The offers, one form each, with Join and Decline, and a form that carries on without an answer. The
+ * buttons say only that: an org's name is its admin's text, so it is drawn once, as text, never as a
+ * label. Each drawing signs a fresh held sign-in for its forms, as the sign-in pages' forms carry their
+ * state, ending at `exp`, the end the first drawing set ten minutes after the provider's exchange, however
+ * often the page is drawn again.
+ */
+async function invitesPage(held: HeldSignIn, offers: OrgInvite[], config: OAuthConfig, exp: number, notice?: Notice): Promise<Response> {
+  const token = await signJwt(
+    { iss: config.issuer, sub: "invites", aud: INVITES_AUDIENCE, bellman: held as never, exp }, config.secret, STATE_TTL_SECONDS,
+  );
+  const hidden = `<input type="hidden" name="held" value="${escape(token)}">`;
+  const rows = await Promise.all(offers.map(async (offer) => {
+    const org = await config.plans!.getOrg(offer.orgId);
+    if (!org) return "";
+    return `<form class="invite" action="/auth/invites" method="post">${hidden}<input type="hidden" name="org" value="${escape(org.orgId)}">` +
+      `<p><strong>${drawnName(org)}</strong> invited you to join it as ${offer.role === "admin" ? "an admin" : "a member"}.</p>` +
+      `<button class="btn" type="submit" name="choice" value="join">Join</button>` +
+      `<button class="btn" type="submit" name="choice" value="decline">Decline</button></form>`;
+  }));
+  const said = notice ? `<p class="notice">${escape(notice.lead)}${notice.org ? drawnName(notice.org) : ""}${escape(notice.tail ?? "")}</p>` : "";
+  return html(
+    `<h1>You have been invited</h1>` +
+      `<p>Joining puts this account in the organisation: you take its plan, its audit log records the rooms you take part in, ` +
+      `its admins can read those rooms once they close, and if it requires single sign-on you sign in through it. ` +
+      `Until you join, it has none of that.</p>` +
+      `${said}${rows.join("")}` +
+      `<form action="/auth/invites" method="post">${hidden}` +
+      `<button class="btn" type="submit" name="choice" value="continue">Not now: continue signing in</button></form>`
+  );
+}
+
+/**
+ * A Join (ADR 0027), one operation in the store: the offer, the switch, each key's grant and the seats
+ * are read in the transaction that writes the grant, so an offer withdrawn first seats nobody. Answers
+ * whether the person is now a member, and the line the page shows, which names the org only when it
+ * made this person an offer.
+ */
+async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string): Promise<{ joined: boolean; notice: Notice }> {
+  const person = defaultIdentity(profile);
+  const outcome = await plans.acceptOrgInvite(orgId, keys, subjectOf(profile), Date.now(), {
+    actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
+  });
+  const org = outcome === "gone" ? undefined : await plans.getOrg(orgId);
+  if (!org) return { joined: false, notice: { lead: "That invitation is no longer open." } };
+  if (outcome === "joined") return { joined: true, notice: { lead: "You joined ", org, tail: "." } };
+  if (outcome === "member") return { joined: true, notice: { lead: "You are already a member of ", org, tail: "." } };
+  if (outcome === "sso") return { joined: false, notice: { lead: "", org, tail: " requires single sign-on: to join it, start again and enter your work email." } };
+  if (outcome === "full") return { joined: false, notice: { lead: "", org, tail: " has no free seat: ask its admin for one." } };
+  return {
+    joined: false,
+    notice: { lead: "This account is already in another organisation or holds a plan of its own, so it cannot join ", org, tail: "." },
+  };
+}
+
+/**
+ * A Decline (ADR 0027), kept on the person's side: that org's offers stop showing on their pages, and
+ * its invites stay as they were, so its admins learn nothing from it, not even which of the keys they
+ * invited were one person's. Only an org that made this sign-in an offer is declined, or named.
+ */
+async function declineInvite(plans: PlanStore, keys: string[], subjectKey: string, orgId: string): Promise<{ declined: boolean; notice: Notice }> {
+  const offered = (await offersFor(plans, keys, subjectKey)).some((offer) => offer.orgId === orgId);
+  const org = offered ? await plans.getOrg(orgId) : undefined;
+  if (!org) return { declined: false, notice: { lead: "That invitation is no longer open." } };
+  await plans.declineOrg(subjectKey, orgId, Date.now());
+  return { declined: true, notice: { lead: "You declined the invitation from ", org, tail: "." } };
+}
+
+/**
+ * An answer to a page already answered with the same held sign-in (ADR 0027), such as a second press of
+ * Join: it applies nothing, and mints nothing. It follows the first answer to where that left the browser,
+ * the client's code or the panel with its cookies, since the browser may show this response and not the
+ * first's; draws the page again when the first did, ending when it would; and while the first is still on
+ * its way, says so, with a button that asks again. Reaching it takes the held sign-in, and for a panel's
+ * the nonce cookie as well, checked before it, so it gives nobody anything the first answer did not.
+ */
+async function answeredAlready(
+  held: HeldSignIn, token: string, settled: SettledAnswer | undefined, keys: string[], subjectKey: string, exp: number, config: OAuthConfig,
+): Promise<Response> {
+  if (settled?.location) {
+    const res = new Response(null, { status: 302, headers: { location: settled.location, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+    for (const cookie of settled.cookies) res.headers.append("set-cookie", cookie);
+    return res;
+  }
+  if (settled?.redrawn) return invitesPage(held, await offersFor(config.plans!, keys, subjectKey), config, exp);
+  if (settled) return html(`<h1>That sign-in has ended</h1><p>Start it again.</p>`, 400);
+  return html(
+    `<h1>Your answer is on its way</h1><p>It was sent once already. Continue when it has been saved.</p>` +
+      `<form action="/auth/invites" method="post"><input type="hidden" name="held" value="${escape(token)}">` +
+      `<button class="btn" type="submit" name="choice" value="continue">Continue</button></form>`
+  );
 }
 
 export async function handleOAuth(
@@ -1147,6 +1355,54 @@ export async function handleOAuth(
         ...corsHeaders(origin),
       },
     });
+  }
+
+  // ------------------------------------------- the invites page's answers (ADR 0027)
+  // Join, Decline, or carrying on, from the page a sign-in stopped at. The held sign-in is signed,
+  // short-lived and spent by the first answer; a panel's is bound to its browser by the nonce cookie,
+  // checked before anything is spent or applied, as the callback checked it. The page comes back with
+  // what an answer did while an offer remains or the answer did not take; otherwise the sign-in
+  // finishes as the callback would have.
+  if (method === "POST" && path === "/auth/invites") {
+    const form = new URLSearchParams(await request.text());
+    const claims = await verifyJwt(form.get("held") ?? "", config.secret, { issuer: config.issuer, audience: INVITES_AUDIENCE });
+    const plans = config.plans;
+    const held = claims?.bellman as unknown as HeldSignIn | undefined;
+    if (!claims || !held || !plans || !(held.session || held.authorize)) {
+      return html(`<h1>This sign-in link expired</h1><p>Start the sign-in again.</p>`, 400);
+    }
+    const secure = new URL(config.issuer).protocol === "https:";
+    if (held.session && !signinNonceMatches(request, held.session, secure)) return endSignin(signinElsewhere(), secure);
+    const choice = form.get("choice");
+    if (choice !== "join" && choice !== "decline" && choice !== "continue") {
+      return html(`<h1>That answer is not one the page offers</h1><p>Go back and choose again, or start the sign-in again.</p>`, 400);
+    }
+    const keys = grantKeys(identityKeys(held.profile));
+    const subjectKey = subjectOf(held.profile);
+    const spent = await config.store.spendOnce(claims.jti, claims.exp * 1000);
+    if (!spent.first) return answeredAlready(held, form.get("held") ?? "", spent.settled, keys, subjectKey, claims.exp, config);
+    const orgId = form.get("org") ?? "";
+    let notice: Notice | undefined;
+    let stay = false;
+    if (choice === "join") {
+      const answer = await acceptInvite(plans, held.profile, keys, orgId);
+      notice = answer.notice;
+      stay = !answer.joined;
+    } else if (choice === "decline") {
+      const answer = await declineInvite(plans, keys, subjectKey, orgId);
+      notice = answer.notice;
+      stay = !answer.declined;
+    }
+    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey);
+    const redrawn = stay || remaining.length > 0;
+    const res = redrawn
+      ? await invitesPage(held, remaining, config, claims.exp, notice)
+      : held.session
+        ? await completeSession(held.profile, held.session, config)
+        : await completeAuthorize(held.profile, held.authorize!, config, held.via);
+    // Where this answer left the browser, for a second press of the same button (`answeredAlready`).
+    await config.store.settleSpent(claims.jti, { location: res.headers.get("location"), cookies: res.headers.getSetCookie(), redrawn });
+    return res;
   }
 
   // ---------------------------------------- the work-email hand-off (SSO spec, D12)

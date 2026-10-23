@@ -54,6 +54,10 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   reporterRows: () =>
     runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), async (_i: RegistryDO, ctx) =>
       [...(await ctx.storage.list({ prefix: "rl:" })).keys()].map((key) => decodeURIComponent(key.slice("rl:".length)))),
+  // The registry's `sk:<key>` rows, which `BellmanStore` cannot show: every read of one goes on to the user it names.
+  scimIndexRows: () =>
+    runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), async (_i: RegistryDO, ctx) =>
+      [...(await ctx.storage.list({ prefix: "sk:" })).keys()]),
   // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
   // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
   forgetMemory: () => abortAllDurableObjects(),

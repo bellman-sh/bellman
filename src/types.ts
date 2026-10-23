@@ -421,6 +421,23 @@ export interface OrgDomain {
 export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
 
 /**
+ * A seat an org's admin offered to a person the org does not own by its form (ADR 0027): stored
+ * apart from the grants, under its own keys, so nothing that reads a grant can take it for a seat.
+ * Until the person accepts it at a sign-in the org gains nothing over them; accepting writes the
+ * grant, and declining or the admin's withdrawal removes this and nothing else.
+ */
+export interface OrgInvite {
+  orgId: string;
+  /** The stable key the admin named: a provider subject, or an address. */
+  key: string;
+  /** The role the grant will carry if the person accepts. */
+  role: Role;
+  /** The admin who offered the seat; the grant names them as `grantedBy` when it is taken. */
+  invitedBy: string;
+  invitedAt: number;
+}
+
+/**
  * An org's identity provider (SSO spec, D9): one OIDC provider, discovered when its admin saved it,
  * stored apart from the `Org` record under its own key so a read of the org never hands out a
  * secret. `clientSecret` is sealed (D14); no route returns it. `protocol` is the field SAML would

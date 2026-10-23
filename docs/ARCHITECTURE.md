@@ -1228,7 +1228,11 @@ anything built on top:
 4. **An org is a record, and its members are its grants** (ADR 0024). `org:<orgId>`
    in `RegistryDO` holds the name, the one owner, the seats and the standing; a
    member is a grant naming the org, and the seat cap is decided inside the
-   guarded grant write. A team purchase creates the record with the seats it
+   guarded grant write. An admin's seat takes effect at once only for an identity
+   the org owns by its form, its IdP's subjects and addresses on its verified
+   domains; anyone else gets an invite, kept apart from the grants under `io:` and
+   `iv:`, that becomes their grant when they accept it at a sign-in (ADR 0027). A
+   team purchase creates the record with the seats it
    sells, and a subscription that stops paying marks it inactive: every grant in
    an inactive org resolves to `free` with its role and org kept, through
    `standingOf` in `firstGrant`, which every re-check passes through.
@@ -1237,8 +1241,9 @@ anything built on top:
    is written only when a TXT record proved the domain; `/authorize/sso` sends an
    address's domain to its org's IdP, `/callback/sso/<orgId>` reads the id token's
    claims and seats the person; and `require_sso` refuses a GitHub or Google
-   sign-in by anyone the org claims but its owner, at sign-in and at every
-   re-check, through `ssoRefusal` beside `standingOf`.
+   sign-in by anyone the org claims but its owner, by a grant that took effect or
+   a verified address and never by an invite, at sign-in and at every re-check,
+   through `ssoRefusal` beside `standingOf`.
 6. **SCIM provisions the members, and a deprovision ends the sign-in** (ADR 0029).
    `sc:<orgId>` and `sh:<hash>` hold an org's SCIM token hashed; `su:<orgId>:<id>` is
    a user the IdP pushed, naming the grant key the person is seated under;

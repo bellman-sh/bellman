@@ -1,9 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey,
-  scimUserKey, scimUserPrefix, staleIndexKeys,
+  allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
+  orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -11,7 +12,7 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
-  Org, OrgIdp, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -37,7 +38,7 @@ import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
@@ -3316,7 +3317,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // an expired record from another org answer this check would block the
       // key indefinitely, because nothing sweeps it until someone reads it.
       const previous = stored && !lapsed(stored) ? stored : undefined;
-      if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
+      const orgOf = async (orgId: string | null) => (orgId === null ? undefined : txn.get<Org>(orgKey(orgId)));
+      // An unowned seat elsewhere holds nothing (ADR 0027): the org that owns the address by its form takes the key.
+      const taken = previous !== undefined && previous.orgId !== expectedOrgId
+        && takesUnownedSeat(previous, await orgOf(previous.orgId), grant, await orgOf(grant.orgId));
+      if (previous && previous.orgId !== expectedOrgId && !taken) return "conflict" as const;
+      // The org whose IdP pushed the seat it took keeps no hold on the key: a claim does not carry its user along.
+      if (taken && (await txn.get<{ orgId: string }>(scimKeyIndex(grant.key)))?.orgId === previous.orgId) await txn.delete(scimKeyIndex(grant.key));
       // The seat cap (orgs spec, D3), decided in the transaction that seats: an org with a
       // record holds as many grants as it bought, a key already in this org changes role for
       // no seat, and an org that is only a string in grants has no record and no cap.
@@ -3327,7 +3334,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
-        txn, this.#auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+        txn, this.#auditIntents(taken ? takenSeatAuditEntries(previous, grant, audit, Date.now()) : grantAuditEntries(previous, grant, audit, Date.now()))
       );
       // Grant, index and the intent to record it, in one commit. A refused
       // write reaches none of this, so it queues nothing.
@@ -3809,6 +3816,119 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  // ------------------------------------------------- invites (ADR 0027)
+  // Under `io:` and `iv:`, apart from the grants: nothing that reads `gr:` or `go:` can take one for a seat.
+
+  async #putOrgInviteTxn(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<Org>(orgKey(invite.orgId)))) return "no_org" as const;
+      const [byOrg, byKey] = inviteKeysFor(invite);
+      if (await txn.get<OrgInvite>(byOrg)) return "exists" as const;
+      const pending = await txn.list({ prefix: orgInvitesPrefix(invite.orgId), limit: MAX_PENDING_INVITES });
+      if (pending.size >= MAX_PENDING_INVITES) return "limit" as const;
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([
+        orgEventEntry(invite.orgId, "member_invited", { key: invite.key, role: invite.role }, audit, invite.invitedAt),
+      ]));
+      await txn.put<unknown>({ [byOrg]: invite, [byKey]: invite, ...rows });
+      return "invited" as const;
+    });
+  }
+
+  async putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    const outcome = await this.#putOrgInviteTxn(invite, audit);
+    if (outcome === "invited") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
+    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()];
+  }
+
+  /** One prefix read per key, each bounded as an org's listing is: a key many orgs invited cannot make a sign-in read without end. */
+  async invitesFor(keys: string[]): Promise<OrgInvite[]> {
+    const found: OrgInvite[] = [];
+    for (const key of new Set(keys)) {
+      found.push(...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values());
+    }
+    return found;
+  }
+
+  async #deleteOrgInviteTxn(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const rowKeys = inviteKeysFor({ orgId, key });
+      if (!(await txn.get<OrgInvite>(rowKeys[0]))) return "missing" as const;
+      await txn.delete(rowKeys);
+      await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())])));
+      return "deleted" as const;
+    });
+  }
+
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    const outcome = await this.#deleteOrgInviteTxn(orgId, key, audit);
+    if (outcome === "deleted") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  /** The offer, the switch, every key's grant and the seats are read in the transaction that writes the grant (ADR 0027). */
+  async #acceptOrgInviteTxn(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "gone" as const;
+      const unique = [...new Set([subjectKey, ...keys])];
+      const inviteRows = unique.map((key) => inviteKeysFor({ orgId, key }));
+      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg)))).find((i) => i !== undefined);
+      const stored = await Promise.all(unique.map((key) => txn.get<PlanGrant>(grantKey(key))));
+      const grants = stored.filter((g): g is PlanGrant => g !== undefined && !lapsed(g, now));
+      // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
+      const orgs = new Map<string, Org | undefined>([[orgId, org]]);
+      for (const g of grants) if (g.orgId !== null && !orgs.has(g.orgId)) orgs.set(g.orgId, await txn.get<Org>(orgKey(g.orgId)));
+      const unowned = grants.filter((g) => isUnownedSeat(g, g.orgId === null ? undefined : orgs.get(g.orgId)));
+      const seats = unowned.filter((g) => g.orgId === orgId);
+      const offer = invite ? { role: invite.role, by: invite.invitedBy } : seats[0] ? { role: seats[0].role, by: seats[0].grantedBy } : undefined;
+      if (!offer) return "gone" as const;
+      if (org.requireSso) return "sso" as const;
+      const others = grants.filter((g) => !unowned.includes(g));
+      if (others.some((g) => g.orgId === orgId)) {
+        await txn.delete(inviteRows.flat());
+        return "member" as const;
+      }
+      if (others.length > 0) return "taken" as const;
+      if (seats.length === 0 && (await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
+      const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
+      // The subject's own row is a lapsed one at most, here; its index copy in another org goes with it.
+      const subject = stored[0];
+      await txn.delete([...inviteRows.flat(), ...seats.flatMap(allKeysFor), ...staleIndexKeys(subject, grant)]);
+      // A seat the IdP pushed stays the IdP's to end (ADR 0029): its rows follow it onto the subject, as a claim's do.
+      for (const seat of seats) await this.#repointScim(txn, seat, subjectKey);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
+      await txn.put<unknown>({ [grantKey(subjectKey)]: grant, [orgIndexKey(orgId, subjectKey)]: grant, ...rows });
+      return "joined" as const;
+    });
+  }
+
+  async acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    const outcome = await this.#acceptOrgInviteTxn(orgId, keys, subjectKey, now, audit);
+    if (outcome === "joined") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const key = declineKey(subjectKey, orgId);
+      await txn.put(key, Math.max(now, (await txn.get<number>(key)) ?? now));
+    });
+  }
+
+  async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
+    const prefix = declinesPrefix(subjectKey);
+    const rows = await this.ctx.storage.list<number>({ prefix, limit: MAX_PENDING_INVITES });
+    return [...rows].map(([key, at]) => ({ orgId: decodeURIComponent(key.slice(prefix.length)), at }));
+  }
+
   // ------------------------------------------------- SCIM users (SCIM spec, D2 to D8)
   // The row, the directory entry and the key index beside the grant they name, so a push, a deactivation and a
   // rename are each one transaction, and a refusal in any of them is answered before the first write.
@@ -3829,13 +3949,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
       const prior = entry?.scimId ? await txn.get<ScimUser>(scimUserKey(user.orgId, entry.scimId)) : undefined;
       if (prior && prior.deletedAt === null) return { outcome: "exists" as const };
-      const key = entry?.key ?? user.key;
-      const stored = await txn.get<PlanGrant>(grantKey(key));
-      const held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
+      const kept = entry?.key ?? user.key;
+      let key = kept;
+      let stored = await txn.get<PlanGrant>(grantKey(key));
+      let held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
       if (held && held.orgId !== user.orgId) return { outcome: "conflict" as const };
+      // A seat this push creates or restores never lands on a personal account the org does not own by its form (ADR 0027).
+      if (!held) {
+        key = scimSeatKey(org, user.userName, kept);
+        if (key !== kept) {
+          stored = await txn.get<PlanGrant>(grantKey(key));
+          held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
+          if (held && held.orgId !== user.orgId) return { outcome: "conflict" as const };
+        }
+      }
       const linked = held !== undefined;
       const entries: AuditEntry[] = [];
       const rows: Record<string, unknown> = {};
+      if (key !== kept && (await txn.get<{ scimId: string }>(scimKeyIndex(kept)))?.scimId === entry?.scimId) await txn.delete(scimKeyIndex(kept));
       if (!linked && user.active) {
         if ((await this.#countMembers(txn, user.orgId, user.createdAt)) >= org.seats) return { outcome: "full" as const };
         const grant = scimGrant(key, user.orgId, user.createdAt);
@@ -3910,11 +4041,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         if (target) return { outcome: "exists" as const };
       }
       let reuse: PlanGrant | undefined;
+      // A reactivation never re-seats a personal account the org does not own by its form (ADR 0027): on the address instead.
+      const org = await txn.get<Org>(orgKey(orgId));
+      const seatAt = active === true && org ? scimSeatKey(org, rename ?? was.userName, toKey) : toKey;
       if (active === true) {
-        const held = moves ? undefined : await liveAt(toKey);
+        const held = moves && seatAt === toKey ? undefined : await liveAt(seatAt);
         if (held && held.orgId !== orgId) return { outcome: "conflict" as const };
         reuse = held;
-        const org = await txn.get<Org>(orgKey(orgId));
         if (!reuse && org && (await this.#countMembers(txn, orgId, now)) >= org.seats) return { outcome: "full" as const };
       }
 
@@ -3945,6 +4078,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       }
       let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
       if (active === true) {
+        if (seatAt !== next.key) {
+          await txn.delete(scimKeyIndex(next.key));
+          next = { ...next, key: seatAt };
+        }
         if (!reuse) {
           const grant = scimGrant(next.key, orgId, now);
           const stale = rows[grantKey(next.key)] === undefined ? await txn.get<PlanGrant>(grantKey(next.key)) : undefined;
@@ -5509,6 +5646,36 @@ export class DurableObjectStore implements BellmanStore {
 
   async deleteScimUser(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined> {
     return this.registry.deleteScimUser(orgId, id, now, audit);
+  }
+
+  async putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    return this.registry.putOrgInvite(invite, audit);
+  }
+
+  async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
+    return this.registry.listOrgInvites(orgId, limit);
+  }
+
+  async invitesFor(keys: string[]): Promise<OrgInvite[]> {
+    return this.registry.invitesFor(keys);
+  }
+
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.registry.deleteOrgInvite(orgId, key, audit);
+  }
+
+  async acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    return this.registry.acceptOrgInvite(orgId, keys, subjectKey, now, audit);
+  }
+
+  async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
+    await this.registry.declineOrg(subjectKey, orgId, now);
+  }
+
+  async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
+    return this.registry.declinedOrgs(subjectKey);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

@@ -164,10 +164,13 @@ export async function scimRoutes(request: Request, deps: ScimRouteDeps): Promise
  * is finished. A key no sign-in has claimed names nobody and has no rooms.
  */
 async function rooms(store: BellmanStore, orgId: string, was: ScimUser, user: ScimUser, now: number): Promise<void> {
-  const userId = userIdForKey(user.key);
+  // The rooms are the person's the deprovision walked: a reactivation thaws them under that key, though it seats
+  // a personal account's address rather than the account (ADR 0027), and the account takes it back at a sign-in.
+  const key = user.active && !was.active ? was.key : user.key;
+  const userId = userIdForKey(key);
   if (userId === null) return;
   // Every room for the IdP's own subject, whose sign-in is over; the org's rooms alone for a personal account.
-  const scope = { orgId, everywhere: parseSsoKey(user.key)?.orgId === orgId };
+  const scope = { orgId, everywhere: parseSsoKey(key)?.orgId === orgId };
   if (!user.active) await departedRooms(store, userId, scimIdentity(orgId), now, scope);
   else if (!was.active) await thawRooms(store, userId, scimIdentity(orgId), now, scope);
 }

@@ -1,12 +1,16 @@
 /**
  * The org routes (orgs spec, D6): an org's record for its members, and its roster for its admins,
- * who seat a teammate by any stable identity key, change a role, and remove a member. On the audit
+ * who seat or invite a teammate by a stable identity key, change a role, and remove a member or
+ * withdraw an invite. On the audit
  * routes' rules: `deps.caller` (a bearer token or the panel's cookie), CORS for the panel's origins,
  * the same preflight, the CSRF check on every write a cookie makes, one JSON error shape, and the
  * org always the caller's own, never a parameter.
  *
  * A member here is a grant whose `orgId` is this org (D2), written through the guarded grant write
- * that counts the seats (D3) and audits in the same operation. A purchased admin writes here: a grant
+ * that counts the seats (D3) and audits in the same operation. A seat an admin gives takes effect only
+ * for an identity the org owns by its form, its own IdP's subjects and addresses on its verified domains
+ * (ADR 0027); anyone else is invited, apart from the grants, and becomes a member only by accepting at
+ * a sign-in. The roster lists both, each with its status. A purchased admin writes here: a grant
  * in a recorded org resolves to free the moment the org stops paying (D5), can only be `team` in the
  * admin's own org, and is counted against the seats the subscription bought, which is what keeps
  * `/admin/grants` closed to them and this open.
@@ -23,9 +27,9 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { MAX_ORG_NAME_CHARS, orgView, parseOrgName, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
-import type { Org, OrgIdp, PlanGrant, Role } from "../types.js";
+import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type OrgRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
@@ -62,6 +66,18 @@ export interface MemberView {
   granted_at: string;
   expires_at: string | null;
   owner: boolean;
+  status: "member";
+}
+
+/** An invite as the roster shows one (ADR 0027): a seat offered and not taken, so no plan, no grant and no seat yet. */
+export interface InviteView {
+  key: string;
+  user_id: string | null;
+  /** The role the grant will carry if the person accepts. */
+  role: Role;
+  status: "invited";
+  invited_at: string;
+  invited_by: string;
 }
 
 const iso = (at: number): string => new Date(at).toISOString();
@@ -79,6 +95,14 @@ export function memberView(grant: PlanGrant, org: Org): MemberView {
     granted_at: iso(grant.grantedAt),
     expires_at: grant.expiresAt === null ? null : iso(grant.expiresAt),
     owner: isOwner(grant.key, org),
+    status: "member",
+  };
+}
+
+export function inviteView(invite: OrgInvite): InviteView {
+  return {
+    key: invite.key, user_id: userIdForKey(invite.key), role: invite.role, status: "invited",
+    invited_at: iso(invite.invitedAt), invited_by: invite.invitedBy,
   };
 }
 
@@ -282,7 +306,13 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       if (request.method === "GET") {
         // ponytail: two hundred members a read, the bound `/admin/grants` reads with, and no paging.
         const grants = await deps.store.listGrants(200, orgId);
-        return json(200, { members: grants.map((grant) => memberView(grant, org)) }, origin);
+        const invites = await deps.store.listOrgInvites(orgId, MAX_PENDING_INVITES);
+        // A seat on an address the org no longer owns by its form takes no effect until the person accepts it
+        // (ADR 0027), so it is listed as the invite it now is; it still holds its seat, and DELETE removes it.
+        const listed = grants.map((grant) => isUnownedSeat(grant, org)
+          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt })
+          : memberView(grant, org));
+        return json(200, { members: [...listed, ...invites.map(inviteView)] }, origin);
       }
       const body = await readBody(request, origin);
       if (body instanceof Response) return body;
@@ -314,6 +344,21 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       if (seated && seated.orgId === orgId) {
         return problem(409, "exists", "that key is already a member; change its role with PATCH /org/members/:key", origin);
       }
+      // A seat takes effect without the person only for an identity the org owns by its form (ADR 0027).
+      // Anyone else is offered one: an invite, apart from the grants, that nothing resolves a plan, an org
+      // or a refusal from, and that becomes their grant only when they accept it at a sign-in. Whether the
+      // key holds another org's grant is not asked here, so an invite says nothing of the person to the admin.
+      if (!ownsByForm(org, body.key)) {
+        const invite: OrgInvite = { orgId, key: body.key, role, invitedBy: identity.userId, invitedAt: Date.now() };
+        const invited = await deps.store.putOrgInvite(invite, intent);
+        if (invited === "exists") {
+          return problem(409, "exists", "that key is already invited; withdraw it with DELETE /org/members/:key to change the role", origin);
+        }
+        if (invited === "limit") return problem(409, "limit", `this org has ${MAX_PENDING_INVITES} pending invites; withdraw one first`, origin);
+        if (invited === "no_org") return problem(404, "no_org", "this org has no record yet; the operator creates one", origin);
+        // 202: the seat is offered, not taken. The person's answer is what seats them.
+        return json(202, { member: inviteView(invite) }, origin);
+      }
       // What the body says of plan, org, source or expiry is not read: a member of this org is a
       // team grant in this org, from this org, that lapses with the org and not on a date.
       const grant: PlanGrant = {
@@ -335,7 +380,13 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
     // The owner's grant is not this route's to touch, in either direction: they stay an admin (D1).
     if (isOwner(key, org)) return problem(409, "owner", "the owner stays an admin and cannot be removed", origin);
     const existing = await deps.store.getGrant(key);
-    if (!existing || existing.orgId !== orgId) return problem(404, "not_found", "no such member in your org", origin);
+    if (!existing || existing.orgId !== orgId) {
+      // No member by that key: a DELETE may still withdraw this org's invite of it (ADR 0027).
+      if (request.method === "DELETE" && (await deps.store.deleteOrgInvite(orgId, key, intent)) === "deleted") {
+        return new Response(null, { status: 204, headers: corsHeaders(origin) });
+      }
+      return problem(404, "not_found", "no such member in your org", origin);
+    }
     if (request.method === "DELETE") {
       // A member the IdP pushed is the IdP's to remove (SCIM spec, D10): removed here, the next sync would seat
       // them again, and the roster would read as members reappearing. Their role stays Bellman's to change.

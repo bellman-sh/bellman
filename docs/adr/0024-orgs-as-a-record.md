@@ -1,6 +1,6 @@
 # ADR 0024 — An org is a record, and its members are its grants
 
-**Date:** 2026-10-21 · **Status:** accepted · **Closes:** #53 · **Spec:** `docs/superpowers/specs/2026-10-21-orgs-and-sso-design.md` (D1 to D8)
+**Date:** 2026-10-21 · **Status:** accepted, amended by ADR 0027 · **Closes:** #53 · **Spec:** `docs/superpowers/specs/2026-10-21-orgs-and-sso-design.md` (D1 to D8)
 
 ## Context
 
@@ -21,7 +21,11 @@ hang a per-org identity provider until the org is a record.
 2. **Membership is the grant.** A member is a `PlanGrant` whose `orgId` names the org; the role
    is the grant's; the seats used are the live grants in the org's index (`countOrgMembers`).
    There is no `OrgMember` record to disagree with it. A person is in one org, since
-   `Identity.orgId` is singular.
+   `Identity.orgId` is singular. A seat takes effect without the person only for an identity the
+   org owns by its form, a subject of its own IdP or an address under a domain it verified; for
+   anyone else an admin's seat is an invite, kept apart from the grants, that becomes the grant
+   when the person accepts it at a sign-in (ADR 0027). Until then the org has none of what a seat
+   carries: not their sign-in, their plan, their rooms or their audit.
 3. **The seat cap is enforced inside `putGrantIfOwned`,** which answers `full` when the org has a
    record, the key is not already a member of it, and the live grants have reached `seats`. A role
    change takes no seat. Billing's write (`putGrantIfSource`) does not check, so an org can sit one
@@ -37,7 +41,9 @@ hang a per-org identity provider until the org is a record.
    all pass through. An org with no record is active; an operator org always is.
 6. **The org admin's routes are cookie-reachable,** `src/http/orgs.ts` on the audit routes'
    rules: `GET` and `PATCH /org`, `GET` and `POST /org/members`, `PATCH` and `DELETE
-   /org/members/:key`. A purchased admin writes here: a grant in a recorded org lapses with the
+   /org/members/:key`. `POST /org/members` seats an identity the org owns by its form and invites
+   any other, and `DELETE` withdraws an invite as it removes a member (ADR 0027). A purchased admin
+   writes here: a grant in a recorded org lapses with the
    org, can only be `team` in the admin's own org, and is counted against the seats bought.
    `/admin/grants` stays bearer-only and operator-granted.
 7. **The operator creates and resizes an org that was not bought,** `POST /admin/orgs` and

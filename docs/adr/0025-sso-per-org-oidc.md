@@ -1,6 +1,6 @@
 # ADR 0025 — SSO is one OIDC provider per org, routed by a verified domain
 
-**Date:** 2026-10-21 · **Status:** accepted · **Closes:** #55 · **Spec:** `docs/superpowers/specs/2026-10-21-orgs-and-sso-design.md` (D9 to D14)
+**Date:** 2026-10-21 · **Status:** accepted, amended by ADR 0027 · **Closes:** #55 · **Spec:** `docs/superpowers/specs/2026-10-21-orgs-and-sso-design.md` (D9 to D14)
 
 ## Context
 
@@ -34,7 +34,8 @@ An org is a record now (ADR 0024), so a per-org identity provider has somewhere 
    were given holds and no second seat is taken.
 6. **`require_sso` is enforced where plans resolve.** `ssoRefusal` runs at sign-in and at every
    re-check (a refresh, a panel session, a hosted room's month turn): a GitHub or Google sign-in
-   that lands in the org, or carries a verified address under one of its domains, is refused
+   that lands in the org by a grant that took effect, never by an invite (ADR 0027), or carries a
+   verified address under one of its domains, is refused
    unless the person is the org's owner, whose original provider is the break-glass. An operator
    override and an SSO profile are exempt.
 7. **The client secret is sealed** with AES-256-GCM under a key HKDF derives from

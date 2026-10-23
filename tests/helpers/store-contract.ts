@@ -4563,7 +4563,8 @@ export function describeStoreContract(
       const actions = async (orgId = "org_acme") => (await store.auditForOrg(orgId, 30)).map((e) => e.action);
       const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
       const user = (over: Partial<ScimUser> = {}): ScimUser => ({
-        id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: "00u-bo", active: true, key: "email:bo@acme.test", createdAt: 10, updatedAt: 10, ...over,
+        id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: "00u-bo", active: true, key: "email:bo@acme.test", createdAt: 10, updatedAt: 10,
+        deletedAt: null, ...over,
       });
       const scim = scimIntent("org_acme");
 
@@ -4762,16 +4763,71 @@ export function describeStoreContract(
         expect((await actions()).at(-1)).toBe("scim_user_reactivated");
       });
 
-      it("deletes a user with its grant, directory entry and key index", async () => {
+      it("deletes a user into a tombstone that keeps refusing the key, and a push after it starts over", async () => {
         await seated();
         await store.createScimUser(user(), scim);
         expect(await store.deleteScimUser("org_acme", "x1", 40, scim)).toEqual(user());
         expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
         expect(await store.getScimUser("org_acme", "x1")).toBeUndefined();
         expect(await store.scimUserByName("org_acme", "bo@acme.test")).toBeUndefined();
-        expect(await store.scimUserByKey("email:bo@acme.test")).toBeUndefined();
-        expect(await store.deleteScimUser("org_acme", "x1", 41, scim)).toBeUndefined();
+        expect(await store.listScimUsers("org_acme", 10)).toEqual([]);
+        // The key index outlives the row: a deleted subject is refused as a deactivated one is (SCIM spec, D4).
+        expect(await store.scimUserByKey("email:bo@acme.test")).toEqual(user({ active: false, updatedAt: 40, deletedAt: 40 }));
+        // A repeat answers the tombstone, so a walk cut short can be finished.
+        expect(await store.deleteScimUser("org_acme", "x1", 41, scim)).toEqual(user({ active: false, updatedAt: 40, deletedAt: 40 }));
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 42, scim)).toEqual({ outcome: "missing" });
         expect((await actions()).slice(-2)).toEqual(["plan_revoked", "scim_user_deleted"]);
+        // The IdP assigns them again: a new row, the old tombstone gone, a seat taken.
+        expect(await store.createScimUser(user({ id: "x9", createdAt: 43, updatedAt: 43 }), scim)).toEqual({ outcome: "written", user: user({ id: "x9", createdAt: 43, updatedAt: 43 }) });
+        expect(await store.scimUserByKey("email:bo@acme.test")).toMatchObject({ id: "x9", active: true });
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toMatchObject({ id: "x9" });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ source: "scim", grantedAt: 43 });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+      });
+
+      it("finds a person by their address however the IdP spells it", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso, "Bo.Smith@Acme.test")).toBe("written");
+        const pushed = await store.createScimUser(user({ userName: "bo.smith@acme.test", key: "email:bo.smith@acme.test" }), scim);
+        expect(pushed).toMatchObject({ outcome: "linked", user: { key: "sso:org_acme:00u1" } });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        // And the other way round: a push first, then a sign-in that spells the address in capitals.
+        await store.updateOrg("org_acme", { seats: 4 }, by);
+        await store.createScimUser(user({ id: "x2", userName: "cy@acme.test", key: "email:cy@acme.test" }), scim);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u2", 14, sso, "CY@ACME.TEST")).toBe("written");
+        expect(await store.getGrant("email:cy@acme.test")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u2")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u2")).toMatchObject({ id: "x2" });
+        expect(await store.countOrgMembers("org_acme")).toBe(3);
+      });
+
+      it("takes the seat of a person it pushes as inactive, as a deactivation would", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso, "bo@acme.test");
+        const pushed = await store.createScimUser(user({ active: false }), scim);
+        expect(pushed).toMatchObject({ outcome: "linked", user: { key: "sso:org_acme:00u1", active: false } });
+        expect(await store.getGrant("sso:org_acme:00u1")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect((await actions()).slice(-2)).toEqual(["plan_revoked", "scim_user_created"]);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("deprovisioned");
+      });
+
+      it("moves the seat to the door the person last came through: a claimed GitHub key, and a reissued subject", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        await store.moveGrant("email:bo@acme.test", "github:77");
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("github:77")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u1")).toMatchObject({ id: "x1", key: "sso:org_acme:00u1" });
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u9", 15, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("sso:org_acme:00u1")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u9")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u9")).toMatchObject({ id: "x1" });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
       });
     });
 

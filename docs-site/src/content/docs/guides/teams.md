@@ -56,7 +56,7 @@ Once those work, turn `require_sso` on. From then on everyone the org claims, by
 
 Once single sign-on works, the IdP can also keep the roster: push a person when they are assigned Bellman, and take them out when they leave. Three steps:
 
-1. **Mint the token.** On the control panel's Org page, or `POST /org/scim/token`, which answers the token once and the base URL, `https://mcp.bellman.sh/scim/v2`. Minting again replaces the token; `DELETE /org/scim/token` revokes it. The token can do SCIM and nothing else.
+1. **Mint the token.** `POST /org/scim/token`, as an org admin over a bearer token or the control panel's session, answers the token once and the base URL, `https://mcp.bellman.sh/scim/v2`; the control panel's Org page will offer the same button. Minting again replaces the token; `DELETE /org/scim/token` revokes it. The token can do SCIM and nothing else.
 2. **Give both to the IdP.** In Okta, the app's Provisioning tab takes the base URL and the token as a bearer; in Entra ID, the enterprise app's Provisioning page takes them as the tenant URL and the secret token. Turn on create, update and deactivate for users. Group push is not managed: Bellman lists no groups, and roles are set on the Org page.
 3. **Assign people.** A push seats the person as a member, within the seats, under their email address. Someone who already signed in through SSO, or whom an admin already seated by that address, is linked rather than seated again, and keeps the role they had. The first sign-in after a push claims the seat onto the IdP's subject.
 

@@ -438,7 +438,7 @@ describe("SCIM (SCIM spec, D1, D10)", () => {
 
   it("leaves a member the IdP pushed to the IdP, and still removes one an admin seated", async () => {
     await store.createScimUser({
-      id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: null, active: true, key: "email:bo@acme.test", createdAt: 1, updatedAt: 1,
+      id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: null, active: true, key: "email:bo@acme.test", createdAt: 1, updatedAt: 1, deletedAt: null,
     }, scimIntent("org_acme"));
     const managed = (await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!;
     const refusal = await json(managed);
@@ -446,6 +446,10 @@ describe("SCIM (SCIM spec, D1, D10)", () => {
     expect(await store.getGrant("email:bo@acme.test")).toBeDefined();
     expect((await call("owner", "/org/members/email%3Abo%40acme.test", "PATCH", { role: "admin" }))!.status).toBe(200);
     await store.updateScimUser("org_acme", "x1", { active: false }, 2, scimIntent("org_acme"));
+    // Seating a deactivated person by hand would make a member the IdP keeps refusing: they come back through the IdP.
+    const dead = (await call("owner", "/org/members", "POST", { key: "email:bo@acme.test", role: "member" }))!;
+    expect([dead.status, (await json(dead)).error]).toEqual([409, "managed"]);
+    expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
     await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
     expect((await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!.status).toBe(204);
   });

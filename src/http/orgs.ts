@@ -302,6 +302,14 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       // source and expiry. Read-then-write, since the owner's key is a stable fact of the record and
       // two admins seating one key at once can only agree.
       if (isOwner(body.key, org)) return problem(409, "owner", "the owner stays an admin and cannot be re-seated", origin);
+      // A person the IdP pushed and then deactivated or deleted comes back through the IdP (SCIM spec, D10): seated
+      // here, they would hold a seat the sign-in keeps refusing.
+      const managed = body.key.startsWith("email:")
+        ? await deps.store.scimUserByName(orgId, body.key.slice("email:".length).toLowerCase()) ?? await deps.store.scimUserByKey(`email:${body.key.slice("email:".length).toLowerCase()}`)
+        : await deps.store.scimUserByKey(body.key);
+      if (managed && managed.orgId === orgId) {
+        return problem(409, "managed", "this address is provisioned by your identity provider; assign them there", origin);
+      }
       const seated = await deps.store.getGrant(body.key);
       if (seated && seated.orgId === orgId) {
         return problem(409, "exists", "that key is already a member; change its role with PATCH /org/members/:key", origin);

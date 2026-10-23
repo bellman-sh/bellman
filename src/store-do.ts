@@ -3758,9 +3758,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const name = address === undefined ? undefined : scimNameKey(orgId, address);
       const entry = name === undefined ? undefined : await txn.get<DirectoryEntry>(name);
       if (entry?.scimId && (await this.#scimInactive(txn, { orgId, scimId: entry.scimId }))) return "deprovisioned" as const;
-      // The grant the address is seated under, this org's: at the directory's key, else at the address itself. It
-      // moves onto the subject with its role and source, as `moveGrant` moves an admin's address grant.
-      const candidates = [entry?.key, address === undefined ? undefined : `email:${address}`];
+      // The grant the address is seated under, this org's: at the directory's key, else at the address as given or
+      // lowercased (a push seats the lowercased address). It moves onto the subject with its role and source, as
+      // `moveGrant` moves an admin's address grant: the seat follows the door the person last came through.
+      const candidates = address === undefined ? [entry?.key] : [entry?.key, `email:${address}`, `email:${address.toLowerCase()}`];
       for (const from of candidates) {
         const found = from === undefined || from === key ? undefined : await txn.get<PlanGrant>(grantKey(from));
         const held = found && !lapsed(found, now) ? found : undefined;
@@ -3816,7 +3817,9 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const org = await txn.get<Org>(orgKey(user.orgId));
       if (!org) return { outcome: "no_org" as const };
       const entry = await txn.get<DirectoryEntry>(scimNameKey(user.orgId, user.userName));
-      if (entry?.scimId) return { outcome: "exists" as const };
+      // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
+      const prior = entry?.scimId ? await txn.get<ScimUser>(scimUserKey(user.orgId, entry.scimId)) : undefined;
+      if (prior && prior.deletedAt === null) return { outcome: "exists" as const };
       const key = entry?.key ?? user.key;
       const stored = await txn.get<PlanGrant>(grantKey(key));
       const held = stored && !lapsed(stored, user.createdAt) ? stored : undefined;
@@ -3831,8 +3834,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         rows[grantKey(key)] = grant;
         rows[orgIndexKey(user.orgId, key)] = grant;
         entries.push(...grantAuditEntries(undefined, grant, audit, user.createdAt));
+      } else if (held && !user.active) {
+        // Pushed as inactive onto a seat a sign-in or an admin gave: the push is the deactivation (review finding 5).
+        for (const storageKey of allKeysFor(held)) await txn.delete(storageKey);
+        entries.push(...revokeAuditEntries(held, audit, user.createdAt));
       }
-      const row: ScimUser = { ...user, key };
+      if (prior) await txn.delete(scimUserKey(user.orgId, prior.id));
+      const row: ScimUser = { ...user, key, deletedAt: null };
       entries.push(scimUserEntry(user.orgId, user.id, "scim_user_created", {
         user_name: user.userName, external_id: user.externalId, key, linked,
       }, audit, user.createdAt));
@@ -3848,8 +3856,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  /** A tombstone is hidden from every read but `scimUserByKey`, which the sign-in refusal reads. */
   async getScimUser(orgId: string, id: string): Promise<ScimUser | undefined> {
-    return this.ctx.storage.get<ScimUser>(scimUserKey(orgId, id));
+    const user = await this.ctx.storage.get<ScimUser>(scimUserKey(orgId, id));
+    return user && user.deletedAt === null ? user : undefined;
   }
 
   async scimUserByName(orgId: string, userName: string): Promise<ScimUser | undefined> {
@@ -3859,17 +3869,18 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   async scimUserByKey(key: string): Promise<ScimUser | undefined> {
     const managed = await this.ctx.storage.get<{ orgId: string; scimId: string }>(scimKeyIndex(key));
-    return managed ? this.getScimUser(managed.orgId, managed.scimId) : undefined;
+    return managed ? this.ctx.storage.get<ScimUser>(scimUserKey(managed.orgId, managed.scimId)) : undefined;
   }
 
   async listScimUsers(orgId: string, limit: number): Promise<ScimUser[]> {
-    return [...(await this.ctx.storage.list<ScimUser>({ prefix: scimUserPrefix(orgId), limit })).values()];
+    // ponytail: tombstones are read and dropped, so a page holds fewer than `limit` by their number.
+    return [...(await this.ctx.storage.list<ScimUser>({ prefix: scimUserPrefix(orgId), limit })).values()].filter((u) => u.deletedAt === null);
   }
 
   async #updateScimUserTxn(orgId: string, id: string, patch: ScimUserPatch, now: number, audit: AuditIntent): Promise<ScimUpdate> {
     return this.ctx.storage.transaction(async (txn) => {
       const was = await txn.get<ScimUser>(scimUserKey(orgId, id));
-      if (!was) return { outcome: "missing" as const };
+      if (!was || was.deletedAt !== null) return { outcome: "missing" as const };
       const rename = patch.userName !== undefined && patch.userName !== was.userName ? patch.userName : undefined;
       const externalId = patch.externalId !== undefined && patch.externalId !== was.externalId ? patch.externalId : undefined;
       const active = patch.active !== undefined && patch.active !== was.active ? patch.active : undefined;
@@ -3959,27 +3970,33 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
-  async #deleteScimUserTxn(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined> {
+  /**
+   * A delete is a deactivation that also hides the row (review finding 3): the grant goes, the row stays as a
+   * tombstone with its directory entry and key index, so the subject is refused as a deactivated one is, and a
+   * repeat answers the tombstone so a room walk cut short can be finished. A push for the address starts over.
+   */
+  async #deleteScimUserTxn(orgId: string, id: string, now: number, audit: AuditIntent): Promise<{ was: ScimUser; wrote: boolean } | undefined> {
     return this.ctx.storage.transaction(async (txn) => {
       const was = await txn.get<ScimUser>(scimUserKey(orgId, id));
       if (!was) return undefined;
+      if (was.deletedAt !== null) return { was, wrote: false };
       const entries: AuditEntry[] = [];
       const stored = was.active ? await txn.get<PlanGrant>(grantKey(was.key)) : undefined;
       if (stored && !lapsed(stored, now) && stored.orgId === orgId) {
         for (const storageKey of allKeysFor(stored)) await txn.delete(storageKey);
         entries.push(...revokeAuditEntries(stored, audit, now));
       }
-      await txn.delete([scimUserKey(orgId, id), scimNameKey(orgId, was.userName), scimKeyIndex(was.key)]);
       entries.push(scimUserEntry(orgId, id, "scim_user_deleted", { user_name: was.userName, key: was.key }, audit, now));
-      await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents(entries)));
-      return was;
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(entries));
+      await txn.put<unknown>({ [scimUserKey(orgId, id)]: { ...was, active: false, updatedAt: now, deletedAt: now } satisfies ScimUser, ...rows });
+      return { was, wrote: true };
     });
   }
 
   async deleteScimUser(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined> {
-    const was = await this.#deleteScimUserTxn(orgId, id, now, audit);
-    if (was) await this.driver.deliverNow();
-    return was;
+    const outcome = await this.#deleteScimUserTxn(orgId, id, now, audit);
+    if (outcome?.wrote) await this.driver.deliverNow();
+    return outcome?.was;
   }
 
   // ------------------------------------------------- SCIM (SCIM spec, D1)

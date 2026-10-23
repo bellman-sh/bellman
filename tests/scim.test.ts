@@ -159,13 +159,15 @@ describe("Users", () => {
     expect([taken.status, (await taken.json()).scimType]).toEqual([409, "uniqueness"]);
   });
 
-  it("deletes a user", async () => {
+  it("deletes a user, and a repeat is harmless", async () => {
     const { body } = await push("bo@acme.test");
     expect((await call(TOKEN_A, `/scim/v2/Users/${body.id}`, "DELETE"))!.status).toBe(204);
     expect((await call(TOKEN_A, `/scim/v2/Users/${body.id}`))!.status).toBe(404);
-    expect((await call(TOKEN_A, `/scim/v2/Users/${body.id}`, "DELETE"))!.status).toBe(404);
+    expect((await call(TOKEN_A, `/scim/v2/Users/${body.id}`, "DELETE"))!.status).toBe(204);
+    expect((await call(TOKEN_A, `/scim/v2/Users/nobody`, "DELETE"))!.status).toBe(404);
     expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
-    expect((await actions()).slice(-2)).toEqual(["plan_revoked", "scim_user_deleted"]);
+    expect((await json(await call(TOKEN_A, "/scim/v2/Users"))).totalResults).toBe(0);
+    expect((await actions()).filter((a) => a === "plan_revoked" || a === "scim_user_deleted")).toEqual(["plan_revoked", "scim_user_deleted"]);
   });
 
   it("refuses a body over the bound, and one that is not an object", async () => {
@@ -236,6 +238,14 @@ describe("a deprovision's rooms (SCIM spec, D6, D7)", () => {
     expect((await store.getSession("qs_mine"))!.frozenAt).toBeNull();
     expect((await actions()).filter((a) => a === "room_thawed")).toHaveLength(1);
     expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ source: "scim", role: "member" });
+  });
+
+  it("walks out a person pushed as inactive, whom a sign-in had seated", async () => {
+    const { res, body } = await push("bo@acme.test", { active: false });
+    expect([res.status, body.active]).toEqual([201, false]);
+    expect(await store.getGrant("sso:org_acme:00u1")).toBeUndefined();
+    expect((await store.getSession("qs_joined"))!.members.map((m) => m.memberId)).toEqual(["m_al"]);
+    expect((await store.getSession("qs_mine"))!.frozenAt).not.toBeNull();
   });
 
   it("runs the same walk for a delete", async () => {

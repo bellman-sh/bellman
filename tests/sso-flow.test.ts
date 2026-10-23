@@ -257,7 +257,8 @@ describe("the callback (D12, D13)", () => {
 
 describe("SCIM-provisioned members (SCIM spec, D4)", () => {
   const pushed = (over: Partial<ScimUser> = {}): ScimUser => ({
-    id: "x1", orgId: "org_acme", userName: "ana@acme.test", externalId: "00u1abc", active: true, key: "email:ana@acme.test", createdAt: 5, updatedAt: 5, ...over,
+    id: "x1", orgId: "org_acme", userName: "ana@acme.test", externalId: "00u1abc", active: true, key: "email:ana@acme.test", createdAt: 5, updatedAt: 5,
+    deletedAt: null, ...over,
   });
 
   it("signs in a pushed address onto its seat, taking no second one, and links the subject to the SCIM user", async () => {
@@ -315,6 +316,34 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
     const { identity } = await signInThroughSso();
     expect(identity).toMatchObject({ orgId: "org_acme", plan: "team", role: "member" });
     expect(await plans.countOrgMembers("org_acme")).toBe(2);
+  });
+
+  it("links a pushed address to the subject however the IdP spells the email claim, and refuses them once deactivated", async () => {
+    idp = { ...idp, email: "Ana.Smith@Acme.test" };
+    await plans.createScimUser(pushed({ userName: "ana.smith@acme.test", key: "email:ana.smith@acme.test" }), scimIntent("org_acme"));
+    const { identity } = await signInThroughSso("Ana.Smith@Acme.test");
+    expect(identity).toMatchObject({ orgId: "org_acme", plan: "team" });
+    expect(await plans.getGrant("email:ana.smith@acme.test")).toBeUndefined();
+    expect(await plans.scimUserByKey("sso:org_acme:00u1abc")).toMatchObject({ id: "x1" });
+    expect(await plans.countOrgMembers("org_acme")).toBe(2);
+    await plans.updateScimUser("org_acme", "x1", { active: false }, Date.now(), scimIntent("org_acme"));
+    const refused = await signInThroughSso("Ana.Smith@Acme.test");
+    expect(refused.identity).toBeNull();
+    expect(refused.target.searchParams.get("error_description")).toContain("removed your access");
+    // And the other order: a sign-in with capitals first, then the push.
+    idp = { ...idp, sub: "00u2", email: "Bo.Jones@Acme.test" };
+    await signInThroughSso("Bo.Jones@Acme.test");
+    expect((await plans.createScimUser(pushed({ id: "x2", userName: "bo.jones@acme.test", key: "email:bo.jones@acme.test" }), scimIntent("org_acme"))).outcome).toBe("linked");
+    expect(await plans.scimUserByKey("sso:org_acme:00u2")).toMatchObject({ id: "x2" });
+  });
+
+  it("keeps refusing a subject the IdP deleted outright", async () => {
+    await plans.createScimUser(pushed(), scimIntent("org_acme"));
+    const { clientId, tokens } = await signInThroughSso();
+    await plans.deleteScimUser("org_acme", "x1", Date.now(), scimIntent("org_acme"));
+    const refused = await refresh(clientId, tokens!.refresh_token);
+    expect([refused.status, ((await refused.json()) as { error: string }).error]).toEqual([400, "invalid_grant"]);
+    expect((await signInThroughSso()).identity).toBeNull();
   });
 
   it("leaves a personal account that an address linked to the org signing in once deprovisioned, as free", async () => {

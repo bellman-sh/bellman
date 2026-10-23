@@ -113,6 +113,13 @@ transaction what the callback did in two calls:
 4. Otherwise the seat as today, `full` at the cap, and when `address` is given, the directory row
    with `scimId: null`.
 
+The directory is read and written by the address lowercased whole, whoever spelt it: a connector
+lowercases `userName`, and an IdP's `email` claim may carry capitals, so the address is lowercased
+inside `scimNameKey` and both spellings of `email:<address>` are tried for the grant. The grant moved
+in step 3 is whatever the directory's key names, not only an address key: a `github:` or `google:` key a
+personal sign-in claimed earlier, or an `sso:` key the IdP reissued, so one person holds one seat, under
+the door they last came through; a personal account that held it drops to free with its rooms kept.
+
 The callback drops its separate `moveGrant` and passes the vouched address. `deprovisioned` ends the
 sign-in with a page: "Your organisation has removed your access. Ask its admin." Nothing is minted.
 
@@ -149,9 +156,13 @@ one transaction:
 
 `active` going from true to false, by `PATCH`, `PUT` or `DELETE`, runs `updateScimUser` (or
 `deleteScimUser`) in the registry: the grant at `key` is deleted when it is this org's (its
-`plan_revoked` row filed), the row is marked inactive (or removed, for a delete, with `sn:` and `sk:`),
-and `scim_user_deactivated` (or `scim_user_deleted`) is recorded. The answer carries the row, whose
-`key` says who the person is.
+`plan_revoked` row filed), the row is marked inactive, and `scim_user_deactivated` (or
+`scim_user_deleted`) is recorded. A delete also hides the row: it stays as a tombstone, `deletedAt`
+set, with its directory entry and key index, so the subject is refused as a deactivated one is, a
+repeat `DELETE` answers 204 and walks again, and a push for the address starts over under the key the
+tombstone kept. A push with `active: false` onto a key a sign-in or an admin seated is itself the
+deactivation: the grant goes and the walk runs. The answer carries the row, whose `key` says who the
+person is.
 
 Then, outside the registry and after it committed, the rooms. A key that no sign-in has claimed
 names nobody and has no rooms. For an `sso:`, `github:` or `google:` key the user id is derived
@@ -299,5 +310,5 @@ room.
 rows), `src/audit.ts` and `src/http/audit.ts` (`scim:` is no room), `src/scim/{filter,patch,resource,rooms}.ts`,
 `src/http/scim.ts`, `src/http/orgs.ts` (the token routes, `managed`), `src/oauth/routes.ts`
 (`SignInRefused`, `AccessRemoved`, the callback), `src/oauth/providers.ts` if a helper moves,
-`src/worker.ts`, `src/app.ts`, `docs/adr/0027-scim.md`, `README.md`, `docs/ARCHITECTURE.md` sections 5
+`src/worker.ts`, `src/app.ts`, `docs/adr/0029-scim-provisioning.md`, `README.md`, `docs/ARCHITECTURE.md` sections 5
 and 6, `docs-site/src/content/docs/guides/teams.md`.

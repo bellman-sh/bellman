@@ -39,8 +39,12 @@ export const domainKey = (domain: string): string => `od:${domain}`;
  */
 export const scimUserKey = (orgId: string, id: string): string => `su:${orgId}:${id}`;
 export const scimUserPrefix = (orgId: string): string => `su:${orgId}:`;
-/** The org's directory by address: the key it is seated under, and the SCIM user managing it. */
-export const scimNameKey = (orgId: string, address: string): string => `sn:${orgId}:${address}`;
+/**
+ * The org's directory by address: the key it is seated under, and the SCIM user managing it. The address is
+ * lowercased here, whoever writes it: a connector lowercases `userName`, an IdP's `email` claim may carry
+ * capitals, and one person must be one entry.
+ */
+export const scimNameKey = (orgId: string, address: string): string => `sn:${orgId}:${address.toLowerCase()}`;
 /** The SCIM user a grant key is managed by. */
 export const scimKeyIndex = (key: string): string => `sk:${key}`;
 /** An org's SCIM token, and the lookup from its hash to the org. */

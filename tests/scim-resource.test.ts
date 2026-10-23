@@ -6,7 +6,7 @@ import type { ScimUser } from "../src/types.js";
 const BASE = "https://mcp.test/scim/v2";
 const user: ScimUser = {
   id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: null, active: true, key: "email:bo@acme.test",
-  createdAt: Date.parse("2026-10-22T10:00:00Z"), updatedAt: Date.parse("2026-10-22T11:00:00Z"),
+  createdAt: Date.parse("2026-10-22T10:00:00Z"), updatedAt: Date.parse("2026-10-22T11:00:00Z"), deletedAt: null,
 };
 
 describe("userResource", () => {

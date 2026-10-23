@@ -52,7 +52,7 @@ export function serviceProviderConfig(base: string): Record<string, unknown> {
     sort: { supported: false },
     etag: { supported: false },
     authenticationSchemes: [{
-      type: "oauthbearertoken", name: "Bearer token", description: "The org's SCIM token, issued from its Org page, as a bearer token", primary: true,
+      type: "oauthbearertoken", name: "Bearer token", description: "The org's SCIM token, issued by its admin, as a bearer token", primary: true,
     }],
     meta: { resourceType: "ServiceProviderConfig", location: `${base}/ServiceProviderConfig` },
   };

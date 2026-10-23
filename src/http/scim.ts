@@ -105,7 +105,7 @@ export async function scimRoutes(request: Request, deps: ScimRouteDeps): Promise
       if ("error" in read) return scimError(400, read.error, "invalidValue");
       const made = await deps.store.createScimUser({
         id: randomId(16), orgId, userName: read.userName, externalId: read.externalId, active: read.active,
-        key: `email:${read.userName}`, createdAt: now, updatedAt: now,
+        key: `email:${read.userName}`, createdAt: now, updatedAt: now, deletedAt: null,
       }, intent);
       if (made.outcome !== "written" && made.outcome !== "linked") {
         if (made.outcome === "exists") return scimError(409, "a user with that userName exists", "uniqueness");
@@ -113,6 +113,8 @@ export async function scimRoutes(request: Request, deps: ScimRouteDeps): Promise
         if (made.outcome === "full") return full();
         return scimError(404, "this org has no record");
       }
+      // Pushed as inactive onto a seat a sign-in had given (Entra pushes disabled accounts so): the deactivation's walk.
+      if (!made.user.active) await rooms(deps.store, orgId, { ...made.user, active: true }, made.user, now);
       return answer(201, made.user, { location: `${base}/Users/${made.user.id}` });
     }
 
@@ -123,9 +125,10 @@ export async function scimRoutes(request: Request, deps: ScimRouteDeps): Promise
       return found ? answer(200, found) : scimError(404, "no such user");
     }
     if (request.method === "DELETE") {
+      // A repeat answers the tombstone and walks again: that is how a walk cut short is finished.
       const was = await deps.store.deleteScimUser(orgId, id, now, intent);
       if (!was) return scimError(404, "no such user");
-      await rooms(deps.store, orgId, was, { ...was, active: false }, now);
+      await rooms(deps.store, orgId, { ...was, active: true }, { ...was, active: false }, now);
       return new Response(null, { status: 204 });
     }
     const body = await readBody(request);

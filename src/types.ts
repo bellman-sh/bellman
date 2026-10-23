@@ -452,6 +452,11 @@ export interface ScimUser {
   key: string;
   createdAt: number;
   updatedAt: number;
+  /**
+   * When the IdP deleted the row, or null. A deleted user is a tombstone: hidden from every read but the key
+   * index, which keeps refusing the subject as a deactivated one is refused, until a push starts them over.
+   */
+  deletedAt: number | null;
 }
 
 /** What a push may change (SCIM spec, D8): the name, the IdP's id, and whether the person is active. */

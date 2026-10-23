@@ -3372,9 +3372,10 @@ export class MemoryStore implements BellmanStore {
     const name = address === undefined ? undefined : scimNameKey(orgId, address);
     const entry = name === undefined ? undefined : this.directory.get(name);
     if (entry?.scimId && this.scimInactive({ orgId, scimId: entry.scimId })) return "deprovisioned";
-    // The grant the address is seated under, this org's: at the directory's key, else at the address itself. It
-    // moves onto the subject with its role and source, as `claimGrant` moves an admin's address grant.
-    const candidates = [entry?.key, address === undefined ? undefined : `email:${address}`];
+    // The grant the address is seated under, this org's: at the directory's key, else at the address as given or
+    // lowercased (a push seats the lowercased address). It moves onto the subject with its role and source, as
+    // `claimGrant` moves an admin's address grant: the seat follows the door the person last came through.
+    const candidates = address === undefined ? [entry?.key] : [entry?.key, `email:${address}`, `email:${address.toLowerCase()}`];
     for (const from of candidates) {
       const held = from === undefined || from === key ? undefined : this.liveGrant(from);
       if (!held || held.orgId !== orgId) continue;
@@ -3420,7 +3421,9 @@ export class MemoryStore implements BellmanStore {
     const org = this.orgs.get(user.orgId);
     if (!org) return { outcome: "no_org" };
     const entry = this.directory.get(scimNameKey(user.orgId, user.userName));
-    if (entry?.scimId) return { outcome: "exists" };
+    // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
+    const prior = entry?.scimId ? this.scimUsers.get(scimUserKey(user.orgId, entry.scimId)) : undefined;
+    if (prior && prior.deletedAt === null) return { outcome: "exists" };
     const key = entry?.key ?? user.key;
     const held = this.liveGrant(key);
     if (held && held.orgId !== user.orgId) return { outcome: "conflict" };
@@ -3431,8 +3434,13 @@ export class MemoryStore implements BellmanStore {
       const grant = scimGrant(key, user.orgId, user.createdAt);
       this.grants.set(key, grant);
       entries.push(...grantAuditEntries(undefined, grant, audit, user.createdAt));
+    } else if (held && !user.active) {
+      // Pushed as inactive onto a seat a sign-in or an admin gave: the push is the deactivation (review finding 5).
+      this.grants.delete(key);
+      entries.push(...revokeAuditEntries(held, audit, user.createdAt));
     }
-    const stored: ScimUser = { ...user, key };
+    if (prior) this.scimUsers.delete(scimUserKey(user.orgId, prior.id));
+    const stored: ScimUser = { ...user, key, deletedAt: null };
     this.writeScimRows(stored);
     entries.push(scimUserEntry(user.orgId, user.id, "scim_user_created", {
       user_name: user.userName, external_id: user.externalId, key, linked,
@@ -3441,9 +3449,10 @@ export class MemoryStore implements BellmanStore {
     return { outcome: linked ? "linked" : "written", user: detach(stored) };
   }
 
+  /** A tombstone is hidden from every read but `scimUserByKey`, which the sign-in refusal reads. */
   async getScimUser(orgId: string, id: string): Promise<ScimUser | undefined> {
     const user = this.scimUsers.get(scimUserKey(orgId, id));
-    return user && detach(user);
+    return user && user.deletedAt === null ? detach(user) : undefined;
   }
 
   async scimUserByName(orgId: string, userName: string): Promise<ScimUser | undefined> {
@@ -3453,17 +3462,20 @@ export class MemoryStore implements BellmanStore {
 
   async scimUserByKey(key: string): Promise<ScimUser | undefined> {
     const managed = this.scimByKey.get(scimKeyIndex(key));
-    return managed ? this.getScimUser(managed.orgId, managed.scimId) : undefined;
+    const user = managed && this.scimUsers.get(scimUserKey(managed.orgId, managed.scimId));
+    return user && detach(user);
   }
 
   async listScimUsers(orgId: string, limit: number): Promise<ScimUser[]> {
-    const mine = [...this.scimUsers.values()].filter((u) => u.orgId === orgId).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const mine = [...this.scimUsers.values()]
+      .filter((u) => u.orgId === orgId && u.deletedAt === null)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     return detach(mine.slice(0, limit));
   }
 
   async updateScimUser(orgId: string, id: string, patch: ScimUserPatch, now: number, audit: AuditIntent): Promise<ScimUpdate> {
     const was = this.scimUsers.get(scimUserKey(orgId, id));
-    if (!was) return { outcome: "missing" };
+    if (!was || was.deletedAt !== null) return { outcome: "missing" };
     const rename = patch.userName !== undefined && patch.userName !== was.userName ? patch.userName : undefined;
     const externalId = patch.externalId !== undefined && patch.externalId !== was.externalId ? patch.externalId : undefined;
     const active = patch.active !== undefined && patch.active !== was.active ? patch.active : undefined;
@@ -3531,18 +3543,22 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "updated", user: detach(next), was: detach(was) };
   }
 
+  /**
+   * A delete is a deactivation that also hides the row (review finding 3): the grant goes, the row stays as a
+   * tombstone with its directory entry and key index, so the subject is refused as a deactivated one is, and a
+   * repeat answers the tombstone so a room walk cut short can be finished. A push for the address starts over.
+   */
   async deleteScimUser(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined> {
     const was = this.scimUsers.get(scimUserKey(orgId, id));
     if (!was) return undefined;
+    if (was.deletedAt !== null) return detach(was);
     const entries: AuditEntry[] = [];
     const grant = was.active ? this.liveGrant(was.key) : undefined;
     if (grant && grant.orgId === orgId) {
       this.grants.delete(was.key);
       entries.push(...revokeAuditEntries(grant, audit, now));
     }
-    this.scimUsers.delete(scimUserKey(orgId, id));
-    this.directory.delete(scimNameKey(orgId, was.userName));
-    this.scimByKey.delete(scimKeyIndex(was.key));
+    this.scimUsers.set(scimUserKey(orgId, id), { ...was, active: false, updatedAt: now, deletedAt: now });
     entries.push(scimUserEntry(orgId, id, "scim_user_deleted", { user_name: was.userName, key: was.key }, audit, now));
     this.recordAudit(entries);
     return detach(was);

@@ -82,8 +82,9 @@ export const refuse = (code: RoomFailure, reason: string, extra?: { retryAfter: 
  * working, and only sending, joining and inviting are refused.
  */
 export const FROZEN =
-  "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
-  "history is still readable, but nothing new can be sent or joined until the plan is restored.";
+  "this session is frozen: the plan behind it has lapsed, or its creator's access was removed. Everyone stays a " +
+  "member and the history is still readable, but nothing new can be sent or joined until it is restored; the org's " +
+  "admin can say which.";
 
 /** A permanent code refused to a room that is not public (ADR 0020), by `issueInvite`'s check or the store's. */
 const NOT_PUBLIC =

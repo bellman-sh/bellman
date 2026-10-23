@@ -137,7 +137,7 @@ describe("PATCH /org", () => {
 
   it("refuses a cookie write without the panel's Origin, a bad name, a stray field, and a member", async () => {
     expect((await call("cookie-owner", "/org", "PATCH", { name: "X" }, null))!.status).toBe(403);
-    for (const body of [{ name: "" }, { name: "a".repeat(81) }, {}, { seats: 9 }, "null", "[]"]) {
+    for (const body of [{ name: "" }, { name: "a".repeat(81) }, { name: "Ac\u202eme" }, { name: "Acme\u200b" }, {}, { seats: 9 }, "null", "[]"]) {
       expect((await call("owner", "/org", "PATCH", body))!.status, JSON.stringify(body)).toBe(400);
     }
     expect((await call("member", "/org", "PATCH", { name: "X" }))!.status).toBe(403);
@@ -147,6 +147,8 @@ describe("PATCH /org", () => {
 
 describe("GET /org/members", () => {
   it("lists the org's grants as members, the owner marked, and its invites after them, for an admin", async () => {
+    await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
     await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
     await store.putOrgInvite({ orgId: "org_acme", key: "github:9", role: "admin", invitedBy: "u_github_1", invitedAt: 2 }, { actorUserId: "u_github_1" });
     const res = (await call("admin-2", "/org/members"))!;

@@ -26,7 +26,7 @@ import { domainVerified, isDomain, newDomainToken, verificationRecord } from "..
 import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
-import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, orgView, ownsByForm, parseOrgName, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -280,7 +280,12 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
         // ponytail: two hundred members a read, the bound `/admin/grants` reads with, and no paging.
         const grants = await deps.store.listGrants(200, orgId);
         const invites = await deps.store.listOrgInvites(orgId, MAX_PENDING_INVITES);
-        return json(200, { members: [...grants.map((grant) => memberView(grant, org)), ...invites.map(inviteView)] }, origin);
+        // A seat on an address the org no longer owns by its form takes no effect until the person accepts it
+        // (ADR 0027), so it is listed as the invite it now is; it still holds its seat, and DELETE removes it.
+        const listed = grants.map((grant) => isUnownedSeat(grant, org)
+          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt })
+          : memberView(grant, org));
+        return json(200, { members: [...listed, ...invites.map(inviteView)] }, origin);
       }
       const body = await readBody(request, origin);
       if (body instanceof Response) return body;

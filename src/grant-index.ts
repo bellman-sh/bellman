@@ -97,3 +97,10 @@ export const keyInvitesPrefix = (key: string): string => `iv:${segment(key)}:`;
 export function inviteKeysFor(invite: { orgId: string; key: string }): string[] {
   return [`${orgInvitesPrefix(invite.orgId)}${invite.key}`, `${keyInvitesPrefix(invite.key)}${segment(invite.orgId)}`];
 }
+
+/**
+ * The orgs a person declined (ADR 0027), on the person's side: `ix:<subject>:<org>`, keyed by the provider
+ * subject that answered, so an org's own rows for the keys it invited stay as they were.
+ */
+export const declinesPrefix = (subjectKey: string): string => `ix:${segment(subjectKey)}:`;
+export const declineKey = (subjectKey: string, orgId: string): string => `${declinesPrefix(subjectKey)}${segment(orgId)}`;

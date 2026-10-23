@@ -3,7 +3,7 @@ import type {
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgInvite, OrgPatch,
 } from "./types.js";
-import { MAX_PENDING_INVITES } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1774,11 +1774,25 @@ export interface BellmanStore {
   listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]>;
   /** Every pending invite that names one of these keys, from any org: what a sign-in shows. In the keys' order, then by org. */
   invitesFor(keys: string[]): Promise<OrgInvite[]>;
+  /** An admin's withdrawal of one invite: both rows, and `invite_withdrawn` in the org's stream. */
+  deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing">;
   /**
-   * Drops one invite, both rows. `invite_withdrawn` is recorded when `audit` is given, which is the
-   * admin's withdrawal; the person's own answer passes null and files nothing in the org's stream.
+   * A Join (ADR 0027), ONE operation, so a withdrawal that lands first means no seat. The org's offer
+   * to one of the sign-in's `keys`, an invite or an admin's seat on an address the org no longer owns
+   * by its form (`isUnownedSeat`), becomes the grant of `subjectKey`: team, the offer's role, `source:
+   * "invite"`, `grantedBy` whoever made the offer, with its `plan_granted` row; the org's invites of
+   * those keys go, and the seat, which the grant replaces. `gone` for no record or no such offer; `sso`
+   * when the org requires single sign-on; `member` when a key already holds this org's grant otherwise
+   * (its invites go); `taken` when a key holds any other grant; `full` at the seats, unless a seat moves.
    */
-  deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing">;
+  acceptOrgInvite(orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
+  /**
+   * That the person behind `subjectKey` declined this org's offers (ADR 0027), kept on their side: the
+   * org's invites stay as they were, so a decline tells its admins nothing. Idempotent.
+   */
+  declineOrg(subjectKey: string, orgId: string, now: number): Promise<void>;
+  /** The orgs the person behind `subjectKey` declined, by id. */
+  declinedOrgs(subjectKey: string): Promise<string[]>;
 
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
@@ -1856,6 +1870,8 @@ export class MemoryStore implements BellmanStore {
   private domainIndex = new Map<string, string>();
   /** Each org's pending invites (ADR 0027), org to key to invite: apart from `grants`, which no invite enters. */
   private invites = new Map<string, Map<string, OrgInvite>>();
+  /** The orgs each person declined (ADR 0027), subject key to org to when: the person's side, not the org's. */
+  private declines = new Map<string, Map<string, number>>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -3305,10 +3321,50 @@ export class MemoryStore implements BellmanStore {
     return detach([...new Set(keys)].flatMap((key) => orgIds.flatMap((orgId) => this.invites.get(orgId)?.get(key) ?? [])));
   }
 
-  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     if (!this.invites.get(orgId)?.delete(key)) return "missing";
-    if (audit) this.recordAudit([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())]);
+    this.recordAudit([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())]);
     return "deleted";
+  }
+
+  /** Synchronous throughout, as the guarded grant writes are: the offer's read and the grant's write must not be split. */
+  async acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    const org = this.orgs.get(orgId);
+    if (!org) return "gone";
+    const unique = [...new Set([subjectKey, ...keys])];
+    const pending = this.invites.get(orgId);
+    const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined);
+    const grants = unique.map((key) => this.liveGrant(key)).filter((g): g is PlanGrant => g !== undefined);
+    const seat = grants.find((g) => g.orgId === orgId && isUnownedSeat(g, org));
+    const offer = invite ? { role: invite.role, by: invite.invitedBy } : seat ? { role: seat.role, by: seat.grantedBy } : undefined;
+    if (!offer) return "gone";
+    if (org.requireSso) return "sso";
+    const others = grants.filter((g) => g !== seat);
+    const dropInvites = () => { for (const key of unique) pending?.delete(key); };
+    if (others.some((g) => g.orgId === orgId)) {
+      dropInvites();
+      return "member";
+    }
+    if (others.length > 0) return "taken";
+    if (!seat && this.liveMembers(orgId) >= org.seats) return "full";
+    const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
+    if (seat) this.grants.delete(seat.key);
+    dropInvites();
+    this.grants.set(subjectKey, detach(grant));
+    this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
+    return "joined";
+  }
+
+  async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
+    const declined = this.declines.get(subjectKey) ?? new Map<string, number>();
+    if (!declined.has(orgId)) declined.set(orgId, now);
+    this.declines.set(subjectKey, declined);
+  }
+
+  async declinedOrgs(subjectKey: string): Promise<string[]> {
+    return [...(this.declines.get(subjectKey)?.keys() ?? [])].sort();
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

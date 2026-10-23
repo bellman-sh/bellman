@@ -1,6 +1,6 @@
 import { domainOf } from "./oauth/dns.js";
-import { parseSsoKey, ssoUserId } from "./oauth/providers.js";
-import type { Org, Role } from "./types.js";
+import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
+import type { Org, PlanGrant, Role } from "./types.js";
 
 /**
  * What the org routes share (orgs spec, D6, D7): the rules a body is read by and the shape an org
@@ -31,11 +31,37 @@ export function ownsByForm(org: Org, key: string): boolean {
   return domain !== null && org.domains.some((d) => d.domain === domain && d.verifiedAt !== null);
 }
 
-/** The name as stored: trimmed, 1 to MAX_ORG_NAME_CHARS characters; undefined for anything else. */
+/**
+ * An admin's seat on an address the org does not own by its form as it stands (ADR 0027): one seated
+ * before seats needed the person's consent, or under a domain the org has released since. Ownership is
+ * read now, not when the seat was written. Such a seat takes no effect at a sign-in and is offered there
+ * as an invite instead. A seat on a provider subject is not an address, and keeps its effect.
+ */
+export function isUnownedSeat(grant: PlanGrant, org: Org | undefined): boolean {
+  if (grant.source !== "org" || grant.orgId === null || immutableKeys([grant.key]).length > 0) return false;
+  return !org || org.orgId !== grant.orgId || !ownsByForm(org, grant.key);
+}
+
+/**
+ * Control and format characters (Unicode Cc and Cf), which draw nothing or reorder the text around them:
+ * the bidirectional embeddings, overrides, isolates and marks, the zero-width characters, and the C0 and
+ * C1 controls. An org's name is shown to the people it invites, so it holds none.
+ */
+const UNDRAWN_IN_A_NAME = /[\p{Cc}\p{Cf}]/u;
+
+/** The name as stored: trimmed, 1 to MAX_ORG_NAME_CHARS characters, no control or format character; undefined for anything else. */
 export function parseOrgName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const name = value.trim();
-  return name.length >= 1 && name.length <= MAX_ORG_NAME_CHARS ? name : undefined;
+  return name.length >= 1 && name.length <= MAX_ORG_NAME_CHARS && !UNDRAWN_IN_A_NAME.test(name) ? name : undefined;
+}
+
+/**
+ * An org's name as a page draws it: without the characters `parseOrgName` refuses, which a name stored
+ * before that rule may still hold, and its id when nothing else is left.
+ */
+export function drawnOrgName(org: Pick<Org, "orgId" | "name">): string {
+  return org.name.replace(new RegExp(UNDRAWN_IN_A_NAME.source, "gu"), "").trim() || org.orgId;
 }
 
 /** A seat count: a whole number from 1 to MAX_SEATS; undefined for anything else, a numeric string included. */

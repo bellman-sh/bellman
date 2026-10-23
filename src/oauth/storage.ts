@@ -449,6 +449,11 @@ export interface AuthStorage {
   /** Single use: a replayed authorization code must find nothing. */
   takeCode(code: string): Promise<AuthCode | undefined>;
   /**
+   * Spends a single-use id, the invites page's held sign-in (ADR 0027): true the first time, false
+   * every time after. Kept until `expiresAt`, past which the token that carries the id is refused anyway.
+   */
+  spendOnce(id: string, expiresAt: number): Promise<boolean>;
+  /**
    * Store a rotated refresh token and promote its client in one operation.
    *
    * Issuing a token IS what makes a registration permanent, so the two must not
@@ -509,6 +514,8 @@ export interface AuthStorage {
 export class MemoryAuthStore implements AuthStorage {
   private clients = new Map<string, RegisteredClient>();
   private codes = new Map<string, AuthCode>();
+  /** Spent single-use ids, to when each may be forgotten. */
+  private spent = new Map<string, number>();
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
   private sessions = new Map<string, PanelSession>();
@@ -624,6 +631,14 @@ export class MemoryAuthStore implements AuthStorage {
     if (!value) return undefined;
     this.codes.delete(code);
     return Date.now() > value.expires_at ? undefined : value;
+  }
+
+  async spendOnce(id: string, expiresAt: number): Promise<boolean> {
+    const now = Date.now();
+    for (const [spent, until] of this.spent) if (until < now) this.spent.delete(spent);
+    if (this.spent.has(id)) return false;
+    this.spent.set(id, expiresAt);
+    return true;
   }
 
   async putRefresh(token: string, value: RefreshToken): Promise<void> {

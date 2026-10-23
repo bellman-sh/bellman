@@ -1,10 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  allKeysFor, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix, orgInvitesPrefix, orgKey,
-  staleIndexKeys,
+  allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
+  orgInvitesPrefix, orgKey, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
@@ -3772,22 +3772,71 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return found;
   }
 
-  async #deleteOrgInviteTxn(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+  async #deleteOrgInviteTxn(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     return this.ctx.storage.transaction(async (txn) => {
       const rowKeys = inviteKeysFor({ orgId, key });
       if (!(await txn.get<OrgInvite>(rowKeys[0]))) return "missing" as const;
       await txn.delete(rowKeys);
-      if (audit) {
-        await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())])));
-      }
+      await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())])));
       return "deleted" as const;
     });
   }
 
-  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     const outcome = await this.#deleteOrgInviteTxn(orgId, key, audit);
-    if (outcome === "deleted" && audit) await this.driver.deliverNow();
+    if (outcome === "deleted") await this.driver.deliverNow();
     return outcome;
+  }
+
+  /** The offer, the switch, every key's grant and the seats are read in the transaction that writes the grant (ADR 0027). */
+  async #acceptOrgInviteTxn(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "gone" as const;
+      const unique = [...new Set([subjectKey, ...keys])];
+      const inviteRows = unique.map((key) => inviteKeysFor({ orgId, key }));
+      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg)))).find((i) => i !== undefined);
+      const stored = await Promise.all(unique.map((key) => txn.get<PlanGrant>(grantKey(key))));
+      const grants = stored.filter((g): g is PlanGrant => g !== undefined && !lapsed(g, now));
+      const seat = grants.find((g) => g.orgId === orgId && isUnownedSeat(g, org));
+      const offer = invite ? { role: invite.role, by: invite.invitedBy } : seat ? { role: seat.role, by: seat.grantedBy } : undefined;
+      if (!offer) return "gone" as const;
+      if (org.requireSso) return "sso" as const;
+      const others = grants.filter((g) => g !== seat);
+      if (others.some((g) => g.orgId === orgId)) {
+        await txn.delete(inviteRows.flat());
+        return "member" as const;
+      }
+      if (others.length > 0) return "taken" as const;
+      if (!seat && (await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
+      const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
+      // The subject's own row is a lapsed one at most, here; its index copy in another org goes with it.
+      const subject = stored[0];
+      await txn.delete([...inviteRows.flat(), ...(seat ? allKeysFor(seat) : []), ...staleIndexKeys(subject, grant)]);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
+      await txn.put<unknown>({ [grantKey(subjectKey)]: grant, [orgIndexKey(orgId, subjectKey)]: grant, ...rows });
+      return "joined" as const;
+    });
+  }
+
+  async acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    const outcome = await this.#acceptOrgInviteTxn(orgId, keys, subjectKey, now, audit);
+    if (outcome === "joined") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
+    await this.ctx.storage.put(declineKey(subjectKey, orgId), now);
+  }
+
+  async declinedOrgs(subjectKey: string): Promise<string[]> {
+    const prefix = declinesPrefix(subjectKey);
+    const rows = await this.ctx.storage.list<number>({ prefix, limit: MAX_PENDING_INVITES });
+    return [...rows.keys()].map((key) => decodeURIComponent(key.slice(prefix.length)));
   }
 
   /**
@@ -5155,8 +5204,22 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.invitesFor(keys);
   }
 
-  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     return this.registry.deleteOrgInvite(orgId, key, audit);
+  }
+
+  async acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
+    return this.registry.acceptOrgInvite(orgId, keys, subjectKey, now, audit);
+  }
+
+  async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
+    await this.registry.declineOrg(subjectKey, orgId, now);
+  }
+
+  async declinedOrgs(subjectKey: string): Promise<string[]> {
+    return this.registry.declinedOrgs(subjectKey);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

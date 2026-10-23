@@ -224,6 +224,16 @@ describe("the callback (D12, D13)", () => {
     expect((await signInThroughSso()).identity?.label).toBe("Ana@sso");
   });
 
+  /** An IdP's sign-in is its org's by its form (ADR 0027): another org's invite of its address stops it at no page. */
+  it("stops at no invites page, though another org invited the address", async () => {
+    await plans.createOrg({ ...acme, orgId: "org_b", name: "Bee", ownerUserId: "u_github_2" }, { ...ownerGrant, key: "github:2", orgId: "org_b" }, by);
+    await plans.putOrgInvite({ orgId: "org_b", key: "email:ana@acme.test", role: "member", invitedBy: "u_github_2", invitedAt: 4 }, { actorUserId: "u_github_2" });
+    const { callback, identity } = await signInThroughSso();
+    expect(callback.status).toBe(302);
+    expect(identity).toMatchObject({ userId: ssoUserId("org_acme", "00u1abc"), orgId: "org_acme" });
+    expect(await plans.invitesFor(["email:ana@acme.test"])).toHaveLength(1);
+  });
+
   it("refuses a full org before anything is minted", async () => {
     await plans.updateOrg("org_acme", { seats: 1 }, by);
     const { target, identity } = await signInThroughSso();

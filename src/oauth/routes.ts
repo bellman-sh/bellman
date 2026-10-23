@@ -4,7 +4,7 @@ import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
 import type { Identity, Org, OrgInvite, Plan, PlanGrant } from "../types.js";
@@ -102,7 +102,7 @@ export type PlanStore = Pick<
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
   | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
-  | "invitesFor" | "deleteOrgInvite"
+  | "invitesFor" | "acceptOrgInvite" | "declineOrg" | "declinedOrgs"
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
   | "recordSignIn"
@@ -350,12 +350,16 @@ async function firstGrant(
   const stable = grantKeys(keys);
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
-    if (usableGrant(grant) && (honourPurchases || grant.source !== PURCHASE)) {
-      // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
-      // refresh, a panel session's re-check and a hosted room's month turn all come through
-      // this function, so a lapse reaches each of them as a revocation does.
-      return { grant: await standingOf(plans, grant), key: stable[i] };
-    }
+    if (!usableGrant(grant) || (!honourPurchases && grant.source === PURCHASE)) continue;
+    const org = grant.orgId === null ? undefined : await plans.getOrg(grant.orgId);
+    // An admin's seat on an address the org does not own by its form as it stands resolves nothing
+    // and is never claimed (ADR 0027): the sign-in's page offers it as an invite instead. Only a
+    // sign-in reads address keys, so a refresh never meets one.
+    if (isUnownedSeat(grant, org)) continue;
+    // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
+    // refresh, a panel session's re-check and a hosted room's month turn all come through
+    // this function, so a lapse reaches each of them as a revocation does.
+    return { grant: standingOf(grant, org), key: stable[i] };
   }
   return undefined;
 }
@@ -364,11 +368,9 @@ async function firstGrant(
  * The grant as the org it names stands (orgs spec, D5): the free plan while the org's record says
  * nobody is paying, the role and the org kept so the person is still a member of it; the grant
  * unchanged for an active org and for an org with no record, which is only a string in grants
- * and overrides and has no standing to lose. One read of the registry, for grants in an org only.
+ * and overrides and has no standing to lose.
  */
-export async function standingOf(plans: Pick<PlanStore, "getOrg">, grant: PlanGrant): Promise<PlanGrant> {
-  if (grant.orgId === null) return grant;
-  const org = await plans.getOrg(grant.orgId);
+export function standingOf(grant: PlanGrant, org: Org | undefined): PlanGrant {
   return org && !org.active ? { ...grant, plan: "free" } : grant;
 }
 
@@ -871,7 +873,8 @@ async function completeSession(profile: ProviderProfile, pending: SessionRequest
 /**
  * A sign-in held at the invites page (ADR 0027): who the provider said this is, and the flow the page
  * finishes, a client's authorization or the panel's session. Signed and short-lived, as the state the
- * provider round trip carries, and carried the same way, in the page's forms.
+ * provider round trip carries, and carried the same way, in the page's forms; the first answer that
+ * comes back with it spends it, and every drawing of the page signs a fresh one.
  */
 interface HeldSignIn {
   profile: ProviderProfile;
@@ -880,102 +883,125 @@ interface HeldSignIn {
   session?: SessionRequest;
 }
 
-/** One row an org: the invite of the most specific key that has one, as `firstGrant` picks a grant. */
-function oneInviteAnOrg(invites: OrgInvite[]): OrgInvite[] {
-  const seen = new Set<string>();
-  return invites.filter((invite) => !seen.has(invite.orgId) && Boolean(seen.add(invite.orgId)));
+/** A line the page shows after an answer: fixed text, and an org's name between, drawn apart from it. */
+interface Notice {
+  lead: string;
+  org?: Org;
+  tail?: string;
+}
+
+const subjectOf = (profile: ProviderProfile): string => `${profile.provider}:${profile.subject}`;
+
+/**
+ * What orgs have offered this sign-in (ADR 0027): their invites of its keys, and an admin's seat on one
+ * of its addresses that the org no longer owns by its form, which resolves nothing and is offered here in
+ * its place, read as the invite it would be; but nothing from an org the person declined. Most specific
+ * key first, as `firstGrant` picks a grant, and one an org.
+ */
+async function offersFor(plans: PlanStore, keys: string[], subjectKey: string): Promise<OrgInvite[]> {
+  const [invites, grants, declined] = await Promise.all([
+    plans.invitesFor(keys), Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
+  ]);
+  const seats: OrgInvite[] = [];
+  for (const grant of grants) {
+    if (grant?.orgId && isUnownedSeat(grant, await plans.getOrg(grant.orgId))) {
+      seats.push({ orgId: grant.orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt });
+    }
+  }
+  const seen = new Set(declined);
+  return [...invites, ...seats].filter((offer) => !seen.has(offer.orgId) && Boolean(seen.add(offer.orgId)));
 }
 
 /**
- * The page a sign-in stops at while an org has invited this person (ADR 0027), or undefined to carry
- * on. It sits after the provider's exchange and before the plan resolves, so a Join is the grant the
- * plan then resolves through, and continuing leaves every invite as it was. An SSO sign-in is its
- * org's by its form and stops at nothing. A failed read of the invites costs the person nothing: no
- * page this time, and the invites stand for the next.
+ * The page a sign-in stops at while an org has offered this person a seat (ADR 0027), or undefined to
+ * carry on. It sits after the provider's exchange and before the plan resolves, so a Join is the grant
+ * the plan then resolves through, and carrying on leaves every offer as it was. An SSO sign-in is its
+ * org's by its form and stops at nothing. A failed read of the offers costs the person nothing: no page
+ * this time, and the offers stand for the next.
  */
 async function invitesHeld(
   profile: ProviderProfile, via: string, next: Pick<HeldSignIn, "authorize" | "session">, config: OAuthConfig,
 ): Promise<Response | undefined> {
   if (!config.plans || profile.provider === "sso") return undefined;
-  let invites: OrgInvite[];
+  let offers: OrgInvite[];
   try {
-    invites = await config.plans.invitesFor(grantKeys(identityKeys(profile)));
+    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile));
   } catch (err) {
     console.error("could not read a sign-in's invites:", err);
     return undefined;
   }
-  if (invites.length === 0) return undefined;
-  const held = await signJwt(
-    { iss: config.issuer, sub: "invites", aud: INVITES_AUDIENCE, bellman: { profile, via, ...next } as never },
-    config.secret,
-    STATE_TTL_SECONDS
-  );
-  return invitesPage(held, invites, config.plans);
+  if (offers.length === 0) return undefined;
+  return invitesPage({ profile, via, ...next }, offers, config);
 }
 
+/** An org's name as the page draws it: without what a name may not hold, escaped, and isolated so it reorders nothing around it. */
+const drawnName = (org: Org): string => `<bdi>${escape(drawnOrgName(org))}</bdi>`;
+
 /**
- * The invites, one form each, with Join and Decline, and a form that carries on without an answer.
- * An org's name is its admin's text and is escaped like everything else here; each form carries the
- * held sign-in as the sign-in pages' forms carry their state.
+ * The offers, one form each, with Join and Decline, and a form that carries on without an answer. The
+ * buttons say only that: an org's name is its admin's text, so it is drawn once, as text, never as a
+ * label. Each drawing signs a fresh held sign-in for its forms, as the sign-in pages' forms carry their
+ * state.
  */
-async function invitesPage(held: string, invites: OrgInvite[], plans: PlanStore, notice?: string): Promise<Response> {
-  const hidden = `<input type="hidden" name="held" value="${escape(held)}">`;
-  const rows = await Promise.all(oneInviteAnOrg(invites).map(async (invite) => {
-    const org = await plans.getOrg(invite.orgId);
+async function invitesPage(held: HeldSignIn, offers: OrgInvite[], config: OAuthConfig, notice?: Notice): Promise<Response> {
+  const token = await signJwt(
+    { iss: config.issuer, sub: "invites", aud: INVITES_AUDIENCE, bellman: held as never }, config.secret, STATE_TTL_SECONDS,
+  );
+  const hidden = `<input type="hidden" name="held" value="${escape(token)}">`;
+  const rows = await Promise.all(offers.map(async (offer) => {
+    const org = await config.plans!.getOrg(offer.orgId);
     if (!org) return "";
     return `<form class="invite" action="/auth/invites" method="post">${hidden}<input type="hidden" name="org" value="${escape(org.orgId)}">` +
-      `<p><strong>${escape(org.name)}</strong> invited you to join it as ${invite.role === "admin" ? "an admin" : "a member"}.</p>` +
-      `<button class="btn" type="submit" name="choice" value="join">Join ${escape(org.name)}</button>` +
+      `<p><strong>${drawnName(org)}</strong> invited you to join it as ${offer.role === "admin" ? "an admin" : "a member"}.</p>` +
+      `<button class="btn" type="submit" name="choice" value="join">Join</button>` +
       `<button class="btn" type="submit" name="choice" value="decline">Decline</button></form>`;
   }));
+  const said = notice ? `<p class="notice">${escape(notice.lead)}${notice.org ? drawnName(notice.org) : ""}${escape(notice.tail ?? "")}</p>` : "";
   return html(
     `<h1>You have been invited</h1>` +
       `<p>Joining puts this account in the organisation: you take its plan, its audit log records the rooms you take part in, ` +
       `its admins can read those rooms once they close, and if it requires single sign-on you sign in through it. ` +
       `Until you join, it has none of that.</p>` +
-      `${notice ? `<p class="notice">${escape(notice)}</p>` : ""}${rows.join("")}` +
+      `${said}${rows.join("")}` +
       `<form action="/auth/invites" method="post">${hidden}` +
       `<button class="btn" type="submit" name="choice" value="continue">Not now: continue signing in</button></form>`
   );
 }
 
-/** Drops an org's invites of every key this sign-in holds: a Join, a Decline or a seat already held answers all of them. */
-async function dropInvites(plans: PlanStore, orgId: string, keys: string[]): Promise<void> {
-  for (const key of keys) await plans.deleteOrgInvite(orgId, key, null);
+/**
+ * A Join (ADR 0027), one operation in the store: the offer, the switch, each key's grant and the seats
+ * are read in the transaction that writes the grant, so an offer withdrawn first seats nobody. Answers
+ * whether the person is now a member, and the line the page shows, which names the org only when it
+ * made this person an offer.
+ */
+async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string): Promise<{ joined: boolean; notice: Notice }> {
+  const person = defaultIdentity(profile);
+  const outcome = await plans.acceptOrgInvite(orgId, keys, subjectOf(profile), Date.now(), {
+    actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
+  });
+  const org = outcome === "gone" ? undefined : await plans.getOrg(orgId);
+  if (!org) return { joined: false, notice: { lead: "That invitation is no longer open." } };
+  if (outcome === "joined") return { joined: true, notice: { lead: "You joined ", org, tail: "." } };
+  if (outcome === "member") return { joined: true, notice: { lead: "You are already a member of ", org, tail: "." } };
+  if (outcome === "sso") return { joined: false, notice: { lead: "", org, tail: " requires single sign-on: to join it, start again and enter your work email." } };
+  if (outcome === "full") return { joined: false, notice: { lead: "", org, tail: " has no free seat: ask its admin for one." } };
+  return {
+    joined: false,
+    notice: { lead: "This account is already in another organisation or holds a plan of its own, so it cannot join ", org, tail: "." },
+  };
 }
 
 /**
- * A Join (ADR 0027): the grant the invite offered, under the subject the provider just vouched for, as
- * a claimed address grant is, through the guarded write with its outcomes. One org a person (ADR 0024):
- * a grant any of the sign-in's keys holds already says who they are, so a seat elsewhere, or a plan of
- * their own, refuses it and leaves the invite standing. Answers whether the person is now a member, and
- * the line the page shows.
+ * A Decline (ADR 0027), kept on the person's side: that org's offers stop showing on their pages, and
+ * its invites stay as they were, so its admins learn nothing from it, not even which of the keys they
+ * invited were one person's. Only an org that made this sign-in an offer is declined, or named.
  */
-async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string): Promise<{ joined: boolean; notice: string }> {
-  const refused = (notice: string) => ({ joined: false, notice });
-  const invite = (await plans.invitesFor(keys)).find((i) => i.orgId === orgId);
-  const org = invite ? await plans.getOrg(orgId) : undefined;
-  if (!invite || !org) return refused("That invitation is no longer open.");
-  // A GitHub or Google sign-in into an org that requires SSO is refused the moment it is a member (D13):
-  // joining here would close this account to its own sign-in.
-  if (org.requireSso) return refused(`${org.name} requires single sign-on: to join it, start again and enter your work email.`);
-  const holding = (await Promise.all(keys.map((key) => plans.getGrant(key)))).find((grant) => grant !== undefined);
-  if (holding?.orgId === orgId) {
-    await dropInvites(plans, orgId, keys);
-    return { joined: true, notice: `You are already a member of ${org.name}.` };
-  }
-  const elsewhere = `This account is already in another organisation or holds a plan of its own, so it cannot join ${org.name}.`;
-  if (holding) return refused(elsewhere);
-  const person = defaultIdentity(profile);
-  const grant: PlanGrant = {
-    key: `${profile.provider}:${profile.subject}`, plan: "team", role: invite.role, orgId, source: "invite",
-    grantedAt: Date.now(), grantedBy: invite.invitedBy, expiresAt: null,
-  };
-  const outcome = await plans.putGrantIfOwned(grant, orgId, { actorUserId: person.userId, actorLabel: person.label, actorOrgId: null });
-  if (outcome === "conflict") return refused(elsewhere);
-  if (outcome === "full") return refused(`${org.name} has no free seat: ask its admin for one.`);
-  await dropInvites(plans, orgId, keys);
-  return { joined: true, notice: `You joined ${org.name}.` };
+async function declineInvite(plans: PlanStore, keys: string[], subjectKey: string, orgId: string): Promise<{ declined: boolean; notice: Notice }> {
+  const offered = (await offersFor(plans, keys, subjectKey)).some((offer) => offer.orgId === orgId);
+  const org = offered ? await plans.getOrg(orgId) : undefined;
+  if (!org) return { declined: false, notice: { lead: "That invitation is no longer open." } };
+  await plans.declineOrg(subjectKey, orgId, Date.now());
+  return { declined: true, notice: { lead: "You declined the invitation from ", org, tail: "." } };
 }
 
 export async function handleOAuth(
@@ -1274,39 +1300,44 @@ export async function handleOAuth(
   }
 
   // ------------------------------------------- the invites page's answers (ADR 0027)
-  // Join, Decline, or carrying on, from the page a sign-in stopped at. The held sign-in is signed and
-  // short-lived, and a panel's is bound to its browser by the nonce cookie, checked here before any
-  // answer is applied, as the callback checked it. The page comes back with what an answer did while an
-  // invite remains or a Join did not take; otherwise the sign-in finishes as the callback would have.
+  // Join, Decline, or carrying on, from the page a sign-in stopped at. The held sign-in is signed,
+  // short-lived and spent by the first answer; a panel's is bound to its browser by the nonce cookie,
+  // checked before anything is spent or applied, as the callback checked it. The page comes back with
+  // what an answer did while an offer remains or the answer did not take; otherwise the sign-in
+  // finishes as the callback would have.
   if (method === "POST" && path === "/auth/invites") {
     const form = new URLSearchParams(await request.text());
-    const token = form.get("held") ?? "";
-    const claims = await verifyJwt(token, config.secret, { issuer: config.issuer, audience: INVITES_AUDIENCE });
+    const claims = await verifyJwt(form.get("held") ?? "", config.secret, { issuer: config.issuer, audience: INVITES_AUDIENCE });
     const plans = config.plans;
     const held = claims?.bellman as unknown as HeldSignIn | undefined;
-    if (!held || !plans || !(held.session || held.authorize)) {
+    if (!claims || !held || !plans || !(held.session || held.authorize)) {
       return html(`<h1>This sign-in link expired</h1><p>Start the sign-in again.</p>`, 400);
     }
     const secure = new URL(config.issuer).protocol === "https:";
     if (held.session && !signinNonceMatches(request, held.session, secure)) return endSignin(signinElsewhere(), secure);
     const choice = form.get("choice");
+    if (choice !== "join" && choice !== "decline" && choice !== "continue") {
+      return html(`<h1>That answer is not one the page offers</h1><p>Go back and choose again, or start the sign-in again.</p>`, 400);
+    }
+    if (!(await config.store.spendOnce(claims.jti, claims.exp * 1000))) {
+      return html(`<h1>This page was already answered</h1><p>Start the sign-in again.</p>`, 400);
+    }
     const orgId = form.get("org") ?? "";
     const keys = grantKeys(identityKeys(held.profile));
-    let notice: string | undefined;
+    const subjectKey = subjectOf(held.profile);
+    let notice: Notice | undefined;
     let stay = false;
     if (choice === "join") {
       const answer = await acceptInvite(plans, held.profile, keys, orgId);
       notice = answer.notice;
       stay = !answer.joined;
     } else if (choice === "decline") {
-      // The sign-in's own keys and no others: a forged org names nothing this person can drop but their own invites.
-      await dropInvites(plans, orgId, keys);
-      notice = `You declined the invitation from ${(await plans.getOrg(orgId))?.name ?? "that organisation"}.`;
-    } else if (choice !== "continue") {
-      return html(`<h1>That answer is not one the page offers</h1><p>Go back and choose again, or start the sign-in again.</p>`, 400);
+      const answer = await declineInvite(plans, keys, subjectKey, orgId);
+      notice = answer.notice;
+      stay = !answer.declined;
     }
-    const remaining = choice === "continue" ? [] : await plans.invitesFor(keys);
-    if (stay || remaining.length > 0) return invitesPage(token, remaining, plans, notice);
+    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey);
+    if (stay || remaining.length > 0) return invitesPage(held, remaining, config, notice);
     return held.session
       ? completeSession(held.profile, held.session, config)
       : completeAuthorize(held.profile, held.authorize!, config, held.via);

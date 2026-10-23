@@ -88,6 +88,9 @@ async function githubCallback() {
 /** The held sign-in a page's forms carry. */
 const heldOf = (page: string) => /name="held" value="([^"]+)"/.exec(page)![1];
 
+/** Every button's label, in the page's order. */
+const buttons = (page: string) => [...page.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]);
+
 /** An answer to the invites page, as its form posts it. */
 const answer = (held: string, choice: string, org?: string, cookie?: string) => oauth("/auth/invites", {
   method: "POST",
@@ -124,13 +127,32 @@ describe("the invites page (ADR 0027)", () => {
     const { res } = await githubCallback();
     expect([res.status, res.headers.get("location")]).toEqual([200, null]);
     const page = await res.text();
-    expect(page).toContain("<strong>Acme</strong> invited you to join it as an admin.");
-    expect(page).toContain("<strong>Bee</strong> invited you to join it as a member.");
+    expect(page).toContain("<strong><bdi>Acme</bdi></strong> invited you to join it as an admin.");
+    expect(page).toContain("<strong><bdi>Bee</bdi></strong> invited you to join it as a member.");
+    expect(buttons(page)).toEqual(["Join", "Decline", "Join", "Decline", "Not now: continue signing in"]);
     expect(page.match(/name="choice" value="join"/g)).toHaveLength(2);
     expect(page.match(/name="choice" value="decline"/g)).toHaveLength(2);
     expect(page).toContain('name="choice" value="continue"');
     expect(page).toContain('action="/auth/invites" method="post"');
     expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  /** An org's name is its admin's text: on the page it is drawn once, as text, and never as a button's label. */
+  it("labels its buttons itself, whatever the org is called, and draws the name once, isolated", async () => {
+    await plans.updateOrg("org_acme", { name: "Not now: continue signing in" }, by);
+    await seat(ACME_ADMIN, "github:4242");
+    const page = await (await githubCallback()).res.text();
+    expect(buttons(page)).toEqual(["Join", "Decline", "Not now: continue signing in"]);
+    expect(page.match(/Not now: continue signing in/g)).toHaveLength(2);
+    expect(page).toContain("<strong><bdi>Not now: continue signing in</bdi></strong> invited you");
+  });
+
+  it("draws a name stored before names were checked without its control and format characters", async () => {
+    await plans.updateOrg("org_acme", { name: "Ac\u202eme\u200b \u2066Co\u0007" }, by);
+    await seat(ACME_ADMIN, "github:4242");
+    const page = await (await githubCallback()).res.text();
+    expect(page).toContain("<strong><bdi>Acme Co</bdi></strong> invited you");
+    expect(page).not.toMatch(/[\u202e\u200b\u2066\u0007]/u);
   });
 
   it("carries a sign-in with no invites straight on, as before", async () => {
@@ -151,16 +173,35 @@ describe("the invites page (ADR 0027)", () => {
     expect((await plans.auditForOrg("org_acme", 50)).at(-1)).toMatchObject({ action: "plan_granted", actorUserId: "u_github_4242", detail: { key: "github:4242", source: "invite" } });
   });
 
-  it("removes the invite on Decline, and files nothing of the person in the org's stream", async () => {
+  /**
+   * A decline is kept on the person's side: the org's invites stay as its admin wrote them, so nothing
+   * the admin can read changes, not even which of the keys they invited were one account's.
+   */
+  it("keeps a Decline on the person's side: the org's page stops, and its admin sees nothing change", async () => {
     await seat(ACME_ADMIN, "github:4242");
+    await seat(ACME_ADMIN, "email:jesse@example.dev");
+    const before = { invites: await plans.listOrgInvites("org_acme", 10), rows: await plans.auditForOrg("org_acme", 50) };
     const { identity, page } = await signIn("decline");
     expect(page).toContain("Acme");
     expect(identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
-    expect(await plans.invitesFor(["github:4242"])).toEqual([]);
     expect(await plans.getGrant("github:4242")).toBeUndefined();
-    const rows = await plans.auditForOrg("org_acme", 50);
-    expect(rows.filter((e) => e.actorUserId === "u_github_4242" || JSON.stringify(e).includes("jesse@example.dev"))).toEqual([]);
+    expect(await plans.listOrgInvites("org_acme", 10)).toEqual(before.invites);
+    expect(await plans.auditForOrg("org_acme", 50)).toEqual(before.rows);
+    expect(await plans.declinedOrgs("github:4242")).toEqual(["org_acme"]);
     expect((await signIn()).page).toBeNull();
+  });
+
+  it("declines only an org that made this sign-in an offer, and names no other", async () => {
+    await plans.createOrg({ ...acme, orgId: "org_secret", name: "Secret Co", ownerUserId: "u_github_3" }, { ...ownerGrant, key: "github:3", orgId: "org_secret" }, by);
+    await seat(B_ADMIN, "github:4242");
+    const { res } = await githubCallback();
+    const after = await answer(heldOf(await res.text()), "decline", "org_secret");
+    expect(after.status).toBe(200);
+    const page = await after.text();
+    expect(page).toContain("That invitation is no longer open.");
+    expect(page).not.toContain("Secret Co");
+    expect(await plans.declinedOrgs("github:4242")).toEqual([]);
+    expect(page).toContain("<strong><bdi>Bee</bdi></strong> invited you");
   });
 
   it("keeps the invite when the person carries on without answering, and asks again next time", async () => {
@@ -189,14 +230,40 @@ describe("the invites page (ADR 0027)", () => {
     const { res } = await githubCallback();
     const refused = await answer(heldOf(await res.text()), "join", "org_acme");
     expect(refused.status).toBe(200);
-    expect(await refused.text()).toContain("already in another organisation or holds a plan of its own, so it cannot join Acme");
+    expect(await refused.text()).toContain("already in another organisation or holds a plan of its own, so it cannot join <bdi>Acme</bdi>.");
     expect(await plans.getGrant("github:4242")).toMatchObject({ orgId: "org_b" });
     expect(await plans.invitesFor(["github:4242"])).toHaveLength(1);
 
     await plans.deleteGrant("github:4242");
     await plans.updateOrg("org_acme", { seats: 1 }, by);
     const full = await answer(heldOf(await (await githubCallback()).res.text()), "join", "org_acme");
-    expect(await full.text()).toContain("Acme has no free seat: ask its admin for one.");
+    expect(await full.text()).toContain("<bdi>Acme</bdi> has no free seat: ask its admin for one.");
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("escapes the org's name in the line an answer shows, as in the invitation", async () => {
+    await plans.updateOrg("org_acme", { name: "<b>Bold</b> & Co", seats: 1 }, by);
+    await seat(ACME_ADMIN, "github:4242");
+    const full = await answer(heldOf(await (await githubCallback()).res.text()), "join", "org_acme");
+    const page = await full.text();
+    expect(page).toContain('<p class="notice"><bdi>&lt;b&gt;Bold&lt;/b&gt; &amp; Co</bdi> has no free seat');
+    expect(page).not.toContain("<b>Bold");
+  });
+
+  /**
+   * The Join's check and its write are one operation in the store, so what the route read before it
+   * cannot seat anyone: here the route's own read is held at its stale answer, and the admin's withdrawal
+   * has landed in the store between it and the Join.
+   */
+  it("seats nobody when the invite is withdrawn before the Join, whatever an earlier read said", async () => {
+    await seat(ACME_ADMIN, "github:4242");
+    const { res } = await githubCallback();
+    const held = heldOf(await res.text());
+    const stale = await plans.invitesFor(["github:4242", "github:jesse@example.dev", "email:jesse@example.dev"]);
+    expect(await plans.deleteOrgInvite("org_acme", "github:4242", { actorUserId: "u_github_1" })).toBe("deleted");
+    plans.invitesFor = async () => stale;
+    const after = await answer(held, "join", "org_acme");
+    expect(await after.text()).toContain("That invitation is no longer open.");
     expect(await plans.getGrant("github:4242")).toBeUndefined();
   });
 
@@ -206,6 +273,25 @@ describe("the invites page (ADR 0027)", () => {
     const { res } = await githubCallback();
     expect((await answer(heldOf(await res.text()), "seat-me", "org_acme")).status).toBe(400);
     expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("takes one answer for each page: the same held sign-in a second time is refused, and mints nothing", async () => {
+    await seat(ACME_ADMIN, "github:4242");
+    const { clientId, res } = await githubCallback();
+    const held = heldOf(await res.text());
+    const first = await answer(held, "continue");
+    expect((await redeemed(clientId, first)).identity).toMatchObject({ userId: "u_github_4242" });
+    const again = await answer(held, "continue");
+    expect([again.status, again.headers.get("location")]).toEqual([400, null]);
+    expect((await answer(held, "join", "org_acme")).status).toBe(400);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+
+    await seat(B_ADMIN, "github:4242");
+    const twice = heldOf(await (await githubCallback()).res.text());
+    const redrawn = await answer(twice, "decline", "org_b");
+    expect(redrawn.status).toBe(200);
+    expect(heldOf(await redrawn.text())).not.toBe(twice);
+    expect((await answer(twice, "join", "org_acme")).status).toBe(400);
   });
 
   it("binds a panel sign-in's answer to the browser that started it, and keeps the nonce until the end", async () => {
@@ -232,6 +318,58 @@ describe("the invites page (ADR 0027)", () => {
   });
 });
 
+describe("a seat on an address the org no longer owns by its form (ADR 0027)", () => {
+  /** example.dev proven by acme, so its address could be seated without the person, then released. */
+  const releasedSeat = async () => {
+    await plans.claimDomain("org_acme", "example.dev", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "example.dev", 2, by);
+    expect((await seat(ACME_ADMIN, "email:jesse@example.dev", "admin")).status).toBe(201);
+    expect(await plans.releaseDomain("org_acme", "example.dev", by)).toBe("released");
+  };
+
+  it("takes no effect once the domain is released: no org, no claim, and the page offers it", async () => {
+    await releasedSeat();
+    const { clientId, res } = await githubCallback();
+    expect(res.status).toBe(200);
+    const page = await res.text();
+    expect(page).toContain("<strong><bdi>Acme</bdi></strong> invited you to join it as an admin.");
+    const { identity } = await redeemed(clientId, await answer(heldOf(page), "continue"));
+    expect(identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    expect(await plans.getGrant("email:jesse@example.dev")).toMatchObject({ orgId: "org_acme", source: "org" });
+  });
+
+  it("is claimed onto the subject when the person joins, with the role it was given", async () => {
+    await releasedSeat();
+    const { identity } = await signIn("join");
+    expect(identity).toMatchObject({ userId: "u_github_4242", orgId: "org_acme", role: "admin", plan: "team" });
+    expect(await plans.getGrant("email:jesse@example.dev")).toBeUndefined();
+    expect(await plans.getGrant("github:4242")).toMatchObject({ role: "admin", source: "invite", grantedBy: "u_github_1" });
+  });
+
+  /** A seat written before invites existed, for an address the org never owned, reads the same way. */
+  it("reads an address seat the org never owned as an invite too, on the page and on the roster", async () => {
+    await plans.putGrantIfOwned({ ...ownerGrant, key: "email:jesse@example.dev", role: "member", source: "org" }, "org_acme", by);
+    const { identity, page } = await signIn("continue");
+    expect(page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
+    expect(identity).toMatchObject({ orgId: null, plan: "free" });
+    const caller = async (): Promise<RoomCaller> => ({ identity: ACME_ADMIN, via: "bearer" });
+    const roster = await orgRoutes(new Request(`${ISSUER}/org/members`, { headers: { authorization: "Bearer x" } }), { store: plans, caller, panelOrigins: [PANEL] });
+    const members = ((await roster!.json()) as { members: { key: string; status: string }[] }).members;
+    expect(members.map((m) => [m.key, m.status])).toEqual([["github:1", "member"], ["email:jesse@example.dev", "invited"]]);
+  });
+
+  it("keeps its effect while the org still owns the address", async () => {
+    await plans.claimDomain("org_acme", "example.dev", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "example.dev", 2, by);
+    await seat(ACME_ADMIN, "email:jesse@example.dev");
+    const { identity, page } = await signIn();
+    expect(page).toBeNull();
+    expect(identity).toMatchObject({ orgId: "org_acme", plan: "team" });
+    expect(await plans.getGrant("github:4242")).toMatchObject({ orgId: "org_acme", source: "org" });
+  });
+});
+
 describe("require_sso and an invite (ADR 0027, SSO spec D13)", () => {
   beforeEach(async () => {
     await plans.claimDomain("org_acme", "acme.test", "tok", 1, by);
@@ -247,9 +385,9 @@ describe("require_sso and an invite (ADR 0027, SSO spec D13)", () => {
     await plans.updateOrg("org_acme", { requireSso: true }, by);
     const { res, clientId } = await githubCallback();
     expect(res.status).toBe(200);
-    const page = await res.text();
-    const join = await answer(heldOf(page), "join", "org_acme");
-    expect(await join.text()).toContain("Acme requires single sign-on: to join it, start again and enter your work email.");
+    const join = await answer(heldOf(await res.text()), "join", "org_acme");
+    const page = await join.text();
+    expect(page).toContain("<bdi>Acme</bdi> requires single sign-on: to join it, start again and enter your work email.");
     expect(await plans.getGrant("github:4242")).toBeUndefined();
     const { identity } = await redeemed(clientId, await answer(heldOf(page), "continue"));
     expect(identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });

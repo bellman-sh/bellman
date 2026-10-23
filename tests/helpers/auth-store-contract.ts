@@ -102,5 +102,19 @@ export function describeAuthStoreContract(name: string, makeStore: () => AuthSto
         expect(await store.countClients()).toBe(1);
       });
     });
+
+    /** The invites page's held sign-in is answered once (ADR 0027): its id is spent by the first answer. */
+    describe("single-use ids", () => {
+      it("spends an id the first time and refuses it every time after, whatever the others do", async () => {
+        const store = makeStore();
+        const until = Date.now() + 600_000;
+        expect(await store.spendOnce("held-1", until)).toBe(true);
+        expect(await store.spendOnce("held-1", until)).toBe(false);
+        expect(await store.spendOnce("held-2", until)).toBe(true);
+        expect(await store.spendOnce("held-1", until + 1)).toBe(false);
+        const [a, b] = await Promise.all([store.spendOnce("held-3", until), store.spendOnce("held-3", until)]);
+        expect([a, b].sort()).toEqual([false, true]);
+      });
+    });
   });
 }

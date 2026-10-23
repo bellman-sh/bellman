@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import type { Org } from "../src/types.js";
 
@@ -13,6 +13,28 @@ describe("an org's name", () => {
     for (const bad of ["", "   ", "a".repeat(MAX_ORG_NAME_CHARS + 1), ` ${"a".repeat(MAX_ORG_NAME_CHARS + 1)} `, 42, null, undefined, ["Acme"]]) {
       expect(parseOrgName(bad), String(bad)).toBeUndefined();
     }
+  });
+
+  /**
+   * A name is shown to the people an org invites, so it holds no control or format character (Cc, Cf):
+   * the bidirectional embeddings, overrides, isolates and marks, the zero-width characters, the C0 and C1
+   * controls. Letters of any script, and marks that draw, are names.
+   */
+  it("holds no control or format character, and any script's letters", () => {
+    const refused = [0x0, 0x7, 0x9, 0xa, 0x1b, 0x7f, 0x85, 0x9f, 0xad, 0x61c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f,
+      0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff, 0xe0041];
+    for (const cp of refused) {
+      expect(parseOrgName(`Ac${String.fromCodePoint(cp)}me`), cp.toString(16)).toBeUndefined();
+    }
+    for (const good of ["Café Ünïcødé", "株式会社アクメ", "שלום Acme", "شركة", "Acme ❤\u{fe0f}", "<b>Bold</b> & Co"]) {
+      expect(parseOrgName(good), good).toBe(good);
+    }
+  });
+
+  it("is drawn without those characters when a name stored before the rule holds them, and as its id when nothing is left", () => {
+    expect(drawnOrgName({ orgId: "org_x", name: "Ac\u202eme\u200b Co" })).toBe("Acme Co");
+    expect(drawnOrgName({ orgId: "org_x", name: "\u202e\u2066" })).toBe("org_x");
+    expect(drawnOrgName({ orgId: "org_x", name: "Acme" })).toBe("Acme");
   });
 });
 

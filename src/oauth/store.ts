@@ -27,6 +27,8 @@ import type { Identity } from "../types.js";
  */
 
 const CODE = "code:";
+/** Spent single-use ids (ADR 0027): the invites page's held sign-ins, each kept until its token expires. */
+const SPENT = "spent:";
 const REFRESH = "refresh:";
 const CLIENT = "client:";
 const REG = "reg:";
@@ -433,6 +435,18 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     await this.#purge(CODE);
   }
 
+  /** The read and the write in one transaction: two answers with one held sign-in cannot both be first. */
+  async spendOnce(id: string, expiresAt: number): Promise<boolean> {
+    const key = `${SPENT}${id}`;
+    const first = await this.ctx.storage.transaction(async (txn) => {
+      if (await txn.get(key)) return false;
+      await txn.put(key, { expires_at: expiresAt });
+      return true;
+    });
+    await this.#purge(SPENT);
+    return first;
+  }
+
   /** Single use: a replayed authorization code finds nothing. */
   async takeCode(code: string): Promise<AuthCode | undefined> {
     const key = `${CODE}${code}`;
@@ -640,6 +654,9 @@ export class AuthStore implements AuthStorage, BillingStorage {
   }
   takeCode(code: string): Promise<AuthCode | undefined> {
     return this.object.takeCode(code);
+  }
+  spendOnce(id: string, expiresAt: number): Promise<boolean> {
+    return this.object.spendOnce(id, expiresAt);
   }
   putRefresh(token: string, value: RefreshToken): Promise<void> {
     return this.object.putRefresh(token, value);

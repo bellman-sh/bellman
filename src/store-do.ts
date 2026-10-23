@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, isUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
@@ -38,7 +38,7 @@ import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
@@ -3308,7 +3308,11 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // an expired record from another org answer this check would block the
       // key indefinitely, because nothing sweeps it until someone reads it.
       const previous = stored && !lapsed(stored) ? stored : undefined;
-      if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
+      const orgOf = async (orgId: string | null) => (orgId === null ? undefined : txn.get<Org>(orgKey(orgId)));
+      // An unowned seat elsewhere holds nothing (ADR 0027): the org that owns the address by its form takes the key.
+      const taken = previous !== undefined && previous.orgId !== expectedOrgId
+        && takesUnownedSeat(previous, await orgOf(previous.orgId), grant, await orgOf(grant.orgId));
+      if (previous && previous.orgId !== expectedOrgId && !taken) return "conflict" as const;
       // The seat cap (orgs spec, D3), decided in the transaction that seats: an org with a
       // record holds as many grants as it bought, a key already in this org changes role for
       // no seat, and an org that is only a string in grants has no record and no cap.
@@ -3319,7 +3323,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
-        txn, this.#auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+        txn, this.#auditIntents(taken ? takenSeatAuditEntries(previous, grant, audit, Date.now()) : grantAuditEntries(previous, grant, audit, Date.now()))
       );
       // Grant, index and the intent to record it, in one commit. A refused
       // write reaches none of this, so it queues nothing.
@@ -3800,21 +3804,25 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg)))).find((i) => i !== undefined);
       const stored = await Promise.all(unique.map((key) => txn.get<PlanGrant>(grantKey(key))));
       const grants = stored.filter((g): g is PlanGrant => g !== undefined && !lapsed(g, now));
-      const seat = grants.find((g) => g.orgId === orgId && isUnownedSeat(g, org));
-      const offer = invite ? { role: invite.role, by: invite.invitedBy } : seat ? { role: seat.role, by: seat.grantedBy } : undefined;
+      // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
+      const orgs = new Map<string, Org | undefined>([[orgId, org]]);
+      for (const g of grants) if (g.orgId !== null && !orgs.has(g.orgId)) orgs.set(g.orgId, await txn.get<Org>(orgKey(g.orgId)));
+      const unowned = grants.filter((g) => isUnownedSeat(g, g.orgId === null ? undefined : orgs.get(g.orgId)));
+      const seats = unowned.filter((g) => g.orgId === orgId);
+      const offer = invite ? { role: invite.role, by: invite.invitedBy } : seats[0] ? { role: seats[0].role, by: seats[0].grantedBy } : undefined;
       if (!offer) return "gone" as const;
       if (org.requireSso) return "sso" as const;
-      const others = grants.filter((g) => g !== seat);
+      const others = grants.filter((g) => !unowned.includes(g));
       if (others.some((g) => g.orgId === orgId)) {
         await txn.delete(inviteRows.flat());
         return "member" as const;
       }
       if (others.length > 0) return "taken" as const;
-      if (!seat && (await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
+      if (seats.length === 0 && (await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
       const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
       // The subject's own row is a lapsed one at most, here; its index copy in another org goes with it.
       const subject = stored[0];
-      await txn.delete([...inviteRows.flat(), ...(seat ? allKeysFor(seat) : []), ...staleIndexKeys(subject, grant)]);
+      await txn.delete([...inviteRows.flat(), ...seats.flatMap(allKeysFor), ...staleIndexKeys(subject, grant)]);
       const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
       await txn.put<unknown>({ [grantKey(subjectKey)]: grant, [orgIndexKey(orgId, subjectKey)]: grant, ...rows });
       return "joined" as const;
@@ -3830,13 +3838,16 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
-    await this.ctx.storage.put(declineKey(subjectKey, orgId), now);
+    await this.ctx.storage.transaction(async (txn) => {
+      const key = declineKey(subjectKey, orgId);
+      await txn.put(key, Math.max(now, (await txn.get<number>(key)) ?? now));
+    });
   }
 
-  async declinedOrgs(subjectKey: string): Promise<string[]> {
+  async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
     const prefix = declinesPrefix(subjectKey);
     const rows = await this.ctx.storage.list<number>({ prefix, limit: MAX_PENDING_INVITES });
-    return [...rows.keys()].map((key) => decodeURIComponent(key.slice(prefix.length)));
+    return [...rows].map(([key, at]) => ({ orgId: decodeURIComponent(key.slice(prefix.length)), at }));
   }
 
   /**
@@ -5218,7 +5229,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.registry.declineOrg(subjectKey, orgId, now);
   }
 
-  async declinedOrgs(subjectKey: string): Promise<string[]> {
+  async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
     return this.registry.declinedOrgs(subjectKey);
   }
 

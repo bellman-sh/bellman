@@ -3,7 +3,7 @@ import type {
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgInvite, OrgPatch,
 } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -17,7 +17,7 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -1781,18 +1781,20 @@ export interface BellmanStore {
    * to one of the sign-in's `keys`, an invite or an admin's seat on an address the org no longer owns
    * by its form (`isUnownedSeat`), becomes the grant of `subjectKey`: team, the offer's role, `source:
    * "invite"`, `grantedBy` whoever made the offer, with its `plan_granted` row; the org's invites of
-   * those keys go, and the seat, which the grant replaces. `gone` for no record or no such offer; `sso`
-   * when the org requires single sign-on; `member` when a key already holds this org's grant otherwise
-   * (its invites go); `taken` when a key holds any other grant; `full` at the seats, unless a seat moves.
+   * those keys go, and every such seat of the org's, which the grant replaces. An unowned seat in any org
+   * holds nothing, so none counts below. `gone` for no record or no such offer; `sso` when the org requires
+   * single sign-on; `member` when a key holds this org's grant otherwise (its invites go); `taken` when a
+   * key holds any other grant; `full` at the seats, unless a seat moves.
    */
   acceptOrgInvite(orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
   /**
-   * That the person behind `subjectKey` declined this org's offers (ADR 0027), kept on their side: the
-   * org's invites stay as they were, so a decline tells its admins nothing. Idempotent.
+   * That the person behind `subjectKey` declined this org's offers made by `now` (ADR 0027), kept on their
+   * side: the org's invites stay as they were, so a decline tells its admins nothing. A later decline moves
+   * the time on; an earlier one leaves it.
    */
   declineOrg(subjectKey: string, orgId: string, now: number): Promise<void>;
-  /** The orgs the person behind `subjectKey` declined, by id. */
-  declinedOrgs(subjectKey: string): Promise<string[]>;
+  /** The orgs the person behind `subjectKey` declined, by id, each with the time of its latest decline. */
+  declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]>;
 
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
@@ -3095,7 +3097,11 @@ export class MemoryStore implements BellmanStore {
     // everywhere else, and reading past that here would let a dead record from
     // another org hold a key hostage until some unrelated read swept it.
     const existing = this.liveGrant(grant.key);
-    if (existing && existing.orgId !== expectedOrgId) return "conflict";
+    const orgOf = (orgId: string | null) => (orgId === null ? undefined : this.orgs.get(orgId));
+    // An unowned seat elsewhere holds nothing (ADR 0027): the org that owns the address by its form takes the key.
+    const taken = existing !== undefined && existing.orgId !== expectedOrgId
+      && takesUnownedSeat(existing, orgOf(existing.orgId), grant, orgOf(grant.orgId));
+    if (existing && existing.orgId !== expectedOrgId && !taken) return "conflict";
     // The seat cap (D3), decided in the same synchronous span as the write: a key that is
     // already a member of this org changes role for no seat; an org with no record has no cap.
     if (grant.orgId !== null && !(existing && existing.orgId === grant.orgId)) {
@@ -3103,7 +3109,7 @@ export class MemoryStore implements BellmanStore {
       if (org && this.liveMembers(grant.orgId) >= org.seats) return "full";
     }
     this.grants.set(grant.key, detach(grant));
-    this.recordAudit(grantAuditEntries(existing, grant, audit, Date.now()));
+    this.recordAudit(taken ? takenSeatAuditEntries(existing, grant, audit, Date.now()) : grantAuditEntries(existing, grant, audit, Date.now()));
     return "written";
   }
 
@@ -3337,20 +3343,22 @@ export class MemoryStore implements BellmanStore {
     const pending = this.invites.get(orgId);
     const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined);
     const grants = unique.map((key) => this.liveGrant(key)).filter((g): g is PlanGrant => g !== undefined);
-    const seat = grants.find((g) => g.orgId === orgId && isUnownedSeat(g, org));
-    const offer = invite ? { role: invite.role, by: invite.invitedBy } : seat ? { role: seat.role, by: seat.grantedBy } : undefined;
+    // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
+    const unowned = grants.filter((g) => isUnownedSeat(g, g.orgId === null ? undefined : this.orgs.get(g.orgId)));
+    const seats = unowned.filter((g) => g.orgId === orgId);
+    const offer = invite ? { role: invite.role, by: invite.invitedBy } : seats[0] ? { role: seats[0].role, by: seats[0].grantedBy } : undefined;
     if (!offer) return "gone";
     if (org.requireSso) return "sso";
-    const others = grants.filter((g) => g !== seat);
+    const others = grants.filter((g) => !unowned.includes(g));
     const dropInvites = () => { for (const key of unique) pending?.delete(key); };
     if (others.some((g) => g.orgId === orgId)) {
       dropInvites();
       return "member";
     }
     if (others.length > 0) return "taken";
-    if (!seat && this.liveMembers(orgId) >= org.seats) return "full";
+    if (seats.length === 0 && this.liveMembers(orgId) >= org.seats) return "full";
     const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
-    if (seat) this.grants.delete(seat.key);
+    for (const seat of seats) this.grants.delete(seat.key);
     dropInvites();
     this.grants.set(subjectKey, detach(grant));
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
@@ -3359,12 +3367,12 @@ export class MemoryStore implements BellmanStore {
 
   async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {
     const declined = this.declines.get(subjectKey) ?? new Map<string, number>();
-    if (!declined.has(orgId)) declined.set(orgId, now);
+    declined.set(orgId, Math.max(now, declined.get(orgId) ?? now));
     this.declines.set(subjectKey, declined);
   }
 
-  async declinedOrgs(subjectKey: string): Promise<string[]> {
-    return [...(this.declines.get(subjectKey)?.keys() ?? [])].sort();
+  async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
+    return [...(this.declines.get(subjectKey) ?? [])].map(([orgId, at]) => ({ orgId, at })).sort((a, b) => (a.orgId < b.orgId ? -1 : 1));
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

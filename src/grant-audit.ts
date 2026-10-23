@@ -124,6 +124,19 @@ export function grantAuditEntries(
   return entries;
 }
 
+/**
+ * What a guarded write records when it takes a key from an unowned seat another org held (ADR 0027): that
+ * seat's revocation in its own org's stream, by the system and naming no other org, and the new grant as a
+ * first grant in the writer's. So the seat's org learns that an org which proved the address's domain took
+ * it, and not which org, nor who.
+ */
+export function takenSeatAuditEntries(seat: PlanGrant, next: PlanGrant, intent: AuditIntent, now: number): AuditEntry[] {
+  return [
+    ...revokeAuditEntries(seat, { actorUserId: "system", detail: { reason: "its address is another org's by a verified domain" } }, now),
+    ...grantAuditEntries(undefined, next, intent, now),
+  ];
+}
+
 /** What a guarded grant DELETE should record. Nothing, for an org-less grant. */
 export function revokeAuditEntries(
   removed: PlanGrant,

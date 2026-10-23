@@ -43,17 +43,38 @@ export function isUnownedSeat(grant: PlanGrant, org: Org | undefined): boolean {
 }
 
 /**
- * Control and format characters (Unicode Cc and Cf), which draw nothing or reorder the text around them:
- * the bidirectional embeddings, overrides, isolates and marks, the zero-width characters, and the C0 and
- * C1 controls. An org's name is shown to the people it invites, so it holds none.
+ * Whether a grant `next` written for its org takes the key from `previous`, another org's seat (ADR 0027):
+ * the seat is unowned, so it holds nothing, and the writing org owns the address by its form, so the
+ * address is that org's to seat. The guarded write then replaces the seat rather than refusing the key.
  */
-const UNDRAWN_IN_A_NAME = /[\p{Cc}\p{Cf}]/u;
+export function takesUnownedSeat(previous: PlanGrant, previousOrg: Org | undefined, next: PlanGrant, nextOrg: Org | undefined): boolean {
+  return previous.orgId !== next.orgId && isUnownedSeat(previous, previousOrg)
+    && nextOrg !== undefined && nextOrg.orgId === next.orgId && ownsByForm(nextOrg, next.key);
+}
 
-/** The name as stored: trimmed, 1 to MAX_ORG_NAME_CHARS characters, no control or format character; undefined for anything else. */
+/**
+ * The mod's rule for a peer's text (`spelledOut` in `src/mod/view.ts`), copied here and not shared, for
+ * what an org's name may not hold: every control, format, private-use or unassigned character, every line
+ * or paragraph separator, and every code point Unicode leaves undrawn (`Default_Ignorable_Code_Point`, the
+ * Hangul fillers among them), but a variation selector (U+FE00 to U+FE0F) directly after a character that
+ * draws, and a zero-width non-joiner or joiner (U+200C, U+200D) directly after one or after a selector so
+ * kept. So a heart on fire (U+2764 U+FE0F U+200D U+1F525) and a Persian non-joiner between two letters are
+ * names. A name is one line, so the mod's line break is not among the exceptions.
+ */
+const UNDRAWN = String.raw`\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}`;
+const SELECTORS = String.raw`\u{fe00}-\u{fe0f}`;
+const JOINERS = String.raw`\u{200c}\u{200d}`;
+const UNDRAWN_IN_A_NAME = [
+  String.raw`(?![${JOINERS}${SELECTORS}])[${UNDRAWN}]`,
+  String.raw`(?<![^${UNDRAWN}])[${SELECTORS}]`,
+  String.raw`(?<!(?:[^${UNDRAWN}]|[^${UNDRAWN}][${SELECTORS}]))[${JOINERS}]`,
+].join("|");
+
+/** The name as stored: trimmed, 1 to MAX_ORG_NAME_CHARS characters, nothing the rule above refuses; undefined for anything else. */
 export function parseOrgName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const name = value.trim();
-  return name.length >= 1 && name.length <= MAX_ORG_NAME_CHARS && !UNDRAWN_IN_A_NAME.test(name) ? name : undefined;
+  return name.length >= 1 && name.length <= MAX_ORG_NAME_CHARS && !new RegExp(UNDRAWN_IN_A_NAME, "u").test(name) ? name : undefined;
 }
 
 /**
@@ -61,7 +82,7 @@ export function parseOrgName(value: unknown): string | undefined {
  * before that rule may still hold, and its id when nothing else is left.
  */
 export function drawnOrgName(org: Pick<Org, "orgId" | "name">): string {
-  return org.name.replace(new RegExp(UNDRAWN_IN_A_NAME.source, "gu"), "").trim() || org.orgId;
+  return org.name.replace(new RegExp(UNDRAWN_IN_A_NAME, "gu"), "").trim() || org.orgId;
 }
 
 /** A seat count: a whole number from 1 to MAX_SEATS; undefined for anything else, a numeric string included. */

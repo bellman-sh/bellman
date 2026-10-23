@@ -4693,15 +4693,55 @@ export function describeStoreContract(
         expect(await store.acceptOrgInvite("org_acme", ["github:10", "email:ten@y.test"], "github:10", 41, person)).toBe("gone");
       });
 
-      it("keeps a decline on the person's side: the org's invites stay, and the decline is listed once", async () => {
+      /** An unowned seat holds nothing, in this org or another (ADR 0027): none of them makes the Join `taken` or `member`. */
+      it("leaves another org's unowned seat out, and moves every unowned seat of this org's", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.putGrantIfOwned(owner({ key: "github:nine@x.test", role: "admin", source: "org", grantedBy: "u_github_7" }), "org_acme", by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", role: "admin", grantedBy: "u_github_7", source: "invite" });
+        expect(await store.getGrant("github:nine@x.test")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_b" });
+
+        await store.updateOrg("org_acme", { seats: 4 }, by);
+        await store.putGrantIfOwned(owner({ key: "email:ten@x.test", role: "member", source: "org" }), "org_acme", by);
+        await store.putGrantIfOwned(owner({ key: "github:ten@x.test", role: "member", source: "org" }), "org_acme", by);
+        await store.updateOrg("org_acme", { seats: 2 }, by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:10", "github:ten@x.test", "email:ten@x.test"], "github:10", 41, person)).toBe("joined");
+        expect([await store.getGrant("email:ten@x.test"), await store.getGrant("github:ten@x.test")]).toEqual([undefined, undefined]);
+        expect(await store.countOrgMembers("org_acme")).toBe(3);
+      });
+
+      /** An address another org seated and never owned is the domain's owner's to seat (ADR 0027): the seat is replaced, naming no org to the one that held it. */
+      it("lets the org that owns an address by its form take it from another org's unowned seat, and only that org", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2", seats: 3 }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "admin", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.putGrantIfOwned(owner({ key: "email:ten@y.test", role: "member", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        expect(await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org" }), "org_acme", by)).toBe("written");
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", role: "member" });
+        expect((await store.listGrants(10, "org_b")).map((g) => g.key).sort()).toEqual(["email:ten@y.test", "github:2"]);
+        const revoked = (await store.auditForOrg("org_b", 20)).at(-1);
+        expect([revoked?.action, revoked?.actorUserId, revoked?.actorOrgId, revoked?.detail.key]).toEqual(["plan_revoked", "system", null, "email:nine@x.test"]);
+        expect(JSON.stringify(revoked)).not.toContain("org_acme");
+        expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "plan_granted", detail: { key: "email:nine@x.test", org_id: "org_acme" } });
+        expect(await store.putGrantIfOwned(owner({ key: "email:ten@y.test", role: "member", source: "org" }), "org_acme", by)).toBe("conflict");
+        expect(await store.getGrant("email:ten@y.test")).toMatchObject({ orgId: "org_b" });
+      });
+
+      it("keeps a decline on the person's side: the org's invites stay, and the decline is listed once, at its latest", async () => {
         await seated();
         await store.putOrgInvite(invite("github:9"), by);
         await store.putOrgInvite(invite("email:nine@x.test"), by);
         expect(await store.declinedOrgs("github:9")).toEqual([]);
         await store.declineOrg("github:9", "org_acme", 40);
         await store.declineOrg("github:9", "org_acme", 41);
+        await store.declineOrg("github:9", "org_acme", 30);
         await store.declineOrg("github:9", "org_b", 42);
-        expect(await store.declinedOrgs("github:9")).toEqual(["org_acme", "org_b"]);
+        expect(await store.declinedOrgs("github:9")).toEqual([{ orgId: "org_acme", at: 41 }, { orgId: "org_b", at: 42 }]);
         expect(await store.declinedOrgs("github:99")).toEqual([]);
         expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:nine@x.test", "github:9"]);
         expect(await orgEvents()).toEqual(["member_invited", "member_invited"]);

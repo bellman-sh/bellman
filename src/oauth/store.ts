@@ -5,7 +5,7 @@ import {
   REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, SWEEP_INTERVAL_MS, SWEEP_RESUME_MS,
   clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
-  type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient,
+  type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient, type SettledAnswer,
   type SweepStorage,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
@@ -436,15 +436,24 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   /** The read and the write in one transaction: two answers with one held sign-in cannot both be first. */
-  async spendOnce(id: string, expiresAt: number): Promise<boolean> {
+  async spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }> {
     const key = `${SPENT}${id}`;
-    const first = await this.ctx.storage.transaction(async (txn) => {
-      if (await txn.get(key)) return false;
+    const answer = await this.ctx.storage.transaction(async (txn) => {
+      const row = await txn.get<{ expires_at: number; settled?: SettledAnswer }>(key);
+      if (row) return { first: false as const, ...(row.settled ? { settled: row.settled } : {}) };
       await txn.put(key, { expires_at: expiresAt });
-      return true;
+      return { first: true as const };
     });
     await this.#purge(SPENT);
-    return first;
+    return answer;
+  }
+
+  async settleSpent(id: string, settled: SettledAnswer): Promise<void> {
+    const key = `${SPENT}${id}`;
+    await this.ctx.storage.transaction(async (txn) => {
+      const row = await txn.get<{ expires_at: number }>(key);
+      if (row) await txn.put(key, { ...row, settled });
+    });
   }
 
   /** Single use: a replayed authorization code finds nothing. */
@@ -655,8 +664,11 @@ export class AuthStore implements AuthStorage, BillingStorage {
   takeCode(code: string): Promise<AuthCode | undefined> {
     return this.object.takeCode(code);
   }
-  spendOnce(id: string, expiresAt: number): Promise<boolean> {
+  spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }> {
     return this.object.spendOnce(id, expiresAt);
+  }
+  settleSpent(id: string, settled: SettledAnswer): Promise<void> {
+    return this.object.settleSpent(id, settled);
   }
   putRefresh(token: string, value: RefreshToken): Promise<void> {
     return this.object.putRefresh(token, value);

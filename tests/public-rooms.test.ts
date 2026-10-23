@@ -78,6 +78,14 @@ describe("whether a room is publicly readable", () => {
     expect(hydrated.unpublishedAt).toBeNull();
     expect(isPublic(hydrated)).toBe(true);
   });
+
+  it("reads a room stored before room pages as opening on its canvas, and any stored value but page as the canvas", () => {
+    const old = structuredClone(session({ manifest: roomManifest({ public: true }) })) as unknown as Record<string, unknown>;
+    delete old.publicView;
+    expect(hydrateStoredSession(old)!.publicView).toBe("canvas");
+    expect(hydrateStoredSession({ ...old, publicView: "page" })!.publicView).toBe("page");
+    expect(hydrateStoredSession({ ...old, publicView: "log" })!.publicView).toBe("canvas");
+  });
 });
 
 describe("the preview", () => {
@@ -102,6 +110,24 @@ describe("the creator's public link", () => {
       expect(open.data.public_url).not.toBe(open.data.join_url);
       const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "pair" }, brief: brief() });
       expect("public_url" in shut.data).toBe(false);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+// Room pages spec, D3: a room starts on its canvas, and its creator chooses the page later. bellman_start is the
+// one place a room's record is first written, so this is where its value is pinned.
+describe("how a room opens when it starts", () => {
+  it("is the canvas, for a public room and a private one", async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      for (const manifest of [{ room: "Open", preset: "pair", public: true }, { room: "Shut", preset: "pair" }]) {
+        const started = await jesse.call("bellman_start", { manifest, brief: brief() });
+        expect(started.isError, started.text).toBe(false);
+        expect((await h.store.getSession(String(started.data.session_id)))?.publicView, manifest.room).toBe("canvas");
+      }
     } finally {
       await h.close();
     }

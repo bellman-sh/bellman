@@ -215,6 +215,21 @@ export function describeStoreContract(
       });
     });
 
+    // Room pages spec, D3: how a public room opens, on its record beside its name.
+    it("writes how a public room opens on its record and nothing else, reads the canvas for one never set, and leaves a room that is not there not there", async () => {
+      // Named, so a write that touches `publicName` shows in the whole-record comparison below.
+      const s = session({ id: "qs_viewed", manifest: roomManifest({ public: true }), publicName: "viewed-room" });
+      await store.createSession(s);
+      const before = (await store.getSession(s.id))!;
+      expect(before.publicView).toBe("canvas");
+      await store.setPublicView(s.id, "page");
+      expect(await store.getSession(s.id)).toEqual({ ...before, publicView: "page" });
+      await store.setPublicView(s.id, "canvas");
+      expect((await store.getSession(s.id))?.publicView).toBe("canvas");
+      await store.setPublicView("qs_nope", "page");
+      expect(await store.getSession("qs_nope")).toBeUndefined();
+    });
+
     it("returns undefined for an unknown session", async () => {
       expect((await store.getSession("qs_nope"))).toBeUndefined();
     });

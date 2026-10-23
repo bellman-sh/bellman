@@ -6,7 +6,7 @@ import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
+  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
@@ -1800,6 +1800,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return;
       await putRows(txn, memberRows(s, { ...s, publicName: name }));
+    });
+  }
+
+  /** `BellmanStore.setPublicView`, for this room (room pages spec, D3). An empty object is left empty. */
+  async setPublicView(view: PublicView): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      await putRows(txn, memberRows(s, { ...s, publicView: view }));
     });
   }
 
@@ -4737,6 +4746,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async setPublicName(sessionId: string, name: string): Promise<void> {
     await this.session(sessionId).setPublicName(name);
+  }
+
+  async setPublicView(sessionId: string, view: PublicView): Promise<void> {
+    await this.session(sessionId).setPublicView(view);
   }
 
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {

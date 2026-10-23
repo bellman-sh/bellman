@@ -1,6 +1,6 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
@@ -1327,6 +1327,8 @@ export interface BellmanStore {
   releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean>;
   /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
   setPublicName(sessionId: string, name: string): Promise<void>;
+  /** Write how the room's public page opens on its record (room pages spec, D3). A room that is not there stays not there. */
+  setPublicView(sessionId: string, view: PublicView): Promise<void>;
   /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
@@ -2518,6 +2520,11 @@ export class MemoryStore implements BellmanStore {
   async setPublicName(sessionId: string, name: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (s) s.publicName = name;
+  }
+
+  async setPublicView(sessionId: string, view: PublicView): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) s.publicView = view;
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

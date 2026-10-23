@@ -1,4 +1,4 @@
-# ADR 0024 — Public rooms are read at bellman.sh
+# ADR 0026 — Public rooms are read at bellman.sh
 
 **Date:** 2026-10-21 · **Status:** accepted · **Amends:** ADR 0011, decision 3 · **Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` · **Plan:** `docs/superpowers/plans/2026-10-17-public-rooms-on-bellman-sh.md`
 

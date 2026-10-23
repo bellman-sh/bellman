@@ -1232,7 +1232,7 @@ loud:
   `bellman.sh` is allowlisted (`BELLMAN_PUBLIC_PAGE_ORIGINS`) for one mutation,
   filing a report (`POST /rooms/:id/reports`), and for the sign-in return;
   every other write answers the panel's origins alone, `BELLMAN_PANEL_ORIGINS`,
-  the dash's (ADR 0024).
+  the dash's (ADR 0026).
 
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room

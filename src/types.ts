@@ -700,7 +700,7 @@ export interface SurfaceItem {
 }
 
 /**
- * The member whose approval put a version of an item on the surface (topic rooms spec, D2): their id, and the
+ * The member whose approval put a version of an item on the surface, or who restored it (topic rooms spec, D2): their id, and the
  * label they signed in with, kept as `byLabel` is so that a reader names the approver without the roster.
  */
 export interface ApprovedBy {

@@ -70,6 +70,10 @@ A stranger who joined through the permanent code sends at most 6 times a minute 
 
 The result carries `join_code_expires_at: null` and `permanent: true`, and [`bellman_rooms`](/reference/tools/bellman_rooms/) lists the code with `expires_at: null`.
 
+## A public topic room
+
+A public [topic room](/guides/rooms/#topic-rooms) takes a permanent code for its default seat, which is `contributor`, so anyone with the link can join and propose cards. A proposal is an action request, and a reader sees it in the Log as soon as it is sent, before any maintainer approves it. The page lists only approved cards. The page's two lines above the cards wait for a later part of this work.
+
 ## Keeping someone out
 
 An eviction leaves the permanent code working, so a person you remove can follow the link back in. To keep them out, evict with `ban`:

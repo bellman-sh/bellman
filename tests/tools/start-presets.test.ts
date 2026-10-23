@@ -150,9 +150,15 @@ describe("bellman_start citing a saved preset", () => {
 
   // Topic rooms spec, D6 and R4: a topic room opens as a page; every other preset as its canvas.
   it("starts a topic room opening as a page, and every other preset opening as its canvas", async () => {
-    for (const [preset, view] of [["topic", "page"], ["swarm", "canvas"], ["pair", "canvas"]] as const) {
-      const { sessionId } = await startRoom(jesse, manifestFixture({ preset, public: true }));
-      expect((await h.store.getSession(sessionId))!.publicView, preset).toBe(view);
+    for (const [preset, isPublic, view] of [
+      ["topic", true, "page"],
+      ["topic", false, "page"],
+      ["swarm", true, "canvas"],
+      ["pair", true, "canvas"],
+    ] as const) {
+      const manifest = isPublic ? manifestFixture({ preset, public: true }) : manifestFixture({ preset });
+      const { sessionId } = await startRoom(jesse, manifest);
+      expect((await h.store.getSession(sessionId))!.publicView, `${preset}, public ${isPublic}`).toBe(view);
     }
   });
 

@@ -48,6 +48,17 @@ export interface AuthCode {
   expires_at: number;
 }
 
+/**
+ * Where a held sign-in's first answer left the browser (ADR 0027), for an answer that comes after it with
+ * the same id, such as a second press of the same button: the redirect it answered and the cookies it set,
+ * or `location` null when it drew the invites page again, or ended on a page of its own.
+ */
+export interface SettledAnswer {
+  location: string | null;
+  cookies: string[];
+  redrawn: boolean;
+}
+
 export interface RefreshToken {
   client_id: string;
   resource: string;
@@ -449,6 +460,14 @@ export interface AuthStorage {
   /** Single use: a replayed authorization code must find nothing. */
   takeCode(code: string): Promise<AuthCode | undefined>;
   /**
+   * Spends a single-use id, the invites page's held sign-in (ADR 0027): `first` the first time; every time
+   * after, what that first answer settled on (`settleSpent`), or nothing while it has not. Kept until
+   * `expiresAt`, past which the token that carries the id is refused anyway.
+   */
+  spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }>;
+  /** What the first answer of a spent id settled on. A no-op for an id never spent. */
+  settleSpent(id: string, settled: SettledAnswer): Promise<void>;
+  /**
    * Store a rotated refresh token and promote its client in one operation.
    *
    * Issuing a token IS what makes a registration permanent, so the two must not
@@ -509,6 +528,8 @@ export interface AuthStorage {
 export class MemoryAuthStore implements AuthStorage {
   private clients = new Map<string, RegisteredClient>();
   private codes = new Map<string, AuthCode>();
+  /** Spent single-use ids: when each may be forgotten, and what its first answer settled on. */
+  private spent = new Map<string, { until: number; settled?: SettledAnswer }>();
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
   private sessions = new Map<string, PanelSession>();
@@ -624,6 +645,20 @@ export class MemoryAuthStore implements AuthStorage {
     if (!value) return undefined;
     this.codes.delete(code);
     return Date.now() > value.expires_at ? undefined : value;
+  }
+
+  async spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }> {
+    const now = Date.now();
+    for (const [spent, row] of this.spent) if (row.until < now) this.spent.delete(spent);
+    const row = this.spent.get(id);
+    if (row) return { first: false, ...(row.settled ? { settled: structuredClone(row.settled) } : {}) };
+    this.spent.set(id, { until: expiresAt });
+    return { first: true };
+  }
+
+  async settleSpent(id: string, settled: SettledAnswer): Promise<void> {
+    const row = this.spent.get(id);
+    if (row) row.settled = structuredClone(settled);
   }
 
   async putRefresh(token: string, value: RefreshToken): Promise<void> {

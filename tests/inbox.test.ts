@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  discardThrough, drain, enqueue, findInbox, inboxDirFor, pendingCount, readMemberships,
+  discardThrough, drain, enqueue, findInbox, inboxDirFor, pendingCount, pendingSummary, readMemberships,
   renderBatch, renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent,
 } from "../src/inbox.js";
 
@@ -96,6 +96,66 @@ describe("inbox queue", () => {
     discardThrough(dir, "m_mine", 2);
 
     expect(drain(dir).map((e) => `${e.member_id}:${e.cursor}`)).toEqual(["m_mine:3", "m_other:1"]);
+  });
+
+  it("pendingSummary counts each member's queued events without taking them", () => {
+    enqueue(dir, event({ member_id: "m1", cursor: 1 }));
+    enqueue(dir, event({ member_id: "m1", cursor: 2, ambient: true }));
+    enqueue(dir, event({ member_id: "m2", cursor: 3 }));
+    expect(pendingSummary(dir)).toEqual([
+      { member_id: "m1", interrupting: 1, ambient: 1 },
+      { member_id: "m2", interrupting: 1, ambient: 0 },
+    ]);
+    expect(drain(dir)).toHaveLength(3);
+    expect(pendingSummary(dir)).toEqual([]);
+  });
+
+  it("pendingSummary answers [] for a directory that does not exist", () => {
+    expect(pendingSummary(join(root, "missing"))).toEqual([]);
+  });
+
+  // Files list by arrival time, so the members interleave; the answer is by member, whatever the order.
+  it("pendingSummary groups a member's events however they arrived, and sorts by member_id", () => {
+    enqueue(dir, event({ member_id: "m2", cursor: 1, at: "2026-09-17T00:00:01.000Z" }));
+    enqueue(dir, event({ member_id: "m1", cursor: 2, at: "2026-09-17T00:00:02.000Z", ambient: true }));
+    enqueue(dir, event({ member_id: "m2", cursor: 3, at: "2026-09-17T00:00:03.000Z", ambient: true }));
+    enqueue(dir, event({ member_id: "m1", cursor: 4, at: "2026-09-17T00:00:04.000Z", ambient: false }));
+    expect(pendingSummary(dir)).toEqual([
+      { member_id: "m1", interrupting: 1, ambient: 1 },
+      { member_id: "m2", interrupting: 1, ambient: 1 },
+    ]);
+  });
+
+  // drain drops an entry it cannot parse; a summary of what is waiting leaves it out rather than fail.
+  it("pendingSummary skips an entry that does not parse", () => {
+    enqueue(dir, event({ member_id: "m2", cursor: 2 }));
+    writeFileSync(join(dir, "000000000000001-m1-000000000001.json"), "{not json");
+    expect(pendingSummary(dir)).toEqual([{ member_id: "m2", interrupting: 1, ambient: 0 }]);
+  });
+
+  // The Stop hook's drain claims a file with a rename; a summary that listed it first finds it gone.
+  it("pendingSummary skips an event another consumer claims between the listing and the read", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        readFileSync: (...args: Parameters<typeof real.readFileSync>) => {
+          const path = String(args[0]);
+          if (path.endsWith("-m1-000000000001.json")) real.renameSync(path, `${path}.claimed`);
+          return real.readFileSync(...args);
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/inbox.js");
+      mocked.enqueue(dir, event({ member_id: "m1", cursor: 1 }));
+      mocked.enqueue(dir, event({ member_id: "m2", cursor: 2 }));
+      expect(mocked.pendingSummary(dir)).toEqual([{ member_id: "m2", interrupting: 1, ambient: 0 }]);
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
   });
 
   it("round-trips memberships and ignores them when draining", () => {

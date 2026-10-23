@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  NO_ORG, allKeysFor, domainKey, grantKey, idpKey, isOrgId, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys,
+  NO_ORG, allKeysFor, domainKey, grantKey, idpKey, isOrgId, orgIndexKey, orgIndexPrefix, orgKey, scimKeyIndex, scimNameKey,
+  scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "../src/grant-index.js";
 import type { PlanGrant } from "../src/types.js";
 
@@ -119,5 +120,15 @@ describe("the org record's key (orgs spec, D1)", () => {
   it("files an org's IdP under oi:<id> and a verified domain under od:<domain>", () => {
     expect(idpKey("org_acme")).toBe("oi:org_acme");
     expect(domainKey("acme.test")).toBe("od:acme.test");
+  });
+
+  /** The SCIM rows (SCIM spec, D1 to D3): the user, the directory by address, the index by key, the token and its lookup. */
+  it("spells the SCIM rows apart from every other prefix", () => {
+    expect(scimUserKey("org_a", "x1")).toBe("su:org_a:x1");
+    expect(scimUserPrefix("org_a")).toBe("su:org_a:");
+    expect(scimNameKey("org_a", "bo@acme.test")).toBe("sn:org_a:bo@acme.test");
+    expect(scimKeyIndex("email:bo@acme.test")).toBe("sk:email:bo@acme.test");
+    expect(scimTokenKey("org_a")).toBe("sc:org_a");
+    expect(scimTokenIndex("h")).toBe("sh:h");
   });
 });

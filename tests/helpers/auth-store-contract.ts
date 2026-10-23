@@ -102,5 +102,30 @@ export function describeAuthStoreContract(name: string, makeStore: () => AuthSto
         expect(await store.countClients()).toBe(1);
       });
     });
+
+    /** The invites page's held sign-in is answered once (ADR 0027): its id is spent by the first answer. */
+    describe("single-use ids", () => {
+      it("spends an id the first time and refuses it every time after, whatever the others do", async () => {
+        const store = makeStore();
+        const until = Date.now() + 600_000;
+        expect(await store.spendOnce("held-1", until)).toEqual({ first: true });
+        expect(await store.spendOnce("held-1", until)).toEqual({ first: false });
+        expect(await store.spendOnce("held-2", until)).toEqual({ first: true });
+        expect(await store.spendOnce("held-1", until + 1)).toEqual({ first: false });
+        const both = await Promise.all([store.spendOnce("held-3", until), store.spendOnce("held-3", until)]);
+        expect(both.map((answer) => answer.first).sort()).toEqual([false, true]);
+      });
+
+      it("tells every answer after the first where the first settled, and settles nothing it never spent", async () => {
+        const store = makeStore();
+        const until = Date.now() + 600_000;
+        const settled = { location: "https://client.test/cb?code=c1", cookies: ["a=b; Path=/"], redrawn: false };
+        await store.spendOnce("held-1", until);
+        await store.settleSpent("held-1", settled);
+        expect(await store.spendOnce("held-1", until)).toEqual({ first: false, settled });
+        await store.settleSpent("never-spent", settled);
+        expect(await store.spendOnce("never-spent", until)).toEqual({ first: true });
+      });
+    });
   });
 }

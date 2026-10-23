@@ -146,6 +146,14 @@ describe("bellman_upload", () => {
     expect(bridge.watching().map((w) => w.member_id)).toEqual(["m_creator"]);
   });
 
+  // The bridge forwards the key as it was given and the server holds it to the grammar, which takes a hyphen after the
+  // first character: an agent that reaches for kebab-case is placed, not refused.
+  it("places a file under a key with a hyphen", async () => {
+    const out = await upload({ path: file("meeting-notes.md", "# notes\n"), key: "meeting-notes" });
+    expect(out.isError, out.text).toBe(false);
+    expect((await fake.store.surfaceOf(ROOM)).map((r) => [r.key, r.kind])).toEqual([["meeting-notes", "file"]]);
+  });
+
   // The fake routes on the path alone, so every test above would pass if the post went to some other
   // origin. This one reads where it went. A second bridge on an origin and port of its own is what tells
   // "the origin it was configured with" from "the one the first bridge happens to use".

@@ -150,7 +150,9 @@ operator creates the record (D7).
 - `POST /org/members` `{ key, role }`: admin. `key` must pass `isStableIdentityKey`; `role` is
   `member` or `admin`. Writes `{ plan: "team", role, orgId, source: "org", grantedBy: the admin,
   expiresAt: null }` through `putGrantIfOwned`: 201 with the member, `409 full` at the cap,
-  `409 conflict` for a key granted in another org.
+  `409 conflict` for a key granted in another org. Amended by ADR 0027: that write is for an
+  identity the org owns by its form, and any other key gets an invite, 202, which the roster
+  lists and `DELETE` withdraws, until the person accepts it at a sign-in (D13).
 - `PATCH /org/members/:key` `{ role }`: admin. The owner's grant cannot be demoted (`409 owner`).
 - `DELETE /org/members/:key`: admin. The owner cannot be removed (`409 owner`); a key with no
   grant in the org is 404. An admin may remove themselves.
@@ -305,6 +307,16 @@ in through SSO as `u_sso_…`, a different account, and their earlier rooms stay
 one. The page the refusal shows says so. Admins should add existing members by their GitHub or
 Google key before turning the switch on if they want those accounts kept; linking the two is a
 follow-up.
+
+**Amended by ADR 0027 (seat consent).** A sign-in lands in this org only by a grant that took
+effect, never by an invite. A seat takes effect without the person only for an identity the org
+owns by its form: a subject of its own IdP, as provisioning above writes, and an address under a
+domain whose `verifiedAt` is set, which the switch's domain half already covers. An admin's seat
+for any other key, a GitHub or Google key among them, is an invite, and the person accepts it on
+a page their next sign-in stops at; the org has none of what a seat carries until then, so it
+refuses none of their sign-ins. Accepting into an org whose switch is on is refused, since the
+account would be refused at its next sign-in by the org it had just joined, so the existing
+members above are added before the switch, and each accepts.
 
 ### D14. The client secret is sealed with a Worker secret
 

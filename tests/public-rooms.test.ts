@@ -181,6 +181,26 @@ describe("a public room's plan", () => {
   });
 });
 
+describe("the tools' words for a public room", () => {
+  /** Every tool's description, by name, as a connected client lists them. */
+  const texts = async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      return Object.fromEntries((await jesse.listTools()).tools.map((t) => [t.name, t.description ?? ""]));
+    } finally {
+      await h.close();
+    }
+  };
+
+  it("put the page on bellman.sh (public rooms on bellman.sh spec, section 1)", async () => {
+    const text = await texts();
+    expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
+    expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
+    expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r/);
+  });
+});
+
 describe("a public room's link", () => {
   // The dash's Worker answers /r/* on bellman.sh, and dash.bellman.sh/r/ only redirects there.
   it("names no old host in a tool description, the README or the docs site", () => {

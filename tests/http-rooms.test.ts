@@ -865,6 +865,17 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["plan"]);
   });
 
+  // A hyphen after the first character is part of a surface key (a role key's grammar has none), and it is a character
+  // a path carries as it is: the route writes it and removes it by the same path.
+  it("takes a key with a hyphen in the path, writes it and removes it by the same path", async () => {
+    const written = (await put(DEV_KEY.jesse, "look-links", { kind: "text", body: "x" }))!;
+    expect(written.status, await written.clone().text()).toBe(200);
+    expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["look-links"]);
+    const removed = (await del(DEV_KEY.jesse, "look-links"))!;
+    expect(removed.status, await removed.clone().text()).toBe(200);
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
   // The malformed escape is decided from the path alone and leaks nothing, but it is still a branch an unauthenticated
   // caller should not reach: the answer to a stranger is the 401 every other route gives.
   it("answers a malformed escape with 401 to a caller who has not signed in, and 400 to one who has", async () => {

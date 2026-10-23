@@ -338,6 +338,20 @@ describe("shape errors name the offending field", () => {
     }))).toThrow(/^roles\.Lead: role keys must match /);
   });
 
+  // The role-key grammar keeps its underscore and has no hyphen, though a surface key may carry one: `renderJoinCode`
+  // prints a role's `_` as `-`, so `lead-dev` and `lead_dev` would print one join code. `Lead` above is refused for
+  // its capital; this one is refused for the hyphen alone.
+  it("authored arm: a role key with a hyphen is refused, in the role-key grammar's words", () => {
+    expect(() => resolveManifest(authored({
+      roles: { "lead-dev": { can: ["send"] }, helper: { can: ["send"] } },
+      creator_role: "helper",
+    }))).toThrow("roles.lead-dev: role keys must match [a-z][a-z0-9_]{0,30}");
+  });
+
+  it.each(["look-links", "a-b", "lead-"])("RoleKeyShape refuses %s: a hyphen is not in a role key", (key) => {
+    expect(RoleKeyShape.safeParse(key).success).toBe(false);
+  });
+
   it("cite arm: an over-long room names room", () => {
     expect(() => resolveManifest({ room: "x".repeat(81), preset: "pair" }))
       .toThrow(/^room: /);

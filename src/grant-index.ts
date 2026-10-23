@@ -33,6 +33,25 @@ export const idpKey = (orgId: string): string => `oi:${orgId}`;
 export const domainKey = (domain: string): string => `od:${domain}`;
 
 /**
+ * The SCIM rows (SCIM spec, D1 to D3). An org id holds no colon, so `su:<org>:` is a prefix of exactly one org's
+ * users; the directory and the key index are read by exact key and never scanned, so an address or a key holding
+ * a colon is no ambiguity there.
+ */
+export const scimUserKey = (orgId: string, id: string): string => `su:${orgId}:${id}`;
+export const scimUserPrefix = (orgId: string): string => `su:${orgId}:`;
+/**
+ * The org's directory by address: the key it is seated under, and the SCIM user managing it. The address is
+ * lowercased here, whoever writes it: a connector lowercases `userName`, an IdP's `email` claim may carry
+ * capitals, and one person must be one entry.
+ */
+export const scimNameKey = (orgId: string, address: string): string => `sn:${orgId}:${address.toLowerCase()}`;
+/** The SCIM user a grant key is managed by. */
+export const scimKeyIndex = (key: string): string => `sk:${key}`;
+/** An org's SCIM token, and the lookup from its hash to the org. */
+export const scimTokenKey = (orgId: string): string => `sc:${orgId}`;
+export const scimTokenIndex = (tokenHash: string): string => `sh:${tokenHash}`;
+
+/**
  * `go:<org>:<key>` is only unambiguous if the org segment cannot itself contain
  * the separator. Otherwise the encoding is not injective and two different
  * (org, key) pairs collide: `("org_a", "github:google:y")` and
@@ -83,3 +102,24 @@ export function staleIndexKeys(
 export function allKeysFor(grant: PlanGrant): string[] {
   return [grantKey(grant.key), orgIndexKey(grant.orgId, grant.key)];
 }
+
+/**
+ * An invite's two rows (ADR 0027), as a grant has two: `io:<org>:<key>` for the org's listing and
+ * its count, `iv:<key>:<org>` for the sign-in that looks up every org that invited a key. Neither
+ * prefix is a grant's, so no scan of `gr:` or `go:` reads one. The key segment of `iv:` is encoded
+ * by the rule above, so a key holding a colon cannot reach another key's range.
+ */
+export const orgInvitesPrefix = (orgId: string): string => `io:${segment(orgId)}:`;
+export const keyInvitesPrefix = (key: string): string => `iv:${segment(key)}:`;
+
+/** Both storage keys an invite occupies. Every delete path clears both. */
+export function inviteKeysFor(invite: { orgId: string; key: string }): string[] {
+  return [`${orgInvitesPrefix(invite.orgId)}${invite.key}`, `${keyInvitesPrefix(invite.key)}${segment(invite.orgId)}`];
+}
+
+/**
+ * The orgs a person declined (ADR 0027), on the person's side: `ix:<subject>:<org>`, keyed by the provider
+ * subject that answered, so an org's own rows for the keys it invited stay as they were.
+ */
+export const declinesPrefix = (subjectKey: string): string => `ix:${segment(subjectKey)}:`;
+export const declineKey = (subjectKey: string, orgId: string): string => `${declinesPrefix(subjectKey)}${segment(orgId)}`;

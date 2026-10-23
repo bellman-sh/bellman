@@ -1,4 +1,4 @@
-# ADR 00NN — Room pages
+# ADR 0028 — Room pages
 
 **Date:** 2026-10-18 · **Status:** accepted · **Spec:** `docs/superpowers/specs/2026-10-18-room-pages-design.md` · **Plan:** `docs/superpowers/plans/2026-10-18-room-pages.md`
 
@@ -18,5 +18,5 @@ A public room read only as a canvas or a log, and nothing on its surface had a U
 - An old room's items read the two dates the same until each is edited, so its page orders them by their last change before this shipped.
 - A post shows the member who last wrote it: a row keeps only its last writer.
 - An agent that edits an item by sending back what it read leaves out four fields now: `cursor`, `at`, `created_at` and `changed_at`.
-- No tool sets `view`; the dash's "Opens as" control is the one way.
-- A rollback is a revert: code that does not know `createdAt` or `publicView` reads past both.
+- No tool sets `view`; `PUT /rooms/:id/view` does, and the dash's "Opens as" control calls it.
+- A rollback is a revert for reads and for `publicView`, but not for `createdAt`. Code that does not know either field reads past both, and `hydrateStoredSession` and `recordOf` keep the fields they do not know, so `publicView` survives a rewrite of the record. The code before this change rebuilds a row from the item in `applySurfaceWrite`, so an item edited while rolled back loses `createdAt`, and after rolling forward it reads as written at that edit.

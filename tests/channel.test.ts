@@ -133,6 +133,8 @@ function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoo
   if (key) env.BELLMAN_KEY = key;
   env.BELLMAN_URL = bellman.url;
   env.XDG_CONFIG_HOME = configHome;
+  // The door is made at launch, so a bridge not given a folder of its own makes one under the real HOME.
+  env.BELLMAN_DOOR_ROOT = configHome;
   env.BELLMAN_NO_BROWSER = "1";
   delete env.BELLMAN_UPLOAD_ROOT;
   if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;

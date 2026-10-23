@@ -4,6 +4,7 @@ import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
+import { scimRoutes } from "./http/scim.js";
 import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
@@ -319,6 +320,15 @@ export default {
       if (handled) return handled;
     }
 
+    // An org's identity provider provisions and deprovisions its members (SCIM spec, D9): behind the fail-closed
+    // guard, and not behind `routeGate`, since there is no caller and no cookie; the org's token is the only identity.
+    if (url.pathname === "/scim/v2" || url.pathname.startsWith("/scim/v2/")) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await scimRoutes(request, { store });
+      if (handled) return handled;
+    }
+
     // The org's audit stream (audit trail spec, D7 and D8), on the room routes' rules and behind the same guard.
     if (url.pathname === "/audit" || url.pathname.startsWith("/audit/")) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
@@ -512,6 +522,7 @@ export default {
       const server = buildServer(identity, store, blobs, {
         hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS),
         mailReport,
+        upgrade: oauth?.paymentLinks ? { origin: oauth.issuer, paymentLinks: oauth.paymentLinks } : undefined,
       });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

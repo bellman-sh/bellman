@@ -421,6 +421,23 @@ export interface OrgDomain {
 export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
 
 /**
+ * A seat an org's admin offered to a person the org does not own by its form (ADR 0027): stored
+ * apart from the grants, under its own keys, so nothing that reads a grant can take it for a seat.
+ * Until the person accepts it at a sign-in the org gains nothing over them; accepting writes the
+ * grant, and declining or the admin's withdrawal removes this and nothing else.
+ */
+export interface OrgInvite {
+  orgId: string;
+  /** The stable key the admin named: a provider subject, or an address. */
+  key: string;
+  /** The role the grant will carry if the person accepts. */
+  role: Role;
+  /** The admin who offered the seat; the grant names them as `grantedBy` when it is taken. */
+  invitedBy: string;
+  invitedAt: number;
+}
+
+/**
  * An org's identity provider (SSO spec, D9): one OIDC provider, discovered when its admin saved it,
  * stored apart from the `Org` record under its own key so a read of the org never hands out a
  * secret. `clientSecret` is sealed (D14); no route returns it. `protocol` is the field SAML would
@@ -441,6 +458,46 @@ export interface OrgIdp {
   userinfoEndpoint: string | null;
   configuredAt: number;
   configuredBy: string;
+}
+
+/**
+ * A member as an org's identity provider pushed them (SCIM spec, D2): the row the IdP reads back by `id`,
+ * and the one place a key, an address and the IdP's own id for the person are tied together. Membership is
+ * still the grant: an active user holds a `team` member grant from `scim` under `key`, an inactive one none.
+ */
+export interface ScimUser {
+  /** Opaque and random: the IdP stores it and asks by it. */
+  id: string;
+  orgId: string;
+  /** The address, lowercased whole. */
+  userName: string;
+  externalId: string | null;
+  active: boolean;
+  /** The grant key the person is seated under, as it stands now: `email:<userName>` until a sign-in claims it onto a subject. */
+  key: string;
+  createdAt: number;
+  updatedAt: number;
+  /**
+   * When the IdP deleted the row, or null. A deleted user is a tombstone: hidden from every read but the key
+   * index, which keeps refusing the subject as a deactivated one is refused, until a push starts them over.
+   */
+  deletedAt: number | null;
+}
+
+/** What a push may change (SCIM spec, D8): the name, the IdP's id, and whether the person is active. */
+export type ScimUserPatch = Partial<Pick<ScimUser, "userName" | "externalId" | "active">>;
+
+/** An org's SCIM bearer token (SCIM spec, D1): its SHA-256 and its provenance, never the token itself. */
+export interface ScimToken {
+  tokenHash: string;
+  issuedAt: number;
+  issuedBy: string;
+}
+
+/** The directory row (SCIM spec, D3): the key an address is seated under, and the SCIM user managing it, if one does. */
+export interface DirectoryEntry {
+  key: string;
+  scimId: string | null;
 }
 
 /**

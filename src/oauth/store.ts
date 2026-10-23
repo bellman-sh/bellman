@@ -5,7 +5,7 @@ import {
   REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, SWEEP_INTERVAL_MS, SWEEP_RESUME_MS,
   clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
-  type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient,
+  type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient, type SettledAnswer,
   type SweepStorage,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
@@ -27,6 +27,8 @@ import type { Identity } from "../types.js";
  */
 
 const CODE = "code:";
+/** Spent single-use ids (ADR 0027): the invites page's held sign-ins, each kept until its token expires. */
+const SPENT = "spent:";
 const REFRESH = "refresh:";
 const CLIENT = "client:";
 const REG = "reg:";
@@ -187,8 +189,8 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * #insertClient, #purgeStale and #clientCount take the handle they work through so that
    * it does.
    *
-   * Not every method here has been converted. takeCode, takeRefresh, markClientUsed,
-   * putRefresh, registerClient and purgeStale still read and then write. They are
+   * Not every method here has been converted. markClientUsed, putRefresh, registerClient and
+   * purgeStale still read and then write. They are
    * unconverted, not exempt: the input gate covers them in production, since every await
    * between their read and their write is storage, and the transaction is the stronger
    * form. registerClient and purgeStale have no production caller: /register goes through
@@ -433,13 +435,30 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     await this.#purge(CODE);
   }
 
+  /** The read and the write in one transaction: two answers with one held sign-in cannot both be first. */
+  async spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }> {
+    const key = `${SPENT}${id}`;
+    const answer = await this.ctx.storage.transaction(async (txn) => {
+      const row = await txn.get<{ expires_at: number; settled?: SettledAnswer }>(key);
+      if (row) return { first: false as const, ...(row.settled ? { settled: row.settled } : {}) };
+      await txn.put(key, { expires_at: expiresAt });
+      return { first: true as const };
+    });
+    await this.#purge(SPENT);
+    return answer;
+  }
+
+  async settleSpent(id: string, settled: SettledAnswer): Promise<void> {
+    const key = `${SPENT}${id}`;
+    await this.ctx.storage.transaction(async (txn) => {
+      const row = await txn.get<{ expires_at: number }>(key);
+      if (row) await txn.put(key, { ...row, settled });
+    });
+  }
+
   /** Single use: a replayed authorization code finds nothing. */
   async takeCode(code: string): Promise<AuthCode | undefined> {
-    const key = `${CODE}${code}`;
-    const value = await this.ctx.storage.get<AuthCode>(key);
-    if (!value) return undefined;
-    await this.ctx.storage.delete(key);
-    return Date.now() > value.expires_at ? undefined : value;
+    return this.#take<AuthCode>(`${CODE}${code}`);
   }
 
   /**
@@ -462,11 +481,24 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
   /** Single use as well: refresh tokens rotate, so using one retires it. */
   async takeRefresh(token: string): Promise<RefreshToken | undefined> {
-    const key = `${REFRESH}${token}`;
-    const value = await this.ctx.storage.get<RefreshToken>(key);
-    if (!value) return undefined;
-    await this.ctx.storage.delete(key);
-    return Date.now() > value.expires_at ? undefined : value;
+    return this.#take<RefreshToken>(`${REFRESH}${token}`);
+  }
+
+  /**
+   * A single-use record read and deleted in one transaction (#173), so two takes of one code
+   * or token cannot both get it. It awaits nothing but storage, which is why the input gate
+   * covered it before the transaction did; the transaction holds if that stops being true, as
+   * touchSession's does. An expired record is deleted and not returned.
+   *
+   * `#private`; see #clientCount.
+   */
+  async #take<T extends { expires_at: number }>(key: string): Promise<T | undefined> {
+    return this.ctx.storage.transaction<T | undefined>(async (txn) => {
+      const value = await txn.get<T>(key);
+      if (!value) return undefined;
+      await txn.delete(key);
+      return Date.now() > value.expires_at ? undefined : value;
+    });
   }
 
   async putSession(id: string, value: PanelSession): Promise<void> {
@@ -640,6 +672,12 @@ export class AuthStore implements AuthStorage, BillingStorage {
   }
   takeCode(code: string): Promise<AuthCode | undefined> {
     return this.object.takeCode(code);
+  }
+  spendOnce(id: string, expiresAt: number): Promise<{ first: true } | { first: false; settled?: SettledAnswer }> {
+    return this.object.spendOnce(id, expiresAt);
+  }
+  settleSpent(id: string, settled: SettledAnswer): Promise<void> {
+    return this.object.settleSpent(id, settled);
   }
   putRefresh(token: string, value: RefreshToken): Promise<void> {
     return this.object.putRefresh(token, value);

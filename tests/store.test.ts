@@ -21,6 +21,8 @@ describeStoreContract(
     blobsFor: () => blobs,
     // The filing times a report's limit counts from are in a private map, and BellmanStore cannot show whose are still held.
     reporterRows: async () => [...(memory as unknown as { filings: Map<string, number[]> }).filings.keys()],
+    // The SCIM key index is a private map too, and every read of a row goes on to the user it names.
+    scimIndexRows: async () => [...(memory as unknown as { scimByKey: Map<string, unknown> }).scimByKey.keys()].sort(),
   },
 );
 

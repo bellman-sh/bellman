@@ -6,8 +6,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ORG_WRITE_BYTES, orgRoutes, type OrgRouteDeps } from "../src/http/orgs.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
+import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
+import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 
@@ -137,7 +139,7 @@ describe("PATCH /org", () => {
 
   it("refuses a cookie write without the panel's Origin, a bad name, a stray field, and a member", async () => {
     expect((await call("cookie-owner", "/org", "PATCH", { name: "X" }, null))!.status).toBe(403);
-    for (const body of [{ name: "" }, { name: "a".repeat(81) }, {}, { seats: 9 }, "null", "[]"]) {
+    for (const body of [{ name: "" }, { name: "a".repeat(81) }, { name: "Ac\u202eme" }, { name: "Acme\u200b" }, {}, { seats: 9 }, "null", "[]"]) {
       expect((await call("owner", "/org", "PATCH", body))!.status, JSON.stringify(body)).toBe(400);
     }
     expect((await call("member", "/org", "PATCH", { name: "X" }))!.status).toBe(403);
@@ -146,12 +148,16 @@ describe("PATCH /org", () => {
 });
 
 describe("GET /org/members", () => {
-  it("lists the org's grants as members, the owner marked, for an admin", async () => {
+  it("lists the org's grants as members, the owner marked, and its invites after them, for an admin", async () => {
+    await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
     await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
+    await store.putOrgInvite({ orgId: "org_acme", key: "github:9", role: "admin", invitedBy: "u_github_1", invitedAt: 2 }, { actorUserId: "u_github_1" });
     const res = (await call("admin-2", "/org/members"))!;
     expect([res.status, await res.json()]).toEqual([200, { members: [
-      { key: "github:1", user_id: "u_github_1", role: "admin", plan: "team", source: "operator", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: true },
-      { key: "email:bo@acme.test", user_id: null, role: "member", plan: "team", source: "org", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: false },
+      { key: "github:1", user_id: "u_github_1", role: "admin", plan: "team", source: "operator", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: true, status: "member" },
+      { key: "email:bo@acme.test", user_id: null, role: "member", plan: "team", source: "org", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: false, status: "member" },
+      { key: "github:9", user_id: "u_github_9", role: "admin", status: "invited", invited_at: "1970-01-01T00:00:00.002Z", invited_by: "u_github_1" },
     ] }]);
   });
 
@@ -165,17 +171,54 @@ describe("GET /org/members", () => {
 
 describe("POST /org/members", () => {
   const add = (who: string, body: unknown, origin: string | null = PANEL) => call(who, "/org/members", "POST", body, origin);
+  /** acme.test proven, so an address under it is the org's by its form (ADR 0027). */
+  const verified = async () => {
+    await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
+    await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
+  };
 
-  it("seats a member by any stable key, as a team grant from this org, until the seats run out", async () => {
+  it("seats an address on a verified domain as a team grant from this org, until the seats run out", async () => {
+    await verified();
     const res = (await add("owner", { key: "email:bo@acme.test", role: "member" }))!;
     expect([res.status, await res.json()]).toEqual([201, { member: {
-      key: "email:bo@acme.test", user_id: null, role: "member", plan: "team", source: "org", granted_at: expect.any(String), expires_at: null, owner: false,
+      key: "email:bo@acme.test", user_id: null, role: "member", plan: "team", source: "org", granted_at: expect.any(String), expires_at: null, owner: false, status: "member",
     } }]);
     expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ plan: "team", orgId: "org_acme", source: "org", grantedBy: "u_github_1" });
-    expect((await add("owner", { key: "github:9", role: "admin" }))!.status).toBe(201);
-    const full = (await add("owner", { key: "github:10", role: "member" }))!;
+    expect((await add("owner", { key: "email:Cy@ACME.test", role: "admin" }))!.status).toBe(201);
+    const full = (await add("owner", { key: "email:di@acme.test", role: "member" }))!;
     expect([full.status, await full.json()]).toEqual([409, { error: "full", error_description: "this org holds 3 of 3 seats", seats: 3, seats_used: 3 }]);
-    expect(await store.getGrant("github:10")).toBeUndefined();
+    expect(await store.getGrant("email:di@acme.test")).toBeUndefined();
+  });
+
+  /**
+   * Any other key names a person the org does not own (ADR 0027): the admin offers a seat, and nothing
+   * of the org reaches them until they accept it. A provider subject, an address under no domain the org
+   * proved, one under a domain it only claimed, a provider-scoped address, and a key another org holds.
+   */
+  it("invites every key the org does not own by its form: no grant, no seat, a 202 the roster lists", async () => {
+    await store.claimDomain("org_acme", "claimed.test", "tok", 1, { actorUserId: "u_op" });
+    const keys = ["github:9", "google:118", "email:bo@elsewhere.test", "email:bo@claimed.test", "github:bo@acme.test", "github:2"];
+    for (const key of keys) {
+      const res = (await add("owner", { key, role: "member" }))!;
+      expect([res.status, await res.json()], key).toEqual([202, { member: {
+        key, user_id: /^(github|google):\d+$/.test(key) ? `u_${key.replace(":", "_")}` : null, role: "member", status: "invited",
+        invited_at: expect.any(String), invited_by: "u_github_1",
+      } }]);
+    }
+    for (const key of keys.slice(0, -1)) expect(await store.getGrant(key), key).toBeUndefined();
+    expect(await store.getGrant("github:2")).toMatchObject({ orgId: "org_b" });
+    expect(await store.countOrgMembers("org_acme")).toBe(1);
+    const roster = (await json(await call("owner", "/org/members"))).members as { key: string; status: string }[];
+    expect(roster.map((m) => [m.key, m.status])).toEqual([["github:1", "member"], ...[...keys].sort().map((k) => [k, "invited"])]);
+    expect((await store.auditForOrg("org_acme", 50)).filter((e) => e.action === "member_invited")).toHaveLength(keys.length);
+    expect((await store.auditForOrg("org_acme", 50)).filter((e) => e.action === "plan_granted" && e.actorUserId === "u_github_1")).toEqual([]);
+  });
+
+  it("refuses a second invite of one key, keeping the first offer's role", async () => {
+    expect((await add("owner", { key: "github:9", role: "admin" }))!.status).toBe(202);
+    const again = (await add("admin-2", { key: "github:9", role: "member" }))!;
+    expect([again.status, (await json(again)).error]).toEqual([409, "exists"]);
+    expect(await store.listOrgInvites("org_acme", 10)).toEqual([expect.objectContaining({ key: "github:9", role: "admin", invitedBy: "u_github_1" })]);
   });
 
   /** An sso key names its org: seated elsewhere, the person would sign in through their own IdP and land in the wrong org. */
@@ -188,9 +231,10 @@ describe("POST /org/members", () => {
   });
 
   it("writes a grant that is this org's, whatever the body says of plan, org or source", async () => {
-    const res = (await add("owner", { key: "github:9", role: "member", plan: "max", orgId: "org_b", source: "purchase", expiresAt: 5 }))!;
+    await verified();
+    const res = (await add("owner", { key: "email:bo@acme.test", role: "member", plan: "max", orgId: "org_b", source: "purchase", expiresAt: 5 }))!;
     expect(res.status).toBe(201);
-    expect(await store.getGrant("github:9")).toMatchObject({ plan: "team", orgId: "org_acme", source: "org", expiresAt: null });
+    expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ plan: "team", orgId: "org_acme", source: "org", expiresAt: null });
   });
 
   /**
@@ -211,11 +255,13 @@ describe("POST /org/members", () => {
     expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.actorUserId === "u_github_1")).toEqual([]);
   });
 
-  it("refuses a key granted in another org, and a cookie without the panel's Origin", async () => {
-    const taken = (await add("owner", { key: "github:2", role: "member" }))!;
+  it("refuses an owned key granted in another org, and a cookie without the panel's Origin", async () => {
+    await verified();
+    await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", orgId: "org_b" }, "org_b", { actorUserId: "u_github_2" });
+    const taken = (await add("owner", { key: "email:bo@acme.test", role: "member" }))!;
     expect([taken.status, (await json(taken)).error]).toEqual([409, "conflict"]);
     expect((await add("cookie-owner", { key: "github:9", role: "member" }, null))!.status).toBe(403);
-    expect((await add("cookie-owner", { key: "github:9", role: "member" }))!.status).toBe(201);
+    expect((await add("cookie-owner", { key: "github:9", role: "member" }))!.status).toBe(202);
   });
 
   it("refuses a body that is not the shape named, and a body past the bound", async () => {
@@ -231,6 +277,7 @@ describe("POST /org/members", () => {
     expect((await add("free-admin", { key: "github:9", role: "member" }))!.status).toBe(403);
     expect((await add("unrecorded", { key: "github:9", role: "member" }))!.status).toBe(404);
     expect(await store.getGrant("github:9")).toBeUndefined();
+    expect(await store.invitesFor(["github:9"])).toEqual([]);
   });
 });
 
@@ -270,6 +317,17 @@ describe("DELETE /org/members/:key", () => {
     expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "plan_revoked", actorUserId: "u_github_1", detail: { key: "email:bo@acme.test" } });
     expect((await call("admin-2", "/org/members/github%3A9", "DELETE"))!.status).toBe(204);
     expect(await store.getGrant("github:9")).toBeUndefined();
+  });
+
+  it("withdraws an invite, once, recording the admin who did", async () => {
+    await call("owner", "/org/members", "POST", { key: "google:118", role: "member" });
+    await store.putOrgInvite({ orgId: "org_b", key: "google:118", role: "member", invitedBy: "u_github_2", invitedAt: 3 }, { actorUserId: "u_github_2" });
+    expect((await call("admin-2", "/org/members/google%3A118", "DELETE"))!.status).toBe(204);
+    expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
+    expect(await store.listOrgInvites("org_b", 10)).toEqual([expect.objectContaining({ key: "google:118" })]);
+    expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "invite_withdrawn", actorUserId: "u_github_9", detail: { key: "google:118" } });
+    expect((await call("admin-2", "/org/members/google%3A118", "DELETE"))!.status).toBe(404);
+    expect((await call("member", "/org/members/google%3A118", "DELETE"))!.status).toBe(403);
   });
 
   it("keeps the owner, knows no other org's key, and refuses a cookie without the panel's Origin", async () => {
@@ -397,5 +455,58 @@ describe("PATCH /org { require_sso } (SSO spec, D13)", () => {
     expect((await call("owner", "/org", "PATCH", { require_sso: "yes" }))!.status).toBe(400);
     expect((await call("owner", "/org", "PATCH", { require_sso: false }))!.status).toBe(200);
     expect((await store.getOrg("org_acme"))?.requireSso).toBe(false);
+  });
+});
+
+describe("SCIM (SCIM spec, D1, D10)", () => {
+  it("tells an admin whether a token is set, and a member nothing", async () => {
+    expect((await call("member", "/org/scim"))!.status).toBe(403);
+    expect(await json(await call("owner", "/org/scim"))).toEqual({ base_url: `${ISSUER}/scim/v2`, token_set: false, issued_at: null, issued_by: null });
+    const res = (await call("owner", "/org/scim", "DELETE"))!;
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "GET"]);
+  });
+
+  it("issues a token once, replaces it on a second issue, and revokes it", async () => {
+    const first = (await call("owner", "/org/scim/token", "POST"))!;
+    const issued = await json(first);
+    expect(first.status).toBe(201);
+    expect(issued).toMatchObject({ replaced: false, issued_by: "u_github_1", base_url: `${ISSUER}/scim/v2` });
+    expect(issued.token).toMatch(/^bst_[A-Za-z0-9_-]{43}$/);
+    expect(await store.orgForScimToken(await sha256Base64url(issued.token as string))).toBe("org_acme");
+    expect(await json(await call("owner", "/org/scim"))).toMatchObject({ token_set: true, issued_by: "u_github_1" });
+    const second = await json(await call("admin-2", "/org/scim/token", "POST"));
+    expect(second).toMatchObject({ replaced: true, issued_by: "u_github_9" });
+    expect(await store.orgForScimToken(await sha256Base64url(issued.token as string))).toBeUndefined();
+    expect(await store.orgForScimToken(await sha256Base64url(second.token as string))).toBe("org_acme");
+    expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "scim_token_issued").map((e) => e.detail.replaced)).toEqual([false, true]);
+    expect((await call("owner", "/org/scim/token", "DELETE"))!.status).toBe(204);
+    expect(await store.orgForScimToken(await sha256Base64url(second.token as string))).toBeUndefined();
+    expect((await call("owner", "/org/scim/token", "DELETE"))!.status).toBe(404);
+    expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "scim_token_revoked", actorUserId: "u_github_1" });
+  });
+
+  it("refuses a cookie without the panel's Origin, a member, and an org with no record", async () => {
+    expect((await call("cookie-owner", "/org/scim/token", "POST", undefined, null))!.status).toBe(403);
+    expect((await call("member", "/org/scim/token", "POST"))!.status).toBe(403);
+    expect((await call("unrecorded", "/org/scim/token", "POST"))!.status).toBe(404);
+    expect(await store.scimTokenOf("org_acme")).toBeUndefined();
+  });
+
+  it("leaves a member the IdP pushed to the IdP, and still removes one an admin seated", async () => {
+    await store.createScimUser({
+      id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: null, active: true, key: "email:bo@acme.test", createdAt: 1, updatedAt: 1, deletedAt: null,
+    }, scimIntent("org_acme"));
+    const managed = (await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!;
+    const refusal = await json(managed);
+    expect([managed.status, refusal.error, refusal.error_description]).toEqual([409, "managed", "this member is provisioned by your identity provider; remove them there"]);
+    expect(await store.getGrant("email:bo@acme.test")).toBeDefined();
+    expect((await call("owner", "/org/members/email%3Abo%40acme.test", "PATCH", { role: "admin" }))!.status).toBe(200);
+    await store.updateScimUser("org_acme", "x1", { active: false }, 2, scimIntent("org_acme"));
+    // Seating a deactivated person by hand would make a member the IdP keeps refusing: they come back through the IdP.
+    const dead = (await call("owner", "/org/members", "POST", { key: "email:bo@acme.test", role: "member" }))!;
+    expect([dead.status, (await json(dead)).error]).toEqual([409, "managed"]);
+    expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+    await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
+    expect((await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!.status).toBe(204);
   });
 });

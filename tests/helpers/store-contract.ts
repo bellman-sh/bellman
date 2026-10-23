@@ -25,7 +25,9 @@ import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
-import type { AuditEntry, Org, OrgIdp, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
+import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
@@ -99,6 +101,11 @@ export interface StoreContractHarness {
    * reporter's account is kept 180 days after resolution and not for good.
    */
   reporterRows: () => Promise<string[]>;
+  /**
+   * The SCIM key index rows the store holds, `sk:<key>` (ADR 0029), which `BellmanStore` cannot show: every read
+   * of one goes on to the user it names, so a row left on a key no user names any longer shows only here.
+   */
+  scimIndexRows: () => Promise<string[]>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -1733,6 +1740,18 @@ export function describeStoreContract(
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
     });
 
+    it("keeps a person's rooms apart from someone whose id extends theirs past a colon, and drops none of theirs", async () => {
+      // An operator-issued user id may hold a colon, so `u_x:a` extends `u_x` (#295). The walk
+      // resolves each row it lists and drops the closed ones, so a row it listed that is not this
+      // person's would be dropped from the other person's index.
+      await store.createSession(session({ id: "qs_b_own", createdBy: "u_x" }));
+      await store.createSession(session({ id: "qs_a_other", createdBy: "u_x:a" }));
+
+      expect(await store.sessionsCreatedBy("u_x", 1)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsCreatedBy("u_x", 10)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsCreatedBy("u_x:a", 10)).toEqual(["qs_a_other"]);
+    });
+
     /**
      * A lapse freezes the rooms this names, so a closed one is budget spent on
      * nothing. The index was never pruned and `limit` was applied to raw rows,
@@ -1828,6 +1847,17 @@ export function describeStoreContract(
 
       expect(await store.sessionsJoinedBy("u_a", 10)).toEqual(["qs_of_a"]);
       expect(await store.sessionsJoinedBy("u_ab", 10)).toEqual(["qs_of_ab"]);
+    });
+
+    it("keeps a person apart from someone whose id extends theirs past a colon", async () => {
+      // An operator-issued user id may hold a colon, so `u_x:a` extends `u_x` (#295), and its rows
+      // must cost `u_x` no place in a short listing either.
+      await store.createSession(ownedBy("qs_b_own", "u_x"));
+      await store.createSession(ownedBy("qs_a_other", "u_x:a"));
+
+      expect(await store.sessionsJoinedBy("u_x", 1)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsJoinedBy("u_x", 10)).toEqual(["qs_b_own"]);
+      expect(await store.sessionsJoinedBy("u_x:a", 10)).toEqual(["qs_a_other"]);
     });
 
     it("lists a room once for a person who joined it from two machines", async () => {
@@ -2849,6 +2879,19 @@ export function describeStoreContract(
           await store.appendEvent(s.id, wrote(item), { surface: { key, item } });
         }
         expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["alpha", "mid", "zeta"]);
+      });
+
+      // A surface key may carry a hyphen. "-" is 0x2D, the digits 0x30-0x39, "_" 0x5F and the letters after, and both
+      // stores sort that way (`<` on the keys; the storage's `list` by the bytes of `sf:<key>`). `localeCompare` puts
+      // "_" before "-", so a store that used it would lay the canvas out differently for the same room.
+      it("sorts rows by key in code-unit order, a hyphen before a digit and a digit before an underscore", async () => {
+        const s = session({});
+        await store.createSession(s);
+        for (const key of ["ab", "a_b", "a1", "a-b", "a-"]) {
+          const item = { ...plan(), key };
+          await store.appendEvent(s.id, wrote(item), { surface: { key, item } });
+        }
+        expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["a-", "a-b", "a1", "a_b", "ab"]);
       });
 
       it("removes the row and moves the cursor; removing nothing moves neither", async () => {
@@ -3890,6 +3933,13 @@ export function describeStoreContract(
         await store.releaseHostedRoom("u_slots", "qs_s2");
         expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: true });
         expect(await store.reserveHostedRoom("u_slots", "qs_s5", 2)).toEqual({ ok: false, open: 2 });
+      });
+
+      it("counts only a person's own slots, not those of someone whose id extends theirs past a colon", async () => {
+        // `u_x:a` extends `u_x` (#226, #295): its open hosted room is not one of u_x's.
+        expect(await store.reserveHostedRoom("u_x:a", "qs_a_other", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_x", "qs_b_own", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_x:a", "qs_a_again", 1)).toEqual({ ok: false, open: 1 });
       });
 
       it("admits one of two reservations made at once at the limit", async () => {
@@ -5088,6 +5138,630 @@ export function describeStoreContract(
       });
     });
 
+    /**
+     * An invite is an offer of a seat, kept apart from the grants (ADR 0027): nothing that reads a grant
+     * (a plan, an org, a seat count, the roster of members) can find one, and it becomes a grant only
+     * through the grant write the person's own Join makes.
+     */
+    describe("invites (ADR 0027)", () => {
+      const acme = (over: Partial<Org> = {}): Org => ({
+        orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
+        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+      });
+      const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
+        grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
+      });
+      const invite = (key: string, over: Partial<OrgInvite> = {}): OrgInvite => ({
+        orgId: "org_acme", key, role: "member", invitedBy: "u_github_1", invitedAt: 7, ...over,
+      });
+      const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
+      const orgEvents = async (orgId = "org_acme") =>
+        (await store.auditForOrg(orgId, 500)).map((e) => e.action).filter((a) => a !== "org_created" && a !== "plan_granted");
+      const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+
+      it("keeps an invite out of every grant read: no grant, no seat, no member", async () => {
+        await seated();
+        expect(await store.putOrgInvite(invite("github:9"), by)).toBe("invited");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect((await store.listGrants(10, "org_acme")).map((g) => g.key)).toEqual(["github:1"]);
+        expect((await store.listGrants(10)).map((g) => g.key)).toEqual(["github:1"]);
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([invite("github:9")]);
+        expect(await store.invitesFor(["github:9"])).toEqual([invite("github:9")]);
+        const rows = (await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "member_invited");
+        expect(rows.map((e) => [e.actorUserId, e.sessionId, e.detail])).toEqual([["u_github_1", "org:org_acme", { key: "github:9", role: "member" }]]);
+      });
+
+      it("refuses an org with no record, and a key this org already invited, keeping the first offer", async () => {
+        expect(await store.putOrgInvite(invite("github:9"), by)).toBe("no_org");
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect(await store.putOrgInvite(invite("github:9", { role: "admin", invitedAt: 8 }), by)).toBe("exists");
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([invite("github:9")]);
+        expect(await orgEvents()).toEqual(["member_invited"]);
+      });
+
+      it("finds a key's invites from every org, in the keys' order and then by org, and none of a key it is a prefix of", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putOrgInvite(invite("email:bo@x.test", { orgId: "org_b" }), by);
+        await store.putOrgInvite(invite("email:bo@x.test"), by);
+        await store.putOrgInvite(invite("github:9"), by);
+        await store.putOrgInvite(invite("github:99"), by);
+        expect((await store.invitesFor(["github:9", "email:bo@x.test", "github:9"])).map((i) => [i.key, i.orgId])).toEqual([
+          ["github:9", "org_acme"], ["email:bo@x.test", "org_acme"], ["email:bo@x.test", "org_b"],
+        ]);
+        expect(await store.invitesFor(["github:8", "email:bo@x"])).toEqual([]);
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:bo@x.test", "github:9", "github:99"]);
+        expect((await store.listOrgInvites("org_acme", 2)).map((i) => i.key)).toEqual(["email:bo@x.test", "github:9"]);
+        expect((await store.listOrgInvites("org_b", 10)).map((i) => i.key)).toEqual(["email:bo@x.test"]);
+      });
+
+      it("drops an invite once, both rows, with the admin's withdrawal recorded", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        await store.putOrgInvite(invite("github:10"), by);
+        expect(await store.deleteOrgInvite("org_acme", "github:9", by)).toBe("deleted");
+        expect(await store.deleteOrgInvite("org_acme", "github:9", by)).toBe("missing");
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([invite("github:10")]);
+        expect(await store.invitesFor(["github:9", "github:10"])).toEqual([invite("github:10")]);
+        expect(await orgEvents()).toEqual(["member_invited", "member_invited", "invite_withdrawn"]);
+        expect(await store.putOrgInvite(invite("github:9"), by)).toBe("invited");
+      });
+
+      const person = { actorUserId: "u_github_9", actorLabel: "nine@x.test", actorOrgId: null };
+      const keys = ["github:9", "github:nine@x.test", "email:nine@x.test"];
+
+      it("joins in one operation: the invite's role, from the admin who invited, under the subject, and every key's invite gone", async () => {
+        await seated();
+        await store.putOrgInvite(invite("email:nine@x.test", { role: "admin", invitedBy: "u_github_7" }), by);
+        await store.putOrgInvite(invite("github:9"), by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("github:9")).toEqual({
+          key: "github:9", plan: "team", role: "member", orgId: "org_acme", source: "invite", grantedAt: 40, grantedBy: "u_github_1", expiresAt: null,
+        });
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
+        expect(await store.invitesFor(keys)).toEqual([]);
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        const granted = (await store.auditForOrg("org_acme", 20)).at(-1);
+        expect([granted?.action, granted?.actorUserId, granted?.detail.key]).toEqual(["plan_granted", "u_github_9", "github:9"]);
+      });
+
+      it("seats nobody for an offer that is not there: no record, no invite, or one withdrawn first", async () => {
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("gone");
+        await seated();
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("gone");
+        await store.putOrgInvite(invite("github:9"), by);
+        await store.deleteOrgInvite("org_acme", "github:9", by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("gone");
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putOrgInvite(invite("github:9", { orgId: "org_b" }), by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("gone");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+      });
+
+      it("refuses an org that requires SSO, a key holding any grant, and a full org, keeping the invite", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        await store.updateOrg("org_acme", { requireSso: true }, by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("sso");
+        await store.updateOrg("org_acme", { requireSso: false }, by);
+        await store.putGrant(owner({ key: "email:nine@x.test", role: "member", orgId: null, plan: "pro", source: "operator" }));
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("taken");
+        await store.deleteGrant("email:nine@x.test");
+        await store.putGrantIfOwned(owner({ key: "github:3", role: "member", source: "org" }), "org_acme", by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("full");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([invite("github:9")]);
+      });
+
+      it("answers member for a key that already holds this org's grant, and drops the invites", async () => {
+        await seated();
+        await store.putOrgInvite(invite("email:nine@x.test"), by);
+        await store.putGrantIfOwned(owner({ key: "github:9", role: "admin", source: "org" }), "org_acme", by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("member");
+        expect(await store.getGrant("github:9")).toMatchObject({ role: "admin", source: "org" });
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
+      });
+
+      /** A seat on an address the org no longer owns by its form is an offer too, and the Join moves it onto the subject. */
+      it("moves an unowned address seat onto the subject, even at the seats, and leaves an owned one alone", async () => {
+        await seated();
+        await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "admin", source: "org", grantedBy: "u_github_7", grantedAt: 5 }), "org_acme", by);
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("email:nine@x.test")).toBeUndefined();
+        expect(await store.getGrant("github:9")).toMatchObject({ role: "admin", source: "invite", grantedBy: "u_github_7", grantedAt: 40 });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+
+        await store.claimDomain("org_acme", "y.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "y.test", 2, by);
+        await store.putGrantIfOwned(owner({ key: "email:ten@y.test", role: "member", source: "org" }), "org_acme", by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:10", "email:ten@y.test"], "github:10", 41, person)).toBe("gone");
+      });
+
+      /** An unowned seat holds nothing, in this org or another (ADR 0027): none of them makes the Join `taken` or `member`. */
+      it("leaves another org's unowned seat out, and moves every unowned seat of this org's", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.putGrantIfOwned(owner({ key: "github:nine@x.test", role: "admin", source: "org", grantedBy: "u_github_7" }), "org_acme", by);
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", role: "admin", grantedBy: "u_github_7", source: "invite" });
+        expect(await store.getGrant("github:nine@x.test")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_b" });
+
+        await store.updateOrg("org_acme", { seats: 4 }, by);
+        await store.putGrantIfOwned(owner({ key: "email:ten@x.test", role: "member", source: "org" }), "org_acme", by);
+        await store.putGrantIfOwned(owner({ key: "github:ten@x.test", role: "member", source: "org" }), "org_acme", by);
+        await store.updateOrg("org_acme", { seats: 2 }, by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:10", "github:ten@x.test", "email:ten@x.test"], "github:10", 41, person)).toBe("joined");
+        expect([await store.getGrant("email:ten@x.test"), await store.getGrant("github:ten@x.test")]).toEqual([undefined, undefined]);
+        expect(await store.countOrgMembers("org_acme")).toBe(3);
+      });
+
+      /** An address another org seated and never owned is the domain's owner's to seat (ADR 0027): the seat is replaced, naming no org to the one that held it. */
+      it("lets the org that owns an address by its form take it from another org's unowned seat, and only that org", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2", seats: 3 }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "admin", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.putGrantIfOwned(owner({ key: "email:ten@y.test", role: "member", source: "org", orgId: "org_b" }), "org_b", by);
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        expect(await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org" }), "org_acme", by)).toBe("written");
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", role: "member" });
+        expect((await store.listGrants(10, "org_b")).map((g) => g.key).sort()).toEqual(["email:ten@y.test", "github:2"]);
+        const revoked = (await store.auditForOrg("org_b", 20)).at(-1);
+        expect([revoked?.action, revoked?.actorUserId, revoked?.actorOrgId, revoked?.detail.key]).toEqual(["plan_revoked", "system", null, "email:nine@x.test"]);
+        expect(JSON.stringify(revoked)).not.toContain("org_acme");
+        expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "plan_granted", detail: { key: "email:nine@x.test", org_id: "org_acme" } });
+        expect(await store.putGrantIfOwned(owner({ key: "email:ten@y.test", role: "member", source: "org" }), "org_acme", by)).toBe("conflict");
+        expect(await store.getGrant("email:ten@y.test")).toMatchObject({ orgId: "org_b" });
+      });
+
+      /** A seat the org's IdP pushed for an address it does not own is an unowned seat too (ADR 0027, ADR 0029). */
+      const pushedUser = (over: Partial<ScimUser> = {}): ScimUser => ({
+        id: "x1", orgId: "org_acme", userName: "nine@x.test", externalId: null, active: true, key: "email:nine@x.test",
+        createdAt: 10, updatedAt: 10, deletedAt: null, ...over,
+      });
+
+      it("moves a pushed seat onto the subject at a Join, its SCIM rows with it, so the IdP still ends it", async () => {
+        await seated();
+        expect((await store.createScimUser(pushedUser(), scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("email:nine@x.test")).toBeUndefined();
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1", key: "github:9" });
+        expect(await store.scimUserByName("org_acme", "nine@x.test")).toMatchObject({ id: "x1", key: "github:9" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toBeUndefined();
+        expect((await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+      });
+
+      /** A push alone never re-seats the account a person joined with (ADR 0027): a re-seat of a Join-linked user lands on the address. */
+      const linkedByJoin = async () => {
+        await seated();
+        await store.createScimUser(pushedUser(), scimIntent("org_acme"));
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1" });
+      };
+
+      it("restores a Join-linked person's seat on the address at a reactivation, never on their own account", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect((await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toMatchObject({ id: "x1", key: "email:nine@x.test", active: true });
+        expect(await store.scimUserByName("org_acme", "nine@x.test")).toMatchObject({ key: "email:nine@x.test" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("seats a re-push after a delete on the address, never on the account the person joined with", async () => {
+        await linkedByJoin();
+        await store.deleteScimUser("org_acme", "x1", 50, scimIntent("org_acme"));
+        expect((await store.createScimUser(pushedUser({ id: "x2", createdAt: 60, updatedAt: 60 }), scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toMatchObject({ id: "x2" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("restores the seat on the address with single sign-on required too, where it holds nothing until answered", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await store.updateOrg("org_acme", { requireSso: true }, by);
+        await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(isUnownedSeat((await store.getGrant("email:nine@x.test"))!, await store.getOrg("org_acme"))).toBe(true);
+      });
+
+      /** Owned by its form, the address is re-seated, and the person's own sign-in claims it back onto their account. */
+      it("re-seats an owned address's person on the address, which their next sign-in claims back by its form", async () => {
+        await seated();
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        await store.createScimUser(pushedUser(), scimIntent("org_acme"));
+        await store.moveGrant("email:nine@x.test", "github:9");
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        await store.moveGrant("email:nine@x.test", "github:9");
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1" });
+      });
+
+      /** The IdP names the user, so no name it gives makes a personal account its to seat (ADR 0027). */
+      const ownedDomain = async () => {
+        await store.claimDomain("org_acme", "acme.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "acme.test", 2, by);
+      };
+
+      it("re-seats the address, not the person's account, when the IdP renames them onto an owned domain and then reactivates", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await ownedDomain();
+        expect((await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test" }, 51, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect((await store.updateScimUser("org_acme", "x1", { active: true }, 52, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("re-seats the address for a rename onto an owned domain and a reactivation in one update", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await ownedDomain();
+        expect((await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test", active: true }, 51, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+      });
+
+      it("seats a re-push of a user renamed onto an owned domain and deleted on the address, not the account", async () => {
+        await linkedByJoin();
+        await ownedDomain();
+        await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test" }, 50, scimIntent("org_acme"));
+        await store.deleteScimUser("org_acme", "x1", 51, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        const repushed = pushedUser({ id: "x2", userName: "nine@acme.test", key: "email:nine@acme.test", createdAt: 60, updatedAt: 60 });
+        expect((await store.createScimUser(repushed, scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+      });
+
+      it("leaves no index row on the account a re-pushed user no longer names", async () => {
+        await linkedByJoin();
+        await store.deleteScimUser("org_acme", "x1", 50, scimIntent("org_acme"));
+        expect(await harness.scimIndexRows()).toContain("sk:github:9");
+        await store.createScimUser(pushedUser({ id: "x2", createdAt: 60, updatedAt: 60 }), scimIntent("org_acme"));
+        expect(await harness.scimIndexRows()).toEqual(["sk:email:nine@x.test"]);
+      });
+
+      it("lets the domain's owner take a key another org's IdP pushed, and leaves that org's IdP no index on it", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2", seats: 3 }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.createScimUser(pushedUser({ orgId: "org_b" }), scimIntent("org_b"));
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        expect(await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org" }), "org_acme", by)).toBe("written");
+        expect(await store.scimUserByKey("email:nine@x.test")).toBeUndefined();
+        await store.moveGrant("email:nine@x.test", "github:9");
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+        await store.updateScimUser("org_b", "x1", { active: false }, 50, scimIntent("org_b"));
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme" });
+      });
+
+      it("keeps a decline on the person's side: the org's invites stay, and the decline is listed once, at its latest", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        await store.putOrgInvite(invite("email:nine@x.test"), by);
+        expect(await store.declinedOrgs("github:9")).toEqual([]);
+        await store.declineOrg("github:9", "org_acme", 40);
+        await store.declineOrg("github:9", "org_acme", 41);
+        await store.declineOrg("github:9", "org_acme", 30);
+        await store.declineOrg("github:9", "org_b", 42);
+        expect(await store.declinedOrgs("github:9")).toEqual([{ orgId: "org_acme", at: 41 }, { orgId: "org_b", at: 42 }]);
+        expect(await store.declinedOrgs("github:99")).toEqual([]);
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:nine@x.test", "github:9"]);
+        expect(await orgEvents()).toEqual(["member_invited", "member_invited"]);
+      });
+
+      it("holds MAX_PENDING_INVITES at once, takes no seat for any of them, and refuses the next", async () => {
+        await seated();
+        for (let n = 0; n < MAX_PENDING_INVITES; n++) {
+          expect(await store.putOrgInvite(invite(`github:${1000 + n}`), by)).toBe("invited");
+        }
+        expect(await store.putOrgInvite(invite("github:5000"), by)).toBe("limit");
+        expect(await store.invitesFor(["github:5000"])).toEqual([]);
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        await store.deleteOrgInvite("org_acme", "github:1000", by);
+        expect(await store.putOrgInvite(invite("github:5000"), by)).toBe("invited");
+      });
+    });
+
+    describe("SCIM (#56)", () => {
+      const acme = (over: Partial<Org> = {}): Org => ({
+        orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
+        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+      });
+      const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
+        grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
+      });
+      const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
+      const actions = async (orgId = "org_acme") => (await store.auditForOrg(orgId, 30)).map((e) => e.action);
+      const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+      const user = (over: Partial<ScimUser> = {}): ScimUser => ({
+        id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: "00u-bo", active: true, key: "email:bo@acme.test", createdAt: 10, updatedAt: 10,
+        deletedAt: null, ...over,
+      });
+      const scim = scimIntent("org_acme");
+
+      it("issues one token per org, replaces it, and revokes it, so only the newest hash resolves", async () => {
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" }, by)).toBe("missing");
+        await seated();
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" }, by)).toBe("issued");
+        expect(await store.orgForScimToken("h1")).toBe("org_acme");
+        expect(await store.scimTokenOf("org_acme")).toEqual({ tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" });
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h2", issuedAt: 6, issuedBy: "u_github_1" }, by)).toBe("replaced");
+        expect(await store.orgForScimToken("h1")).toBeUndefined();
+        expect(await store.orgForScimToken("h2")).toBe("org_acme");
+        expect(await store.revokeScimToken("org_acme", by)).toBe("revoked");
+        expect(await store.orgForScimToken("h2")).toBeUndefined();
+        expect(await store.scimTokenOf("org_acme")).toBeUndefined();
+        expect(await store.revokeScimToken("org_acme", by)).toBe("missing");
+        expect(await actions()).toEqual(["org_created", "plan_granted", "scim_token_issued", "scim_token_issued", "scim_token_revoked"]);
+        expect((await store.auditForOrg("org_acme", 20)).map((e) => e.detail.replaced)).toEqual([undefined, undefined, false, true, undefined]);
+      });
+
+      it("creates a SCIM user as a member grant from scim, and finds it by id, name and key", async () => {
+        expect(await store.createScimUser(user(), scim)).toEqual({ outcome: "no_org" });
+        await seated();
+        expect(await store.createScimUser(user(), scim)).toEqual({ outcome: "written", user: user() });
+        expect(await store.getGrant("email:bo@acme.test")).toEqual({
+          key: "email:bo@acme.test", plan: "team", role: "member", orgId: "org_acme", source: "scim", grantedAt: 10, grantedBy: "scim", expiresAt: null,
+        });
+        expect(await store.getScimUser("org_acme", "x1")).toEqual(user());
+        expect(await store.getScimUser("org_b", "x1")).toBeUndefined();
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toEqual(user());
+        expect(await store.scimUserByKey("email:bo@acme.test")).toEqual(user());
+        expect(await store.createScimUser(user({ id: "x2" }), scim)).toEqual({ outcome: "exists" });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect(await store.createScimUser(user({ id: "x3", userName: "cy@acme.test", key: "email:cy@acme.test" }), scim)).toEqual({ outcome: "full" });
+        expect(await store.getScimUser("org_acme", "x3")).toBeUndefined();
+        expect((await actions()).slice(2)).toEqual(["plan_granted", "scim_user_created"]);
+        expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({
+          sessionId: "scim:x1", actorUserId: "scim", detail: { user_name: "bo@acme.test", external_id: "00u-bo", key: "email:bo@acme.test", linked: false },
+        });
+      });
+
+      it("links a push to an address an admin seated, keeping the role, and refuses one another org holds", async () => {
+        await seated();
+        await store.putGrantIfOwned(owner({ key: "email:bo@acme.test", role: "admin", source: "org" }), "org_acme", by);
+        const made = await store.createScimUser(user(), scim);
+        expect(made).toEqual({ outcome: "linked", user: user() });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ role: "admin", source: "org" });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "scim_user_created", detail: { linked: true } });
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:di@acme.test", role: "member", orgId: "org_b", source: "org" }), "org_b", { actorUserId: "u_github_2" });
+        expect(await store.createScimUser(user({ id: "x4", userName: "di@acme.test", key: "email:di@acme.test" }), scim)).toEqual({ outcome: "conflict" });
+        expect(await store.getScimUser("org_acme", "x4")).toBeUndefined();
+      });
+
+      it("creates an inactive user with no grant and no seat", async () => {
+        await seated();
+        expect(await store.createScimUser(user({ active: false }), scim)).toEqual({ outcome: "written", user: user({ active: false }) });
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect(await store.scimUserByKey("email:bo@acme.test")).toEqual(user({ active: false }));
+      });
+
+      it("lists an org's users in id order, within the limit, and only its own", async () => {
+        await seated();
+        await store.createScimUser(user({ id: "b", active: false }), scim);
+        await store.createScimUser(user({ id: "a", userName: "al@acme.test", key: "email:al@acme.test", active: false }), scim);
+        expect((await store.listScimUsers("org_acme", 10)).map((u) => u.id)).toEqual(["a", "b"]);
+        expect((await store.listScimUsers("org_acme", 1)).map((u) => u.id)).toEqual(["a"]);
+        expect(await store.listScimUsers("org_b", 10)).toEqual([]);
+      });
+
+      it("deactivates by deleting the grant and keeping the row, reactivates within the seats, and is idempotent", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        const off = await store.updateScimUser("org_acme", "x1", { active: false }, 20, scim);
+        expect(off).toEqual({ outcome: "updated", user: user({ active: false, updatedAt: 20 }), was: user() });
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect(await store.updateScimUser("org_acme", "x1", { active: false }, 21, scim)).toMatchObject({ outcome: "updated", user: { active: false, updatedAt: 20 } });
+        await store.createScimUser(user({ id: "x2", userName: "cy@acme.test", key: "email:cy@acme.test" }), scim);
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 22, scim)).toEqual({ outcome: "full" });
+        await store.updateScimUser("org_acme", "x2", { active: false }, 23, scim);
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 24, scim)).toMatchObject({ outcome: "updated", user: { active: true, updatedAt: 24 } });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ role: "member", source: "scim", grantedAt: 24 });
+        expect(await store.updateScimUser("org_acme", "nobody", { active: false }, 25, scim)).toEqual({ outcome: "missing" });
+        expect(await store.updateScimUser("org_b", "x1", { active: false }, 25, scim)).toEqual({ outcome: "missing" });
+        expect((await actions()).filter((a) => a.startsWith("scim_user") || a.startsWith("plan"))).toEqual([
+          "plan_granted", "plan_granted", "scim_user_created", "plan_revoked", "scim_user_deactivated",
+          "plan_granted", "scim_user_created", "plan_revoked", "scim_user_deactivated", "plan_granted", "scim_user_reactivated",
+        ]);
+      });
+
+      it("renames by moving an address grant and the directory entry, leaves a claimed key, and refuses a taken name", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        await store.createScimUser(user({ id: "x2", userName: "cy@acme.test", key: "email:cy@acme.test", active: false }), scim);
+        expect(await store.updateScimUser("org_acme", "x1", { userName: "cy@acme.test" }, 30, scim)).toEqual({ outcome: "exists" });
+        expect(await store.updateScimUser("org_acme", "x1", { userName: "robert@acme.test", externalId: null }, 31, scim)).toMatchObject({
+          outcome: "updated", user: { userName: "robert@acme.test", key: "email:robert@acme.test", externalId: null },
+        });
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.getGrant("email:robert@acme.test")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toBeUndefined();
+        expect(await store.scimUserByName("org_acme", "robert@acme.test")).toMatchObject({ id: "x1" });
+        expect(await store.scimUserByKey("email:robert@acme.test")).toMatchObject({ id: "x1" });
+        expect(await store.scimUserByKey("email:bo@acme.test")).toBeUndefined();
+        await store.moveGrant("email:robert@acme.test", "github:77");
+        expect(await store.scimUserByKey("github:77")).toMatchObject({ id: "x1", key: "github:77" });
+        expect(await store.scimUserByKey("email:robert@acme.test")).toBeUndefined();
+        expect(await store.scimUserByName("org_acme", "robert@acme.test")).toMatchObject({ key: "github:77" });
+        expect(await store.updateScimUser("org_acme", "x1", { userName: "rob@acme.test" }, 32, scim)).toMatchObject({
+          outcome: "updated", user: { userName: "rob@acme.test", key: "github:77" },
+        });
+        expect(await store.getGrant("github:77")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByName("org_acme", "rob@acme.test")).toMatchObject({ id: "x1" });
+        expect((await actions()).at(-1)).toBe("scim_user_updated");
+        expect((await store.auditForOrg("org_acme", 20)).at(-1)?.detail).toEqual({ user_name: "rob@acme.test", key: "github:77", from: "robert@acme.test" });
+      });
+
+      it("seats an SSO sign-in and writes the directory for its address, then links a later push", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso, "bo@acme.test")).toBe("written");
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toBeUndefined();
+        const made = await store.createScimUser(user({ key: "email:bo@acme.test" }), scim);
+        expect(made).toMatchObject({ outcome: "linked", user: { key: "sso:org_acme:00u1" } });
+        expect(await store.scimUserByKey("sso:org_acme:00u1")).toMatchObject({ id: "x1" });
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toMatchObject({ id: "x1", key: "sso:org_acme:00u1" });
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+      });
+
+      it("claims a SCIM user's address grant onto the subject inside the seat, keeping the role, and refuses a deprovisioned one", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        await store.putGrantIfOwned({ ...(await store.getGrant("email:bo@acme.test"))!, role: "admin" }, "org_acme", by);
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ role: "admin", source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u1")).toMatchObject({ id: "x1", key: "sso:org_acme:00u1" });
+        expect(await store.scimUserByKey("email:bo@acme.test")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        // The owner's, the push's, and the role change's: the move onto the subject files none.
+        expect((await actions()).filter((a) => a === "plan_granted")).toHaveLength(3);
+        await store.updateScimUser("org_acme", "x1", { active: false }, 15, scim);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 16, sso, "bo@acme.test")).toBe("deprovisioned");
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 16, sso)).toBe("deprovisioned");
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u9", 16, sso, "bo@acme.test")).toBe("deprovisioned");
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+      });
+
+      it("claims an admin's address grant inside the seat, as the callback did in two calls", async () => {
+        await seated();
+        await store.putGrantIfOwned(owner({ key: "email:bo@acme.test", role: "admin", source: "org" }), "org_acme", by);
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ role: "admin", source: "org" });
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        // An address another org seated is not this org's to move: the person takes a seat of their own.
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.putGrantIfOwned(owner({ key: "email:cy@acme.test", role: "member", orgId: "org_b", source: "org" }), "org_b", { actorUserId: "u_github_2" });
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u2", 15, sso, "cy@acme.test")).toBe("full");
+        await store.updateOrg("org_acme", { seats: 3 }, by);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u2", 15, sso, "cy@acme.test")).toBe("written");
+        expect(await store.getGrant("email:cy@acme.test")).toMatchObject({ orgId: "org_b" });
+      });
+
+      it("refuses a rename or a reactivation onto an address another org holds, and keeps a seat this org gave meanwhile", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2", seats: 5 }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_github_2" });
+        const byB = { actorUserId: "u_github_2" };
+        await store.createScimUser(user(), scim);
+        await store.putGrantIfOwned(owner({ key: "email:di@acme.test", role: "member", orgId: "org_b", source: "org" }), "org_b", byB);
+        expect(await store.updateScimUser("org_acme", "x1", { userName: "di@acme.test" }, 50, scim)).toEqual({ outcome: "conflict" });
+        expect(await store.getGrant("email:di@acme.test")).toMatchObject({ orgId: "org_b" });
+        expect(await store.getScimUser("org_acme", "x1")).toMatchObject({ userName: "bo@acme.test", key: "email:bo@acme.test", updatedAt: 10 });
+        // This org seated the new address by hand: the rename would merge two members.
+        await store.updateOrg("org_acme", { seats: 3 }, by);
+        await store.putGrantIfOwned(owner({ key: "email:ed@acme.test", role: "member", source: "org" }), "org_acme", by);
+        expect(await store.updateScimUser("org_acme", "x1", { userName: "ed@acme.test" }, 51, scim)).toEqual({ outcome: "exists" });
+        // Deactivated, then another org seats the address: reactivating would hand that org's seat to this one.
+        await store.updateScimUser("org_acme", "x1", { active: false }, 52, scim);
+        await store.putGrantIfOwned(owner({ key: "email:bo@acme.test", role: "member", orgId: "org_b", source: "org" }), "org_b", byB);
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 53, scim)).toEqual({ outcome: "conflict" });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ orgId: "org_b" });
+        expect(await store.getScimUser("org_acme", "x1")).toMatchObject({ active: false });
+        // This org re-seated the address by hand while the user was inactive: reactivation keeps that grant, its role included.
+        await store.deleteGrantIfOwned("email:bo@acme.test", "org_b", byB);
+        await store.putGrantIfOwned(owner({ key: "email:bo@acme.test", role: "admin", source: "org" }), "org_acme", by);
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 54, scim)).toMatchObject({ outcome: "updated", user: { active: true, updatedAt: 54 } });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ role: "admin", source: "org" });
+        expect(await store.countOrgMembers("org_acme")).toBe(3);
+        expect((await actions()).at(-1)).toBe("scim_user_reactivated");
+      });
+
+      it("deletes a user into a tombstone that keeps refusing the key, and a push after it starts over", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        expect(await store.deleteScimUser("org_acme", "x1", 40, scim)).toEqual(user());
+        expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+        expect(await store.getScimUser("org_acme", "x1")).toBeUndefined();
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toBeUndefined();
+        expect(await store.listScimUsers("org_acme", 10)).toEqual([]);
+        // The key index outlives the row: a deleted subject is refused as a deactivated one is (SCIM spec, D4).
+        expect(await store.scimUserByKey("email:bo@acme.test")).toEqual(user({ active: false, updatedAt: 40, deletedAt: 40 }));
+        // A repeat answers the tombstone, so a walk cut short can be finished.
+        expect(await store.deleteScimUser("org_acme", "x1", 41, scim)).toEqual(user({ active: false, updatedAt: 40, deletedAt: 40 }));
+        expect(await store.updateScimUser("org_acme", "x1", { active: true }, 42, scim)).toEqual({ outcome: "missing" });
+        expect((await actions()).slice(-2)).toEqual(["plan_revoked", "scim_user_deleted"]);
+        // The IdP assigns them again: a new row, the old tombstone gone, a seat taken.
+        expect(await store.createScimUser(user({ id: "x9", createdAt: 43, updatedAt: 43 }), scim)).toEqual({ outcome: "written", user: user({ id: "x9", createdAt: 43, updatedAt: 43 }) });
+        expect(await store.scimUserByKey("email:bo@acme.test")).toMatchObject({ id: "x9", active: true });
+        expect(await store.scimUserByName("org_acme", "bo@acme.test")).toMatchObject({ id: "x9" });
+        expect(await store.getGrant("email:bo@acme.test")).toMatchObject({ source: "scim", grantedAt: 43 });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+      });
+
+      it("finds a person by their address however the IdP spells it", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso, "Bo.Smith@Acme.test")).toBe("written");
+        const pushed = await store.createScimUser(user({ userName: "bo.smith@acme.test", key: "email:bo.smith@acme.test" }), scim);
+        expect(pushed).toMatchObject({ outcome: "linked", user: { key: "sso:org_acme:00u1" } });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        // And the other way round: a push first, then a sign-in that spells the address in capitals.
+        await store.updateOrg("org_acme", { seats: 4 }, by);
+        await store.createScimUser(user({ id: "x2", userName: "cy@acme.test", key: "email:cy@acme.test" }), scim);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u2", 14, sso, "CY@ACME.TEST")).toBe("written");
+        expect(await store.getGrant("email:cy@acme.test")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u2")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u2")).toMatchObject({ id: "x2" });
+        expect(await store.countOrgMembers("org_acme")).toBe(3);
+      });
+
+      it("takes the seat of a person it pushes as inactive, as a deactivation would", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso, "bo@acme.test");
+        const pushed = await store.createScimUser(user({ active: false }), scim);
+        expect(pushed).toMatchObject({ outcome: "linked", user: { key: "sso:org_acme:00u1", active: false } });
+        expect(await store.getGrant("sso:org_acme:00u1")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect((await actions()).slice(-2)).toEqual(["plan_revoked", "scim_user_created"]);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("deprovisioned");
+      });
+
+      it("moves the seat to the door the person last came through: a claimed GitHub key, and a reissued subject", async () => {
+        await seated();
+        await store.createScimUser(user(), scim);
+        await store.moveGrant("email:bo@acme.test", "github:77");
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("github:77")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u1")).toMatchObject({ id: "x1", key: "sso:org_acme:00u1" });
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u9", 15, sso, "bo@acme.test")).toBe("written");
+        expect(await store.getGrant("sso:org_acme:00u1")).toBeUndefined();
+        expect(await store.getGrant("sso:org_acme:00u9")).toMatchObject({ source: "scim" });
+        expect(await store.scimUserByKey("sso:org_acme:00u9")).toMatchObject({ id: "x1" });
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+      });
+    });
+
     describe("saved presets", () => {
       const preset = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
         name,
@@ -5568,6 +6242,33 @@ export function describeStoreContract(
         expect(await store.releaseHandleNamed("xena")).toBe("u_x");
         expect(await store.signedRooms("u_x")).toEqual([]);
         expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
+      });
+
+      // The operator's list of holders, for the notice that goes out before members are named by handle (public rooms
+      // on bellman.sh spec, D6). Claimed out of order, so the order it answers in is the list's and not the claims'.
+      it("lists every account holding a handle, by user id, and none that released one", async () => {
+        await store.claimHandle("u_b", "grace");
+        await store.claimHandle("u_a", "ada");
+        await store.claimHandle("u_c", "cleo");
+        await store.releaseHandle("u_c");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_a", handle: "ada" }, { userId: "u_b", handle: "grace" }]);
+      });
+
+      it("lists nobody before a claim, a holder once under the handle it holds now, and none the operator released by name", async () => {
+        expect(await store.handleHolders()).toEqual([]);
+        await store.claimHandle("u_a", "ada");
+        await store.claimHandle("u_a", "lovelace");
+        await store.claimHandle("u_b", "grace");
+        expect(await store.releaseHandleNamed("grace")).toBe("u_b");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_a", handle: "lovelace" }]);
+      });
+
+      // An operator-issued id may hold a colon. The id is all of the key past its prefix, so it is read whole, and the
+      // id it extends is a holder of its own.
+      it("lists an id that holds a colon whole, beside the id it extends", async () => {
+        await store.claimHandle("u_x:y", "yara");
+        await store.claimHandle("u_x", "xena");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_x", handle: "xena" }, { userId: "u_x:y", handle: "yara" }]);
       });
     });
 

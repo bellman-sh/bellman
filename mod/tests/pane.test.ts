@@ -144,6 +144,18 @@ test("what draws nothing or acts on the terminal is spelled out in a request, so
   expect(await room.find({ key: "approve-5" })).toBeDefined();
 });
 
+test("a selector and a joiner in turn, and a filler no category names, are spelled out in a request but for the first of each; an emoji draws as it is", async ($, on) => {
+  // The engine runs the bundle's own expression: a selector and a joiner in turn after a word, a Hangul filler and the
+  // grapheme joiner between words, then a heart on fire (U+2764 U+FE0F U+200D U+1F525). The first selector follows the
+  // `n` and stays, the joiner after it stays, and the selector, joiner and selector after those show.
+  const text = "run\u{fe0f}\u{200d}\u{fe0f}\u{200d}\u{fe0f} the\u{3164}tests\u{34f} \u{2764}\u{fe0f}\u{200d}\u{1f525} ok";
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [peerEvent({ cursor: 5, type: "action_request", at: TWO_MINUTES_AGO, payload: { text } })], cursor: 5 };
+  const room = await reviewing($, w);
+  expect(await shown(room)).toContain("run\u{fe0f}\u{200d}\\u{fe0f}\\u{200d}\\u{fe0f} the\\u{3164}tests\\u{34f} \u{2764}\u{fe0f}\u{200d}\u{1f525} ok");
+  expect(await room.find({ key: "approve-5" })).toBeDefined();
+});
+
 test("a request too long to show in full here can only be denied, and the next keeps its buttons", async ($, on) => {
   // As long as the server lets a payload be, and nested deep enough that its JSON drawn two spaces to a level runs
   // past what the pane can draw of its texts.

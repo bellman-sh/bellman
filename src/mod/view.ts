@@ -192,24 +192,51 @@ export interface PendingRequest {
 export const REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1);
 
 /**
+ * The body of a regex class for what draws nothing or acts on the terminal: controls, format, private-use and
+ * unassigned characters, line and paragraph separators, and every code point Unicode leaves undrawn.
+ */
+const UNDRAWN = String.raw`\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}`;
+
+/** The bodies of two regex classes: the sixteen variation selectors, and the zero-width non-joiner and joiner. */
+const SELECTORS = String.raw`\u{fe00}-\u{fe0f}`;
+const JOINERS = String.raw`\u{200c}\u{200d}`;
+
+/**
+ * Three branches. The first is each of `UNDRAWN` but the line break, the joiners and the sixteen selectors. The second
+ * is a selector that is not directly after a character that draws as itself, one outside `UNDRAWN`: after another
+ * selector, a joiner, a line break, a character the first branch writes out, or no character at all it shows. The third
+ * is a joiner that is not directly after such a character either, and not directly after a selector the second branch
+ * keeps: after another joiner, a line break, a character the first branch writes out, a selector the second writes
+ * out, or at the start.
+ */
+const SPELLED_OUT = new RegExp(
+  [
+    String.raw`(?![\n${JOINERS}${SELECTORS}])[${UNDRAWN}]`,
+    String.raw`(?<![^${UNDRAWN}])[${SELECTORS}]`,
+    String.raw`(?<!(?:[^${UNDRAWN}]|[^${UNDRAWN}][${SELECTORS}]))[${JOINERS}]`,
+  ].join("|"),
+  "gu",
+);
+
+/**
  * A peer's text as the person approving it reads it. These are written out as their code points, `\u{1b}`, where
  * `cleanBlock` would drop them, and with them the text a sequence carries or a run of tags spells, which Claude would
- * read and nobody would see: every control, format, private-use or unassigned character and every line or paragraph
- * separator, but the line break and the zero-width non-joiner and joiner, which join what is drawn on either side;
- * every variation selector of the supplement (U+E0100 to U+E01EF); and every one of the sixteen (U+FE00 to U+FE0F) but
- * one directly after a character that is not a selector, which picks how that character draws, so `❤️` draws as it is
- * and a run after it shows. A carriage return before a line break goes.
- * ponytail: by those categories and ranges. What else draws nothing passes: the one selector after each character, a
- * joiner included, and the marks, fillers and Mongolian selectors that draw nothing (U+034F, U+115F, U+1160, U+17B4,
- * U+17B5, U+180B to U+180D, U+180F, U+3164, U+FFA0); spell one out here the day it hides a request.
+ * read and nobody would see: every control, format, private-use or unassigned character, every line or paragraph
+ * separator, and every code point Unicode leaves undrawn (`Default_Ignorable_Code_Point`, which adds to those U+034F,
+ * U+115F, U+1160, U+17B4, U+17B5, U+180B to U+180D, U+180F, U+3164, U+FFA0 and the variation selectors of the
+ * supplement, U+E0100 to U+E01EF), but the line break, the zero-width non-joiner and joiner (U+200C, U+200D) and the
+ * sixteen variation selectors (U+FE00 to U+FE0F). Each of those passes only beside a character that draws as itself: a
+ * selector directly after one, which picks how that character draws, and a joiner directly after one or after a
+ * selector so kept, which joins it to what follows. So a heart on fire (U+2764 U+FE0F U+200D U+1F525), a woman
+ * technologist (U+1F469 U+1F3FD U+200D U+1F4BB), a Devanagari conjunct (U+0915 U+094D U+200D U+0937) and a Persian
+ * non-joiner between two letters (U+06CC U+200C U+062E) draw as they are. After anything else (another selector or
+ * joiner, a line break, a character written out here, or no character at all) it picks or joins nothing, and shows. A
+ * carriage return before a line break goes.
+ * ponytail: by that property and those rules. What else draws nothing passes: one joiner and one selector beside a
+ * character that draws, a few bits for each character drawn; spell one out here the day it hides a request.
  */
 const spelledOut = (text: string): string =>
-  text
-    .replace(/\r\n/g, "\n")
-    .replace(
-      /(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}\u{e0100}-\u{e01ef}]|(?<![^\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])[\u{fe00}-\u{fe0f}]/gu,
-      (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`,
-    );
+  text.replace(/\r\n/g, "\n").replace(SPELLED_OUT, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
 
 /**
  * What an action request asks, as the Approve tab draws it: its payload's `text` when that is the payload's one key

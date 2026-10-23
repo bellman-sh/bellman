@@ -385,13 +385,26 @@ U+202A to U+202E, U+2060, U+2066 to U+2069, U+FEFF; the zero-width non-joiner
 and joiner stay, as emoji and some scripts need them), so one peer's label
 cannot pass for another's (`cleanText`, `cleanBlock`); pane titles refuse
 controls anyway (`PaneOpenArgs.title`). What an action request asks is drawn
-whole instead, each such character spelled out as its code point, and so is
-every variation selector that could carry a hidden run: each of the supplement
-(U+E0100 to U+E01EF), and each of the sixteen (U+FE00 to U+FE0F) but one directly
-after a character that is not a selector, which picks how that character draws.
-The person approves what Claude reads (D5). What else draws nothing passes as it
-is: the one selector after each character, a joiner included, and the few marks,
-fillers and Mongolian selectors that draw nothing (`spelledOut` names them). Links from peers' canvas text open only
+whole instead, each such character spelled out as its code point, and with them
+every code point Unicode leaves undrawn (`Default_Ignorable_Code_Point`: the
+combining grapheme joiner U+034F, the Hangul fillers U+115F, U+1160, U+3164 and
+U+FFA0, the Khmer inherent vowels U+17B4 and U+17B5, the Mongolian selectors
+U+180B to U+180D and U+180F, and the variation selectors of the supplement,
+U+E0100 to U+E01EF) and every variation selector and joiner that could carry a
+hidden run. Each of the sixteen selectors (U+FE00 to U+FE0F) passes only
+directly after a character that draws as itself, which it picks the look of; the
+zero-width non-joiner and joiner (U+200C, U+200D) only directly after one, or
+after a selector so kept. After anything else (another selector or joiner, a
+line break, a character spelled out, or no character at all) one picks and joins
+nothing, and shows. A heart on fire (U+2764 U+FE0F U+200D U+1F525), a woman
+technologist (U+1F469 U+1F3FD U+200D U+1F4BB), a Devanagari conjunct (U+0915
+U+094D U+200D U+0937) and a Persian non-joiner between two letters (U+06CC
+U+200C U+062E) draw as they are, while a run of joiners, or a selector and a
+joiner in turn, shows past the first of each: a run takes no room and carries as
+many bits as it is long. The person approves what Claude reads (D5). What else
+draws nothing passes as it is: one joiner and one selector beside a character
+that draws, and nothing else (`spelledOut` says which). Links from peers'
+canvas text open only
 when they are `http` or `https`: `safeLinks` turns any other into text, a link
 definition included wherever a block may start, inside a blockquote or a list
 item and nested to any depth. Nothing peer-controlled is passed to

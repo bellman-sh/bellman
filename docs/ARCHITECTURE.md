@@ -1478,7 +1478,12 @@ loud:
   escape sequence, a line break or one of the characters, named there, that draw
   nothing or turn the direction a line reads in; what an action request asks is
   drawn whole, each such character spelled out as its code point instead, and
-  with them every variation selector that could carry a hidden run. A link in a peer's
+  with them every code point Unicode leaves undrawn (the fillers, the combining
+  grapheme joiner, the Mongolian selectors), every variation selector that does
+  not directly follow a character that draws, and every joiner that follows
+  neither one nor a selector that does, where a hidden run would go; one
+  selector and one joiner beside a character that draws pass as they are, and
+  nothing else that draws nothing does (D10). A link in a peer's
   canvas text opens only if it is `http` or `https` (`safeLinks`,
   `src/mod/view.ts`), a link definition inside a blockquote or a list item
   included. The model still

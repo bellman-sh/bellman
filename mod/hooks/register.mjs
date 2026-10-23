@@ -137,10 +137,18 @@ function unreadCount(events, p) {
   return roomLog(events, p.sessionId).filter((e) => e.cursor > p.openedThrough && e.ambient !== true && e.from_member_id !== p.seatMemberId).length;
 }
 var REQUEST_DRAWN_MAX = MAX_PAYLOAD_CHARS * 2 * (MAX_PAYLOAD_DEPTH + 1);
-var spelledOut = (text) => text.replace(/\r\n/g, "\n").replace(
-  /(?![\n\u{200c}\u{200d}])[\p{C}\p{Zl}\p{Zp}\u{e0100}-\u{e01ef}]|(?<![^\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])[\u{fe00}-\u{fe0f}]/gu,
-  (c) => `\\u{${c.codePointAt(0).toString(16)}}`
+var UNDRAWN = String.raw`\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}`;
+var SELECTORS = String.raw`\u{fe00}-\u{fe0f}`;
+var JOINERS = String.raw`\u{200c}\u{200d}`;
+var SPELLED_OUT = new RegExp(
+  [
+    String.raw`(?![\n${JOINERS}${SELECTORS}])[${UNDRAWN}]`,
+    String.raw`(?<![^${UNDRAWN}])[${SELECTORS}]`,
+    String.raw`(?<!(?:[^${UNDRAWN}]|[^${UNDRAWN}][${SELECTORS}]))[${JOINERS}]`
+  ].join("|"),
+  "gu"
 );
+var spelledOut = (text) => text.replace(/\r\n/g, "\n").replace(SPELLED_OUT, (c) => `\\u{${c.codePointAt(0).toString(16)}}`);
 function drawingOf(payload) {
   const keys = typeof payload === "object" && payload !== null && !Array.isArray(payload) ? Object.keys(payload) : [];
   const text = keys.length === 1 && keys[0] === "text" ? payload.text : void 0;

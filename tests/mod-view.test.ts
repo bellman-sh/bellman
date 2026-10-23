@@ -263,6 +263,9 @@ describe("drawingOf, all of what a request asks", () => {
   });
 });
 
+/** A character as `drawingOf` writes it out. */
+const spelled = (c: string): string => `\\u{${c.codePointAt(0)!.toString(16)}}`;
+
 describe("drawingOf, variation selectors", () => {
   it("keeps the one selector that picks how a character draws, and spells out a run after it", () => {
     // A heart and the selector that draws it as an emoji, and a face with the one that draws it as text: as they are.
@@ -285,6 +288,128 @@ describe("drawingOf, variation selectors", () => {
     expect(drawingOf({ text: `ok 😀${smuggled}` }).drawing).toBe(
       `ok 😀${[..."rm -rf ~"].map((c) => `\\u{${(0xe0100 + c.charCodeAt(0) - 16).toString(16)}}`).join("")}`,
     );
+  });
+
+  it("spells out a selector after a joiner, so a selector and a joiner in turn show all but the first of each", () => {
+    // Each selector of the sixteen, with either joiner: the joiner is no character for it to pick the look of, and
+    // kept as one that is, it hid one selector for every joiner, with no end.
+    for (let cp = 0xfe00; cp <= 0xfe0f; cp++) {
+      const selector = String.fromCodePoint(cp);
+      for (const joiner of ["\u{200d}", "\u{200c}"]) {
+        const label = `${cp.toString(16)} with ${spelled(joiner)}`;
+        // The first selector follows `a`, which draws as itself, and stays, and so does the joiner after it. Every
+        // one after them follows a joiner or a selector that shows, and shows.
+        expect(drawingOf({ text: `a${selector}${`${joiner}${selector}`.repeat(8)}` }).drawing, label).toBe(
+          `a${selector}${joiner}${spelled(selector)}${`${spelled(joiner)}${spelled(selector)}`.repeat(7)}`,
+        );
+        expect(drawingOf({ text: `a${`${selector}${joiner}`.repeat(8)}` }).drawing, label).toBe(
+          `a${selector}${joiner}${`${spelled(selector)}${spelled(joiner)}`.repeat(7)}`,
+        );
+        expect(drawingOf({ text: `${joiner}${selector}` }).drawing, label).toBe(`${spelled(joiner)}${spelled(selector)}`);
+      }
+    }
+  });
+
+  it("spells out a selector after a character that is spelled out, and after a line break", () => {
+    for (const c of ["\u{7}", "\u{200b}", "\u{2028}", "\u{e0041}", "\u{e000}", "\u{34f}", "\u{3164}"]) {
+      expect(drawingOf({ text: `a${c}\u{fe0f}` }).drawing, spelled(c)).toBe(`a${spelled(c)}${spelled("\u{fe0f}")}`);
+    }
+    // A line break stays, and picks the look of nothing.
+    expect(drawingOf({ text: "a\n\u{fe0f}b" }).drawing).toBe(`a\n${spelled("\u{fe0f}")}b`);
+  });
+
+  it("leaves an emoji drawn with a selector, a joiner or both as it is", () => {
+    for (const emoji of [
+      "❤\u{fe0f}",
+      // A heart on fire: U+2764 U+FE0F U+200D U+1F525, a joiner after the selector.
+      "❤\u{fe0f}\u{200d}\u{1f525}",
+      "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+      "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+      "\u{1f441}\u{fe0f}\u{200d}\u{1f5e8}\u{fe0f}",
+      "1\u{fe0f}\u{20e3}",
+    ]) {
+      expect(drawingOf({ text: `ok ${emoji} ok` }).drawing, emoji).toBe(`ok ${emoji} ok`);
+      expect(drawingOf({ a: emoji }).drawing, emoji).toBe(`{\n  "a": "${emoji}"\n}`);
+    }
+  });
+});
+
+describe("drawingOf, joiners", () => {
+  const JOINERS = ["\u{200d}", "\u{200c}"];
+
+  it("keeps a joiner directly after a character that draws, in an emoji and in a script that needs one", () => {
+    for (const word of [
+      // A woman technologist: a skin tone, then the joiner.
+      "\u{1f469}\u{1f3fd}\u{200d}\u{1f4bb}",
+      // A pirate flag: a joiner, and a selector after the last character.
+      "\u{1f3f4}\u{200d}\u{2620}\u{fe0f}",
+      // A Devanagari conjunct, with a joiner after its virama and with a non-joiner.
+      "\u{915}\u{94d}\u{200d}\u{937}",
+      "\u{915}\u{94d}\u{200c}\u{937}",
+      // A Persian verb, with a non-joiner between two of its letters.
+      "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}",
+    ]) {
+      expect(drawingOf({ text: `ok ${word} ok` }).drawing, word).toBe(`ok ${word} ok`);
+      expect(drawingOf({ a: word }).drawing, word).toBe(`{\n  "a": "${word}"\n}`);
+    }
+  });
+
+  it("spells out every joiner after the first in a run, of either joiner or of both in turn", () => {
+    // A run takes no room, and however long it is it can carry as many bits as it has joiners.
+    for (const unit of ["\u{200d}", "\u{200c}", "\u{200d}\u{200c}", "\u{200c}\u{200d}"]) {
+      const run = [...unit.repeat(8)];
+      const label = `${[...unit].map(spelled).join("")} in a run of ${run.length}`;
+      expect(drawingOf({ text: `a${run.join("")}b` }).drawing, label).toBe(`a${run[0]}${run.slice(1).map(spelled).join("")}b`);
+      // After an emoji, and in a payload's JSON, where the quote before it is the character that draws.
+      expect(drawingOf({ text: `\u{1f600}${run.join("")}` }).drawing, label).toBe(`\u{1f600}${run[0]}${run.slice(1).map(spelled).join("")}`);
+      expect(drawingOf({ a: `x${run.join("")}` }).drawing, label).toBe(`{\n  "a": "x${run[0]}${run.slice(1).map(spelled).join("")}"\n}`);
+    }
+  });
+
+  it("spells out a joiner at the start, after a line break, after a character that is spelled out and after a selector that is", () => {
+    const selector = "\u{fe0f}";
+    for (const joiner of JOINERS) {
+      const label = spelled(joiner);
+      expect(drawingOf({ text: `${joiner}a` }).drawing, label).toBe(`${spelled(joiner)}a`);
+      // A line break stays, and joins nothing to what follows it.
+      expect(drawingOf({ text: `a\n${joiner}b` }).drawing, label).toBe(`a\n${spelled(joiner)}b`);
+      for (const c of ["\u{7}", "\u{200b}", "\u{2028}", "\u{e0041}", "\u{e000}", "\u{34f}", "\u{3164}"]) {
+        expect(drawingOf({ text: `a${c}${joiner}` }).drawing, `${label} after ${spelled(c)}`).toBe(`a${spelled(c)}${spelled(joiner)}`);
+      }
+      // A selector that shows: with nothing before it, after a selector, after a joiner, after a line break.
+      expect(drawingOf({ text: `${selector}${joiner}` }).drawing, label).toBe(`${spelled(selector)}${spelled(joiner)}`);
+      expect(drawingOf({ text: `a${selector}${selector}${joiner}` }).drawing, label).toBe(`a${selector}${spelled(selector)}${spelled(joiner)}`);
+      expect(drawingOf({ text: `a${joiner}${selector}${joiner}` }).drawing, label).toBe(`a${joiner}${spelled(selector)}${spelled(joiner)}`);
+      expect(drawingOf({ text: `a\n${selector}${joiner}` }).drawing, label).toBe(`a\n${spelled(selector)}${spelled(joiner)}`);
+    }
+  });
+});
+
+describe("drawingOf, what Unicode leaves undrawn and no category names", () => {
+  // The combining grapheme joiner, the Hangul and Khmer fillers and the Mongolian free variation selectors: not
+  // controls, not format characters, not private use, not unassigned, and drawn as nothing all the same.
+  const UNDRAWN = [0x34f, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x180b, 0x180c, 0x180d, 0x180f, 0x3164, 0xffa0];
+
+  it("spells out each of them, in a text and in a payload's JSON", () => {
+    for (const cp of UNDRAWN) {
+      const c = String.fromCodePoint(cp);
+      expect(drawingOf({ text: `run${c}it` }).drawing, cp.toString(16)).toBe(`run${spelled(c)}it`);
+      expect(drawingOf({ a: `run${c}it` }).drawing, cp.toString(16)).toBe(`{\n  "a": "run${spelled(c)}it"\n}`);
+    }
+  });
+
+  it("spells out every default-ignorable code point but the joiners and the sixteen selectors, which have rules of their own", () => {
+    const ignorable: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const c = String.fromCodePoint(cp);
+      if (/\p{Default_Ignorable_Code_Point}/u.test(c) && cp !== 0x200c && cp !== 0x200d && !(cp >= 0xfe00 && cp <= 0xfe0f)) ignorable.push(c);
+    }
+    // The eleven above are among them, with the formats and tags the categories already name.
+    expect(ignorable.length).toBeGreaterThan(4_000);
+    for (const cp of UNDRAWN) expect(ignorable, cp.toString(16)).toContain(String.fromCodePoint(cp));
+    const { drawing } = drawingOf({ text: ignorable.map((c) => `a${c}`).join("") });
+    expect(drawing).toBe(ignorable.map((c) => `a${spelled(c)}`).join(""));
   });
 });
 

@@ -1,4 +1,4 @@
-# ADR 0033 — Room search
+# ADR 0034 — Room search
 
 **Date:** 2026-10-23 · **Status:** accepted · **Spec:** `docs/superpowers/specs/2026-10-23-room-search-design.md` · **Plan:** `docs/superpowers/plans/2026-10-23-room-search.md`
 

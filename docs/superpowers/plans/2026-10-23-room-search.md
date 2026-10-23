@@ -94,7 +94,7 @@ Where the spec is silent, or the code disagrees with it, and what this plan does
   A private room's search for "Retry policy" at cursor 12 is `"12::retry%20policy"`; a public room named `mcp` gives `"12:https%3A%2F%2Fbellman.sh%2Fr%2Fmcp:retry%20policy"`. No two reads share a tag, so a stored ETag answers only the read it came from. The link is in it because `url` follows the room's name and whether it is public, which change without the cursor; the words are the normalised ones, since two spellings of one query answer alike. `encodeURIComponent` leaves no `"` or `,`, so `etagMatches`' comma split reads the tag whole. A search answers 304 on a match by the two paths a plain read takes (the record's cursor with no cut, the derived cursor under one).
 - **R21. Nothing is written.** A search reads through `getSession`, `handlesOf`, `surfaceOf`, `recentEvents` and `eventsAfter` alone, and writes no audit row, as the plain reads write none.
 - **R22. The texts.** `bellman_surface`'s description gains one sentence (Task 5) and its input `query` and `in`. `extension/manifest.json` keeps its one-line description; the tool list is unchanged.
-- **R23. The ADR is numbered at the PR:** `docs/adr/00NN-room-search.md`. 0031 (org policy, #315) and 0032 (topic rooms, #317) are on `main`, so this is 0033 unless another PR lands first. Number against `origin/main`, every open PR and every local branch (`git for-each-ref` over `docs/adr`) when the PR opens.
+- **R23. The ADR is numbered at the PR:** `docs/adr/0034-room-search.md`. 0031 (org policy, #315) and 0032 (topic rooms, #317) are on `main`, so this would be 0033, but two unpushed local branches (a2a, audit SIEM) hold 0033, so it is 0034. Number against `origin/main`, every open PR and every local branch (`git for-each-ref` over `docs/adr`) when the PR opens.
 - **R24. ★ The dash keeps the query in the URL, as `q`,** on `/r/$roomId` and `/rooms/$roomId`: the views are search parameters there already, so a search is a link to share, the back button undoes it and a reload keeps it. `validateSearch` keeps a `q` whose trimmed length is 3 to 200 and drops any other, so a bad link shows the view and no error. The box sets `q` on submit only, never per keystroke, since the public reads have no limiter; an empty submit removes it. The view tabs link without `q`, so switching tabs clears the search: each tab searches a different thing.
 - **R25. ★ What owns what.** `src/components/room/search.tsx` holds `SearchBox`, `CardResults` and `MessageResults`; `PublicRoom` and `RoomDetail` place them. The box sits between the view tabs and the body, for cards on the canvas and Page views and for messages on the Log; while `q` is set, the results list takes the body's place. The box is one `<form role="search">` with `<input type="search" minLength={3} maxLength={200}>`: native bounds, no client-side matching.
 - **R26. The public page calls the server's public reads directly,** at `API_ORIGIN` with `credentials: "omit"`, as `getPublicSurface` does. The dash's Worker does not change: it writes a page's head and summary from the path, so `?q=` gets the same page, whose script then searches.
@@ -151,7 +151,7 @@ None.
 | bellman | `src/tools/surface.ts` | 2, 5 | `query`, `in`, `IN_NEEDS_QUERY`; the description's sentence |
 | bellman | `src/http/rooms.ts` | 3 | `searchTag`, `AFTER_WITH_QUERY`; `?query=` on the surface and events reads |
 | bellman | `src/http/public.ts` | 4 | `?query=` on the public surface and events reads |
-| bellman | docs; `docs/adr/00NN-room-search.md` | 5 | the generated page, the surface guide, the public rooms guide, the canvas skill, ARCHITECTURE, the ADR |
+| bellman | docs; `docs/adr/0034-room-search.md` | 5 | the generated page, the surface guide, the public rooms guide, the canvas skill, ARCHITECTURE, the ADR |
 | dash | `src/lib/api.ts`, `src/lib/search.ts` (new), `src/lib/article.ts`, `src/router.tsx` | 6 | the four calls and wire types; `cardsLine`, `messagesLine`, `queryOf`; `titleOf`'s parameter; `q` |
 | dash | `src/components/room/search.tsx` (new) | 7 | `SearchBox`, `CardResults`, `MessageResults` |
 | dash | `src/routes/public-room.tsx`, `src/routes/room-detail.tsx` | 8 | the boxes and the lists in both views |
@@ -750,10 +750,10 @@ Expected: PASS.
 jj commit -m "The public surface and events reads take ?query=: anyone searches a public room's cards and its newest 200 events, members named by number"
 ```
 
-### Task 5: The tool text, the docs, ADR 00NN, and the branch verified
+### Task 5: The tool text, the docs, ADR 0034, and the branch verified
 
 **Files:**
-- Create: `docs/adr/00NN-room-search.md` (R23)
+- Create: `docs/adr/0034-room-search.md` (R23)
 - Modify: `src/tools/surface.ts` (the description), `docs-site/src/content/docs/guides/surface.md`, `docs-site/src/content/docs/guides/public-rooms.md`, `plugin/skills/canvas/SKILL.md`, `docs/ARCHITECTURE.md`; regenerated: `docs-site/src/content/docs/reference/tools/bellman_surface.md`
 
 Its checks: the drift test, the word scan, the measurement, `npm run verify`.
@@ -767,7 +767,7 @@ With query (3 to 200 characters) it searches instead and answers { query, in, to
 - [ ] **Step 2: The ADR**
 
 ````markdown
-# ADR 00NN — Room search
+# ADR 0034 — Room search
 
 **Date:** 2026-10-23 · **Status:** accepted · **Spec:** `docs/superpowers/specs/2026-10-23-room-search-design.md` · **Plan:** `docs/superpowers/plans/2026-10-23-room-search.md`
 
@@ -798,7 +798,7 @@ A topic room or a long-lived hub becomes a knowledge base of sixty cards and tho
 - `docs-site/src/content/docs/guides/surface.md`: a section `## Searching it` after "How members see it", linking the tool's page: the matching and order rules (Global Constraints, R5), the result fields (R9), `url` in a public room only, `in: "messages"` over the last 2,000 events with `searched`, the refusals (R3, R16, R19), the same search as `?query=` on `GET /rooms/:id/surface` and `/events`, and that a search writes nothing and keeps no seat alive.
 - `docs-site/src/content/docs/guides/public-rooms.md`, in "What a reader sees", after the paragraph on names: `?query=` on a public room's surface and events reads searches its cards and its newest 200 events for anyone, names members by number, and gives each card its page's URL. (The page's box waits for Part 2: R29.)
 - `plugin/skills/canvas/SKILL.md`: the opening's last sentence becomes "A member who joins a room that has run for a week reads the surface first, and on a full surface searches it first: `bellman_surface` with `query`."; "Reading it back" gains a bullet: `query` answers the ten best items with a snippet each, `in: "messages"` searches the log, and an item is read in full before it is rewritten.
-- `docs/ARCHITECTURE.md`: in section 4's "**A public room**" paragraph, after "The room read carries `preset` (ADR 0031).": "The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 00NN): `src/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a search's ETag carries its query and the room's link." Section 11: measure as in Setup 4, update the `Tool definitions` and `bellman_surface` rows, and above the newest "Re-measured" paragraph: "Re-measured on <date> for room search, by the method below: <n> tokens over the <before> that trunk (`<commit>`) measures, all of them `bellman_surface`'s (<a> to <b>: `query`, `in` and one sentence on what a search answers). No tool was added. That is <after>."
+- `docs/ARCHITECTURE.md`: in section 4's "**A public room**" paragraph, after "The room read carries `preset` (ADR 0031).": "The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 0034): `src/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a search's ETag carries its query and the room's link." Section 11: measure as in Setup 4, update the `Tool definitions` and `bellman_surface` rows, and above the newest "Re-measured" paragraph: "Re-measured on <date> for room search, by the method below: <n> tokens over the <before> that trunk (`<commit>`) measures, all of them `bellman_surface`'s (<a> to <b>: `query`, `in` and one sentence on what a search answers). No tool was added. That is <after>."
 
 - [ ] **Step 4: Regenerate, scan the words, and run everything**
 
@@ -810,7 +810,7 @@ Expected: PASS.
 
 Run:
 ```bash
-grep -nE -i 'load[- ]bearing|wort[h] (saying|stating|noting|knowing|recording)|structura[l]|two session[s]|the other sessio[n]' docs/adr/00NN-room-search.md docs/ARCHITECTURE.md docs-site/src/content/docs/guides/surface.md docs-site/src/content/docs/guides/public-rooms.md plugin/skills/canvas/SKILL.md src/search.ts src/rooms.ts src/projections.ts src/tools/surface.ts src/http/rooms.ts src/http/public.ts
+grep -nE -i 'load[- ]bearing|wort[h] (saying|stating|noting|knowing|recording)|structura[l]|two session[s]|the other sessio[n]' docs/adr/0034-room-search.md docs/ARCHITECTURE.md docs-site/src/content/docs/guides/surface.md docs-site/src/content/docs/guides/public-rooms.md plugin/skills/canvas/SKILL.md src/search.ts src/rooms.ts src/projections.ts src/tools/surface.ts src/http/rooms.ts src/http/public.ts
 npm run verify
 jj diff -r 'trunk()..@' --stat
 ```
@@ -819,13 +819,13 @@ Expected: the scan prints nothing new against trunk's copy of these files; `veri
 - [ ] **Step 5: Commit**
 
 ```bash
-jj commit -m "ADR 00NN, bellman_surface's text, the surface and public rooms guides, the canvas skill and ARCHITECTURE, for room search"
+jj commit -m "ADR 0034, bellman_surface's text, the surface and public rooms guides, the canvas skill and ARCHITECTURE, for room search"
 ```
 
 ### Part 1's review and PR
 
 - [ ] **The whole-branch review:** one reviewer over the branch's diff from `trunk()`, with this plan and the spec. Fix what it finds, with tests, before the PR.
-- [ ] **The PR.** Number the ADR (R23) and replace `00NN` everywhere (`grep -rn 00NN docs`). Read the diff's stat against the file map, set the bookmark, push, and open it. The body says what a caller gains (`query` and `in`, `?query=` on four reads, the shapes, the bounds, `searched`), that no tool, store method or limit is added and a search writes nothing, that a search's ETag carries its query, that `bellman_surface`'s page was regenerated, and that the dash's PR follows the deploy.
+- [ ] **The PR.** Number the ADR (R23) and replace `0034` everywhere (`grep -rn 0034 docs`). Read the diff's stat against the file map, set the bookmark, push, and open it. The body says what a caller gains (`query` and `in`, `?query=` on four reads, the shapes, the bounds, `searched`), that no tool, store method or limit is added and a search writes nothing, that a search's ETag carries its query, that `bellman_surface`'s page was regenerated, and that the dash's PR follows the deploy.
 - [ ] **After the merge:** read the deploy job, not only the merge. Then `curl -s 'https://mcp.bellman.sh/public/rooms/<a public room>/surface?query=<a word on it>' | jq '{total, n: (.results | length), url: .results[0].data.url}'` prints a total, at most 10, and a `https://bellman.sh/r/…` URL, and `curl -s 'https://mcp.bellman.sh/public/rooms/<it>/events?query=ab' | jq .error_description` prints `"query must be 3 to 200 characters"`.
 
 ---

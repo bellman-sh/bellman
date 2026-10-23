@@ -2817,6 +2817,19 @@ export function describeStoreContract(
         expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["alpha", "mid", "zeta"]);
       });
 
+      // A surface key may carry a hyphen. "-" is 0x2D, the digits 0x30-0x39, "_" 0x5F and the letters after, and both
+      // stores sort that way (`<` on the keys; the storage's `list` by the bytes of `sf:<key>`). `localeCompare` puts
+      // "_" before "-", so a store that used it would lay the canvas out differently for the same room.
+      it("sorts rows by key in code-unit order, a hyphen before a digit and a digit before an underscore", async () => {
+        const s = session({});
+        await store.createSession(s);
+        for (const key of ["ab", "a_b", "a1", "a-b", "a-"]) {
+          const item = { ...plan(), key };
+          await store.appendEvent(s.id, wrote(item), { surface: { key, item } });
+        }
+        expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["a-", "a-b", "a1", "a_b", "ab"]);
+      });
+
       it("removes the row and moves the cursor; removing nothing moves neither", async () => {
         const s = session({});
         await store.createSession(s);

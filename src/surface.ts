@@ -25,8 +25,12 @@ export const MAX_SURFACE_BODY_CHARS = 8_000;
 export const MAX_SURFACE_TITLE_CHARS = 120;
 export const MAX_SURFACE_LINK_CHARS = 2_048;
 
-/** The same grammar as a role key, refused with its own noun. */
-export const SurfaceKeyShape = slugShape("surface keys");
+/**
+ * The role-key grammar with `-` allowed after the first character, `[a-z][a-z0-9_-]{0,30}`, and the same
+ * reserved names, refused with its own noun. A role key has no `-` (see `slugShape`); a surface key never goes
+ * into a join code, so it may.
+ */
+export const SurfaceKeyShape = slugShape("surface keys", { hyphens: true });
 
 /** The record's cursor of the last change to a row, 0 for a room that never had one. */
 export const surfaceCursor = (s: StoredSession): number => s.surfaceCursor ?? 0;

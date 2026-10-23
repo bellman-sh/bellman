@@ -18,3 +18,5 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
 | --- | --- | --- | --- | --- | --- |
 | `session_id` | string | no | — | — | — |
 | `room_id` | string | no | session_id under another name, for a host that reserves it. | — | — |
+| `query` | string | no | Words to search for: every one must appear, in any case. 3 to 200 characters. Without it the tool reads the whole surface. | — | — |
+| `in` | string | no | "cards" (the default) searches the surface's items; "messages" searches the room's messages. Only with query. | `cards`, `messages` | — |

@@ -91,6 +91,34 @@ export async function publicRoom(
   return { creator, sessionId, memberId, code: String(door.data.join_code) };
 }
 
+/** A public topic room: jesse is its maintainer, who allows action requests, and a stranger joined through the permanent code as a contributor who allows none. */
+export interface TopicRoom {
+  maintainer: Peer; maintainerId: string; contributor: Peer; contributorId: string; sessionId: string; code: string;
+}
+
+/**
+ * The maintainer grants `request_actions` unless `over.maintainerCapabilities` says otherwise. The
+ * contributor joins with `joinWith`'s defaults, `read_context` and `receive_messages`, so it grants
+ * no `request_actions` and the room must not need it from a contributor.
+ */
+export async function topicRoom(h: Harness, over: { maintainerCapabilities?: string[] } = {}): Promise<TopicRoom> {
+  const maintainer = await h.connect(DEV_KEY.jesse);
+  const started = await maintainer.call("bellman_start", {
+    manifest: manifestFixture({ preset: "topic", public: true }), brief: brief(),
+    capabilities: over.maintainerCapabilities ?? ["read_context", "receive_messages", "request_actions"],
+  });
+  expect(started.isError, started.text).toBe(false);
+  const sessionId = String(started.data.session_id);
+  const maintainerId = String(started.data.member_id);
+  const door = await maintainer.call("bellman_invite", { session_id: sessionId, member_id: maintainerId, permanent: true });
+  expect(door.isError, door.text).toBe(false);
+  const code = String(door.data.join_code);
+  const contributor = await h.connect(DEV_KEY.outsider);
+  const joined = await joinWith(contributor, code);
+  expect(joined.isError, joined.text).toBe(false);
+  return { maintainer, maintainerId, contributor, contributorId: String(joined.data.member_id), sessionId, code };
+}
+
 /**
  * Both phases of joining: the preview's refusal if it refused, else the confirm's outcome. The joiner grants
  * `read_context` unless `capabilities` says otherwise.

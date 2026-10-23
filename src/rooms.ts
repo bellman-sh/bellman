@@ -397,6 +397,25 @@ export async function eventsFor(
 }
 
 /**
+ * The log since `since` (#208): with `since` a request's whole life back, every request that can still
+ * be outstanding and everything after it. The log is in time order, so its tail is read, doubled
+ * until it reaches back past `since` or holds the whole log, and trimmed to the window.
+ *
+ * Exported so that a second reader of open requests, the cap on a member's open proposals (topic
+ * rooms plan, R11), takes the window `bellman_sync` derives its outstanding list from and cannot
+ * disagree with the poll about how far back it reaches. The caller says how far back `since` is: a
+ * topic room's proposal lives seven days and every other request half an hour.
+ */
+export async function requestWindow(store: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
+  // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
+  // said in the window; a store read that pages backward is the upgrade if that gets large.
+  for (let n = 256; ; n *= 2) {
+    const tail = await store.recentEvents(sessionId, n);
+    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
+  }
+}
+
+/**
  * Which orgs get a row for this action, and what it says (audit trail spec, D1 and D2). One
  * rule, in one place, for the callers that write it themselves and the ones that hand it to
  * a store operation to commit with the mutation it records.

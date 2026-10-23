@@ -15,8 +15,10 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js";
+import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
+import { actionStates } from "../../src/action-state.js";
+import { resolveManifest } from "../../src/manifest.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
@@ -3086,6 +3088,285 @@ export function describeStoreContract(
           expect(retry.event).toEqual(first.event);
           expect(await placements(id), "the removed card stays removed, and c keeps slot 0").toEqual({ c: { x: 0, y: 0 } });
         });
+      });
+    });
+
+    /**
+     * Approving a proposal (topic rooms spec, D2): the response and the card are one transaction.
+     * `decideApproval` in proposal.ts is the rule; these hold both stores to applying it inside the response's
+     * append, where a second approval and a retry are decided.
+     */
+    describe("approving a proposal (topic rooms spec, D2)", () => {
+      const MAINT = member({ memberId: "m_maint", userId: "u_jesse", label: "jesse@codenerd", roomRole: "maintainer" });
+      const MAINT2 = member({ memberId: "m_maint2", userId: "u_second", label: "second@codenerd", roomRole: "maintainer" });
+      const ADA = member({ memberId: "m_ada", userId: "u_ada", label: "ada@lovelace", roomRole: "contributor" });
+      const topic = () => resolveManifest({ room: "mcp", preset: "topic", public: true });
+      const room = async (over: NonNullable<Parameters<typeof session>[0]> = {}) => {
+        const s = session({ manifest: topic(), members: [MAINT, MAINT2, ADA], ...over });
+        await store.createSession(s);
+        return s.id;
+      };
+      const card = (body = "See https://modelcontextprotocol.io/specification"): SurfaceItem => ({
+        key: "tools", kind: "text", title: "Tools", body, ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null,
+      });
+      const writeOf = (item: SurfaceItem | null = card()) => ({ key: "tools", item });
+      const proposed = (id: string, item: SurfaceItem | { key: string; remove: true } = card(), base = 0) =>
+        store.appendEvent(id, {
+          type: "action_request", fromMemberId: "m_ada", fromUserId: "u_ada", fromLabel: "ada@lovelace",
+          payload: { kind: "surface_proposal", item, base }, refId: null,
+        }, { stampActionRequest: true });
+      const answer = (cursor: number, by = MAINT): EventBody => ({
+        type: "action_response", fromMemberId: by.memberId, fromUserId: by.userId, fromLabel: by.label,
+        payload: { approved: true }, refId: String(cursor),
+      });
+      const approve = (id: string, request: SessionEvent, over: Partial<ProposalApproval> = {}, key: string | null = null, by = MAINT) =>
+        store.approveProposal(id, answer(request.cursor, by), key, { requestCursor: request.cursor, base: 0, write: writeOf(), ...over });
+      const direct = (id: string, item: SurfaceItem | null, by = MAINT) =>
+        store.appendEvent(id, {
+          type: "surface", fromMemberId: by.memberId, fromUserId: by.userId, fromLabel: by.label,
+          payload: item ?? { key: "tools", remove: true }, refId: null,
+        }, { surface: { key: "tools", item } });
+      const events = (id: string) => store.eventsAfter(id, 0);
+      const landed = (out: Awaited<ReturnType<typeof approve>>) => {
+        if (out.outcome !== "appended") throw new Error(`the approval said ${out.outcome}`);
+        return out;
+      };
+
+      it("writes the response and the card together: the card authored by the proposer and approved by the approver, at the next cursor", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const out = landed(await approve(id, request));
+        expect(out.event.cursor).toBe(request.cursor + 1);
+        expect(out.written).toMatchObject({ type: "surface", cursor: request.cursor + 2, fromMemberId: "m_ada", fromLabel: "ada@lovelace", payload: card() });
+        expect(await store.surfaceOf(id)).toEqual([expect.objectContaining({
+          ...card(), cursor: out.written!.cursor, at: out.written!.at,
+          byMemberId: "m_ada", byLabel: "ada@lovelace", approvedBy: { memberId: "m_maint", label: "jesse@codenerd" },
+        })]);
+        expect(surfaceCursor((await store.getSession(id))!)).toBe(out.written!.cursor);
+        const next = (await direct(id, card("later")))!;
+        expect(next.cursor, "the next append takes the cursor after the card's").toBe(out.written!.cursor + 1);
+      });
+
+      it("removes a card when a removal is approved, and the card's event says so", async () => {
+        const id = await room();
+        const added = (await direct(id, card()))!;
+        const request = (await proposed(id, { key: "tools", remove: true }, added.cursor))!;
+        const out = landed(await approve(id, request, { base: added.cursor, write: writeOf(null) }));
+        expect(out.written!.payload).toEqual({ key: "tools", remove: true });
+        expect(await store.surfaceOf(id)).toEqual([]);
+      });
+
+      // Review Focus 1: another approval landed first, so the key's cursor is past base.
+      it("refuses an approval whose base is behind the card, naming the card's cursor, and writes nothing", async () => {
+        const id = await room();
+        const first = (await proposed(id, card("First. https://example.com/1")))!;
+        const second = (await proposed(id, card("Second. https://example.com/2")))!;
+        const done = landed(await approve(id, first, { write: writeOf(card("First. https://example.com/1")) }));
+        const before = await events(id);
+
+        const out = await approve(id, second, { write: writeOf(card("Second. https://example.com/2")) });
+
+        expect(out).toEqual({ outcome: "stale", cursor: done.written!.cursor });
+        expect(await events(id)).toEqual(before);
+        expect((await store.surfaceOf(id))[0].body).toBe("First. https://example.com/1");
+        expect(actionStates(await events(id), Date.now(), true).get(second.cursor), "the proposal is still open").toBe("outstanding");
+      });
+
+      // Review Focus 5 (R16): a removal leaves no tombstone, so the log is what says the key moved.
+      it("refuses an approval for a key that was removed after base, naming the removal", async () => {
+        const id = await room();
+        const added = (await direct(id, card()))!;
+        const request = (await proposed(id, card("An edit. https://example.com/e"), added.cursor))!;
+        const gone = (await direct(id, null))!;
+
+        const out = await approve(id, request, { base: added.cursor, write: writeOf(card("An edit. https://example.com/e")) });
+
+        expect(out).toEqual({ outcome: "stale", cursor: gone.cursor });
+        expect(await store.surfaceOf(id)).toEqual([]);
+      });
+
+      it("does not call a new card stale because another key moved", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const other: SurfaceItem = { ...card(), key: "other" };
+        await store.appendEvent(id, {
+          type: "surface", fromMemberId: "m_maint", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: other, refId: null,
+        }, { surface: { key: "other", item: other } });
+        expect((await approve(id, request)).outcome).toBe("appended");
+      });
+
+      // Review Focus 1: two approvals that meet. The tool's own check for an earlier answer reads before it appends and cannot stop this.
+      it("applies one of two approvals that meet, and refuses the other as answered, with one card and one response", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const outs = await Promise.all([approve(id, request), approve(id, request, {}, null, MAINT2)]);
+        expect(outs.map((o) => o.outcome).sort()).toEqual(["answered", "appended"]);
+        const won = landed(outs.find((o) => o.outcome === "appended")!);
+        expect(outs.find((o) => o.outcome === "answered")).toEqual({ outcome: "answered", by: won.event.fromLabel });
+        const log = await events(id);
+        expect(log.filter((e) => e.type === "action_response")).toHaveLength(1);
+        expect(log.filter((e) => e.type === "surface")).toHaveLength(1);
+        expect(await store.surfaceOf(id)).toHaveLength(1);
+      });
+
+      // Review Focus 2 (R13): the preset gives both verbs to the maintainer, so the room is built with one taken away.
+      it("records the response of a seat that holds respond_actions without write_surface, and applies nothing", async () => {
+        const base = topic();
+        const manifest = {
+          ...base,
+          roles: { ...base.roles, maintainer: { ...base.roles.maintainer, can: base.roles.maintainer.can.filter((v) => v !== "write_surface") } },
+        };
+        const id = await room({ manifest });
+        const request = (await proposed(id))!;
+        const out = landed(await approve(id, request));
+        expect(out.written).toBeNull();
+        expect((await events(id)).map((e) => e.type)).toEqual(["action_request", "action_response"]);
+        expect(await store.surfaceOf(id)).toEqual([]);
+        expect(surfaceCursor((await store.getSession(id))!)).toBe(0);
+        expect(actionStates(await events(id), Date.now(), true).get(request.cursor), "the derivation reads the response alone").toBe("answered");
+      });
+
+      it("records the response alone in a room that is not a topic room, though the approver holds write_surface", async () => {
+        const lead = { ...MAINT, roomRole: "lead" };
+        const id = await room({ manifest: resolveManifest({ room: "s", preset: "swarm" }), members: [lead, { ...ADA, roomRole: "helper" }] });
+        const request = (await proposed(id))!;
+        const out = landed(await approve(id, request, {}, null, lead));
+        expect(out.written).toBeNull();
+        expect(await store.surfaceOf(id)).toEqual([]);
+      });
+
+      // Review Focus 1, R21: the key names the response, so a retry replays it however the room has changed.
+      it("replays a keyed approval after the room changed: the same response, no second write, and no stale", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const first = landed(await approve(id, request, {}, "ap-0001"));
+        await direct(id, card("changed after"));
+        const log = await events(id);
+
+        const retry = await approve(id, request, {}, "ap-0001");
+
+        expect(retry).toEqual({ outcome: "replayed", event: first.event });
+        expect(await events(id)).toEqual(log);
+        expect((await store.surfaceOf(id))[0].body).toBe("changed after");
+      });
+
+      it("reports a conflict for a key reused with a different response, and writes nothing", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        landed(await approve(id, request, {}, "ap-0001"));
+        const log = await events(id);
+        const other = { ...answer(request.cursor), payload: { approved: true, result: "a different note" } };
+        const out = await store.approveProposal(id, other, "ap-0001", { requestCursor: request.cursor, base: 0, write: writeOf() });
+        expect(out).toEqual({ outcome: "conflict" });
+        expect(await events(id)).toEqual(log);
+      });
+
+      it("writes neither response nor card into a room that froze after the proposal", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        await store.freezeSession(id, 1);
+        expect(await approve(id, request)).toEqual({ outcome: "frozen" });
+        expect(await events(id)).toHaveLength(1);
+        expect(await store.surfaceOf(id)).toEqual([]);
+      });
+
+      // Surface placement: the approved item goes through the same step as any write, so an unplaced one takes a slot.
+      it("places an item the proposer left unplaced, in the row and in the card's event", async () => {
+        const id = await room();
+        const unplaced = { ...card(), placement: null };
+        const request = (await proposed(id, unplaced))!;
+        const out = landed(await approve(id, request, { write: writeOf(unplaced) }));
+        expect((await store.surfaceOf(id))[0].placement).toEqual({ x: 0, y: 0 });
+        expect(out.written!.payload).toMatchObject({ key: "tools", placement: { x: 0, y: 0 } });
+      });
+
+      // What the store's docs promise beyond the cases above.
+
+      // The Durable Objects store reads the members present and MemoryStore keeps those who left on the roster with
+      // `leftAt` set, so only a case that makes a member leave holds the two to reading "on the roster" the same way.
+      it("records the response of an approver who has left the room, and applies nothing", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        await store.removeMember(id, "m_maint2", {
+          now: Date.now(), frozen: "allow", cut: false, audit: [],
+          event: { type: "member_left", fromMemberId: "m_maint2", fromUserId: "u_second", fromLabel: "second@codenerd", payload: { label: "second@codenerd" }, refId: null },
+        });
+        const out = landed(await approve(id, request, {}, null, MAINT2));
+        expect(out.written).toBeNull();
+        expect(await store.surfaceOf(id)).toEqual([]);
+      });
+
+      it("replays a keyed approval that was recorded alone", async () => {
+        const lead = { ...MAINT, roomRole: "lead" };
+        const id = await room({ manifest: resolveManifest({ room: "s", preset: "swarm" }), members: [lead, { ...ADA, roomRole: "helper" }] });
+        const request = (await proposed(id))!;
+        const first = landed(await approve(id, request, {}, "ap-0001", lead));
+        const log = await events(id);
+        expect(await approve(id, request, {}, "ap-0001", lead)).toEqual({ outcome: "replayed", event: first.event });
+        expect(await events(id)).toEqual(log);
+      });
+
+      // The response and the card are one write: a reader that lands beside it sees both events or neither.
+      it("shows a reader the response and the card together or not at all", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const [, seen] = await Promise.all([approve(id, request), events(id)]);
+        expect(seen.filter((e) => e.type === "action_response")).toHaveLength(seen.filter((e) => e.type === "surface").length);
+      });
+
+      // A topic room may still declare housekeeping (plan R2), and a response closes the request it answers in the
+      // books (#66). Both stores run the books over each event the approval writes, and a case that never declared
+      // housekeeping would not see the Durable Objects store skip them.
+      const HK = { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null };
+      const closesTheRequest = async (id: string, out: Extract<Awaited<ReturnType<typeof approve>>, { outcome: "appended" }>) => {
+        const after = (await store.getSession(id))!;
+        expect(after.openRequests).toEqual({});
+        expect(after.members.find((m) => m.memberId === out.event.fromMemberId)!.lastSentAt).toBe(out.event.at);
+      };
+      const onTheBooks = async (id: string, request: SessionEvent) =>
+        expect((await store.getSession(id))!.openRequests, "the premise: the proposal is on the books").toHaveProperty(String(request.cursor));
+
+      it("runs the room's books over the approval: the request leaves the open requests and the approver is stamped", async () => {
+        const id = await room({ manifest: { ...topic(), housekeeping: HK } });
+        const request = (await proposed(id))!;
+        await onTheBooks(id, request);
+        await closesTheRequest(id, landed(await approve(id, request)));
+      });
+
+      it("runs the room's books over a response recorded alone", async () => {
+        const lead = { ...MAINT, roomRole: "lead" };
+        const manifest = { ...resolveManifest({ room: "s", preset: "swarm" }), housekeeping: HK };
+        const id = await room({ manifest, members: [lead, { ...ADA, roomRole: "helper" }] });
+        const request = (await proposed(id))!;
+        await onTheBooks(id, request);
+        const out = landed(await approve(id, request, {}, null, lead));
+        expect(out.written).toBeNull();
+        await closesTheRequest(id, out);
+      });
+
+      it("leaves no record of the key when it refuses as answered, so the retry runs again", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        landed(await approve(id, request));
+        const log = await events(id);
+        const refused = { outcome: "answered", by: MAINT.label };
+        expect(await approve(id, request, {}, "ap-0002", MAINT2)).toEqual(refused);
+        expect(await approve(id, request, {}, "ap-0002", MAINT2)).toEqual(refused);
+        expect(await events(id)).toEqual(log);
+      });
+
+      it("throws for a request cursor that holds no action_request, and writes nothing", async () => {
+        const id = await room();
+        const said = (await store.appendEvent(id, {
+          type: "message", fromMemberId: "m_ada", fromUserId: "u_ada", fromLabel: "ada@lovelace", payload: { text: "hi" }, refId: null,
+        }))!;
+        const log = await events(id);
+        for (const cursor of [99, said.cursor]) {
+          await expect(
+            store.approveProposal(id, answer(cursor), null, { requestCursor: cursor, base: 0, write: writeOf() }),
+          ).rejects.toThrow(/action_request/);
+        }
+        expect(await events(id)).toEqual(log);
       });
     });
 

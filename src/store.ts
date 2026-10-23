@@ -20,6 +20,7 @@ import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, 
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
+import { decideApproval } from "./proposal.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -743,6 +744,29 @@ export type EventWrite =
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "frozen" }
   | { outcome: "conflict" };
+
+/** What `bellman_send` hands the store to approve a proposal in the response's own transaction (topic rooms spec, D2, R12). */
+export interface ProposalApproval {
+  /** The cursor of the `action_request` being approved. */
+  requestCursor: number;
+  /** The surface cursor the proposer read: the proposal's `base`. */
+  base: number;
+  /** The proposal's write after `resolveSurfaceWrite` settled it (blob metadata filled), or null when the tool found none to apply. */
+  write: SurfaceWrite | null;
+}
+
+/**
+ * What `approveProposal` did. `appended` carries the response and the card's `surface` event, which is null when
+ * the seat applied none (R13). `replayed` carries the response the key named. `stale`, `answered`, `conflict` and
+ * `frozen` wrote nothing at all, not even a record.
+ */
+export type ApprovalWrite =
+  | { outcome: "appended"; event: SessionEvent; written: SessionEvent | null }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "stale"; cursor: number }
+  | { outcome: "answered"; by: string }
+  | { outcome: "conflict" }
+  | { outcome: "frozen" };
 
 /**
  * What `setJoinCode` did, which a boolean could not say once the write became
@@ -1486,6 +1510,31 @@ export interface BellmanStore {
     key: string,
     extras?: AppendExtras
   ): Promise<EventWrite>;
+  /**
+   * Approve a proposal (topic rooms spec, D2; plan R12): append `e`, the maintainer's `action_response`, and, when
+   * `decideApproval` says `apply`, the card's `surface` event and row after it, in the same operation. The card is
+   * authored by the proposer (the request's sender), stamped with the approver, and goes through the same
+   * placement step as any surface write, so a proposal written without a placement takes the next free slot at
+   * approval and the event and the row agree.
+   *
+   * One method and not two appends, because the response, the card and the row cannot disagree, and because what
+   * decides two approvals that meet is the operation that writes. The tool's own look for an earlier answer reads
+   * before it appends and cannot stop them: of two that meet, one appends and the other reads `answered`.
+   *
+   * A `key` names the response, as `appendEventOnce`'s names its event, and `null` is unkeyed, as `appendEvent` is.
+   * A retry returns the response as `replayed`, appends and applies nothing, and re-checks nothing. The key check
+   * precedes the frozen check and the decision, so a retry learns what its first attempt did however the room has
+   * changed since, and never reads `stale`.
+   *
+   * A refusal writes nothing, not even the key's record, so a retry after one runs again: `stale` (the key changed
+   * since `approval.base`, a removal included; `cursor` names the change), `answered` (an earlier response to the
+   * request exists; `by` is its sender's label), `conflict` (the key was used for a different response) and
+   * `frozen`. A seat that cannot apply is not a refusal: its response is recorded alone, and `written` is null (R13).
+   *
+   * Throws when `approval.requestCursor` holds no `action_request`, as an idempotency record naming a missing
+   * cursor does: the tool read it a moment before.
+   */
+  approveProposal(sessionId: string, e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite>;
   /**
    * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
    * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
@@ -2797,6 +2846,77 @@ export class MemoryStore implements BellmanStore {
     this.applyExtras(s, event, placed.extras);
     this.wakeHost(s, event);
     return { outcome: "appended", event: detach(event) };
+  }
+
+  async approveProposal(
+    sessionId: string,
+    e: EventBody,
+    key: string | null,
+    approval: ProposalApproval,
+  ): Promise<ApprovalWrite> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`Unknown session ${sessionId}`);
+
+    // Synchronous from the first read to the last write, as `appendEventOnce`'s stretch is. A second approval of
+    // the same proposal then reads the log with this one's response already in it, so of two that meet one
+    // applies and the other is answered. An await anywhere in here would let both read a log with no answer.
+    const keyed = key === null ? null : { storageKey: idempotencyKey(e.fromMemberId, key), print: fingerprint(e) };
+    const seen = this.keys.get(sessionId);
+
+    // The key first, and it re-checks nothing (R21): a retry returns its response however the room has changed.
+    const record = keyed === null ? undefined : seen?.get(keyed.storageKey);
+    if (keyed !== null && record) {
+      if (record.print !== keyed.print) return { outcome: "conflict" };
+      const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (!original) {
+        throw new Error(`Idempotency record for ${sessionId} names missing cursor ${record.cursor}`);
+      }
+      return { outcome: "replayed", event: detach(original) };
+    }
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+
+    const request = s.events.find((ev) => ev.cursor === approval.requestCursor);
+    if (request === undefined || request.type !== "action_request") {
+      throw new Error(`Approval in ${sessionId} names cursor ${approval.requestCursor}, which holds no action_request`);
+    }
+    const write = approval.write;
+    const decided = decideApproval({
+      room: s as Session & { surfaceCursor?: number },
+      approverId: e.fromMemberId,
+      requestCursor: approval.requestCursor,
+      base: approval.base,
+      write,
+      row: write === null ? undefined : this.surfaces.get(sessionId)?.get(write.key),
+      after: s.events.filter((ev) => ev.cursor > approval.base),
+    });
+    if (decided.kind === "answered") return { outcome: "answered", by: decided.by };
+    if (decided.kind === "stale") return { outcome: "stale", cursor: decided.cursor };
+
+    // One clock for both events, as the Durable Objects store stamps them. An `action_response` is never a reply
+    // to the host (`isReplyToHost` reads a message or a progress event), so neither event wakes it.
+    const at = Date.now();
+    const response = this.appendNow(s, e, at);
+    if (keyed !== null) {
+      const map = seen ?? new Map<string, IdempotencyRecord>();
+      map.set(keyed.storageKey, { cursor: response.cursor, print: keyed.print });
+      this.keys.set(sessionId, map);
+    }
+    if (decided.kind === "record" || write === null) {
+      return { outcome: "appended", event: detach(response), written: null };
+    }
+
+    // The card is the proposer's, as a surface event's author is its row's author everywhere (R18). It carries no
+    // `refId`: nothing reads one off a `surface` event, and the response and the card are adjacent (R30).
+    const draft: EventBody = {
+      type: "surface", fromMemberId: request.fromMemberId, fromUserId: request.fromUserId, fromLabel: request.fromLabel,
+      payload: write.item ?? { key: write.key, remove: true }, refId: null,
+    };
+    // Surface placement's step, before the event is numbered: an item the proposer left unplaced takes the next
+    // free slot, and the event carries the placement the row will (R19).
+    const placed = this.placed(s, draft, { surface: write });
+    const card = this.appendNow(s, placed.e, at);
+    this.applyExtras(s, card, { surface: placed.extras.surface, approvedBy: decided.approvedBy });
+    return { outcome: "appended", event: detach(response), written: detach(card) };
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

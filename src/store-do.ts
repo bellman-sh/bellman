@@ -11,8 +11,8 @@ import type {
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
-  SeatOutcome,
+  AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
+  ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome,
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
@@ -50,6 +50,7 @@ import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHouseke
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
+import { decideApproval } from "./proposal.js";
 import { presetInNewWords } from "./presets.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
@@ -2161,6 +2162,108 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (broughtForward) await this.driver.reArm();
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
+    return result;
+  }
+
+  /**
+   * `BellmanStore.approveProposal` (topic rooms spec, D2; plan R12): a maintainer's response and, when
+   * `decideApproval` says apply, the proposer's card and its row, in one transaction.
+   *
+   * The order inside it is the rule: the key (a retry returns its response and re-checks nothing, R21), then
+   * frozen, then the reads (the request, the key's row, the log past `base`), then `decideApproval`, then the
+   * write. A refusal returns before anything is written, so it leaves no record of the key either.
+   *
+   * **One `putRows`, and the books folded over both events.** The response, the card, the cursor, the key's
+   * record and the row go in one put, as `removeMember`'s several events do, and not through two `#writeEvent`
+   * calls: the second would run housekeeping's books (#66) on a record that does not hold the first's. The books
+   * are folded over the record event by event and the result is written once.
+   *
+   * The wake comes after the commit, one event at a time in cursor order, and only for an approval that appended.
+   * Neither event is a reply to the host (`isReplyToHost` reads a message or a progress event), so no wake row is
+   * queued as `appendEvent` may queue one. The alarm is re-armed when the books brought a due time forward, which
+   * is `#writeEvent`'s rule.
+   *
+   * ponytail: one list of the log from `base` per approval, which bounds the cost at the events since the proposer
+   * read. The upgrade is an `answered` marker beside the request, read in place of the list.
+   */
+  async approveProposal(e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite> {
+    let broughtForward = false as boolean;
+    // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<ApprovalWrite>(async (txn) => {
+      // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+
+      const keyed = key === null ? null : { storageKey: idempotencyKey(e.fromMemberId, key), print: fingerprint(e) };
+      if (keyed !== null) {
+        const record = await txn.get<IdempotencyRecord>(keyed.storageKey);
+        if (record) {
+          if (record.print !== keyed.print) return { outcome: "conflict" };
+          const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+          if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+          return { outcome: "replayed", event: original };
+        }
+      }
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+
+      const request = await txn.get<SessionEvent>(eventKey(approval.requestCursor));
+      if (request === undefined || request.type !== "action_request") {
+        throw new Error(`Approval names cursor ${approval.requestCursor}, which holds no action_request`);
+      }
+      const write = approval.write;
+      const row = write === null ? undefined : await txn.get<SurfaceRow>(surfaceKey(write.key));
+      const after = [...(await txn.list<SessionEvent>({ prefix: "e:", start: eventKey(approval.base + 1) })).values()];
+      const decided = decideApproval({
+        room: s, approverId: e.fromMemberId, requestCursor: approval.requestCursor, base: approval.base, write, row, after,
+      });
+      if (decided.kind === "answered") return { outcome: "answered", by: decided.by };
+      if (decided.kind === "stale") return { outcome: "stale", cursor: decided.cursor };
+
+      const at = Date.now();
+      const response: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at };
+      let card: SessionEvent | null = null;
+      let extras: AppendExtras = {};
+      if (decided.kind === "apply" && write !== null) {
+        // The proposer's, as a surface event's author is its row's author everywhere (R18), with no `refId`: nothing
+        // reads one off a `surface` event, and the response and the card are adjacent (R30).
+        const draft: EventBody = {
+          type: "surface", fromMemberId: request.fromMemberId, fromUserId: request.fromUserId, fromLabel: request.fromLabel,
+          payload: write.item ?? { key: write.key, remove: true }, refId: null,
+        };
+        // Surface placement's step, before the event is numbered: an item the proposer left unplaced takes the next
+        // free slot, and the event carries the placement the row will (R19).
+        const placed = await placedAppend(txn, draft, { surface: write });
+        card = { ...placed.e, cursor: response.cursor + 1, at };
+        extras = { surface: placed.extras.surface, approvedBy: decided.approvedBy };
+      }
+      const events = card === null ? [response] : [response, card];
+      // The books (#66) for each event, folded over the record in cursor order, as `removeMember` folds them.
+      const kept = events.reduce<StoredSession>((draft, ev) => {
+        const books = noteAppend(draft, ev);
+        return books === draft ? draft : { ...draft, ...books };
+      }, s);
+      const owed = card === null
+        ? { puts: {} as Record<string, unknown>, deletes: [] as string[] }
+        : await extraRows(txn, kept, card, extras);
+      await putRows(txn, {
+        ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
+        cursor: events[events.length - 1].cursor,
+        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: response.cursor, print: keyed.print } satisfies IdempotencyRecord }),
+        ...asRows(s, { ...owed.puts, session: owed.puts.session ?? (kept === s ? undefined : kept) }),
+      });
+      for (const gone of owed.deletes) await txn.delete(gone);
+      broughtForward = kept !== s && (bringsForward(s, kept, at) || tickBroughtForward(s, kept));
+      return { outcome: "appended", event: response, written: card };
+    });
+    if (result.outcome === "appended") {
+      this.#wake(result.event, members);
+      if (result.written !== null) this.#wake(result.written, members);
+      // After the wake, as appendEvent does it: reArm() reads the record the approval landed in.
+      if (broughtForward) await this.driver.reArm();
+    }
     return result;
   }
 
@@ -4878,6 +4981,10 @@ export class DurableObjectStore implements BellmanStore {
     extras: AppendExtras = {}
   ): Promise<EventWrite> {
     return this.session(sessionId).appendEventOnce(e, key, extras);
+  }
+
+  async approveProposal(sessionId: string, e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite> {
+    return this.session(sessionId).approveProposal(e, key, approval);
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

@@ -80,6 +80,7 @@ import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 import { publicEvent } from "../src/public-event.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import { resolveManifest } from "../src/manifest.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -2645,5 +2646,52 @@ describe("a failed index write does not fail the operation it indexes", () => {
     // The retry itself needs a real alarm, so it is pinned in the Workers program:
     // worker-tests/join-code-outbox.test.ts drives the queued row through delivery and
     // asserts the code resolves afterwards.
+  });
+});
+
+/**
+ * An approval is one transaction (topic rooms spec, D2, R12): the response, the card's event, the row, the cursor and the
+ * record are written inside a single `transaction` call, and nothing is put outside one. The fake has no rollback;
+ * that the real one aborts a whole transaction is proven in workerd (worker-tests/join-code-outbox.test.ts).
+ */
+describe("SessionDO approveProposal", () => {
+  it("writes everything an approval owes inside one transaction", async () => {
+    const item = { key: "tools", kind: "text", title: null, body: "See https://example.com", ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null };
+    const request = {
+      cursor: 1, type: "action_request", fromMemberId: "m_ada", fromUserId: "u_ada", fromLabel: "ada@lovelace",
+      payload: { kind: "surface_proposal", item, base: 0 }, refId: null, at: 1_700_000_000_000,
+    };
+    const storage = fakeStorage({
+      session: currentRow({
+        manifest: resolveManifest({ room: "mcp", preset: "topic", public: true }),
+        members: [member({ memberId: "m_maint", roomRole: "maintainer" }), member({ memberId: "m_ada", userId: "u_ada", label: "ada@lovelace", roomRole: "contributor" })],
+      }),
+      cursor: 1,
+      "e:000000000001": request,
+    });
+    let open = 0;
+    let outside = 0;
+    const transaction = storage.transaction;
+    const put = storage.put;
+    (storage as { transaction: unknown }).transaction = async (closure: never) => {
+      open++;
+      try { return await transaction(closure); } finally { open--; }
+    };
+    (storage as { put: unknown }).put = async (...args: Parameters<typeof put>) => {
+      if (open === 0) outside++;
+      return put(...args);
+    };
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    const out = await doi.approveProposal(
+      { type: "action_response", fromMemberId: "m_maint", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { approved: true }, refId: "1" },
+      null,
+      { requestCursor: 1, base: 0, write: { key: "tools", item } },
+    );
+
+    expect(out.outcome).toBe("appended");
+    expect(outside, "puts made outside the transaction").toBe(0);
+    expect((await doi.eventsAfter(0)).map((e) => e.type)).toEqual(["action_request", "action_response", "surface"]);
+    expect(await doi.surfaceOf()).toMatchObject([{ key: "tools", byMemberId: "m_ada", approvedBy: { memberId: "m_maint" } }]);
   });
 });

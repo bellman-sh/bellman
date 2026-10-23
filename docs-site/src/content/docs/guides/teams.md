@@ -40,6 +40,8 @@ An org is a record: a name, one owner, a count of seats, and whether anyone is p
 
 An admin seats a teammate by a stable identity: `github:<numeric id>`, `google:<numeric id>`, or an email address, which the first sign-in with that address claims onto its subject. The control panel does this; underneath, it is `POST /org/members` with `{ key, role }`, and `GET /org` shows the name, the seats and how many are used. The owner stays an admin and cannot be removed. When every seat is taken, adding one more is refused until a seat is freed or more are bought.
 
+A seat takes effect at once only for someone the org owns by its form: a subject of its own identity provider, or an address under a domain it has verified. Anyone else is invited. The org gets nothing of theirs until they accept: not their sign-in, their plan, the rooms they sit in or its audit of them. Their next sign-in stops at a page that names the org, with **Join**, **Decline**, and a way to carry on without answering, which asks again next time. Joining takes a seat, so a full org refuses it, and so does an org that requires single sign-on, which they join by signing in through it. An invite takes no seat. `GET /org/members` lists invites after the members, each marked `invited`, `POST` answers `202` for one, and `DELETE /org/members/<key>` withdraws it.
+
 When the subscription stops paying, the org keeps its members and loses the plan: everyone in it is on the free plan, with their org and role kept, until a payment brings it back. Nothing is removed by a failed card. An org set up by the operator rather than bought is always active.
 
 ## Single sign-on
@@ -50,7 +52,7 @@ An org's admin can have everyone sign in through the company's identity provider
 2. **Prove your email domains.** Claim `acme.com`, publish the TXT record Bellman gives you at `_bellman.acme.com`, and ask Bellman to check it. Until a domain is verified it routes nothing.
 3. **Try it.** On the sign-in page, enter a work email. An address under a verified domain is sent to your IdP; the first sign-in seats the person as a member of your org, within its seats, and an address an admin had already seated keeps the role it was given.
 
-Once those work, turn `require_sso` on. From then on everyone the org claims, by a seat or by a verified address, must sign in through the IdP; GitHub and Google refuse them and say so. The org's owner may still sign in with their original provider, which is the way back in if the IdP is ever down. A person who had a personal Bellman account under a company address signs in through SSO as a new account, and their earlier rooms stay with the old one, so seat existing members by their GitHub or Google key first if those accounts should be kept.
+Once those work, turn `require_sso` on. From then on everyone the org claims, by a seat they hold or by a verified address, must sign in through the IdP; GitHub and Google refuse them and say so. An invite nobody has accepted claims no one. The org's owner may still sign in with their original provider, which is the way back in if the IdP is ever down. A person who had a personal Bellman account under a company address signs in through SSO as a new account, and their earlier rooms stay with the old one, so seat existing members by their GitHub or Google key first if those accounts should be kept, and have each accept their invite before the switch goes on.
 
 ## The audit log
 
@@ -70,7 +72,7 @@ Each entry is `{ at, session_id, actor, action, detail }`, where `actor` is a us
 - A creator changing what a hosted room's host is told to ask (`host_instructions_changed`). Its entry records the length of the new text, not the text, and none is written when the text did not change.
 - The end of a room's record: `room_deleted` when its creator or an org admin asked for it to be deleted, and `room_purged` when it was purged.
 - Plan grants and revocations, `plan_granted` and `plan_revoked`. A team purchase or cancellation appears here with `stripe` as the actor.
-- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats, its standing or `require_sso`; `idp_configured` and `idp_removed`; and `domain_claimed`, `domain_verified` and `domain_released`.
+- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats, its standing or `require_sso`; `idp_configured` and `idp_removed`; `domain_claimed`, `domain_verified` and `domain_released`; and `member_invited` and `invite_withdrawn`, naming the key the admin entered. A person's answer to an invite adds no entry of its own: a Join is its `plan_granted`.
 
 A room that crosses organisations writes to both orgs' logs, so each side sees the crossings that touched its own boundary and nothing else.
 
@@ -84,4 +86,4 @@ A closed room's creator, or an admin of an org that sat in it, can delete it. Th
 
 ## Buying the team plan
 
-Buying the team plan makes the buyer the admin of an org named for their user id, `org_<userId>`. Adding other people to that org is not built yet.
+Buying the team plan makes the buyer the admin of an org named for their user id, `org_<userId>`, and its admins seat and invite people as [Your org and its seats](#your-org-and-its-seats) describes.

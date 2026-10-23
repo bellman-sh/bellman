@@ -27,7 +27,7 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -184,20 +184,24 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       if (request.method === "GET") return json(200, orgView(org, await deps.store.countOrgMembers(orgId), identity.role), origin);
       const body = await readBody(request, origin);
       if (body instanceof Response) return body;
-      // The name and the SSO switch are what an admin changes here. A stray field is a mistake
-      // answered, not ignored: `seats` is the operator's (D7) and `active` is billing's (D5).
-      const stray = Object.keys(body).find((field) => field !== "name" && field !== "require_sso");
+      // The name, the SSO switch and the policy are what an admin changes here. A stray field is a
+      // mistake answered, not ignored: `seats` is the operator's (D7) and `active` is billing's (D5).
+      const stray = Object.keys(body).find((field) => field !== "name" && field !== "require_sso" && field !== "policy");
       if (stray !== undefined) return problem(400, "invalid_request", `${stray} is not a field of PATCH /org`, origin);
       const name = body.name === undefined ? undefined : parseOrgName(body.name);
       if (body.name !== undefined && name === undefined) return problem(400, "invalid_request", `name must be 1 to ${MAX_ORG_NAME_CHARS} characters`, origin);
       if (body.require_sso !== undefined && typeof body.require_sso !== "boolean") return problem(400, "invalid_request", "require_sso must be true or false", origin);
       const requireSso = body.require_sso as boolean | undefined;
-      if (name === undefined && requireSso === undefined) return problem(400, "invalid_request", "give a name, require_sso, or both", origin);
+      const policy = body.policy === undefined ? undefined : parsePolicyPatch(body.policy);
+      if (policy && "error" in policy) return problem(400, "invalid_request", policy.error, origin);
+      if (name === undefined && requireSso === undefined && policy === undefined) {
+        return problem(400, "invalid_request", "give a name, require_sso, policy, or any of them", origin);
+      }
       // Turning the switch on with nothing to sign in through would lock every member out (D13).
       if (requireSso === true && (!hasVerifiedDomain(org) || !(await deps.store.getOrgIdp(orgId)))) {
         return problem(409, "require_sso", SSO_NEEDS, origin);
       }
-      const updated = await deps.store.updateOrg(orgId, { name, requireSso }, intent);
+      const updated = await deps.store.updateOrg(orgId, { name, requireSso, policy: policy?.patch }, intent);
       if (!updated) return problem(404, "no_org", "this org has no record yet; the operator creates one", origin);
       return json(200, orgView(updated, await deps.store.countOrgMembers(orgId), identity.role), origin);
     }

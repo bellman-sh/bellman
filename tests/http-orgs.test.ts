@@ -146,6 +146,27 @@ describe("PATCH /org", () => {
     expect((await call("member", "/org", "PATCH", { name: "X" }))!.status).toBe(403);
     expect((await store.getOrg("org_acme"))?.name).toBe("Acme");
   });
+  it("sets policy fields for an admin, merging over the rest, and shows them to a member on GET", async () => {
+    const res = (await call("owner", "/org", "PATCH", { policy: { require_org_only: true, forbidden_capabilities: ["request_actions"] } }))!;
+    expect([res.status, (await json(res)).policy]).toEqual([200, { require_org_only: true, forbidden_capabilities: ["request_actions"], allowed_counterparty_orgs: null, who_may_create: "any_member", allow_operator_impersonation: true }]);
+    await call("owner", "/org", "PATCH", { policy: { allowed_counterparty_orgs: ["org_b"] }, name: "Acme Ltd" });
+    expect((await json(await call("member", "/org"))).policy).toMatchObject({ require_org_only: true, allowed_counterparty_orgs: ["org_b"] });
+    expect((await store.auditForOrg("org_acme", 10)).at(-1)).toMatchObject({ action: "org_updated", detail: { name: "Acme Ltd", policy: { allowed_counterparty_orgs: ["org_b"] } } });
+  });
+
+  it("refuses a policy that is empty, names a stray field, or gives a field the wrong shape, and a member", async () => {
+    for (const [body, error] of [
+      [{ policy: {} }, "policy names no field"],
+      [{ policy: { who_may_create: "owner" } }, "who_may_create must be any_member or admins_only"],
+      [{ policy: { allowed_counterparty_orgs: ["not an org"] } }, "allowed_counterparty_orgs must be null or a list of at most 50 distinct org ids"],
+      [{ policy: null }, "policy must be an object"],
+    ] as [unknown, string][]) {
+      const res = (await call("owner", "/org", "PATCH", body))!;
+      expect([res.status, await said(res)], JSON.stringify(body)).toEqual([400, error]);
+    }
+    expect((await call("member", "/org", "PATCH", { policy: { require_org_only: true } }))!.status).toBe(403);
+    expect((await store.getOrg("org_acme"))?.policy).toEqual(DEFAULT_POLICY);
+  });
 });
 
 describe("GET /org/members", () => {

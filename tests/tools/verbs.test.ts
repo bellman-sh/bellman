@@ -678,7 +678,7 @@ describe("platform role and room role are different things", () => {
   // It is a tripwire for the easy regression, not a proof: destructuring, optional
   // chaining and a helper handed the identity all slip past it, so the behavioural
   // tests above are the real guard.
-  it("leaves identity.role read only by the audit gate", async () => {
+  it("leaves identity.role read only by the audit gate and the org policy's who_may_create", async () => {
     const { readFileSync, readdirSync } = await import("node:fs");
     // The whole tool layer, not one path. #92 split the tools out of
     // server.ts, and an invariant pinned to a single file stops holding the
@@ -701,12 +701,16 @@ describe("platform role and room role are different things", () => {
         .map((line, i) => [`${url.pathname.split("/").pop()}:${i + 1}`, line] as const)
         .filter(([, line]) => readsRole.test(line))
     );
-    expect(hits.length, `identity.role at ${hits.map(([where]) => where).join(", ")}`).toBe(1);
-    expect(hits[0][1]).toContain("the audit log requires the admin role");
-    // Where the one hit is, is the positive control. A scan that never reached
-    // src/audit.ts would report zero and fail above; naming the file proves the
+    // Two platform-role gates, and no more: the audit log's, and an org policy's who_may_create
+    // (ADR 0031), which is an org admin's rule over its own members and not a room verb.
+    expect(hits.length, `identity.role at ${hits.map(([where]) => where).join(", ")}`).toBe(2);
+    const audit = hits.find(([where]) => where.startsWith("audit.ts:"));
+    const policy = hits.find(([where]) => where.startsWith("start.ts:"));
+    // Where each hit is, is the positive control. A scan that never reached
+    // src/audit.ts would report one and fail above; naming the files proves the
     // read got there rather than passing on an empty list.
-    expect(hits[0][0]).toMatch(/^audit\.ts:/);
+    expect(audit?.[1]).toContain("the audit log requires the admin role");
+    expect(policy?.[1]).toContain('whoMayCreate === "admins_only"');
   });
 
   it("never names Identity in src/roles.ts's code", async () => {

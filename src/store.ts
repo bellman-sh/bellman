@@ -19,7 +19,9 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { chainHash, chainWalk, NO_ANCHOR, SWEEP_EVERY_MS, SYSTEM_INTENT, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { SINK_BATCH, SINK_DELAY_MS, SWEEP_EVERY_MS, SYSTEM_INTENT, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { entryView } from "./audit.js";
+import { randomId } from "./oauth/tokens.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -1903,6 +1905,14 @@ export interface BellmanStore {
   setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings>;
   /** One sweep at `now`: deletes the rows past the window in seq order and returns how many (D2). */
   sweepAudit(orgId: string, now: number): Promise<number>;
+  /** Sets the org's one sink (D3): a fresh secret, returned this once; the cursor survives a re-set. Records `audit_sink_set`. */
+  setAuditSink(orgId: string, url: string, audit: AuditIntent): Promise<{ sink: AuditSinkStatus; secret: string }>;
+  /** Removes the sink and records `audit_sink_removed`; false when there was none. */
+  removeAuditSink(orgId: string, audit: AuditIntent): Promise<boolean>;
+  /** Clears a sink's failure state, dead or not, and delivers again from its cursor; undefined when none. */
+  resumeAuditSink(orgId: string, audit: AuditIntent): Promise<AuditSinkStatus | undefined>;
+  /** One delivery attempt at `now`: the next batch past the cursor, and the state it leaves; undefined when no sink. */
+  pumpAuditSink(orgId: string, now: number): Promise<AuditSinkStatus | undefined>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
@@ -2027,8 +2037,8 @@ export class MemoryStore implements BellmanStore {
    */
   private readonly blobs: BlobStore;
 
-  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`. */
-  constructor(private readonly options: { blobs?: BlobStore; host?: (wake: HostWake) => void } = {}) {
+  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`; `post` is the sink's `fetch`. */
+  constructor(private readonly options: { blobs?: BlobStore; host?: (wake: HostWake) => void; post?: typeof fetch } = {}) {
     this.blobs = options.blobs ?? new MemoryBlobStore();
   }
 
@@ -3229,8 +3239,11 @@ export class MemoryStore implements BellmanStore {
       if (!entry.orgId) continue;
       const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
       this.auditSeq.set(entry.orgId, seq);
-      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? this.auditStateOf(entry.orgId).anchor.hash;
+      const state = this.auditStateOf(entry.orgId);
+      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? state.anchor.hash;
       this.audit.push({ seq, entry: detach(entry), prevHash, hash: chainHash(seq, prevHash, entry) });
+      // A live sink with no delivery dated gets one: as AuditDO's append arms its alarm (D3).
+      if (state.sink && !state.sink.dead && state.sinkAt === null) state.sinkAt = Date.now() + SINK_DELAY_MS;
     }
   }
 
@@ -3841,6 +3854,50 @@ export class MemoryStore implements BellmanStore {
     return plan.count;
   }
 
+  async setAuditSink(orgId: string, url: string, audit: AuditIntent): Promise<{ sink: AuditSinkStatus; secret: string }> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    const secret = randomId(32);
+    state.sink = newSink(url, now, secret, state.sink?.deliveredThrough ?? 0);
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_set", { url }, audit, now)]);
+    return { sink: (await this.auditSettings(orgId)).sink!, secret };
+  }
+
+  async removeAuditSink(orgId: string, audit: AuditIntent): Promise<boolean> {
+    const state = this.auditStateOf(orgId);
+    if (!state.sink) return false;
+    const { url } = state.sink;
+    state.sink = null; state.sinkAt = null;
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_removed", { url }, audit, Date.now())]);
+    return true;
+  }
+
+  async resumeAuditSink(orgId: string, audit: AuditIntent): Promise<AuditSinkStatus | undefined> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    if (!state.sink) return undefined;
+    state.sink = { ...state.sink, attempts: 0, failingSince: null, lastError: null, dead: false };
+    state.sinkAt = now;
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_resumed", { url: state.sink.url, delivered_through: state.sink.deliveredThrough }, audit, now)]);
+    return (await this.auditSettings(orgId)).sink!;
+  }
+
+  async pumpAuditSink(orgId: string, now: number): Promise<AuditSinkStatus | undefined> {
+    const state = this.auditStateOf(orgId);
+    const sink = state.sink;
+    if (!sink) return undefined;
+    state.sinkAt = null;
+    const newest = () => this.auditSeq.get(orgId) ?? 0;
+    const rows = sink.dead ? [] : this.streamOf(orgId).filter((r) => r.seq > sink.deliveredThrough).slice(0, SINK_BATCH);
+    if (rows.length === 0) return sinkStatus(sink, newest());
+    const outcome = await deliverBatch(this.options.post ?? fetch, sink, orgId, rows.map(entryView), now);
+    // Rows appended while the post was in flight are pending too: one more pass, not a wait for the next append.
+    const next = nextSinkState(sink, outcome, now, rows.length === SINK_BATCH || newest() > rows.at(-1)!.seq);
+    state.sink = next.sink; state.sinkAt = next.armAt;
+    if (next.died) this.recordAudit([orgEventEntry(orgId, "audit_sink_dead", deadDetail(next.sink), SYSTEM_INTENT, now)]);
+    return sinkStatus(next.sink, newest());
+  }
+
   private streamOf(orgId: string): SeqEntry[] {
     return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq, hash: r.hash, prevHash: r.prevHash }));
   }
@@ -3872,6 +3929,8 @@ export class MemoryStore implements BellmanStore {
     for (const [reporter, times] of this.filings) {
       if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
+    // Every sink whose delivery is due: what AuditDO's own alarm does per org.
+    for (const [orgId, st] of this.auditState) if (st.sinkAt !== null && st.sinkAt <= now) await this.pumpAuditSink(orgId, now);
   }
 
   /**

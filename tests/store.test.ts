@@ -8,6 +8,8 @@ import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/
 import { tickStep } from "../src/heartbeat.js";
 import { clearedKeys, dueFindings } from "../src/housekeeping.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
+import { SINK_BATCH, SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/audit-sink.js";
+import { backoffMs } from "../src/outbox.js";
 import { member, roomManifest, session, type SeededSession } from "./helpers/fixtures.js";
 
 // A fresh blob store for each case, handed both to the store, which purges from it, and to the cases,
@@ -622,5 +624,112 @@ describe("verifyAudit sees a row edited behind the store's back", () => {
     for (const at of [1, 2, 3]) await store.appendAudit({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
     (store as unknown as { audit: { seq: number; entry: AuditEntry }[] }).audit[1]!.entry.action = "edited";
     expect(await store.verifyAudit("org_a")).toMatchObject({ ok: false, broken_at: 2 });
+  });
+});
+
+describe("the sink's deliveries", () => {
+  const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+  const url = "https://collector.example/in";
+  const row = (at: number) => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+  /** A store whose sink posts to `answer`: every request kept, in order. */
+  const rig = (answer: () => Response | Promise<Response>) => {
+    const posts: { url: string; init: RequestInit }[] = [];
+    const store = new MemoryStore({ post: ((u: string, init: RequestInit) => { posts.push({ url: u, init }); return answer(); }) as unknown as typeof fetch });
+    return { store, posts };
+  };
+  const verified = async (secret: string, init: RequestInit) => {
+    const h = init.headers as Record<string, string>;
+    const [t, v1] = h["Bellman-Signature"].split(",").map((kv) => kv.slice(kv.indexOf("=") + 1));
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    return crypto.subtle.verify("HMAC", key, Uint8Array.from(v1.match(/../g)!, (x) => parseInt(x, 16)), enc.encode(`${t}.${init.body as string}`));
+  };
+
+  it("posts the rows past the cursor as one signed batch and advances the cursor", async () => {
+    const { store, posts } = rig(() => new Response(null, { status: 200 }));
+    await store.appendAudit(row(1));
+    await store.appendAudit(row(2));
+    const { secret } = await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    await store.sweep(t);
+    expect(posts).toHaveLength(1);
+    const { init } = posts[0];
+    const h = init.headers as Record<string, string>;
+    expect([posts[0].url, init.method, h["Content-Type"], h["Bellman-Delivery"]]).toEqual([url, "POST", "application/json", "org_a:1-3"]);
+    expect(await verified(secret, init)).toBe(true);
+    expect(await verified("not the secret", init)).toBe(false);
+    const body = JSON.parse(init.body as string);
+    expect(body).toMatchObject({ org_id: "org_a", delivery: "org_a:1-3" });
+    expect(body.entries.map((e: { seq: number; action: string }) => [e.seq, e.action])).toEqual([[1, "sent_message"], [2, "sent_message"], [3, "audit_sink_set"]]);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "ok", delivered_through: 3, pending: 0, attempts: 0 });
+    await store.sweep(t + 1);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("keeps the cursor on a refusal, backs off, and clears the failure when the next post lands", async () => {
+    let status = 500;
+    const { store, posts } = rig(() => new Response(null, { status }));
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    await store.sweep(t);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "failing", attempts: 1, delivered_through: 0, pending: 2, last_error: "500", failing_since: new Date(t).toISOString() });
+    await store.sweep(t + backoffMs(1) - 1);
+    expect(posts).toHaveLength(1);
+    status = 200;
+    await store.sweep(t + backoffMs(1));
+    expect(posts).toHaveLength(2);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "ok", attempts: 0, delivered_through: 2, pending: 0, last_error: null, failing_since: null });
+  });
+
+  it("records a thrown post as the error", async () => {
+    const { store } = rig(() => { throw new Error("getaddrinfo ENOTFOUND collector.example"); });
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    await store.sweep(Date.now() + SINK_DELAY_MS);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "failing", attempts: 1, last_error: "getaddrinfo ENOTFOUND collector.example" });
+  });
+
+  it("is dead after a day of failure, says so in the stream, posts no more, and delivers again once resumed", async () => {
+    let status = 503;
+    const { store, posts } = rig(() => new Response(null, { status }));
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    await store.sweep(t);
+    await store.sweep(t + SINK_DEAD_AFTER_MS);
+    expect(posts).toHaveLength(2);
+    const sink = (await store.auditSettings("org_a")).sink!;
+    expect(sink).toMatchObject({ status: "dead", attempts: 2, last_error: "503", failing_since: new Date(t).toISOString() });
+    expect((await store.auditForOrg("org_a", 10)).at(-1)).toMatchObject({
+      action: "audit_sink_dead", actorUserId: "system", detail: { url, failing_since: new Date(t).toISOString(), last_error: "503" },
+    });
+    status = 200;
+    await store.appendAudit(row(2));
+    await store.sweep(t + 2 * SINK_DEAD_AFTER_MS);
+    expect(posts).toHaveLength(2);
+    const resumed = (await store.resumeAuditSink("org_a", by))!;
+    expect(resumed).toMatchObject({ status: "ok", attempts: 0, delivered_through: 0, pending: 5, last_error: null, failing_since: null });
+    await store.sweep(t + 2 * SINK_DEAD_AFTER_MS + 1);
+    expect(posts).toHaveLength(3);
+    expect((posts[2].init.headers as Record<string, string>)["Bellman-Delivery"]).toBe("org_a:1-5");
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "ok", delivered_through: 5, pending: 0 });
+  });
+
+  it("delivers a long backlog a batch at a time, the next pass dated now", async () => {
+    const { store, posts } = rig(() => new Response(null, { status: 200 }));
+    for (let i = 1; i <= SINK_BATCH + 50; i++) await store.appendAudit(row(i));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    await store.sweep(t);
+    expect(posts).toHaveLength(1);
+    expect((posts[0].init.headers as Record<string, string>)["Bellman-Delivery"]).toBe(`org_a:1-${SINK_BATCH}`);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ delivered_through: SINK_BATCH, pending: 51 });
+    await store.sweep(t);
+    expect(posts).toHaveLength(2);
+    expect((posts[1].init.headers as Record<string, string>)["Bellman-Delivery"]).toBe(`org_a:${SINK_BATCH + 1}-${SINK_BATCH + 51}`);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ delivered_through: SINK_BATCH + 51, pending: 0 });
+    await store.sweep(t);
+    expect(posts).toHaveLength(2);
   });
 });

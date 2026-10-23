@@ -1,13 +1,14 @@
 /**
  * The audit routes (audit trail spec, D7 and D8): an org admin reads their own org's stream, a
  * page at a time or whole as a file. On the room routes' rules: the same caller, CORS for the
- * panel's origins and the same preflight. Both are reads, so neither needs a CSRF check. The
- * org is always the caller's own, never a parameter.
+ * panel's origins and the same preflight. The reads need no CSRF check; every write on this
+ * router goes through the one gate, as the org routes' writes do. The org is always the
+ * caller's own, never a parameter.
  */
-import { auditRefusal, type AuditPage, type AuditQuery, type SeqEntry } from "../audit.js";
-import { RETENTION_FLOOR_DAYS, retentionDaysOf, type AuditSettings } from "../audit-sink.js";
+import { auditRefusal, entryView, type AuditEntryView, type AuditPage, type AuditQuery } from "../audit.js";
+import { RETENTION_FLOOR_DAYS, retentionDaysOf, sinkUrlOf, type AuditSettings } from "../audit-sink.js";
 import { attachmentDisposition } from "../blobs.js";
-import { allowedOrigin, corsHeaders, preflightResponse } from "../oauth/browser.js";
+import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type AuditRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
@@ -79,40 +80,7 @@ export function parseAuditQuery(
   return { query, format };
 }
 
-/** One row as the panel and an export read it (D7). A row from before D2 says it recorded no crossing. */
-export interface AuditEntryView {
-  seq: number;
-  at: string;
-  action: string;
-  room: { id: string; name: string | null } | null;
-  /** `label` and `org_id` are absent on a row from before D2: not recorded, which is not the same as no org. */
-  actor: { id: string; label?: string | null; org_id?: string | null };
-  parties: (string | null)[] | null;
-  crossing: "internal" | "cross_org" | null;
-  direction: "outbound" | "inbound" | null;
-  detail: Record<string, unknown>;
-  /** The row's link in the chain (ADR 0033); null on a row from before it. `GET /audit/verify` walks them. */
-  hash: string | null;
-}
-
-export function entryView(e: SeqEntry): AuditEntryView {
-  const recorded = e.crossing !== undefined;
-  return {
-    seq: e.seq,
-    at: new Date(e.at).toISOString(),
-    action: e.action,
-    // A grant row is about an org's plan, filed under `grant:<key>`, an org row about the org itself, under
-    // `org:<id>` (orgs spec, D8), and a SCIM row about a member the IdP pushed, under `scim:<id>` (SCIM spec,
-    // D11): none is about a room.
-    room: /^(grant|org|scim):/.test(e.sessionId) ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
-    actor: recorded ? { id: e.actorUserId, label: e.actorLabel ?? null, org_id: e.actorOrgId ?? null } : { id: e.actorUserId },
-    parties: recorded ? e.parties ?? [] : null,
-    crossing: e.crossing ?? null,
-    direction: recorded ? e.direction ?? null : null,
-    detail: e.detail,
-    hash: e.hash ?? null,
-  };
-}
+export { entryView, type AuditEntryView } from "../audit.js";
 
 /** Rows the export reads per page: one page per pull, so a long stream is never held whole. */
 export const AUDIT_EXPORT_PAGE = 500;
@@ -156,13 +124,36 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
   try {
     const exporting = path === "/audit/export";
     const settings = path === "/audit/settings";
-    if (path !== "/audit" && !exporting && path !== "/audit/verify" && !settings) return problem(404, "not_found", "no such route", origin);
-    if (settings ? request.method !== "GET" && request.method !== "PATCH" : request.method !== "GET") return methodNotAllowed(settings ? "GET, PATCH" : "GET", origin);
+    const sink = path === "/audit/sink";
+    const resume = path === "/audit/sink/resume";
+    if (path !== "/audit" && !exporting && path !== "/audit/verify" && !settings && !sink && !resume) return problem(404, "not_found", "no such route", origin);
+    const allowed = settings ? "GET, PATCH" : sink ? "PUT, DELETE" : resume ? "POST" : "GET";
+    if (!allowed.split(", ").includes(request.method)) return methodNotAllowed(allowed, origin);
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+    const csrf = csrfRefusal(request, who.via, origin);
+    if (csrf) return csrf;
     const refused = auditRefusal(who.identity);
     if (refused) return problem(403, "forbidden", refused, origin);
     const orgId = who.identity.orgId as string; // auditRefusal refuses an identity with no org
+    const intent = { actorUserId: who.identity.userId, actorLabel: who.identity.label, actorOrgId: who.identity.orgId };
+    if (resume) {
+      const status = await deps.store.resumeAuditSink(orgId, intent);
+      return status ? json(200, status, origin) : problem(404, "not_found", "this org has no sink", origin);
+    }
+    if (sink && request.method === "DELETE") {
+      return (await deps.store.removeAuditSink(orgId, intent))
+        ? new Response(null, { status: 204, headers: corsHeaders(origin) })
+        : problem(404, "not_found", "this org has no sink", origin);
+    }
+    if (sink) {
+      const refusedLength = lengthRefusal(request, MAX_SETTINGS_BYTES, "an audit sink", origin);
+      if (refusedLength) return refusedLength;
+      const body: unknown = await request.json().catch(() => undefined);
+      const url = sinkUrlOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).url : "invalid");
+      if (url === "invalid") return problem(400, "invalid_request", "url must be an https URL", origin);
+      return json(200, await deps.store.setAuditSink(orgId, url, intent), origin);
+    }
     if (settings) {
       if (request.method === "GET") return json(200, settingsView(await deps.store.auditSettings(orgId)), origin);
       const refusedLength = lengthRefusal(request, MAX_SETTINGS_BYTES, "an audit setting", origin);
@@ -170,7 +161,6 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
       const body: unknown = await request.json().catch(() => undefined);
       const days = retentionDaysOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).retention_days : "invalid");
       if (days === "invalid") return problem(400, "invalid_request", `retention_days must be an integer of at least ${RETENTION_FLOOR_DAYS}, or null`, origin);
-      const intent = { actorUserId: who.identity.userId, actorLabel: who.identity.label, actorOrgId: who.identity.orgId };
       return json(200, settingsView(await deps.store.setAuditRetention(orgId, days, intent)), origin);
     }
     if (path === "/audit/verify") {

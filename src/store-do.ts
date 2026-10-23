@@ -35,12 +35,13 @@ import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent, readableEvent, readableEvents } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import {
-  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
+  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, entryView, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { DUE_PREFIX, OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, dueNames, earliestDue, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { chainHash, chainWalk, NO_ANCHOR, SWEEP_BATCH, SWEEP_EVERY_MS, SYSTEM_INTENT, VERIFY_PAGE, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { SINK_BATCH, SINK_DELAY_MS, SWEEP_BATCH, SWEEP_EVERY_MS, SYSTEM_INTENT, VERIFY_PAGE, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { randomId } from "./oauth/tokens.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
@@ -4907,6 +4908,77 @@ export class AuditDO extends DurableObject {
       const seq = insertAuditRow(this.ctx.storage, entry);
       if (intentId !== undefined) sql.exec("INSERT INTO delivered (intent_id, seq) VALUES (?, ?)", intentId, seq);
     });
+    if (this.#armSink(Date.now())) await this.#reArm();
+  }
+
+  /** D3: a live sink with no delivery due gets one `SINK_DELAY_MS` out, so a burst of rows goes as one batch. */
+  #armSink(now: number): boolean {
+    const kv = this.ctx.storage.kv;
+    const sink = kv.get<AuditSink>("sink");
+    if (!sink || sink.dead || kv.get<number>(dueKey("sink")) !== undefined) return false;
+    this.#arm("sink", now + SINK_DELAY_MS);
+    return true;
+  }
+
+  async setSink(orgId: string, url: string, intent: AuditIntent, now: number): Promise<{ sink: AuditSinkStatus; secret: string }> {
+    const kv = this.ctx.storage.kv;
+    const secret = randomId(32);
+    this.ctx.storage.transactionSync(() => {
+      kv.put<AuditSink>("sink", newSink(url, now, secret, kv.get<AuditSink>("sink")?.deliveredThrough ?? 0));
+      insertAuditRow(this.ctx.storage, orgEventEntry(orgId, "audit_sink_set", { url }, intent, now));
+    });
+    this.#armSink(now);
+    await this.#reArm();
+    return { sink: (await this.settings()).sink!, secret };
+  }
+
+  async removeSink(orgId: string, intent: AuditIntent, now: number): Promise<boolean> {
+    const kv = this.ctx.storage.kv;
+    const sink = kv.get<AuditSink>("sink");
+    if (!sink) return false;
+    this.ctx.storage.transactionSync(() => {
+      kv.delete("sink");
+      this.#disarm("sink");
+      insertAuditRow(this.ctx.storage, orgEventEntry(orgId, "audit_sink_removed", { url: sink.url }, intent, now));
+    });
+    await this.#reArm();
+    return true;
+  }
+
+  async resumeSink(orgId: string, intent: AuditIntent, now: number): Promise<AuditSinkStatus | undefined> {
+    const kv = this.ctx.storage.kv;
+    const sink = kv.get<AuditSink>("sink");
+    if (!sink) return undefined;
+    this.ctx.storage.transactionSync(() => {
+      kv.put<AuditSink>("sink", { ...sink, attempts: 0, failingSince: null, lastError: null, dead: false });
+      insertAuditRow(this.ctx.storage, orgEventEntry(orgId, "audit_sink_resumed", { url: sink.url, delivered_through: sink.deliveredThrough }, intent, now));
+    });
+    this.#arm("sink", now);
+    await this.#reArm();
+    return (await this.settings()).sink!;
+  }
+
+  /**
+   * D3: one batch past the cursor, posted, and the state the outcome leaves; the next attempt armed
+   * from it. The org's id is read off the rows: a Durable Object cannot read its own name.
+   * ponytail: the alarm and a manual pump can overlap on one object; the second posts a batch the
+   * first may also deliver, which the receiver dedupes on `Bellman-Delivery`.
+   */
+  async pump(now: number): Promise<AuditSinkStatus | undefined> {
+    const kv = this.ctx.storage.kv;
+    const sink = kv.get<AuditSink>("sink");
+    if (!sink) return undefined;
+    const rows = sink.dead ? [] : this.ctx.storage.sql.exec<AuditRecord>("SELECT * FROM entries WHERE seq > ? ORDER BY seq LIMIT ?", sink.deliveredThrough, SINK_BATCH).toArray().map(entryOf);
+    if (rows.length === 0) return sinkStatus(sink, this.#newestSeq());
+    const orgId = rows[0].orgId as string;
+    const outcome = await deliverBatch(fetch, sink, orgId, rows.map(entryView), now);
+    // Rows appended while the post was in flight are pending too: one more pass, not a wait for the next append.
+    const next = nextSinkState(sink, outcome, now, rows.length === SINK_BATCH || this.#newestSeq() > rows.at(-1)!.seq);
+    kv.put<AuditSink>("sink", next.sink);
+    if (next.armAt === null) this.#disarm("sink"); else this.#arm("sink", next.armAt);
+    if (next.died) await this.append(orgEventEntry(orgId, "audit_sink_dead", deadDetail(next.sink), SYSTEM_INTENT, now));
+    await this.#reArm();
+    return sinkStatus(next.sink, this.#newestSeq());
   }
 
   /** The newest `limit` entries, oldest first: `bellman_audit`'s read, without the stream's seq and chain. */
@@ -5024,6 +5096,7 @@ export class AuditDO extends DurableObject {
       this.#disarm(name);
       try {
         if (name === "sweep") await this.sweep(now);
+        else if (name === "sink") await this.pump(now);
       } catch (error) {
         console.error(`alarm handler "${name}" failed for the audit stream:`, error);
         throw error;
@@ -5869,6 +5942,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async sweepAudit(orgId: string, now: number): Promise<number> {
     return this.audit(orgId).sweep(now);
+  }
+
+  async setAuditSink(orgId: string, url: string, audit: AuditIntent): Promise<{ sink: AuditSinkStatus; secret: string }> {
+    return this.audit(orgId).setSink(orgId, url, audit, Date.now());
+  }
+
+  async removeAuditSink(orgId: string, audit: AuditIntent): Promise<boolean> {
+    return this.audit(orgId).removeSink(orgId, audit, Date.now());
+  }
+
+  async resumeAuditSink(orgId: string, audit: AuditIntent): Promise<AuditSinkStatus | undefined> {
+    return this.audit(orgId).resumeSink(orgId, audit, Date.now());
+  }
+
+  async pumpAuditSink(orgId: string, now: number): Promise<AuditSinkStatus | undefined> {
+    return this.audit(orgId).pump(now);
   }
 
   /**

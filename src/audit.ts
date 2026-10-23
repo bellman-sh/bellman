@@ -257,3 +257,38 @@ export function auditRefusal(identity: Identity): string | null {
   if (!identity.orgId) return "your identity has no org.";
   return null;
 }
+
+/** One row as the panel and an export read it (D7); the sink posts the same shape (ADR 0033). A row from before D2 says it recorded no crossing. */
+export interface AuditEntryView {
+  seq: number;
+  at: string;
+  action: string;
+  room: { id: string; name: string | null } | null;
+  /** `label` and `org_id` are absent on a row from before D2: not recorded, which is not the same as no org. */
+  actor: { id: string; label?: string | null; org_id?: string | null };
+  parties: (string | null)[] | null;
+  crossing: "internal" | "cross_org" | null;
+  direction: "outbound" | "inbound" | null;
+  detail: Record<string, unknown>;
+  /** The row's link in the chain (ADR 0033); null on a row from before it. `GET /audit/verify` walks them. */
+  hash: string | null;
+}
+
+export function entryView(e: SeqEntry): AuditEntryView {
+  const recorded = e.crossing !== undefined;
+  return {
+    seq: e.seq,
+    at: new Date(e.at).toISOString(),
+    action: e.action,
+    // A grant row is about an org's plan, filed under `grant:<key>`, an org row about the org itself, under
+    // `org:<id>` (orgs spec, D8), and a SCIM row about a member the IdP pushed, under `scim:<id>` (SCIM spec,
+    // D11): none is about a room.
+    room: /^(grant|org|scim):/.test(e.sessionId) ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
+    actor: recorded ? { id: e.actorUserId, label: e.actorLabel ?? null, org_id: e.actorOrgId ?? null } : { id: e.actorUserId },
+    parties: recorded ? e.parties ?? [] : null,
+    crossing: e.crossing ?? null,
+    direction: recorded ? e.direction ?? null : null,
+    detail: e.detail,
+    hash: e.hash ?? null,
+  };
+}

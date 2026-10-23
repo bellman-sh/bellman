@@ -23,12 +23,13 @@ const people: Record<string, Identity> = {
   "member-a": { userId: "u_al", orgId: "org_a", plan: "team", role: "member", label: "Al" },
   "free-a": { userId: "u_fi", orgId: "org_a", plan: "free", role: "admin", label: "Fi" },
   "no-org": { userId: "u_nn", orgId: null, plan: "team", role: "admin", label: "Nn" },
+  "cookie-a": { userId: "u_ana", orgId: "org_a", plan: "team", role: "admin", label: "Ana" },
 };
 
 const caller = async (request: Request): Promise<RoomCaller | null> => {
   const token = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
   const identity = token === undefined ? undefined : people[token];
-  return identity ? { identity, via: "bearer" } : null;
+  return identity ? { identity, via: token!.startsWith("cookie-") ? "cookie" : "bearer" } : null;
 };
 
 let store: MemoryStore;
@@ -39,10 +40,10 @@ beforeEach(() => {
   deps = { store, caller, panelOrigins: [PANEL] };
 });
 
-const call = (who: string | null, path: string, method = "GET", body?: string) =>
+const call = (who: string | null, path: string, method = "GET", body?: string, origin: string | null = PANEL) =>
   auditRoutes(new Request(`${ISSUER}${path}`, {
     method,
-    headers: { origin: PANEL, ...(who ? { authorization: `Bearer ${who}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    headers: { ...(origin ? { origin } : {}), ...(who ? { authorization: `Bearer ${who}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
     body,
   }), deps);
 const patch = (who: string, body: string) => call(who, "/audit/settings", "PATCH", body);
@@ -325,9 +326,63 @@ describe("/audit/settings", () => {
     expect([cleared.status, await cleared.json()]).toEqual([200, { retention_days: null, sink: null }]);
   });
 
+  it("refuses a cookie write without the panel's Origin, and takes the read", async () => {
+    expect((await call("cookie-a", "/audit/settings", "PATCH", '{"retention_days":90}', null))!.status).toBe(403);
+    expect((await store.auditSettings("org_a")).retentionDays).toBeNull();
+    expect((await call("cookie-a", "/audit/settings", "GET", undefined, null))!.status).toBe(200);
+    expect((await call("cookie-a", "/audit/settings", "PATCH", '{"retention_days":90}'))!.status).toBe(200);
+  });
+
   it("is an admin's route, and takes no other method", async () => {
     expect((await call("member-a", "/audit/settings"))!.status).toBe(403);
     expect((await patch("member-a", JSON.stringify({ retention_days: 90 })))!.status).toBe(403);
     expect((await call("admin-a", "/audit/settings", "PUT"))!.status).toBe(405);
+  });
+});
+
+describe("/audit/sink", () => {
+  const put = (who: string, body: string, origin: string | null = PANEL) => call(who, "/audit/sink", "PUT", body, origin);
+  const URL_A = "https://siem.example.test/bellman";
+
+  it("sets the sink, answering its status and the secret once, and shows it in the settings", async () => {
+    const res = (await put("admin-a", JSON.stringify({ url: URL_A })))!;
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ sink: { url: URL_A, status: "ok", delivered_through: 0, pending: 1 } }); // the audit_sink_set row is the first delivery
+    expect(body.secret).toMatch(/^[A-Za-z0-9_-]{43}$/); // randomId(32): 256 bits, base64url
+    const settings = await (await call("admin-a", "/audit/settings"))!.json();
+    expect(settings.sink).toMatchObject({ url: URL_A, status: "ok" });
+    expect(settings).not.toHaveProperty("secret");
+    expect((await store.auditForOrg("org_a", 10)).at(-1)).toMatchObject({ action: "audit_sink_set", actorUserId: "u_ana", detail: { url: URL_A } });
+  });
+
+  it("refuses an http URL, a missing one, and a body that is not JSON", async () => {
+    expect(await said(await put("admin-a", JSON.stringify({ url: "http://siem.example.test/x" })))).toBe("url must be an https URL");
+    expect((await put("admin-a", "{}"))!.status).toBe(400);
+    expect((await put("admin-a", "nope"))!.status).toBe(400);
+    expect((await store.auditSettings("org_a")).sink).toBeNull();
+  });
+
+  it("removes the sink: 204, then 404 when there is none", async () => {
+    await put("admin-a", JSON.stringify({ url: URL_A }));
+    expect((await call("admin-a", "/audit/sink", "DELETE"))!.status).toBe(204);
+    expect((await store.auditSettings("org_a")).sink).toBeNull();
+    expect((await call("admin-a", "/audit/sink", "DELETE"))!.status).toBe(404);
+  });
+
+  it("resumes a sink: 200 with its status, 404 when there is none", async () => {
+    expect((await call("admin-a", "/audit/sink/resume", "POST"))!.status).toBe(404);
+    await put("admin-a", JSON.stringify({ url: URL_A }));
+    const res = (await call("admin-a", "/audit/sink/resume", "POST"))!;
+    expect([res.status, (await res.json()).status]).toEqual([200, "ok"]);
+  });
+
+  it("is an admin's route, CSRF-gated, and takes no other method", async () => {
+    expect((await put("member-a", JSON.stringify({ url: URL_A })))!.status).toBe(403);
+    expect((await call("member-a", "/audit/sink", "DELETE"))!.status).toBe(403);
+    expect((await call("member-a", "/audit/sink/resume", "POST"))!.status).toBe(403);
+    expect((await put("cookie-a", JSON.stringify({ url: URL_A }), null))!.status).toBe(403);
+    expect((await call("admin-a", "/audit/sink", "GET"))!.status).toBe(405);
+    expect((await call("admin-a", "/audit/sink/resume", "GET"))!.status).toBe(405);
   });
 });

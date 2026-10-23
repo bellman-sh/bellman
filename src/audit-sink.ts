@@ -4,7 +4,7 @@
  * without `cloudflare:workers`. The stores own the storage; this module owns what to write.
  */
 import { createHash } from "node:crypto";
-import { recordOf } from "./audit.js";
+import { recordOf, type AuditEntryView } from "./audit.js";
 import type { AuditIntent } from "./grant-audit.js";
 import { backoffMs } from "./outbox.js";
 import type { AuditEntry } from "./types.js";
@@ -146,6 +146,29 @@ export async function signBatch(secret: string, t: number, body: string): Promis
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(`${t}.${body}`)));
   return `t=${t},v1=${Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
+
+/**
+ * One delivery: the batch body signed with the sink's secret, posted with the sink's timeout. `ok`
+ * only on a 2xx; a refusal carries its status and a failure its message, so the status page says
+ * why. `post` is `fetch`, or what a test hands in.
+ */
+export async function deliverBatch(post: typeof fetch, sink: AuditSink, orgId: string, entries: AuditEntryView[], now: number): Promise<SinkOutcome> {
+  const last = entries.at(-1)!.seq;
+  const { delivery, body } = batchBody(orgId, entries, entries[0].seq, last);
+  try {
+    const res = await post(sink.url, {
+      method: "POST", body,
+      headers: { "Content-Type": "application/json", "Bellman-Delivery": delivery, "Bellman-Signature": await signBatch(sink.secret, now, body) },
+      signal: AbortSignal.timeout(SINK_TIMEOUT_MS),
+    });
+    return res.ok ? { ok: true, through: last } : { ok: false, error: String(res.status) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The `audit_sink_dead` row's detail (ADR 0033, D3). */
+export const deadDetail = (sink: AuditSink) => ({ url: sink.url, failing_since: new Date(sink.failingSince ?? 0).toISOString(), last_error: sink.lastError });
 
 export function retentionDaysOf(value: unknown): number | null | "invalid" {
   if (value === null) return null;

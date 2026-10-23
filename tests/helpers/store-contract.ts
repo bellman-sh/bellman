@@ -6058,6 +6058,55 @@ export function describeStoreContract(
       });
     });
 
+    describe("the sink", () => {
+      const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+      const url = "https://collector.example/in";
+
+      it("setAuditSink returns the secret once, status ok with pending = rows not yet delivered, and audits audit_sink_set", async () => {
+        await store.appendAudit(chainRow(1));
+        await store.appendAudit(chainRow(2));
+        const set = await store.setAuditSink("org_a", url, by);
+        expect(set.secret).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+        expect(set.sink).toMatchObject({ url, status: "ok", delivered_through: 0, pending: 3, attempts: 0, failing_since: null, last_error: null });
+        expect((await store.auditSettings("org_a")).sink).toEqual(set.sink);
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_set", detail: { url }, actorUserId: "u_admin" });
+      });
+
+      it("setAuditSink again issues a new secret and keeps delivered_through", async () => {
+        const first = await store.setAuditSink("org_a", url, by);
+        const second = await store.setAuditSink("org_a", "https://other.example/in", by);
+        expect(second.secret).not.toBe(first.secret);
+        expect(second.sink).toMatchObject({ url: "https://other.example/in", delivered_through: first.sink.delivered_through, status: "ok" });
+      });
+
+      it("setAuditSink stores the url as given", async () => {
+        const odd = "https://u:p@collector.example/in#frag";
+        expect((await store.setAuditSink("org_a", odd, by)).sink.url).toBe(odd);
+        expect((await store.auditSettings("org_a")).sink?.url).toBe(odd);
+      });
+
+      it("removeAuditSink is false when none, true once, and audits audit_sink_removed", async () => {
+        expect(await store.removeAuditSink("org_a", by)).toBe(false);
+        await store.setAuditSink("org_a", url, by);
+        expect(await store.removeAuditSink("org_a", by)).toBe(true);
+        expect(await store.removeAuditSink("org_a", by)).toBe(false);
+        expect((await store.auditSettings("org_a")).sink).toBeNull();
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_removed", detail: { url }, actorUserId: "u_admin" });
+      });
+
+      it("resumeAuditSink is undefined when none and clears nothing on a healthy sink", async () => {
+        expect(await store.resumeAuditSink("org_a", by)).toBeUndefined();
+        const { sink } = await store.setAuditSink("org_a", url, by);
+        const resumed = await store.resumeAuditSink("org_a", by);
+        expect(resumed).toMatchObject({ url, status: "ok", attempts: 0, delivered_through: sink.delivered_through });
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_resumed", detail: { url, delivered_through: 0 } });
+      });
+
+      it("pumpAuditSink is undefined when there is no sink", async () => {
+        expect(await store.pumpAuditSink("org_a", Date.now())).toBeUndefined();
+      });
+    });
+
     // ------------------------------------------------------------- the audit query (audit trail spec, D6)
     describe("the audit query", () => {
       const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);

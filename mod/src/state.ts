@@ -21,7 +21,11 @@ export const tab = atom({ plugin: "bellman-mod", key: "tab" } as const, "log" as
 export const wake = atom({ plugin: "bellman-mod", key: "wake" } as const, { paused: false });
 /** By room, the requests waiting on the person, written by the log reads (doors.ts) and a Deny; read for the Approve count. */
 export const pending = atom({ plugin: "bellman-mod", key: "pending" } as const, {} as Record<string, PendingRequest[]>);
-/** The request the Approve tab shows, by its room and cursor, written by the person's presses; null for the room's oldest. */
+/**
+ * The request the person last turned the Approve tab to (‹, ›, the notice's button, a Log row's Review, the Approve
+ * count), by its room and cursor, written by those presses alone. The tab shows it while it waits; else the request it
+ * last drew (`lastDrawn`, pane.tsx), which a render keeps because it may not write here; else the room's oldest.
+ */
 export const request = atom({ plugin: "bellman-mod", key: "request" } as const, null as { session_id: string; cursor: number } | null);
 /** `approvalKey`s of the action requests the person approved, written by the room pane: the gate passes Claude's `approved: true` answer for exactly these. */
 export const approved = atom({ plugin: "bellman-mod", key: "approved" } as const, [] as string[]);

@@ -197,6 +197,20 @@ count.
   request expires (D8). `Approve n` counts only the requests still waiting on
   the person: on the tab, the room's; in the sidebar and the band, every room's,
   and pressing it there opens the tab on the oldest of them, in its room.
+  The tab never replaces what it shows unless the person asks. It holds the
+  request it last drew, whether the person's pick (‹, ›, a Log row's Review or
+  the Approve count) or the oldest by default, by its room and cursor and never
+  by its place in the list: while that request waits the tab shows it, whatever
+  arrives or leaves around it, and `request i of n` moves with it. When it
+  leaves (it expired, someone answered it, or the person denied it here) the tab
+  draws a notice in its place: who asked, that it no longer waits, and why when
+  the mod knows, with no Approve or Deny and one button, keyed apart from
+  both, that shows the oldest still waiting; with none left the usual empty
+  state follows the notice. Only a pick shows another request, so a press
+  aimed at one request never lands on the next. The tab keeps what it last drew
+  in a module variable, since a render may not write `$.state`; a reload starts
+  it over and the tab draws the person's pick if that still waits, else the
+  oldest, a fresh draw.
 
 **D6. Toasts.** *(person: a toast for the latest message; an action request
 raises a toast and never takes the keyboard)*
@@ -261,7 +275,10 @@ person)*
   "declined" after Claude carried the request out. An approval that does not
   reach Claude, because the prompt is refused or dropped, is taken back: the
   request draws its buttons again, the gate stays shut for it, and a toast
-  tells the person.
+  tells the person. A press on Approve for a request that no longer waits (the
+  log read that took it out has landed, and the frame pressed in is not yet
+  redrawn) records nothing and tells Claude nothing: a toast says the request
+  no longer waits.
 - **Deny** is answered by the mod itself, through the bridge's door:
   `POST /rooms/<id>/decline { ref_id }` (D9), which sends `action_response`
   with `{ approved: false }` as the bridge's seat and nothing else. It is no
@@ -272,7 +289,9 @@ person)*
   notice that the person declined, so Claude does not act on the request, and
   when that notice is refused, a toast says Claude was not told and to tell it
   not to carry the request out. When the door does not answer, a toast tells
-  the person and the request still waits.
+  the person and the request still waits. A Deny pressed for a request that no
+  longer waits asks the room nothing and toasts that it no longer waits; one the
+  room accepts leaves the tab's notice saying the person denied it (D5).
 - **The gate** is a `tool.call` hook on every tool whose name ends in
   `bellman_send`, on any server, and an `mcp.call` hook on the same tools for
   another plugin calling through `$.mcp.call`. It acts on

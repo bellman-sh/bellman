@@ -150,6 +150,11 @@ export type World = {
   roomsHeld: Promise<void> | null;
   /** While set, every `bellman_whoami` answer waits for it: a hook of the mod's held mid-ask. */
   asking: Promise<void> | null;
+  /**
+   * The next read of `key` of the mod's state waits until `release()`, and `reached` says it is waiting: a handler held
+   * at its first look while the room moves on. Armed until a read of that key reaches it.
+   */
+  holdNextRead: (key: string) => { reached: Promise<void>; release: () => void };
   /** While true every `bellman_whoami` is refused, as a call the bridge cannot answer is. */
   whoamiFails: boolean;
   /** What a well-formed decline is answered: 200 with its cursor, or this status with an error (422 is the server's refusal). */
@@ -228,9 +233,10 @@ function isDeclineBody(body: unknown): boolean {
  * door, `{ second }` for two bridges from the start. Set later, `w.door` is a bridge that restarted:
  * its old socket refuses from then on.
  */
-export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state" | "seed" | "trail">> = {}): Promise<World> {
+export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state" | "seed" | "trail" | "holdNextRead">> = {}): Promise<World> {
   const clock = mock.clock(on, { now: NOW });
   const session = mock.session(on);
+  let holding: { key: string; reached: () => void; until: Promise<void> } | null = null;
   const w: World = {
     door: "/tmp/bellman-door-1.sock",
     status: structuredClone(STATUS),
@@ -241,6 +247,14 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     held: null,
     roomsHeld: null,
     asking: null,
+    holdNextRead: (key) => {
+      let release!: () => void;
+      let reached!: () => void;
+      const until = new Promise<void>((resolve) => (release = resolve));
+      const waiting = new Promise<void>((resolve) => (reached = resolve));
+      holding = { key, reached, until };
+      return { reached: waiting, release };
+    },
     whoamiFails: false,
     declineStatus: 200,
     fetched: [],
@@ -285,7 +299,13 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     return set;
   });
   // A seeded value reads at version 0, a value never written, so the mod's own first write of it still lands.
-  on("state.get", ($, e, next) => {
+  on("state.get", async ($, e, next) => {
+    if (holding !== null && e.plugin === "bellman-mod" && e.key === holding.key) {
+      const { reached, until } = holding;
+      holding = null;
+      reached();
+      await until;
+    }
     const seeded = e.plugin === "bellman-mod" && !(e.key in w.state) ? (w.seed as Record<string, unknown>)[e.key] : undefined;
     return seeded === undefined ? next(e) : { value: { value: seeded, version: 0 } };
   });

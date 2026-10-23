@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
-last-verified-against-source: 82901d9
-last-updated: 2026-10-22
+last-verified-against-source: 512a4d2
+last-updated: 2026-10-23
 ---
 
 # Bellman Architecture
@@ -1481,9 +1481,16 @@ loud:
   or as another request: every field of the payload Claude reads, the characters
   that would draw nothing or act on the terminal spelled out (D10 in the spec
   says which), and nothing the server accepts cut short; a request that cannot
-  be drawn whole there can only be denied, and a Log row's Review leads to it. The person's Deny is answered through the door and never through
-  here, so Claude's own `approved: false` is refused too. Approve tells Claude
-  once, by a prompt of the mod's own that queues behind any turn running, and an
+  be drawn whole there can only be denied, and a Log row's Review leads to it.
+  The tab never replaces what it shows unless the person asks: it holds the
+  request it last drew by its room and cursor, never by its place in the list,
+  and when that request expires, is answered or is denied it draws a notice in
+  its place, with one button to the oldest still waiting, rather than the next
+  request taking over beneath a press; a press on the buttons of a request that
+  has just left tells Claude and the room nothing. The person's Deny is
+  answered through the door and never through here, so Claude's own
+  `approved: false` is refused too. Approve tells Claude once, by a prompt of
+  the mod's own that queues behind any turn running, and an
   approval that does not reach Claude is taken back. This is
   a guard against Claude answering on its own and no proof to the requester: a
   prompt-injected Claude could still read the bridge's saved sign-in and post an

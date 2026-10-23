@@ -140,7 +140,7 @@ declare module "claude-code" {
       wake: { paused: boolean };
       /** By room, the action requests waiting on the person, oldest first (written by the log reads, and by a Deny). */
       pending: Record<string, PendingRequest[]>;
-      /** The request the Approve tab shows, by its room and cursor; null, or one that no longer waits, for the room's oldest. */
+      /** The request the person last turned the Approve tab to, by its room and cursor, written by the person's presses alone; the tab shows it while it waits, else the one it last drew, else the room's oldest. */
       request: { session_id: string; cursor: number } | null;
       /** `approvalKey`s (src/mod/gate.ts) of the requests the person approved: the gate passes Claude's `approved: true` answer for these (written by the room pane). */
       approved: string[];

@@ -1,7 +1,7 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import { CANVAS_MAX, GATE_REASON, LOGS_MAX, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvalKey, approvedText, declinedText } from "../hooks/register.mjs";
-import type { RoomMember } from "../types";
+import type { DoorEvent, RoomMember } from "../types";
 import { NOW, PANE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, refusedWrites, roomsTick, shown, tick, world } from "./harness";
 import type { World } from "./harness";
 
@@ -57,6 +57,36 @@ const frames = async (room: Awaited<ReturnType<typeof opened>>) => (await room.f
 /** The Approve buttons drawn: one for the one request the tab shows, while it waits on the person. */
 const approveButtons = async (room: Awaited<ReturnType<typeof opened>>) =>
   (await room.findAll({ type: "Button" })).flatMap((b) => (/^approve-\d+$/.test(b.key ?? "") ? [b.key] : []));
+
+/** ada's action request at `cursor` that runs out ten seconds into the mocked clock: asked thirty minutes less ten seconds before it starts, so the next rooms poll finds it expired. */
+const lapsing = (cursor: number, payload: unknown) => peerEvent({ cursor, type: "action_request", at: new Date(NOW - 30 * 60_000 + 10_000).toISOString(), payload });
+
+/** A member's answer to the request at cursor `ref`, logged at `cursor`: the request waits on nobody from then on. */
+const answerTo = (cursor: number, ref: number) =>
+  peerEvent({ cursor, type: "action_response", from_member_id: "m-rook", from_label: "rook", ref_id: String(ref), payload: { approved: true, result: "done" } });
+
+/** `events` reach the room's log, and the next rooms poll reads them. */
+async function logged(w: World, ...events: DoorEvent[]): Promise<void> {
+  const log = w.log.qs_room1!;
+  log.events.push(...events);
+  log.cursor = events.at(-1)!.cursor;
+  await roomsTick(w);
+}
+
+/** The keys of the buttons that answer a request or turn to one: Approve, Deny, ‹ and › (`approve-prev`, `approve-next`), and the notice's own `show-<cursor>`. */
+const requestKeys = async (room: Awaited<ReturnType<typeof opened>>) =>
+  (await room.findAll({ type: "Button" })).flatMap((b) => (/^(approve|deny|show)-/.test(b.key ?? "") ? [b.key] : []));
+
+/**
+ * The Approve tab once the request it showed has left: a notice in its place saying why, with no Approve, Deny, ‹ or ›
+ * of any request, and one button that shows request `next`, which draws nothing of it (`asks` is what it asks).
+ */
+async function expectNotice(room: Awaited<ReturnType<typeof opened>>, why: string, next: number, asks: string): Promise<void> {
+  const drawn = await shown(room);
+  expect(drawn).toContain(`ada's request is no longer waiting: ${why}.`);
+  expect(await requestKeys(room)).toEqual([`show-${next}`]);
+  expect(drawn).not.toContain(asks);
+}
 
 /** An item of the room's surface as the door serves it (`bellman_surface`'s, as the bridge relays it), in the writer's envelope. */
 const item = (data: Record<string, unknown>) => ({
@@ -328,6 +358,142 @@ test("an approved request stays in the list, waiting for Claude, and the band's 
   await top.press({ key: "open-approve" });
   expect(await shown(room)).toContain("request 2 of 2 ‹ › ada asks · 28 min left deploy Approve Deny");
 });
+
+test("the request the person turned to expires while shown: a notice draws in its place, and a button shows the next", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [lapsing(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await reviewing($, w);
+  expect(await shown(room)).toContain("request 1 of 2 ‹ › ada asks · 1 min left run the migration Approve Deny");
+  await roomsTick(w);
+  // Not the next request's buttons in this one's place, where a press meant for this one would land.
+  await expectNotice(room, "it expired", 6, "deploy");
+  // Nothing of the old request can be pressed: its key is not drawn, and Claude was told nothing.
+  await expect(room.press({ key: "approve-5" })).rejects.toThrow();
+  expect(w.submitted).toEqual([]);
+  expect(w.state.approved ?? []).toEqual([]);
+  // Only the person's press shows the next, and then with its own buttons.
+  await room.press({ key: "show-6" });
+  expect(await shown(room)).toContain("ada asks · 28 min left deploy Approve Deny");
+  expect(await requestKeys(room)).toEqual(["approve-6", "deny-6"]);
+});
+
+test("the request the person turned to is answered while shown: the same notice, saying so", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await reviewing($, w);
+  await logged(w, answerTo(7, 5));
+  await expectNotice(room, "it was answered", 6, "deploy");
+  await expect(room.press({ key: "deny-5" })).rejects.toThrow();
+  expect(w.declined).toEqual([]);
+  await room.press({ key: "show-6" });
+  expect(await shown(room)).toContain("ada asks · 28 min left deploy Approve Deny");
+  expect(await requestKeys(room)).toEqual(["approve-6", "deny-6"]);
+});
+
+test("with nothing chosen, the oldest request expires while shown: the notice, and not the next request under the same press", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [lapsing(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await opened($, w);
+  await room.press({ key: "tab-approve" });
+  expect(await approveButtons(room)).toEqual(["approve-5"]);
+  await roomsTick(w);
+  await expectNotice(room, "it expired", 6, "deploy");
+  await room.press({ key: "show-6" });
+  expect(await requestKeys(room)).toEqual(["approve-6", "deny-6"]);
+});
+
+test("the person at request 3 of 5 stays on it while request 1 leaves, and it reads 2 of 4", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [5, 6, 7, 8, 9].map((cursor) => asked(cursor, { text: `ask ${cursor}` })), cursor: 9 };
+  const room = await reviewing($, w, 7);
+  expect(await shown(room)).toContain("request 3 of 5 ‹ › ada asks · 28 min left ask 7 Approve Deny");
+  await logged(w, answerTo(10, 5));
+  // The same request, by its cursor and not by its place in the list.
+  expect(await shown(room)).toContain("request 2 of 4 ‹ › ada asks · 28 min left ask 7 Approve Deny");
+  expect(await requestKeys(room)).toEqual(["approve-prev", "approve-next", "approve-7", "deny-7"]);
+  // ‹ and › go on from where it stands.
+  await room.press({ key: "approve-next" });
+  expect(await shown(room)).toContain("request 3 of 4 ‹ › ada asks · 28 min left ask 8 Approve Deny");
+  expect(await approveButtons(room)).toEqual(["approve-8"]);
+});
+
+test("the person's own Deny leaves a notice that says so, and a button shows the next request", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+  const room = await reviewing($, w);
+  await room.press({ key: "deny-5" });
+  expect(w.declined).toEqual([{ socket: w.door, room: "qs_room1", body: { ref_id: "5" } }]);
+  await expectNotice(room, "you denied it", 6, "deploy");
+  // The room's log carries the Deny on its next read, and the notice still says whose it was.
+  await logged(w, answerTo(7, 5));
+  await expectNotice(room, "you denied it", 6, "deploy");
+  await room.press({ key: "show-6" });
+  expect(await approveButtons(room)).toEqual(["approve-6"]);
+});
+
+test("nothing that arrives or leaves shows another request: only the person's press does", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = { events: [asked(5, { text: "run the migration" })], cursor: 5 };
+  const room = await opened($, w);
+  await room.press({ key: "tab-approve" });
+  // A request arrives behind the one shown: it does not take its place.
+  await logged(w, asked(6, { text: "deploy" }));
+  expect(await shown(room)).toContain("request 1 of 2 ‹ › ada asks");
+  expect(await approveButtons(room)).toEqual(["approve-5"]);
+  // The one shown is answered: its notice, and a button to the other.
+  await logged(w, answerTo(7, 5));
+  await expectNotice(room, "it was answered", 6, "deploy");
+  // The other is answered too: the notice stays, and the tab's usual empty state follows it.
+  await logged(w, answerTo(8, 6));
+  expect(await shown(room)).toContain("ada's request is no longer waiting: it was answered. Nothing waits on you.");
+  expect(await requestKeys(room)).toEqual([]);
+  // A new request arrives: the notice stays and offers it.
+  await logged(w, asked(9, { text: "rotate the keys" }));
+  await expectNotice(room, "it was answered", 9, "rotate the keys");
+  await room.press({ key: "show-9" });
+  expect(await shown(room)).toContain("rotate the keys Approve Deny");
+  expect(await approveButtons(room)).toEqual(["approve-9"]);
+});
+
+test("a request that leaves for a reason the mod cannot tell is no longer waiting, and says no more", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await reviewing($, w);
+  // The seat may not respond any more, so the room lists nothing to answer.
+  w.rooms[0]!.room.your_verbs = ["send"];
+  await roomsTick(w);
+  expect(await shown(room)).toContain("ada's request is no longer waiting. Nothing waits on you.");
+  expect(await requestKeys(room)).toEqual([]);
+});
+
+for (const kind of ["approve", "deny"] as const) {
+  test(`a press on the ${kind === "approve" ? "Approve" : "Deny"} of a request that has just left, on the frame it was drawn in, does nothing but toast that it is no longer waiting`, async ($, on) => {
+    const w = await world($, on);
+    w.log.qs_room1 = { events: [asked(5, { text: "run the migration" }), asked(6, { text: "deploy" })], cursor: 6 };
+    const room = await reviewing($, w);
+    // The person presses on the frame they see, and the handler's first look is at what waits, before it writes or tells
+    // anyone anything. It is held there while the room moves on, so that the frame it was pressed in is gone when the
+    // handler goes on.
+    const before = w.trail.length;
+    const look = w.holdNextRead("pending");
+    const pressed = room.press({ key: `${kind}-5` });
+    await Promise.race([look.reached, pressed]);
+    expect(w.trail.slice(before)).toEqual([]);
+    expect([w.submitted, w.declined]).toEqual([[], []]);
+    await logged(w, answerTo(7, 5));
+    look.release();
+    await pressed;
+    // The kit settles a press before a handler it held at a read has gone on: one tick of the clock lets it.
+    await w.clock.advance(1);
+    expect(w.toasts.at(-1)).toBe("Bellman: that request is no longer waiting.");
+    // Claude was told nothing, the gate stays shut for it, and the room was not asked to answer it.
+    expect(w.submitted).toEqual([]);
+    expect(w.rows).toEqual([]);
+    expect(w.declined).toEqual([]);
+    expect(w.state.approved ?? []).toEqual([]);
+    expect(await answer($)).toEqual(REFUSED);
+  });
+}
 
 test("Approve while idle wakes Claude with the request's cursor, and the gate then passes Claude's answer", async ($, on) => {
   const w = await world($, on);

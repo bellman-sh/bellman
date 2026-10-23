@@ -660,6 +660,13 @@ function declinedText(sessionId, cursor) {
 }
 var message2 = (error) => error instanceof Error ? error.message : String(error);
 var keyOf = (r) => approvalKey(r.session_id, String(r.cursor));
+var isRef = (a, b) => b !== null && a.session_id === b.session_id && a.cursor === b.cursor;
+var lastDrawn = null;
+var lastDenied = null;
+var GONE = "Bellman: that request is no longer waiting.";
+async function waits($, r) {
+  return ((await read4($, pending))[r.session_id] ?? []).some((p) => p.cursor === r.cursor);
+}
 var awaitingPerson = (list, given) => list.filter((r) => !given.includes(keyOf(r)));
 var throwIfRefused = (result) => {
   const reason = result.deny ?? result.drop;
@@ -667,6 +674,10 @@ var throwIfRefused = (result) => {
 };
 async function approve($, r) {
   const text = approvedText(r.session_id, r.cursor);
+  if (!await waits($, r)) {
+    $.ui.toast(GONE);
+    return;
+  }
   const key = keyOf(r);
   let first = false;
   await update2($, approved, (keys) => {
@@ -688,6 +699,10 @@ async function approve($, r) {
 }
 async function deny($, r) {
   const text = declinedText(r.session_id, r.cursor);
+  if (!await waits($, r)) {
+    $.ui.toast(GONE);
+    return;
+  }
   const socketPath = seatIn(await read4($, doors), r.session_id)?.door.socketPath ?? null;
   let answered = false;
   if (socketPath !== null) {
@@ -702,6 +717,7 @@ async function deny($, r) {
     $.ui.toast("Bellman: the Deny did not go through, so the request still waits.");
     return;
   }
+  lastDenied = keyOf(r);
   await update2($, pending, (was) => ({ ...was, [r.session_id]: (was[r.session_id] ?? []).filter((p) => p.cursor !== r.cursor) }));
   try {
     throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
@@ -828,17 +844,22 @@ async function drawPane($, ui, site, s, p) {
   } else {
     const now = await $.clock.now();
     const chosen = await read4($, request);
-    const indexOf = (pick) => Math.max(0, waiting.findIndex((w) => w.session_id === pick?.session_id && w.cursor === pick?.cursor));
-    const at = indexOf(chosen);
-    const r = waiting[at];
-    const step = (by) => act(
-      () => update2($, request, (was) => {
-        const to = waiting[(indexOf(was) + by + waiting.length) % waiting.length];
-        return { session_id: to.session_id, cursor: to.cursor };
-      })
-    );
-    const drawing = r === void 0 ? null : drawingFor(r, (await read4($, logs))[s.picked] ?? []);
-    body = r === void 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing waits on you.")] : [
+    const log = (await read4($, logs))[s.picked] ?? [];
+    const last = lastDrawn?.session_id === s.picked ? lastDrawn : null;
+    const r = waiting.find((w) => isRef(w, chosen)) ?? (last === null ? waiting[0] : waiting.find((w) => isRef(w, last)));
+    if (r !== void 0) lastDrawn = r;
+    else if (last === null) lastDrawn = null;
+    const at = r === void 0 ? 0 : waiting.indexOf(r);
+    const next = waiting[0];
+    const pickRequest = (to) => act(() => update2($, request, () => ({ session_id: to.session_id, cursor: to.cursor })));
+    const step = (by) => pickRequest(waiting[(at + by + waiting.length) % waiting.length]);
+    const gone = (g) => {
+      const answered = log.some((e) => e.type === "action_response" && e.ref_id === String(g.cursor));
+      const why = lastDenied === keyOf(g) ? "you denied it" : answered ? "it was answered" : now >= g.expires_at ? "it expired" : "";
+      return /* @__PURE__ */ h(Box, { flexDirection: "column" }, /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${g.from_label}'s request is no longer waiting${why === "" ? "" : `: ${why}`}.`), next !== void 0 && /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, { key: `show-${next.cursor}`, label: "Show next request", onPress: pickRequest(next) })));
+    };
+    const drawing = r === void 0 ? null : drawingFor(r, log);
+    body = r === void 0 ? [...last === null ? [] : [gone(last)], ...next === void 0 ? [/* @__PURE__ */ h(Text, { dimColor: true }, "Nothing waits on you.")] : []] : [
       /* @__PURE__ */ h(Box, { flexDirection: "column" }, waiting.length > 1 && /* @__PURE__ */ h(Box, { columnGap: 1 }, /* @__PURE__ */ h(Text, null, `request ${at + 1} of ${waiting.length}`), /* @__PURE__ */ h(Button, { key: "approve-prev", label: "\u2039", onPress: step(-1) }), /* @__PURE__ */ h(Button, { key: "approve-next", label: "\u203A", onPress: step(1) })), /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, `${r.from_label} asks \xB7 ${Math.max(0, Math.ceil((r.expires_at - now) / 6e4))} min left`), drawing !== null && /* @__PURE__ */ h(Box, { borderStyle: "round", flexDirection: "column" }, /* @__PURE__ */ h(Text, { wrap: "wrap" }, drawing)), /* @__PURE__ */ h(Box, { columnGap: 1 }, waitsOnClaude(r) ? onClaude() : drawing !== null ? [/* @__PURE__ */ h(Button, { key: `approve-${r.cursor}`, label: "Approve", variant: "primary", onPress: act(() => approve($, r)) }), denyIt(r)] : [/* @__PURE__ */ h(Text, { dimColor: true }, "too long to show in full here, so it can only be denied"), denyIt(r)]))
     ];
   }

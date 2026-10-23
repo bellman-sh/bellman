@@ -4,7 +4,8 @@
  * requests waiting on the person, one at a time and the oldest first: who asks, what it asks drawn whole in a frame of
  * its own, every field Claude reads, and Approve and Deny after it. The Log's row of a waiting request leads to it with
  * Review, so a request is approved only where it is seen in full. A request the person approved keeps its place, and
- * reads that it waits on Claude where the buttons were.
+ * reads that it waits on Claude where the buttons were. The tab never replaces what it shows unless the person asks:
+ * it keeps the request it drew while that waits, and a notice stands in its place once it does not (`lastDrawn`).
  *
  * Every string a peer controls reaches the screen cleaned: through `cleanText` or `cleanBlock`, through what
  * `pendingRequests`, `kept`, `canvasOf` and `roomLabel` (src/mod/view.ts) cleaned already, and a canvas text's Markdown
@@ -49,6 +50,34 @@ export const message = (error: unknown): string => (error instanceof Error ? err
 /** The key a request is approved under: the room, and the request's cursor as the `ref_id` an answer carries. */
 const keyOf = (r: PendingRequest): string => approvalKey(r.session_id, String(r.cursor));
 
+/** The room and cursor that name a request. */
+type Ref = { session_id: string; cursor: number };
+const isRef = (a: Ref, b: Ref | null): boolean => b !== null && a.session_id === b.session_id && a.cursor === b.cursor;
+
+/**
+ * The request the Approve tab last drew in the room it shows. The tab keeps showing it for as long as it waits,
+ * whatever arrives or leaves around it, and draws a notice in its place once it does not, so that no press lands on a
+ * request the person never read (R31); only the person's pick (`request`) shows another. A module variable, as
+ * `drawings` is, because a render may not write `$.state` and only the render knows what it drew. A reload starts it
+ * over: the tab then draws the person's pick if that still waits, else the oldest, a fresh draw with no frame of the
+ * old module left for a press to land in.
+ */
+let lastDrawn: PendingRequest | null = null;
+
+/** The key of the request whose Deny the room last accepted: the log says only that it was answered, and the notice says the person did. */
+let lastDenied: string | null = null;
+
+/** What the person is told when they press the buttons of a request that has left. */
+const GONE = "Bellman: that request is no longer waiting.";
+
+/**
+ * Whether `r` is still listed as waiting, read as a press is handled: the frame the press landed in may be a redraw
+ * behind the log read that took the request out, and that frame still draws its buttons.
+ */
+async function waits($: EngineInterface, r: PendingRequest): Promise<boolean> {
+  return ((await read($, pending))[r.session_id] ?? []).some((p) => p.cursor === r.cursor);
+}
+
 /**
  * The requests of `list` that wait on the person: those whose key is not in `given`, the keys approved. An approved
  * request waits on Claude, and the Approve count (the tab's, the band's and the sidebar's) does not count it.
@@ -66,11 +95,16 @@ const throwIfRefused = (result: { deny?: string; drop?: string }): void => {
  * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told once, by
  * a prompt of the mod's own, whether a turn is running or not. A plugin's prompt runs once the session is idle, so a
  * running turn has it next; a row appended to that turn would only be stored, with nothing to make the turn read it.
- * An action request is not idempotent, so a press on one already approved tells Claude nothing more. When Claude
- * cannot be told, the approval is taken back: the request draws its buttons again, and the gate stays shut for it.
+ * An action request is not idempotent, so a press on one already approved tells Claude nothing more, and neither does
+ * a press on one that has left (`waits`): the person is told it no longer waits. When Claude cannot be told, the
+ * approval is taken back: the request draws its buttons again, and the gate stays shut for it.
  */
 async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = approvedText(r.session_id, r.cursor);
+  if (!(await waits($, r))) {
+    $.ui.toast(GONE);
+    return;
+  }
   const key = keyOf(r);
   // `update` runs again on a lost race, so `first` is what the write that landed saw: of presses made before a redraw, one.
   let first = false;
@@ -98,10 +132,14 @@ async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
  * Deny: the mod answers the room itself, `approved: false`, through the door of the bridge that lists the seat
  * (`decline`, doors.ts): no tool call of Claude Code's, which would be refused from a press, and none the gate sees.
  * Claude is told only once the room has been answered, and the person is told when it was not, and when Claude could
- * not be told.
+ * not be told. A press on a request that has left asks the room nothing (`waits`): the person is told it no longer waits.
  */
 async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = declinedText(r.session_id, r.cursor);
+  if (!(await waits($, r))) {
+    $.ui.toast(GONE);
+    return;
+  }
   const socketPath = seatIn(await read($, doors), r.session_id)?.door.socketPath ?? null;
   let answered = false;
   if (socketPath !== null) {
@@ -116,7 +154,8 @@ async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
     $.ui.toast("Bellman: the Deny did not go through, so the request still waits.");
     return;
   }
-  // Answered: it waits on nobody, though the log will not say so until its next read.
+  // Answered: it waits on nobody, though the log will not say so until its next read. Before the write, which redraws.
+  lastDenied = keyOf(r);
   await update($, pending, (was) => ({ ...was, [r.session_id]: (was[r.session_id] ?? []).filter((p) => p.cursor !== r.cursor) }));
   try {
     throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
@@ -329,25 +368,44 @@ export async function drawPane(
   } else {
     const now = await $.clock.now();
     const chosen = await read($, request);
-    const indexOf = (pick: { session_id: string; cursor: number } | null): number =>
-      Math.max(0, waiting.findIndex((w) => w.session_id === pick?.session_id && w.cursor === pick?.cursor));
-    // The request the person turned to, while it waits; else the oldest. ‹ and › go round.
-    const at = indexOf(chosen);
-    const r = waiting[at];
-    const step = (by: number) =>
-      act(() =>
-        update($, request, (was) => {
-          const to = waiting[(indexOf(was) + by + waiting.length) % waiting.length]!;
-          return { session_id: to.session_id, cursor: to.cursor };
-        }),
+    const log: readonly KeptEvent[] = (await read($, logs))[s.picked] ?? [];
+    // The request the person turned to, while it waits; else the one last drawn here, while it waits; else the oldest,
+    // the first time. When the one last drawn has left it stays the subject, and a notice stands where it was: nothing
+    // that arrives or leaves shows another request, only a pick does (‹, ›, the notice's button, a Log row's Review).
+    const last = lastDrawn?.session_id === s.picked ? lastDrawn : null;
+    const r = waiting.find((w) => isRef(w, chosen)) ?? (last === null ? waiting[0] : waiting.find((w) => isRef(w, last)));
+    if (r !== undefined) lastDrawn = r;
+    else if (last === null) lastDrawn = null;
+    const at = r === undefined ? 0 : waiting.indexOf(r);
+    const next = waiting[0];
+    const pickRequest = (to: PendingRequest) => act(() => update($, request, () => ({ session_id: to.session_id, cursor: to.cursor })));
+    // ‹ and › go round from the request shown, which is the frame the person pressed in.
+    const step = (by: number) => pickRequest(waiting[(at + by + waiting.length) % waiting.length]!);
+    // Where a request was, once it has left: whose it was and that it no longer waits, with the reason when the mod knows
+    // it (the person's own Deny, an answer in the room's log, or its time), and a button to the oldest still waiting. It
+    // draws no Approve or Deny, and its button is keyed apart from both, so that no press meant for the request that left
+    // can reach the next.
+    const gone = (g: PendingRequest) => {
+      const answered = log.some((e) => e.type === "action_response" && e.ref_id === String(g.cursor));
+      const why = lastDenied === keyOf(g) ? "you denied it" : answered ? "it was answered" : now >= g.expires_at ? "it expired" : "";
+      return (
+        <Box flexDirection="column">
+          <Text wrap="truncate-end">{`${g.from_label}'s request is no longer waiting${why === "" ? "" : `: ${why}`}.`}</Text>
+          {next !== undefined && (
+            <Box>
+              <Button key={`show-${next.cursor}`} label="Show next request" onPress={pickRequest(next)} />
+            </Box>
+          )}
+        </Box>
       );
+    };
     // Drawn as plain text and not Markdown, since what is drawn is what Claude reads, and in a frame, so that no line of
     // what a peer wrote can read as the tab's own or as another request. One too long to draw whole is drawn for its
     // Deny alone.
-    const drawing = r === undefined ? null : drawingFor(r, (await read($, logs))[s.picked] ?? []);
+    const drawing = r === undefined ? null : drawingFor(r, log);
     body =
       r === undefined
-        ? [<Text dimColor>Nothing waits on you.</Text>]
+        ? [...(last === null ? [] : [gone(last)]), ...(next === undefined ? [<Text dimColor>Nothing waits on you.</Text>] : [])]
         : [
             <Box flexDirection="column">
               {waiting.length > 1 && (

@@ -1,4 +1,4 @@
-# ADR 0031 — Topic rooms
+# ADR 0032 — Topic rooms
 
 **Date:** 2026-10-22 · **Status:** accepted · **Spec:** `docs/superpowers/specs/2026-10-08-topic-rooms-design.md` · **Plan:** `docs/superpowers/plans/2026-10-22-topic-rooms.md`
 

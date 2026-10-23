@@ -528,7 +528,7 @@ describe("the room routes, against the real tools", () => {
     ]);
 
     // Said again once it has landed, the server reads the key first and replays the first answer's cursor
-    // (ADR 0031), so the door gets the same reply, and nothing more lands.
+    // (ADR 0032), so the door gets the same reply, and nothing more lands.
     expect(await bridge.decline(mine.sessionId, ref)).toEqual(reply);
     expect(await mine.answers()).toHaveLength(1);
   });

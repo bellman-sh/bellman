@@ -198,17 +198,20 @@ const RESERVED_ROLE_KEYS: ReadonlySet<string> = new Set(["__proto__", "construct
  * One slug grammar for every externally supplied key that becomes a lookup key:
  * role keys here, surface keys in surface.ts. `noun` is only the wording of the
  * two messages, so a surface key is refused as a surface key.
+ *
+ * `hyphens` allows `-` after the first character, and only a surface key asks for it. `renderJoinCode`
+ * prints a role's `_` as `-`, so a role key with a `-` in it would let `a-b` and `a_b` print one code, and a
+ * preset name keeps the role-key grammar. A surface key never goes into a code, and the agents that write
+ * one reach for kebab-case.
  */
-export function slugShape(noun: string) {
+export function slugShape(noun: string, { hyphens = false }: { hyphens?: boolean } = {}) {
+  const grammar = `[a-z][a-z0-9_${hyphens ? "-" : ""}]{0,${MAX_ROLE_KEY_LENGTH - 1}}`;
   return z.string()
     .refine(
       (key) => !RESERVED_ROLE_KEYS.has(key),
       `${noun} must not be one of: ${[...RESERVED_ROLE_KEYS].join(", ")}`,
     )
-    .regex(
-      new RegExp(`^[a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}$`),
-      `${noun} must match [a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}`,
-    );
+    .regex(new RegExp(`^${grammar}$`), `${noun} must match ${grammar}`);
 }
 
 /**

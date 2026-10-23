@@ -58,3 +58,12 @@ it is code from a peer (ADR 0008), for a panel that holds the account cookie.
   the window its creator's plan keeps closed rooms (#65).
 - `bellman_send`'s `html` clause says what the policy does not close: in Chromium
   a page naming a STUN or TURN server reaches that host over WebRTC.
+
+## Amended 2026-10-23
+
+A key may carry `-` after its first character, `[a-z][a-z0-9_-]{0,30}`, where
+decision 1 gave it the role-key grammar and its underscore alone. Agents reached
+for kebab-case (`look-links`) and were refused. The length bound and the reserved
+names are the role key's still (`slugShape`, `src/manifest.ts`). A role key and a
+preset name keep refusing `-`: `renderJoinCode` prints a role's `_` as `-`, so
+`a-b` and `a_b` would print one code. A surface key never goes into a code.

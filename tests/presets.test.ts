@@ -51,6 +51,15 @@ describe("checkPreset", () => {
     });
   });
 
+  // `My-Review` above is refused for its capitals as much as its hyphen. A preset name keeps the role-key grammar,
+  // which has no hyphen: only a surface key was given one.
+  it("refuses a hyphen in a name, in the grammar's words", () => {
+    expect(checkPreset("my-review", body(), NOW)).toMatchObject({
+      ok: false, status: 400, error: "invalid_request",
+      description: expect.stringContaining("preset names must match [a-z][a-z0-9_]{0,30}"),
+    });
+  });
+
   it.each(["pair", "swarm", "review", "social"])("refuses the built-in name %s with its own error", (name) => {
     expect(checkPreset(name, body(), NOW)).toMatchObject({ ok: false, status: 409, error: "builtin" });
   });

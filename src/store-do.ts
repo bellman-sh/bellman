@@ -4293,36 +4293,54 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * `pr:<userId>:<name>` — a person's saved presets (designer spec D4).
-   * Injective for the reason `us:` is: a user id is `u_[A-Za-z0-9_-]+` and a name
-   * is a slug, so neither holds the separator. Storage lists keys in order, which
-   * is the names' code-unit order.
+   * `pr:<userId>:<name>` — a person's saved presets (designer spec D4). A name is a slug and
+   * holds no separator, but an operator-issued user id may hold a colon, as the `us:` index says,
+   * so a read keeps only a row whose rest is its own preset's name. Storage lists keys in order,
+   * which is the names' code-unit order.
    */
   async listPresets(userId: string): Promise<SavedPreset[]> {
+    return this.#presets(this.ctx.storage, userId);
+  }
+
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    return this.#preset(this.ctx.storage, userId, name);
+  }
+
+  /**
+   * The count and the write in one transaction. It awaits nothing but storage, which is why the
+   * input gate kept a second save from counting between them before the transaction did; the
+   * transaction holds if a later edit puts anything else there (worker-tests/preset-race.test.ts).
+   */
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    return this.ctx.storage.transaction<"saved" | "full">(async (txn) => {
+      if ((await this.#preset(txn, userId, preset.name)) === undefined) {
+        if ((await this.#presets(txn, userId)).length >= cap) return "full";
+      }
+      await txn.put(`pr:${userId}:${preset.name}`, preset);
+      return "saved";
+    });
+  }
+
+  /** A person's presets, read through `storage`: the object's, or a transaction's handle. */
+  async #presets(
+    storage: { list<T>(options: { prefix: string }): Promise<Map<string, T>> },
+    userId: string,
+  ): Promise<SavedPreset[]> {
     const prefix = `pr:${userId}:`;
-    const map = await this.ctx.storage.list<SavedPreset>({ prefix });
+    const map = await storage.list<SavedPreset>({ prefix });
     // A key under this prefix whose rest is not its own preset's name belongs to someone whose id
-    // extends this one past a colon, which an operator-issued id may hold. It is not this person's.
+    // extends this one past a colon. It is not this person's.
     return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => presetInNewWords(p));
   }
 
   /** The listing's guard for one name: the record under the key must be the preset asked for. */
-  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
-    const p = await this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
+  async #preset(
+    storage: { get<T>(key: string): Promise<T | undefined> },
+    userId: string,
+    name: string,
+  ): Promise<SavedPreset | undefined> {
+    const p = await storage.get<SavedPreset>(`pr:${userId}:${name}`);
     return p && p.name === name ? presetInNewWords(p) : undefined;
-  }
-
-  /**
-   * The count and the write in one call. The object's input gate holds every
-   * other request while this one awaits storage, so a second save cannot count
-   * between this one's count and its write.
-   */
-  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
-    if ((await this.getPreset(userId, preset.name)) === undefined) {
-      if ((await this.listPresets(userId)).length >= cap) return "full";
-    }
-    await this.ctx.storage.put(`pr:${userId}:${preset.name}`, preset);
-    return "saved";
   }
 
   /** Only a record that is this person's, by the listing's guard. */

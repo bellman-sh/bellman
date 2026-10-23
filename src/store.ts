@@ -3193,6 +3193,8 @@ export class MemoryStore implements BellmanStore {
     const taken = existing !== undefined && existing.orgId !== expectedOrgId
       && takesUnownedSeat(existing, orgOf(existing.orgId), grant, orgOf(grant.orgId));
     if (existing && existing.orgId !== expectedOrgId && !taken) return "conflict";
+    // The org whose IdP pushed the seat it took keeps no hold on the key: a claim does not carry its user along.
+    if (taken && this.scimByKey.get(scimKeyIndex(grant.key))?.orgId === existing.orgId) this.scimByKey.delete(scimKeyIndex(grant.key));
     // The seat cap (D3), decided in the same synchronous span as the write: a key that is
     // already a member of this org changes role for no seat; an org with no record has no cap.
     if (grant.orgId !== null && !(existing && existing.orgId === grant.orgId)) {
@@ -3501,7 +3503,11 @@ export class MemoryStore implements BellmanStore {
     if (others.length > 0) return "taken";
     if (seats.length === 0 && this.liveMembers(orgId) >= org.seats) return "full";
     const grant: PlanGrant = { key: subjectKey, plan: "team", role: offer.role, orgId, source: "invite", grantedAt: now, grantedBy: offer.by, expiresAt: null };
-    for (const seat of seats) this.grants.delete(seat.key);
+    // A seat the IdP pushed stays the IdP's to end (ADR 0029): its rows follow it onto the subject, as a claim's do.
+    for (const seat of seats) {
+      this.grants.delete(seat.key);
+      this.repointScim(seat, subjectKey);
+    }
     dropInvites();
     this.grants.set(subjectKey, detach(grant));
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));

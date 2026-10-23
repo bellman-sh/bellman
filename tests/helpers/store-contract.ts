@@ -4801,6 +4801,38 @@ export function describeStoreContract(
         expect(await store.getGrant("email:ten@y.test")).toMatchObject({ orgId: "org_b" });
       });
 
+      /** A seat the org's IdP pushed for an address it does not own is an unowned seat too (ADR 0027, ADR 0029). */
+      const pushedUser = (over: Partial<ScimUser> = {}): ScimUser => ({
+        id: "x1", orgId: "org_acme", userName: "nine@x.test", externalId: null, active: true, key: "email:nine@x.test",
+        createdAt: 10, updatedAt: 10, deletedAt: null, ...over,
+      });
+
+      it("moves a pushed seat onto the subject at a Join, its SCIM rows with it, so the IdP still ends it", async () => {
+        await seated();
+        expect((await store.createScimUser(pushedUser(), scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("joined");
+        expect(await store.getGrant("email:nine@x.test")).toBeUndefined();
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1", key: "github:9" });
+        expect(await store.scimUserByName("org_acme", "nine@x.test")).toMatchObject({ id: "x1", key: "github:9" });
+        expect(await store.scimUserByKey("email:nine@x.test")).toBeUndefined();
+        expect((await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+      });
+
+      it("lets the domain's owner take a key another org's IdP pushed, and leaves that org's IdP no index on it", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2", seats: 3 }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.createScimUser(pushedUser({ orgId: "org_b" }), scimIntent("org_b"));
+        await store.claimDomain("org_acme", "x.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "x.test", 2, by);
+        expect(await store.putGrantIfOwned(owner({ key: "email:nine@x.test", role: "member", source: "org" }), "org_acme", by)).toBe("written");
+        expect(await store.scimUserByKey("email:nine@x.test")).toBeUndefined();
+        await store.moveGrant("email:nine@x.test", "github:9");
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+        await store.updateScimUser("org_b", "x1", { active: false }, 50, scimIntent("org_b"));
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme" });
+      });
+
       it("keeps a decline on the person's side: the org's invites stay, and the decline is listed once, at its latest", async () => {
         await seated();
         await store.putOrgInvite(invite("github:9"), by);

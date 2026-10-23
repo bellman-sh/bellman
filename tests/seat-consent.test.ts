@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { orgRoutes } from "../src/http/orgs.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
+import { scimRoutes } from "../src/http/scim.js";
 import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { seal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
+import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
@@ -506,6 +508,72 @@ describe("seats that hold nothing, declines, and pages answered twice (ADR 0027)
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * A seat an org's identity provider pushes (ADR 0029) is an admin's seat by another door: for an address the
+ * org does not own by its form it takes effect only when the person accepts it, and a deprovision still
+ * ends it once they have.
+ */
+describe("a seat the org's identity provider pushes (ADR 0027, ADR 0029)", () => {
+  const TOKENS = { org_acme: "bst_seat-consent-acme", org_b: "bst_seat-consent-bee" } as const;
+  beforeEach(async () => {
+    for (const [orgId, token] of Object.entries(TOKENS)) {
+      await plans.issueScimToken(orgId, { tokenHash: await sha256Base64url(token), issuedAt: 2, issuedBy: "u_op" }, { actorUserId: "u_op" });
+    }
+  });
+  const scim = async (orgId: keyof typeof TOKENS, path: string, method: string, body: unknown) => {
+    const text = JSON.stringify(body);
+    return (await scimRoutes(new Request(`${ISSUER}${path}`, {
+      method, body: text,
+      headers: { authorization: `Bearer ${TOKENS[orgId]}`, "content-type": SCIM_JSON, "content-length": String(text.length) },
+    }), { store: plans }))!;
+  };
+  const push = async (userName: string, orgId: keyof typeof TOKENS = "org_acme") =>
+    (await (await scim(orgId, "/scim/v2/Users", "POST", { schemas: [USER_SCHEMA], userName })).json()) as { id: string };
+  const deactivate = (id: string, orgId: keyof typeof TOKENS = "org_acme") =>
+    scim(orgId, `/scim/v2/Users/${id}`, "PATCH", { schemas: [PATCH_SCHEMA], Operations: [{ op: "replace", value: { active: false } }] });
+
+  it("takes no effect for an address the org does not own by its form: the sign-in stays free, and the page offers it", async () => {
+    await push("jesse@example.dev");
+    expect(await plans.getGrant("email:jesse@example.dev")).toMatchObject({ orgId: "org_acme", source: "scim" });
+    const { identity, page } = await signIn("continue");
+    expect(page).toContain("<strong><bdi>Acme</bdi></strong> invited you to join it as a member.");
+    expect(identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("is the IdP's to end once the person has joined: a deprovision takes the seat", async () => {
+    const { id } = await push("jesse@example.dev");
+    const joined = await signIn("join");
+    expect(joined.page).toContain("<bdi>Acme</bdi>");
+    expect(joined.identity).toMatchObject({ orgId: "org_acme", plan: "team" });
+    expect(await plans.scimUserByKey("github:4242")).toMatchObject({ id, key: "github:4242" });
+    expect((await deactivate(id)).status).toBe(200);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    expect((await signIn()).identity).toMatchObject({ orgId: null, plan: "free" });
+  });
+
+  it("takes effect at once for an address on a domain the org verified, as before", async () => {
+    await plans.claimDomain("org_acme", "example.dev", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "example.dev", 2, by);
+    await push("jesse@example.dev");
+    const { identity, page } = await signIn();
+    expect(page).toBeNull();
+    expect(identity).toMatchObject({ orgId: "org_acme", plan: "team" });
+  });
+
+  /** The domain's owner takes the address from another org's pushed seat; that org's IdP keeps no hold on the person it never seated. */
+  it("leaves another org's IdP no hold on an address the domain's owner takes", async () => {
+    const bee = await push("jesse@example.dev", "org_b");
+    await plans.claimDomain("org_acme", "example.dev", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "example.dev", 2, by);
+    expect((await seat(ACME_ADMIN, "email:jesse@example.dev")).status).toBe(201);
+    expect((await signIn()).identity).toMatchObject({ orgId: "org_acme" });
+    expect(await plans.scimUserByKey("github:4242")).toBeUndefined();
+    expect((await deactivate(bee.id, "org_b")).status).toBe(200);
+    expect(await plans.getGrant("github:4242")).toMatchObject({ orgId: "org_acme", source: "org" });
   });
 });
 

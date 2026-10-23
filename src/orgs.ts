@@ -32,13 +32,14 @@ export function ownsByForm(org: Org, key: string): boolean {
 }
 
 /**
- * An admin's seat on an address the org does not own by its form as it stands (ADR 0027): one seated
- * before seats needed the person's consent, or under a domain the org has released since. Ownership is
- * read now, not when the seat was written. Such a seat takes no effect at a sign-in and is offered there
- * as an invite instead. A seat on a provider subject is not an address, and keeps its effect.
+ * A seat an org gave an address it does not own by its form as it stands (ADR 0027): an admin's (`org`), one
+ * seated before seats needed the person's consent or under a domain the org has released since, or one its
+ * identity provider pushed (`scim`, ADR 0029), which may name any address. Ownership is read now, not when
+ * the seat was written. Such a seat takes no effect at a sign-in and is offered there as an invite instead.
+ * A seat on a provider subject is not an address, and keeps its effect.
  */
 export function isUnownedSeat(grant: PlanGrant, org: Org | undefined): boolean {
-  if (grant.source !== "org" || grant.orgId === null || immutableKeys([grant.key]).length > 0) return false;
+  if ((grant.source !== "org" && grant.source !== "scim") || grant.orgId === null || immutableKeys([grant.key]).length > 0) return false;
   return !org || org.orgId !== grant.orgId || !ownsByForm(org, grant.key);
 }
 

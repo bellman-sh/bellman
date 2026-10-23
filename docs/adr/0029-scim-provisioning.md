@@ -1,6 +1,6 @@
 # ADR 0029 — SCIM provisions an org's members, and a deprovision ends the sign-in and freezes the rooms
 
-**Date:** 2026-10-22 · **Status:** accepted · **Closes:** #56 · **Spec:** `docs/superpowers/specs/2026-10-22-scim-design.md` · **Plan:** `docs/superpowers/plans/2026-10-22-scim.md`
+**Date:** 2026-10-22 · **Status:** accepted, amended by ADR 0027 · **Closes:** #56 · **Spec:** `docs/superpowers/specs/2026-10-22-scim-design.md` · **Plan:** `docs/superpowers/plans/2026-10-22-scim.md`
 
 ## Context
 
@@ -71,4 +71,6 @@ and nothing froze a room.
   room walk reads the joined index in one window of `JOINED_SCAN` rooms, closed ones included, so a person
   who held a handle in more than that many rooms can keep a live membership the walk never reaches.
 - The IdP may push an address under a domain the org has not verified, as an admin may seat one; the
-  cross-tenant checks, not the domain, are what protect other orgs' seats.
+  cross-tenant checks, not the domain, are what protect other orgs' seats. Such a seat takes effect only
+  when the person accepts it at a sign-in, as an admin's does (ADR 0027): it links no personal account
+  until then, and its SCIM rows follow it onto the account that accepts it, so a deprovision still ends it.

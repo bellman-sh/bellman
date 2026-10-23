@@ -3322,6 +3322,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const taken = previous !== undefined && previous.orgId !== expectedOrgId
         && takesUnownedSeat(previous, await orgOf(previous.orgId), grant, await orgOf(grant.orgId));
       if (previous && previous.orgId !== expectedOrgId && !taken) return "conflict" as const;
+      // The org whose IdP pushed the seat it took keeps no hold on the key: a claim does not carry its user along.
+      if (taken && (await txn.get<{ orgId: string }>(scimKeyIndex(grant.key)))?.orgId === previous.orgId) await txn.delete(scimKeyIndex(grant.key));
       // The seat cap (orgs spec, D3), decided in the transaction that seats: an org with a
       // record holds as many grants as it bought, a key already in this org changes role for
       // no seat, and an org that is only a string in grants has no record and no cap.
@@ -3898,6 +3900,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // The subject's own row is a lapsed one at most, here; its index copy in another org goes with it.
       const subject = stored[0];
       await txn.delete([...inviteRows.flat(), ...seats.flatMap(allKeysFor), ...staleIndexKeys(subject, grant)]);
+      // A seat the IdP pushed stays the IdP's to end (ADR 0029): its rows follow it onto the subject, as a claim's do.
+      for (const seat of seats) await this.#repointScim(txn, seat, subjectKey);
       const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
       await txn.put<unknown>({ [grantKey(subjectKey)]: grant, [orgIndexKey(orgId, subjectKey)]: grant, ...rows });
       return "joined" as const;

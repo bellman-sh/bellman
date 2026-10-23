@@ -115,12 +115,20 @@ async function signInThroughSso(email = "ana@acme.test") {
   return { clientId, callback, target, identity: await identityFromAccessToken(tokens.access_token, config), tokens };
 }
 
-async function signInThroughGithub() {
+async function signInThroughGithub(joining?: string) {
   const clientId = await registerClient();
   const { req } = await chooser(clientId);
   await call(`/authorize/github?req=${encodeURIComponent(req)}`);
-  const callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
-  const target = new URL(callback.headers.get("location")!);
+  let callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+  // An org that offered this account a seat stops the sign-in at its page (ADR 0027); `joining` answers it with Join.
+  if (callback.status === 200 && joining) {
+    const held = /name="held" value="([^"]+)"/.exec(await callback.text())![1];
+    callback = await call("/auth/invites", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ held, choice: "join", org: joining }).toString(),
+    });
+  }
+  const target = new URL(callback.headers.get("location") ?? "https://no-redirect.test/");
   const code = target.searchParams.get("code");
   if (!code) return { clientId, target, identity: null as Identity | null, tokens: null as Record<string, string> | null };
   const res = await call("/token", {
@@ -356,10 +364,12 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
     expect((await signInThroughSso()).identity).toBeNull();
   });
 
+  /** example.dev is no domain of Acme's, so the pushed seat links the account only when the person joins (ADR 0027). */
   it("leaves a personal account that an address linked to the org signing in once deprovisioned, as free", async () => {
     await plans.updateOrg("org_acme", { requireSso: false }, by);
     await plans.createScimUser(pushed({ userName: "jesse@example.dev", key: "email:jesse@example.dev" }), scimIntent("org_acme"));
-    const linked = await signInThroughGithub();
+    expect((await signInThroughGithub()).identity).toBeNull();
+    const linked = await signInThroughGithub("org_acme");
     expect(linked.identity).toMatchObject({ userId: "u_github_4242", orgId: "org_acme", plan: "team" });
     expect(await plans.scimUserByKey("github:4242")).toMatchObject({ id: "x1" });
     await plans.updateScimUser("org_acme", "x1", { active: false }, Date.now(), scimIntent("org_acme"));

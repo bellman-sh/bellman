@@ -24,9 +24,12 @@ seat the person's to take, and not only an admin's to give.
    another org's grant is not asked, so an invite tells the admin nothing of the person. An invite takes
    no seat, and an org holds at most 200 at once. `member_invited` and `invite_withdrawn` are filed in
    the org's stream, naming the key the admin typed.
-3. **An admin's seat on an address the org no longer owns by its form is read as an invite, in place.**
-   That is a `source: "org"` grant on an address key, under a domain the org has released since, or
-   written before this decision for an address the org never owned (`isUnownedSeat`). The grant stays
+3. **A seat on an address the org does not own by its form is read as an invite, in place.** That is
+   an admin's (`source: "org"`) grant on an address key, under a domain the org has released since or
+   written before this decision for an address the org never owned, or one the org's identity provider
+   pushed (`source: "scim"`, ADR 0029), which may name any address (`isUnownedSeat`). A Join moves a
+   pushed seat's SCIM rows onto the subject with it, as a claim does, so the IdP's deprovision still ends
+   it; and when an org that owns the address takes the key, the pushing org's IdP keeps no index on it. The grant stays
    as it is, but a sign-in neither resolves it nor claims it onto the subject; the page in 4 offers it,
    the roster lists it as invited, and it keeps its seat until it is answered or removed. It holds the
    person nowhere: it refuses no Join to another org, and an org that owns the address by its form now

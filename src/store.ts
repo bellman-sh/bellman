@@ -19,7 +19,7 @@ import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
-import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -928,6 +928,10 @@ export interface AppendExtras {
    * whatever has happened to the key since carries a higher cursor. A removal
    * leaves no tombstone, so re-applying the original write would find no row to
    * compare against and could only put back what was removed.
+   *
+   * An item that arrives with no placement is placed first, from the rows the room holds (withPlacement,
+   * surface.ts), and the event is appended with the placement the row takes. Both stores do it in the append,
+   * before the event is built, and neither does it on a replay.
    */
   surface?: SurfaceWrite;
 }
@@ -2570,10 +2574,26 @@ export class MemoryStore implements BellmanStore {
     // Synchronous from here, so the event and its extras land together. The
     // Durable Objects store gets that from a transaction; here it is the absence
     // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
-    const event = this.appendNow(s, e);
-    this.applyExtras(s, event, extras);
+    const placed = this.placed(s, e, extras);
+    const event = this.appendNow(s, placed.e);
+    this.applyExtras(s, event, placed.extras);
     this.wakeHost(s, event);
     return detach(event);
+  }
+
+  /**
+   * The step `placedAppend` takes in store-do.ts, over the map (surface placement spec D3): an item that arrives
+   * with no placement is placed from the rows the room holds, and the event goes in with the placement the row
+   * takes, so the log and the row agree. Everything else comes back untouched. A replay never gets here:
+   * `appendEventOnce` returns the original event first.
+   *
+   * No awaits, for appendEvent's reason: the read of the rows and the write that fills the slot are one turn,
+   * so two writes that land together cannot take one slot.
+   */
+  private placed(s: Session, e: Omit<SessionEvent, "cursor" | "at">, extras: AppendExtras): { e: Omit<SessionEvent, "cursor" | "at">; extras: AppendExtras } {
+    if (extras.surface === undefined || !needsPlacement(extras.surface)) return { e, extras };
+    const surface = withPlacement([...(this.surfaces.get(s.id)?.values() ?? [])], extras.surface);
+    return surface === extras.surface ? { e, extras } : { e: { ...e, payload: surface.item }, extras: { ...extras, surface } };
   }
 
   /**
@@ -2760,11 +2780,14 @@ export class MemoryStore implements BellmanStore {
 
     if (s.frozenAt !== null) return { outcome: "frozen" };
 
-    const event = this.appendNow(s, e);
+    // After the replay branch and the frozen check, so neither reads the surface, and with `print` already
+    // taken from the draft as the caller sent it: a retry reads as a retry however the room has changed.
+    const placed = this.placed(s, e, extras);
+    const event = this.appendNow(s, placed.e);
     const map = seen ?? new Map<string, IdempotencyRecord>();
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
-    this.applyExtras(s, event, extras);
+    this.applyExtras(s, event, placed.extras);
     this.wakeHost(s, event);
     return { outcome: "appended", event: detach(event) };
   }

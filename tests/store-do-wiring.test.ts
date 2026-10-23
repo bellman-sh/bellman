@@ -1235,6 +1235,58 @@ describe("SessionDO read cost", () => {
 });
 
 /**
+ * A surface write that arrives with no placement is placed from the room's rows, read in the append's own
+ * transaction (surface placement spec D3): one list of the `sf:` prefix. A write that carries its placement,
+ * which is every write the dash's drag makes, reads none.
+ */
+describe("SessionDO surface placement read cost", () => {
+  it("lists the surface rows once for a write that needs a slot, and not at all for one that does not", async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    const card = (key: string, placement: { x: number; y: number } | null) =>
+      ({ key, kind: "text" as const, title: null, body: "x", ends: null, placement, blob: null, shape: null });
+    const lists = async (item: ReturnType<typeof card>) => {
+      const before = storage.lists;
+      await doi.appendEvent(
+        { type: "surface", fromMemberId: "m1", fromUserId: "u1", fromLabel: "jesse", payload: item, refId: null },
+        { surface: { key: item.key, item } },
+      );
+      return storage.lists - before;
+    };
+
+    const placed = await lists(card("a", { x: 0, y: 0 }));
+    const unplaced = await lists(card("b", null));
+
+    expect(unplaced - placed, "one list more than a write that carries its placement").toBe(1);
+    expect(await doi.surfaceOf()).toMatchObject([{ key: "a" }, { key: "b", placement: { x: 360, y: 0 } }]);
+    expect((await doi.eventsAfter(0)).at(-1)?.payload, "the event says where the row went").toMatchObject({ key: "b", placement: { x: 360, y: 0 } });
+  });
+
+  /**
+   * `appendEventOnce` answers a retry from the original event and a frozen room with a refusal, and neither
+   * needs a slot, so neither lists the surface. A retry is the call most likely to come twice.
+   */
+  it("lists no surface rows for a retry that replays, and none for a frozen room", async () => {
+    const item = { key: "a", kind: "text" as const, title: null, body: "x", ends: null, placement: null, blob: null, shape: null };
+    const draft = { type: "surface" as const, fromMemberId: "m1", fromUserId: "u1", fromLabel: "jesse", payload: item, refId: null };
+    const room = (over: Partial<Session> = {}) => {
+      const storage = fakeStorage({ session: currentRow(over), cursor: 0 });
+      const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+      return async () => {
+        const before = storage.lists;
+        const out = await doi.appendEventOnce(draft, "sf-0001", { surface: { key: item.key, item } });
+        return { outcome: out.outcome, lists: storage.lists - before };
+      };
+    };
+
+    const write = room();
+    expect((await write()).outcome).toBe("appended");
+    expect(await write(), "the retry replays and reads no rows").toEqual({ outcome: "replayed", lists: 0 });
+    expect(await room({ frozenAt: 1 })(), "a frozen room refuses and reads no rows").toEqual({ outcome: "frozen", lists: 0 });
+  });
+});
+
+/**
  * SessionDO's constructor moves an older room's members out of its record and into rows of
  * their own before any event reaches it (ADR 0019, D5). The storage here is filled after it is
  * made, so the record goes in as an older build wrote it and only the constructor moves it.

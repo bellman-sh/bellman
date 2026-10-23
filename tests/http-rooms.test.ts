@@ -652,6 +652,17 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(viaRoute.surface_cursor).toBe(out.cursor);
   });
 
+  // The route is the same write as the tool's (surface placement spec D3): an item it is handed with no
+  // placement is placed, in the next free slot, and a member's read says where.
+  it("places an item the route is handed with no placement, in the next free slot", async () => {
+    for (const key of ["plan", "risks"]) {
+      const res = (await put(DEV_KEY.jesse, key, { kind: "text", body: key }))!;
+      expect(res.status, await res.clone().text()).toBe(200);
+    }
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string; placement: unknown } }[] };
+    expect(body.items.map((i) => [i.data.key, i.data.placement])).toEqual([["plan", { x: 0, y: 0 }], ["risks", { x: 360, y: 0 }]]);
+  });
+
   // Both transports call writeSurface, so the route takes an html page because the tool does (#185).
   it("places an html page through the route, and a member's read gives it back as kind html with that body", async () => {
     const page = "<!doctype html><p>hi</p>";

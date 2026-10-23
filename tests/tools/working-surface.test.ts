@@ -69,13 +69,13 @@ describe("writing an item", () => {
     const last = events.at(-1)!;
     expect(last).toMatchObject({
       type: "surface", fromMemberId: p.creatorMemberId,
-      payload: { key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null },
+      payload: { key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: { x: 0, y: 0 } },
     });
     expect(out.data.cursor).toBe(last.cursor);
     expect(out.data.room_members).toEqual([p.joiner.identity.label]);
 
     expect(await rows(p)).toEqual([{
-      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null, shape: null,
+      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null,
       cursor: last.cursor, at: last.at, createdAt: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
     }]);
   });
@@ -151,9 +151,11 @@ describe("writing an item", () => {
     const item = (key: string) => asRead.find((i) => i.key === key)!;
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
-    // pass just as well for a read that had dropped them.
+    // pass just as well for a read that had dropped them. The one field the server fills
+    // is `placement`, which a text item left out and reads back as the slot it was given
+    // (surface placement spec D3); a connector has none to give.
     expect(item("plan")).toMatchObject({
-      title: null, ends: null, placement: null, blob: null, shape: null,
+      title: null, ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null,
       cursor: expect.any(Number), at: expect.any(String), created_at: expect.any(String), changed_at: expect.any(String),
     });
     expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
@@ -647,6 +649,34 @@ describe("a room's retention window", () => {
   });
 });
 
+describe("an item written with no placement (surface placement spec D3)", () => {
+  it("is placed in the next free slot, and the log and every read say where", async () => {
+    const p = await pairUp(h);
+    for (const item of [
+      plan(),
+      plan({ key: "risks" }),
+      { key: "arch", kind: "diagram", body: "flowchart LR\n  A --> B", placement: { x: 720, y: 0, w: 720 } },
+      plan({ key: "notes" }),
+    ]) {
+      const out = await write(p, item);
+      expect(out.isError, out.text).toBe(false);
+    }
+
+    const read = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, surface: true,
+    });
+    const items = (read.data.surface as { items: { data: { key: string; placement: unknown } }[] }).items.map((i) => i.data);
+    // `arch` is 720 wide and covers slots 2 and 3, so `notes` takes slot 4, the first of the next row.
+    expect(Object.fromEntries(items.map((i) => [i.key, i.placement]))).toEqual({
+      arch: { x: 720, y: 0, w: 720 }, notes: { x: 0, y: 240 }, plan: { x: 0, y: 0 }, risks: { x: 360, y: 0 },
+    });
+    const logged = (await h.store.eventsAfter(p.sessionId, 0)).filter((e) => e.type === "surface");
+    expect(logged.map((e) => (e.payload as { placement: unknown }).placement)).toEqual([
+      { x: 0, y: 0 }, { x: 360, y: 0 }, { x: 720, y: 0, w: 720 }, { x: 0, y: 240 },
+    ]);
+  });
+});
+
 describe("file and image items (#183)", () => {
   const MD = text("# notes\n");
 
@@ -658,7 +688,7 @@ describe("file and image items (#183)", () => {
 
     const [row] = await rows(p);
     expect(row).toMatchObject({
-      key: "notes", kind: "file", title: "Notes", body: null, ends: null, placement: null,
+      key: "notes", kind: "file", title: "Notes", body: null, ends: null, placement: { x: 0, y: 0 },
       blob: { id, bytes: MD.byteLength, type: "text/markdown", name: "notes.md" },
     });
     const last = (await h.store.eventsAfter(p.sessionId, 0)).at(-1)!;

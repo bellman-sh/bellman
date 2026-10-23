@@ -8,6 +8,7 @@ import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
 import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
+import { policyView } from "../src/orgs.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
@@ -111,7 +112,7 @@ describe("GET /org", () => {
     expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([200, PANEL]);
     expect(await res.json()).toEqual({
       org_id: "org_acme", name: "Acme", owner_user_id: "u_github_1", seats: 3, seats_used: 1, active: true,
-      source: "purchase", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin",
+      source: "purchase", created_at: "2026-10-21T00:00:00.000Z", require_sso: false, domains: [], your_role: "admin", policy: policyView(DEFAULT_POLICY),
     });
   });
 

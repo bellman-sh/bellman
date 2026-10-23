@@ -132,11 +132,24 @@ when the room was created.
 `placement` is `{ x, y, w?, h? }`, all finite numbers: `x` and `y` unbounded,
 `w` and `h` positive when given. A connector takes none. The control panel's
 canvas uses the placement as the item's position, `x` growing to the right and
-`y` downward. An item with no placement gets a slot in a grid by key order,
-worked out by each viewer and never written back, so place any item whose
-position matters.
+`y` downward.
+
+Leave `placement` out and the server places the item. It takes the lowest slot
+of the canvas's grid that no other item covers and stores it with the item, so
+every viewer sees one layout. A placement you write is stored as you wrote it,
+over a box that is already there or not, and writing an item again without a
+`placement` leaves it where it is. A `shape` is the exception: it is refused
+without `{ x, y, w, h }`. An item written before the server placed anything
+reads back with `placement: null`; the canvas draws it in a grid slot by key
+order, and writing it again places it.
+
+So leaving `placement` out is never a gap, only a worse layout than one you
+choose. The next section is how to choose.
 
 ## Laying it out
+
+Lay the surface out for a person opening the canvas, and for the next member to
+write, who places against what you left.
 
 - **One idea per item.** The plan, the decisions, the status, the design
   diagram: each its own item. A reader finds an idea by its title, and a writer
@@ -149,19 +162,90 @@ position matters.
 - **Keep the plan current rather than appended to.** When step 2 is done,
   rewrite `plan` with step 2 marked done. Do not add a `step_2_done` item next
   to it.
-- **The current state top-left.** Put what a reader needs first, the status or
-  the plan, at `{ x: 0, y: 0 }`, where someone opening the canvas starts.
-- **Columns by topic.** Items about one topic share an `x` and stack down by
-  `y`; the next topic starts a column to the right.
-- **Connectors for relations.** When one item depends on, blocks or explains
-  another, draw a connector between them rather than saying so in prose:
-  `{ "key": "api_to_db", "kind": "connector", "ends": { "from": "api", "to": "db" }, "title": "writes" }`.
-  Write both ends first: a connector naming a key that is not on the surface is
-  refused. Removing an item leaves its connectors pointing at nothing, and the
-  canvas stops drawing them, so remove those connectors too.
-- **Remove what is finished.** A surface holds at most 64 items. A write that
-  would add a 65th key is refused until one is removed; a write to a key already
-  on the surface does not count against the limit.
+
+**The grid.** A card is 320 wide and about 200 tall, with 40 between cards, so a
+slot is 360 across and 240 down: columns sit at `x = 0, 360, 720, …` and rows at
+`y = 0, 240, 480, …`. It is the canvas's own grid, the one the server places on.
+Work to it:
+
+1. **Read the surface first,** with `bellman_sync` and `surface: true`, so you
+   place against what is there.
+2. **One topic, one column.** Items about one topic share an `x`. The first
+   column is the first topic: what a reader needs first, the status or the plan,
+   at `{ x: 0, y: 0 }`, where someone opening the canvas starts.
+3. **A new card takes the next free slot of its topic's column:** the first `y`
+   in it that no existing item covers.
+4. **A new topic starts the next column,** 360 to the right of the last.
+5. **Write nothing over an existing box,** except a group's `rect` laid behind
+   the cards it groups. An item covers `x` to `x + w` and `y` to `y + h`; a card
+   with no `w` or `h` is 320 by 200.
+6. **A `diagram` card takes `w: 720`,** two columns wide, so leave the next
+   column's slot at that `y` empty.
+
+**A worked example.** A plan of three steps in one column, a decision in the
+next, a connector from the decision to the step it changed, and a `rect` behind
+the plan titled "Phase 1". Each line is its own `bellman_send`, and the
+connector goes last, because its ends must be on the surface:
+
+```json
+{ "key": "step_1", "kind": "text", "title": "Port the webhook handler", "body": "Move the handler to the new queue.", "placement": { "x": 0, "y": 0 } }
+{ "key": "step_2", "kind": "text", "title": "Backfill idempotency keys", "body": "Run the backfill on staging first.", "placement": { "x": 0, "y": 240 } }
+{ "key": "step_3", "kind": "text", "title": "Cut over", "body": "Switch traffic once the backfill is clean.", "placement": { "x": 0, "y": 480 } }
+{ "key": "decision_1", "kind": "text", "title": "Keep the old endpoint for a week", "body": "Peers still call it until they update.", "placement": { "x": 360, "y": 0 } }
+{ "key": "phase_1", "kind": "shape", "title": "Phase 1", "shape": { "form": "rect", "color": "blue" }, "placement": { "x": -20, "y": -20, "w": 360, "h": 720 } }
+{ "key": "decision_to_step_3", "kind": "connector", "ends": { "from": "decision_1", "to": "step_3" }, "title": "changed" }
+```
+
+The `rect` lies 20 past the three cards on every side, so it covers the plan's
+column and stops short of the decision's.
+
+## What to draw
+
+Three rules decide what goes on the surface beside the cards.
+
+1. **Connect what relates.** When one item depends on, blocks, explains or
+   follows another, draw a connector between them instead of saying so in
+   prose, with a one-word `title` for the relation: `needs`, `blocks`,
+   `changed`, `then`. A plan's steps connect in order, `step_1` to `step_2` to
+   `step_3`, and a decision connects to the item it changed:
+   `{ "key": "api_to_db", "kind": "connector", "ends": { "from": "api", "to": "db" }, "title": "writes" }`.
+   Write both ends first: a connector naming a key that is not on the surface
+   is refused. Removing an item leaves its connectors pointing at nothing, and
+   the canvas stops drawing them, so remove those connectors too.
+2. **Group what belongs together.** Put a `rect` shape behind a column or a
+   cluster of cards, with a `title` and a `color`, 20 past the cards on every
+   side, so a reader sees the group before the cards. Where a connector has no
+   second item to reach, a `line` or an `arrow` shape marks a boundary or points
+   at a place.
+3. **Draw, don't connect, past about six relations.** Seven connectors on one
+   surface read as a tangle. Write one `diagram` item that draws the structure,
+   and connect it to the cards it explains:
+
+```json
+{ "key": "request_flow", "kind": "diagram", "title": "Request flow", "body": "flowchart LR\n  api --> queue\n  queue --> worker\n  worker --> db", "placement": { "x": 720, "y": 0, "w": 720 } }
+```
+
+## Sizes
+
+| | Size |
+|---|---|
+| A card | 320 wide, so leave `w` out. About 200 tall, so set `h` only when its height matters; over 240 it covers the slot below, which then stays empty. |
+| A shape | `w` and `h`, always: its box is its placement. |
+| A diagram | `w: 720`. |
+
+## Before each write
+
+- [ ] **Read first.** You have read the surface since its last change.
+- [ ] **One topic, one column.** The card's `x` is its topic's column.
+- [ ] **Nothing overlaps,** except a `rect` behind the cards it groups.
+- [ ] **A relation is a connector, a group is a shape, a structure is a
+  diagram.**
+- [ ] **Remove what is finished,** and the connectors that pointed at it. A
+  surface holds at most 64 items; a write that would add a 65th key is refused
+  until one is removed, and a write to a key already on the surface does not
+  count against the limit.
+- [ ] **Place every item.** The server places one you leave unplaced, in the
+  next free slot, so leaving it out is never a gap, only a worse layout.
 
 ## Reading it back
 

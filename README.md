@@ -336,11 +336,16 @@ POST   /org/domains               {domain}  answers the TXT record to publish
 POST   /org/domains/<domain>/verify
 DELETE /org/domains/<domain>
 PATCH  /org                       {require_sso}  needs an IdP and a verified domain
+GET    /org/scim                  whether a SCIM token is set, and the base URL to give the IdP
+POST   /org/scim/token            mints the org's SCIM token, shown once; again replaces it
+DELETE /org/scim/token
 POST   /admin/orgs                {org_id, name, owner_key, seats}    (operator)
 PATCH  /admin/orgs/<orgId>        {name?, seats?}  seats of an operator org only (operator)
 ```
 
 **Single sign-on** (ADR 0025): an org's admin saves one OIDC identity provider (Okta, Entra ID, Google Workspace, JumpCloud) and proves the org's email domains with a TXT record at `_bellman.<domain>`. The sign-in pages then take a work email: an address under a verified domain is sent to that org's IdP, with `https://mcp.bellman.sh/callback/sso/<orgId>` as the redirect URI the IdP is registered with, and the first sign-in seats the person as a team member of the org, within its seats. With `require_sso` on, everyone the org claims, by grant or by a verified address, must sign in that way; the org's owner may still use GitHub or Google, which is the break-glass if the IdP is down. The IdP's client secret is stored sealed under `BELLMAN_SEAL_SECRET` (or the token secret) and never returned.
+
+**Provisioning with SCIM** (ADR 0027): an org's admin mints a SCIM token and gives it to the IdP with `https://mcp.bellman.sh/scim/v2` as the base URL. The IdP then pushes a user when they are assigned the app (a `team` member grant, within the seats, or a link to the person who already signed in or whom an admin already seated by that address), updates them, and deactivates them when they leave: the grant goes, their sign-in is refused at the next re-check, they are taken out of every room, and the rooms they created freeze until they are reactivated or someone with the right to close them does. The token can do SCIM and nothing else, and a member the IdP pushed is removed through the IdP, not the roster. Groups are listed empty and not managed.
 
 A seat is a grant: the owner holds one, and `POST /org/members` answers `409 full` at the count the subscription bought. When the subscription stops paying the org goes inactive and keeps its members, each resolving to the free plan with their role and org kept, until a payment brings it back. An org that exists only as a string in `BELLMAN_USERS` has no record, no cap and no member routes; `POST /admin/orgs` gives it one. Billing touches only the orgs billing created: an operator's org keeps its seats and stays active whatever its owner's subscription does, and a purchased org's seats are its subscription's quantity, which `PATCH /admin/orgs` refuses to change.
 

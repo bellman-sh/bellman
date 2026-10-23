@@ -1127,6 +1127,17 @@ anything built on top:
    claims and seats the person; and `require_sso` refuses a GitHub or Google
    sign-in by anyone the org claims but its owner, at sign-in and at every
    re-check, through `ssoRefusal` beside `standingOf`.
+6. **SCIM provisions the members, and a deprovision ends the sign-in** (ADR 0027).
+   `sc:<orgId>` and `sh:<hash>` hold an org's SCIM token hashed; `su:<orgId>:<id>` is
+   a user the IdP pushed, naming the grant key the person is seated under;
+   `sn:<orgId>:<address>` is the directory from an address to that key, written by
+   a push and by the SSO sign-in alike, and `sk:<key>` the index back, both
+   re-pointed by `moveGrant`. A deactivation deletes the grant in the registry,
+   then, outside it and idempotently, takes the person out of every open room
+   and freezes the rooms they created through `freezeSession`, its first
+   production caller; `AccessRemoved` refuses the IdP's own subject at every
+   re-check, beside `SsoRequired`. A personal account an address linked keeps its
+   sign-in and loses only the org's grant and the org's rooms.
 
 ### How each surface gets a credential
 

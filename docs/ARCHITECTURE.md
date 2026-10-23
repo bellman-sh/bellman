@@ -1255,6 +1255,13 @@ anything built on top:
    production caller; `AccessRemoved` refuses the IdP's own subject at every
    re-check, beside `SsoRequired`. A personal account an address linked keeps its
    sign-in and loses only the org's grant and the org's rooms.
+7. **An org's policy binds its members at a start and at a join** (ADR 0031). `policy`
+   is a field of the org record, lifted to its default on a row written before it. It is
+   read by `bellman_start`, `bellman_connect` and `bellman_confirm`, after the entitlement
+   refusals and before any write: who may start a room, org-only always, the capabilities a
+   member may not grant, and the orgs a member may share a room with, that last one checked
+   from both sides of a join, the joiner's org against the room's orgs and each of theirs
+   against the joiner's. A room already running is not revisited when the policy tightens.
 
 ### How each surface gets a credential
 

@@ -30,6 +30,34 @@ session is org-restricted and your identity is not in the creator's org.
 
 Members inside the org join as they do in any room. The [rooms guide](/guides/rooms/) covers codes and seats.
 
+## Org policy
+
+An admin can make the rules above hold for every member, every time, instead of per room. The policy is a field of the org, set with `PATCH /org` and shown to every member by `GET /org`:
+
+```json
+{
+  "policy": {
+    "who_may_create": "admins_only",
+    "require_org_only": true,
+    "forbidden_capabilities": ["request_actions"],
+    "allowed_counterparty_orgs": ["acme"]
+  }
+}
+```
+
+Give only the fields you are changing; the rest stay as they were. `who_may_create` is `any_member` or `admins_only`. `require_org_only` makes every room a member starts org-only, whatever the call says. `forbidden_capabilities` lists capabilities a member may not grant a peer, at a start or at a join. `allowed_counterparty_orgs` is the orgs a member may share a room with besides their own: `null` is any org, `[]` is none, and a list is checked from both sides, so a room that holds your org takes a joiner from another org only if your list allows theirs and theirs allows yours. A member outside any org is outside every list.
+
+Each rule refuses where the member acts, with the policy named so they can ask their admin:
+
+```text
+your org's policy lets only admins start rooms.
+your org's policy forbids granting request_actions to peers; call again without it.
+your org's policy does not allow rooms with org "acme".
+org "acme"'s policy does not allow members of your org in its rooms.
+```
+
+The owner and admins are bound like everyone else; `admins_only` admits admins because that is what it says. A room already running is not changed when the policy tightens: evict or close it. The change itself lands in the audit log as `org_updated`, naming the fields that changed. The refusals are listed on [`bellman_start`](/reference/tools/bellman_start/), [`bellman_connect`](/reference/tools/bellman_connect/) and [`bellman_confirm`](/reference/tools/bellman_confirm/).
+
 ## The admin role
 
 A person's org role is `member` or `admin`, and it is not a room role. Inside a room an org admin holds exactly what their seat holds: the org role buys nothing there. An admin whose seat lacks `invite` cannot mint a code, and an admin with no seat has no verbs in the room at all. The admin role matters in two places, the audit log and the read of closed rooms below.

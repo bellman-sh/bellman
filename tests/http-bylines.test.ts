@@ -299,7 +299,7 @@ describe("GET /public/handles/:handle", () => {
     expect(body.rooms).toHaveLength(1);
     expect(body.rooms[0]).toMatchObject({
       id: PUB,
-      public_url: `https://dash.bellman.sh/r/${PUB}`,
+      public_url: `https://bellman.sh/r/${PUB}`,
       text: { trust: "untrusted", origin: { label: "@jesse" }, data: { room: "Open review", purpose: "Read along" } },
     });
     expect(typeof body.rooms[0].signed_at).toBe("string");
@@ -340,10 +340,10 @@ describe("GET /public/handles/:handle", () => {
     await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
     await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
     const link = async () => ((await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { public_url: string }[] }).rooms[0].public_url;
-    expect(await link()).toBe(`https://dash.bellman.sh/r/${PUB}`);
+    expect(await link()).toBe(`https://bellman.sh/r/${PUB}`);
     await store.claimPublicName("open-review", { id: PUB, at: Date.now() }, null);
     await store.setPublicName(PUB, "open-review");
-    expect(await link()).toBe("https://dash.bellman.sh/r/open-review");
+    expect(await link()).toBe("https://bellman.sh/r/open-review");
   });
 
   it("answers the handle and its rooms and nothing more", async () => {

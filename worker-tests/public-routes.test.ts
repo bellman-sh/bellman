@@ -97,7 +97,7 @@ describe("a handle's page through the Worker (bylines spec D4, D5)", () => {
       handle: "ws-jesse",
       rooms: [{
         id: ROOM,
-        public_url: `https://dash.bellman.sh/r/${ROOM}`,
+        public_url: `https://bellman.sh/r/${ROOM}`,
         text: { trust: "untrusted", origin: { label: "@ws-jesse" }, data: { room: "Open review", purpose: "Read along" } },
       }],
     });

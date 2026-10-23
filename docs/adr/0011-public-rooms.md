@@ -61,3 +61,9 @@ speak. A member's label is how they signed in, an email address for most.
 - Deferred at merge (#233): images and file links on the public page carry dash's
   cookie, which the route ignores; a made-up room id starts a Durable Object; an
   open page keeps polling after the room goes private.
+
+## Amended 2026-10-22
+
+Public room pages moved to `https://bellman.sh/r/`, where the dash's Worker answers `/r/*`
+(`BELLMAN_PUBLIC_PAGE_ORIGINS`). `PUBLIC_ROOM_URL_BASE` is now `https://bellman.sh/r/`, and
+`dash.bellman.sh/r/` answers with a 301 to it, so a link handed out before still opens the room.

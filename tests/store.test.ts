@@ -716,6 +716,37 @@ describe("the sink's deliveries", () => {
     expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "ok", delivered_through: 5, pending: 0 });
   });
 
+  it("drops the outcome of a post that finished after the sink was removed", async () => {
+    let during: (() => Promise<unknown>) | null = null;
+    const { store, posts } = rig(async () => { await during?.(); return new Response(null, { status: 200 }); });
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    during = () => store.removeAuditSink("org_a", by);
+    await store.sweep(t);
+    expect(posts).toHaveLength(1);
+    expect((await store.auditSettings("org_a")).sink).toBeNull();
+    await store.sweep(t + 1);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("drops the outcome of a post that finished after the sink was replaced, so the new secret and cursor stand", async () => {
+    let during: (() => Promise<unknown>) | null = null;
+    let replaced = "";
+    const { store, posts } = rig(async () => { await during?.(); return new Response(null, { status: 200 }); });
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    during = async () => { replaced = (await store.setAuditSink("org_a", url, by)).secret; during = null; };
+    await store.sweep(t);
+    expect(posts).toHaveLength(1);
+    expect((await store.auditSettings("org_a")).sink).toMatchObject({ delivered_through: 0, pending: 3 });
+    await store.sweep(t + SINK_DELAY_MS);
+    expect(posts).toHaveLength(2);
+    expect((posts[1].init.headers as Record<string, string>)["Bellman-Delivery"]).toBe("org_a:1-3");
+    expect(await verified(replaced, posts[1].init)).toBe(true);
+  });
+
   it("delivers a long backlog a batch at a time, the next pass dated now", async () => {
     const { store, posts } = rig(() => new Response(null, { status: 200 }));
     for (let i = 1; i <= SINK_BATCH + 50; i++) await store.appendAudit(row(i));

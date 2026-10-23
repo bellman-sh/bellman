@@ -150,14 +150,15 @@ export async function signBatch(secret: string, t: number, body: string): Promis
 /**
  * One delivery: the batch body signed with the sink's secret, posted with the sink's timeout. `ok`
  * only on a 2xx; a refusal carries its status and a failure its message, so the status page says
- * why. `post` is `fetch`, or what a test hands in.
+ * why. A redirect is a refusal too: the batch goes to the URL the admin set and nowhere else. `post`
+ * is `fetch`, or what a test hands in.
  */
 export async function deliverBatch(post: typeof fetch, sink: AuditSink, orgId: string, entries: AuditEntryView[], now: number): Promise<SinkOutcome> {
   const last = entries.at(-1)!.seq;
   const { delivery, body } = batchBody(orgId, entries, entries[0].seq, last);
   try {
     const res = await post(sink.url, {
-      method: "POST", body,
+      method: "POST", body, redirect: "manual",
       headers: { "Content-Type": "application/json", "Bellman-Delivery": delivery, "Bellman-Signature": await signBatch(sink.secret, now, body) },
       signal: AbortSignal.timeout(SINK_TIMEOUT_MS),
     });

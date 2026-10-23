@@ -4972,6 +4972,10 @@ export class AuditDO extends DurableObject {
     if (rows.length === 0) return sinkStatus(sink, this.#newestSeq());
     const orgId = rows[0].orgId as string;
     const outcome = await deliverBatch(fetch, sink, orgId, rows.map(entryView), now);
+    // Removed or replaced while the post was in flight (the input gate opens across an awaited fetch): the
+    // outcome belongs to a sink that is gone, and whoever replaced it armed the next attempt.
+    const live = kv.get<AuditSink>("sink");
+    if (live?.secret !== sink.secret) return live ? sinkStatus(live, this.#newestSeq()) : undefined;
     // Rows appended while the post was in flight are pending too: one more pass, not a wait for the next append.
     const next = nextSinkState(sink, outcome, now, rows.length === SINK_BATCH || this.#newestSeq() > rows.at(-1)!.seq);
     kv.put<AuditSink>("sink", next.sink);

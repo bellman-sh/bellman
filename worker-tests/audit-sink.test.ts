@@ -61,6 +61,18 @@ it("arms the alarm when a row lands, posts one signed batch, and leaves nothing 
   expect(await dueSink()).toBeNull();
 });
 
+it("drops the outcome of a post that finished after the sink was removed", async () => {
+  const s = store();
+  let during: (() => Promise<unknown>) | null = null;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => { await during?.(); return new Response(null, { status: 200 }); });
+  await s.setAuditSink("org_a", url, by);
+  during = () => s.removeAuditSink("org_a", by);
+  await fire();
+  expect((await s.auditSettings("org_a")).sink).toBeNull();
+  expect(await dueSink()).toBeNull();
+  expect(await alarm()).toBeNull();
+});
+
 it("backs off after a refusal and keeps the cursor", async () => {
   collector(503);
   const s = store();

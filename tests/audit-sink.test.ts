@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import {
   chainHash, chainWalk, sweepPlan, nextSinkState, sinkStatus, newSink, batchBody, signBatch,
-  retentionDaysOf, sinkUrlOf, NO_ANCHOR, SINK_DEAD_AFTER_MS, type ChainRow, type AuditSink,
+  retentionDaysOf, sinkUrlOf, deliverBatch, NO_ANCHOR, SINK_DEAD_AFTER_MS, type ChainRow, type AuditSink,
 } from "../src/audit-sink.js";
 import { recordOf } from "../src/audit.js";
 import { backoffMs } from "../src/outbox.js";
@@ -121,6 +121,16 @@ describe("retentionDaysOf", () => {
   it("accepts null and integers at or above the floor", () => {
     expect([null, 30, 365].map(retentionDaysOf)).toEqual([null, 30, 365]);
     expect([29, 30.5, "90", undefined, true].map(retentionDaysOf)).toEqual(["invalid", "invalid", "invalid", "invalid", "invalid"]);
+  });
+});
+
+describe("deliverBatch", () => {
+  it("never follows a redirect: a 3xx is a refusal with its status", async () => {
+    let init: RequestInit | undefined;
+    const post = (async (_u: string, i: RequestInit) => { init = i; return new Response(null, { status: 302, headers: { Location: "http://10.0.0.1/" } }); }) as unknown as typeof fetch;
+    const sink = newSink("https://c.example/in", 0, "s");
+    expect(await deliverBatch(post, sink, "org_a", [{ seq: 1, ...entry(1) } as never], 0)).toEqual({ ok: false, error: "302" });
+    expect(init?.redirect).toBe("manual");
   });
 });
 

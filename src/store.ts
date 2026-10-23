@@ -3891,6 +3891,8 @@ export class MemoryStore implements BellmanStore {
     const rows = sink.dead ? [] : this.streamOf(orgId).filter((r) => r.seq > sink.deliveredThrough).slice(0, SINK_BATCH);
     if (rows.length === 0) return sinkStatus(sink, newest());
     const outcome = await deliverBatch(this.options.post ?? fetch, sink, orgId, rows.map(entryView), now);
+    // Removed or replaced while the post was in flight: the outcome belongs to a sink that is gone.
+    if (state.sink?.secret !== sink.secret) return state.sink ? sinkStatus(state.sink, newest()) : undefined;
     // Rows appended while the post was in flight are pending too: one more pass, not a wait for the next append.
     const next = nextSinkState(sink, outcome, now, rows.length === SINK_BATCH || newest() > rows.at(-1)!.seq);
     state.sink = next.sink; state.sinkAt = next.armAt;

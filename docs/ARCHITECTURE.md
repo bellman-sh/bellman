@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
-last-verified-against-source: 512a4d2
+last-verified-against-source: aa927fc
 last-updated: 2026-10-23
 ---
 

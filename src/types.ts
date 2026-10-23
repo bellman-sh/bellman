@@ -413,6 +413,29 @@ export interface OrgDomain {
 export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
 
 /**
+ * An org's identity provider (SSO spec, D9): one OIDC provider, discovered when its admin saved it,
+ * stored apart from the `Org` record under its own key so a read of the org never hands out a
+ * secret. `clientSecret` is sealed (D14); no route returns it. `protocol` is the field SAML would
+ * widen, and nothing reads another value yet.
+ */
+export interface OrgIdp {
+  protocol: "oidc";
+  /** As the IdP's discovery document states it: https, no trailing slash, no query or fragment. */
+  issuer: string;
+  clientId: string;
+  /** Sealed with the Worker's seal secret; see `src/oauth/sealed.ts`. */
+  clientSecret: string;
+  /** How the token endpoint takes the client credentials, from the discovery document; basic when it lists it. */
+  tokenAuth: "client_secret_basic" | "client_secret_post";
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  /** Asked for the address and the name only when the id token lacks them; null when the IdP has none. */
+  userinfoEndpoint: string | null;
+  configuredAt: number;
+  configuredBy: string;
+}
+
+/**
  * That a person exists.
  *
  * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org

@@ -4,7 +4,7 @@ import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { MemoryStore } from "../src/store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
-import type { ProviderProfile } from "../src/oauth/providers.js";
+import { ssoUserId, type ProviderProfile } from "../src/oauth/providers.js";
 
 /**
  * The whole authorization code flow, with GitHub and Google stubbed at the
@@ -1489,6 +1489,18 @@ describe("signedInPlan", () => {
     // The operator's override outranks a grant, as at refresh.
     const overrides: Record<string, Identity> = { "github:4242": { userId: "u_x", orgId: null, plan: "pro", role: "member", label: "x" } };
     expect(await signedInPlan("u_github_4242", { plans, overrides })).toBe("pro");
+  });
+
+  it("reads an SSO user's plan through the key its id encodes (SSO spec, D10)", async () => {
+    const plans = new MemoryStore();
+    const by = { actorUserId: "u_op" };
+    await plans.createOrg(
+      { orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator", active: true, createdAt: 1, requireSso: false, domains: [] },
+      { key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null }, by,
+    );
+    await plans.putGrantIfOwned({ key: "sso:org_acme:00u1abc", plan: "team", role: "member", orgId: "org_acme", source: "sso", grantedAt: 1, grantedBy: "sso", expiresAt: null }, "org_acme", by);
+    expect(await signedInPlan(ssoUserId("org_acme", "00u1abc"), { plans })).toBe("team");
+    expect(await signedInPlan(ssoUserId("org_acme", "nobody"), { plans })).toBe("free");
   });
 
   it("drops a purchase when purchases are not honoured, and answers null for an id no provider minted", async () => {

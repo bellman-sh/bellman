@@ -1073,12 +1073,15 @@ caller places them as a `file` instead of uploading twice.
 
 ## 6. Identity, plans and entitlements
 
-A human signs in with GitHub or Google. Bellman is its own authorization server:
-it mints its own tokens and never stores an upstream one.
+A human signs in with GitHub or Google, or, by a work email under a domain their
+org has verified, with the org's own identity provider (ADR 0025). Bellman is its
+own authorization server: it mints its own tokens and never stores an upstream one.
 
 ```mermaid
 flowchart TB
-    START["human signs in<br/>GitHub or Google"] --> KEYS["identity keys<br/>provider:subject<br/>provider:email<br/>email:address"]
+    START["human signs in<br/>GitHub or Google,<br/>or the org's IdP by work email"] --> KEYS["identity keys<br/>provider:subject<br/>provider:email<br/>email:address<br/>sso:org:subject"]
+    START -->|"first SSO sign-in"| SEAT["provisionSsoMember<br/>a team grant, within the seats"]
+    SEAT --> G
     KEYS --> O{"BELLMAN_USERS<br/>override?"}
     O -->|yes| OPER["plan from the operator"]
     O -->|no| G{"stored grant for<br/>a stable key?"}
@@ -1115,6 +1118,13 @@ anything built on top:
    sells, and a subscription that stops paying marks it inactive: every grant in
    an inactive org resolves to `free` with its role and org kept, through
    `standingOf` in `firstGrant`, which every re-check passes through.
+5. **SSO is one OIDC provider per org, routed by a verified domain** (ADR 0025).
+   `oi:<orgId>` holds the IdP apart from the record, its secret sealed; `od:<domain>`
+   is written only when a TXT record proved the domain; `/authorize/sso` sends an
+   address's domain to its org's IdP, `/callback/sso/<orgId>` reads the id token's
+   claims and seats the person; and `require_sso` refuses a GitHub or Google
+   sign-in by anyone the org claims but its owner, at sign-in and at every
+   re-check, through `ssoRefusal` beside `standingOf`.
 
 ### How each surface gets a credential
 
@@ -1168,6 +1178,16 @@ sequenceDiagram
 
 The invariants that encode this, and that any change has to argue against out
 loud:
+
+- **An org's IdP secret is sealed, and never returned** (ADR 0025). It is stored
+  under AES-256-GCM with a key HKDF derives from `BELLMAN_SEAL_SECRET`, or from
+  `BELLMAN_TOKEN_SECRET` when that is unset, so a dump of the registry yields no
+  secret without the Worker secret too; `GET /org/idp` says only that one is set.
+  The id token a sign-in reads arrives in the token endpoint's own TLS response,
+  the one case OIDC lets a client skip the signature check for, and its `iss`,
+  `aud`, `exp`, `nonce` and `sub` are checked. Only a domain proven by its TXT
+  record routes a sign-in or counts an address, so nobody claims `@acme.com`
+  without acme's DNS.
 
 - **The control panel holds a cookie, not a token** — `dash.bellman.sh` renders
   billing and provider keys, so a token in web storage there would turn any XSS

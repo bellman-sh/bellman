@@ -145,3 +145,6 @@ BELLMAN_PUBLIC_PAGE_ORIGINS = "https://bellman.sh"
 #   npx wrangler secret put BELLMAN_KEYS
 # So is BELLMAN_OPERATORS, the user ids (u_…) that may release anyone's handle; unset, nobody may:
 #   npx wrangler secret put BELLMAN_OPERATORS
+# And BELLMAN_SEAL_SECRET, which seals an org's IdP client secret at rest (ADR 0025). Optional: unset,
+# BELLMAN_TOKEN_SECRET seals it, and rotating that then means every org re-enters its secret.
+#   npx wrangler secret put BELLMAN_SEAL_SECRET

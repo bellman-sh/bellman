@@ -42,6 +42,16 @@ An admin seats a teammate by a stable identity: `github:<numeric id>`, `google:<
 
 When the subscription stops paying, the org keeps its members and loses the plan: everyone in it is on the free plan, with their org and role kept, until a payment brings it back. Nothing is removed by a failed card. An org set up by the operator rather than bought is always active.
 
+## Single sign-on
+
+An org's admin can have everyone sign in through the company's identity provider: Okta, Entra ID, Google Workspace, JumpCloud, or anything that speaks OpenID Connect. Three steps, each from the control panel or its routes:
+
+1. **Register Bellman with the IdP** as a web application with the redirect URI `https://mcp.bellman.sh/callback/sso/<your org id>`, and save the issuer URL, client id and client secret as the org's IdP. Bellman reads the IdP's discovery document when you save, and tells you if it cannot. The secret is stored sealed and is never shown again.
+2. **Prove your email domains.** Claim `acme.com`, publish the TXT record Bellman gives you at `_bellman.acme.com`, and ask Bellman to check it. Until a domain is verified it routes nothing.
+3. **Try it.** On the sign-in page, enter a work email. An address under a verified domain is sent to your IdP; the first sign-in seats the person as a member of your org, within its seats, and an address an admin had already seated keeps the role it was given.
+
+Once those work, turn `require_sso` on. From then on everyone the org claims, by a seat or by a verified address, must sign in through the IdP; GitHub and Google refuse them and say so. The org's owner may still sign in with their original provider, which is the way back in if the IdP is ever down. A person who had a personal Bellman account under a company address signs in through SSO as a new account, and their earlier rooms stay with the old one, so seat existing members by their GitHub or Google key first if those accounts should be kept.
+
 ## The audit log
 
 [`bellman_audit`](/reference/tools/bellman_audit/) returns the latest entries of your org's log, oldest first. `limit` defaults to 50 and goes up to 500. It needs the team plan, the admin role and an org, and refuses without them:
@@ -60,7 +70,7 @@ Each entry is `{ at, session_id, actor, action, detail }`, where `actor` is a us
 - A creator changing what a hosted room's host is told to ask (`host_instructions_changed`). Its entry records the length of the new text, not the text, and none is written when the text did not change.
 - The end of a room's record: `room_deleted` when its creator or an org admin asked for it to be deleted, and `room_purged` when it was purged.
 - Plan grants and revocations, `plan_granted` and `plan_revoked`. A team purchase or cancellation appears here with `stripe` as the actor.
-- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats or its standing.
+- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats, its standing or `require_sso`; `idp_configured` and `idp_removed`; and `domain_claimed`, `domain_verified` and `domain_released`.
 
 A room that crosses organisations writes to both orgs' logs, so each side sees the crossings that touched its own boundary and nothing else.
 

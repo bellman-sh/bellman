@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { purchaseGrant } from "../src/billing/grants.js";
-import { grantAuditEntries, orgAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
 import type { Org, PlanGrant } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;
@@ -440,6 +440,16 @@ describe("org rows (orgs spec, D8)", () => {
     const by: AuditIntent = { actorUserId: "u_op", actorLabel: "Ops", actorOrgId: null };
     expect(orgAuditEntries(org(), org({ name: "Acme Ltd" }), by, 5)[0]).toMatchObject({
       actorUserId: "u_op", actorLabel: "Ops", actorOrgId: null, direction: null,
+    });
+  });
+});
+
+describe("an org event's row (SSO spec, D9, D11)", () => {
+  it("is filed under org:<id>, internal to the org, naming the actor and what happened", () => {
+    const by: AuditIntent = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
+    expect(orgEventEntry("org_acme", "domain_verified", { domain: "acme.test" }, by, 7)).toEqual({
+      at: 7, orgId: "org_acme", sessionId: "org:org_acme", actorUserId: "u_github_1", action: "domain_verified",
+      detail: { domain: "acme.test" }, ...internal("org_acme", { label: "Ana", orgId: "org_acme" }),
     });
   });
 });

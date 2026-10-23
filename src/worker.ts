@@ -53,6 +53,11 @@ export interface WorkerEnv extends BellmanEnv {
   SEND_EMAIL?: SendEmail;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
+  /**
+   * A secret: what seals an org's IdP client secret at rest (SSO spec, D14). Unset, the token secret
+   * seals it, and rotating that then means every org re-enters its secret; this keeps the two apart.
+   */
+  BELLMAN_SEAL_SECRET?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   GOOGLE_CLIENT_ID?: string;
@@ -115,6 +120,7 @@ function oauthConfig(
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
     secret: env.BELLMAN_TOKEN_SECRET,
+    sealSecret: env.BELLMAN_SEAL_SECRET,
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
@@ -334,6 +340,7 @@ export default {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
+        sealSecret: env.BELLMAN_SEAL_SECRET ?? env.BELLMAN_TOKEN_SECRET,
       });
       if (handled) return handled;
     }

@@ -75,7 +75,10 @@ that way; the surface is where things stand.
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
   body?, ends?, placement?, blob?, shape? }`, or remove with `{ key, remove: true }`. Kinds:
   `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`, `shape`. Items replace by key;
-  every version stays in the log at its cursor.
+  every version stays in the log at its cursor. An item sent without a placement
+  is placed by the server, in the next free slot of the canvas's grid (four
+  columns of 320 by 200 cells, 40 apart), and keeps that slot until it is written
+  with another or dragged.
 - A `file` or an `image` names a blob. Upload the bytes first — `POST
   /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
   25 MB per file, a bearer token or the panel's cookie, the seat holding

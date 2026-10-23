@@ -214,9 +214,10 @@ Three rules decide what goes on the surface beside the cards.
    the canvas stops drawing them, so remove those connectors too.
 2. **Group what belongs together.** Put a `rect` shape behind a column or a
    cluster of cards, with a `title` and a `color`, 20 past the cards on every
-   side, so a reader sees the group before the cards. Where a connector has no
-   second item to reach, a `line` or an `arrow` shape marks a boundary or points
-   at a place.
+   side, so a reader sees the group before the cards. Give the `rect` a key that
+   sorts before its cards' keys, since one viewer paints in key order. Where a
+   connector has no second item to reach, a `line` or an `arrow` shape marks a
+   boundary or points at a place.
 3. **Draw, don't connect, past about six relations.** Seven connectors on one
    surface read as a tangle. Write one `diagram` item that draws the structure,
    and connect it to the cards it explains:

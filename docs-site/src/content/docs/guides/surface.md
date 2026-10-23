@@ -71,7 +71,9 @@ A surface holds at most 64 items. A write that would add a 65th key is refused u
 
 ### Placement and shapes
 
-`placement` is `{ x, y, w?, h? }`, all finite numbers: `x` and `y` unbounded, `w` and `h` positive when given. `x` grows to the right and `y` downward. An item with no placement gets a slot in a grid by key order, worked out by each viewer and never written back, so place any item whose position matters. A connector takes no placement.
+`placement` is `{ x, y, w?, h? }`, all finite numbers: `x` and `y` unbounded, `w` and `h` positive when given. `x` grows to the right and `y` downward. A connector takes no placement.
+
+Leave `placement` out and the server places the item, in the lowest slot of the canvas's grid that no other item covers: four columns of cells 320 wide and 200 tall, 40 apart, filled left to right and then down. The slot is stored with the item, so every viewer sees one layout. A placement you write is stored as written, and writing an item again without one leaves it where it is. A `shape` is the exception: it needs a full placement. An item written before the server placed anything reads back with `placement: null`, and the canvas draws it in a grid slot by key order until it is written again or dragged.
 
 A `shape` is drawn from its own field. `form` is `rect`, `ellipse`, `diamond`, `arrow` or `line`. `color` is one of six names (`slate` by default, then `blue`, `green`, `amber`, `red` and `violet`) or a hex colour, `#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`. `flip: true` draws an arrow or a line from the bottom-left to the top-right. A shape needs a `placement` with `x`, `y`, `w` and `h`, because its size is the placement's, and takes no `body`, because its label is the `title`. `flip: true` on any other form is refused, and so is a `shape` on any other kind.
 
@@ -79,9 +81,21 @@ A `shape` is drawn from its own field. `form` is `rect`, `ellipse`, `diamond`, `
 
 - Give each idea one item under one stable key, such as `plan`, `decisions`, `status` or `api_design`, and write that key every time the idea changes. The write replaces the item and the log keeps the old version, so `plan_v2` and `plan_final` are never needed. Every new key is one more of the 64.
 - Keep the plan current rather than appended to. When step 2 is done, rewrite `plan` with step 2 marked done; do not add a `step_2_done` item beside it.
-- Put the status or the plan at `{ "x": 0, "y": 0 }` and stack the items on one topic down a shared `x`, so the current state sits at the top left.
-- Draw a connector when one item depends on, blocks or explains another, instead of saying so in prose. Write both ends first: a connector naming a key that is not on the surface is refused. Removing an item leaves its connectors pointing at nothing, and the canvas stops drawing them, so remove those connectors too.
-- Remove what is finished.
+
+A card is 320 wide and about 200 tall, with 40 between cards, so a slot is 360 across and 240 down: columns sit at `x = 0, 360, 720, …` and rows at `y = 0, 240, 480, …`. Agents lay the surface out on that grid, which is also the one the server places on:
+
+- Read the surface first, so a new card goes against what is there.
+- Items on one topic share an `x` and stack down by `y`. The first column is the first topic, with the status or the plan at `{ "x": 0, "y": 0 }`, and a new topic starts the next column.
+- A new card takes the next free slot of its topic's column. Nothing is written over an existing box, except a group's `rect` laid behind the cards it groups.
+- A `diagram` takes `w: 720`, two columns wide. A card needs no `w`, and sets `h` only when its height matters.
+
+Three rules decide what else goes on the surface:
+
+- **Connect what relates.** Draw a connector, with a one-word `title` for the relation, when one item depends on, blocks, explains or follows another: a plan's steps in order, a decision to the item it changed. Write both ends first: a connector naming a key that is not on the surface is refused. Removing an item leaves its connectors pointing at nothing, and the canvas stops drawing them, so remove those connectors too.
+- **Group what belongs together.** A `rect` shape behind a column or a cluster of cards, titled and coloured, 20 past the cards on every side, marks the group. Give the `rect` a key that sorts before its cards' keys, since one viewer paints in key order. A `line` or an `arrow` shape marks a boundary where a connector has no second item to reach.
+- **Draw, don't connect, past about six relations.** Write one `diagram` item that draws the structure, and connect it to the cards it explains.
+
+Remove what is finished, and the connectors that pointed at it.
 
 ## Who can write
 

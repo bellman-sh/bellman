@@ -6,7 +6,7 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-22-surface-placement-design.md]
 last-verified-against-source: 21f13b4
 last-updated: 2026-10-15
 ---
@@ -948,6 +948,22 @@ removed. The record gains one number, `surfaceCursor`, moved in the same put,
 so `bellman_sync` reports "the surface moved" off the record it already read.
 A member a creator removed (#113) is told a number derived from the items it is
 shown instead, because the record's could claim a change it never saw.
+
+An item that arrives with no placement is placed in the append that stores it (ADR 00NN).
+`withPlacement` (`src/surface.ts`) gives a `text`, `link`, `diagram`, `file`, `image` or `html`
+item the placement its key already holds, so replacing an item moves nothing, and otherwise the
+lowest slot of the viewers' grid (`GRID` and `gridSlot`: four columns of 320 by 200 cells, 40
+apart, left to right and then down) that no row's box covers. A shape's box covers the cells
+under it, and a row stored before this, with none, is covered where the viewers draw it.
+`SessionDO`'s `placedAppend` lists the room's `sf:` rows once, for a write that needs a slot and
+for no other, before the event is built; `MemoryStore.placed` reads its map. The event is
+appended with the placement the row takes, and an idempotent retry is judged by the draft the
+caller sent, so it replays however the room has filled since. The search ends at
+`MAX_SLOT_SEARCH` slots (256, a row of four for each of the surface's 64 items), and an item
+that finds none is stored unplaced, with the write still succeeding, and laid out by the
+viewers. The grid lives in three places that must agree: `src/surface.ts`,
+`ui/src/canvas-layout.ts` (held to it by `tests/working-surface.test.ts`) and dash's
+`src/lib/canvas.ts`. A connector has no placement, and a shape is refused without one.
 
 Briefs are rows too, `bf:<memberId>` (ADR 0018). A member keeps only its brief's
 `agent`, for the roster, and `getBriefs` reads the briefs a caller names:

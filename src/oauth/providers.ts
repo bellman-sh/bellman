@@ -1,4 +1,6 @@
+import { isOrgId } from "../grant-index.js";
 import type { Identity } from "../types.js";
+import { base64url, base64urlDecode } from "./tokens.js";
 
 /**
  * Upstream identity providers.
@@ -14,7 +16,8 @@ import type { Identity } from "../types.js";
 export type ProviderName = "github" | "google";
 
 export interface ProviderProfile {
-  provider: ProviderName;
+  /** A hand-written provider, or `sso`: an org's own OIDC provider (SSO spec, D9), whose subject is `<orgId>:<sub>`. */
+  provider: ProviderName | "sso";
   /** Stable upstream id. Emails change; this does not. */
   subject: string;
   label: string;
@@ -145,6 +148,49 @@ export function isProviderName(value: string): value is ProviderName {
 }
 
 /**
+ * An IdP's `sub` as a key may carry (SSO spec, D10): 1 to 128 printable ASCII characters, no
+ * space. OIDC puts no grammar on a subject; this is the bound a storage key and a user id accept.
+ */
+export const SSO_SUB = /^[\x21-\x7e]{1,128}$/;
+
+/** The identity key an org's IdP subject is filed under: readable in a roster, unambiguous because an org id holds no colon. */
+export const ssoKey = (orgId: string, sub: string): string => `sso:${orgId}:${sub}`;
+
+/** The org and the subject an `sso:` key names, or null for a key outside the grammar. */
+export function parseSsoKey(key: string): { orgId: string; sub: string } | null {
+  if (!key.startsWith("sso:")) return null;
+  const rest = key.slice("sso:".length);
+  const colon = rest.indexOf(":");
+  if (colon < 0) return null;
+  const orgId = rest.slice(0, colon);
+  const sub = rest.slice(colon + 1);
+  return isOrgId(orgId) && SSO_SUB.test(sub) ? { orgId, sub } : null;
+}
+
+const utf8 = new TextEncoder();
+
+/**
+ * The user id an SSO sign-in mints (D10): `u_sso_` and the org and subject encoded whole. The
+ * user id grammar is letters, digits, `-` and `_`, and so is an org id's, so no separator could
+ * split the two inside an id; base64url fits the grammar and decodes back, which `signedInPlan`
+ * needs to read a hosted room creator's plan again.
+ */
+export const ssoUserId = (orgId: string, sub: string): string => `u_sso_${base64url(utf8.encode(`${orgId}:${sub}`))}`;
+
+/** The `sso:` key a user id encodes, or null for an id no SSO sign-in minted. */
+export function ssoKeyForUser(userId: string): string | null {
+  const encoded = /^u_sso_([A-Za-z0-9_-]+)$/.exec(userId)?.[1];
+  if (!encoded) return null;
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(base64urlDecode(encoded));
+  } catch {
+    return null;
+  }
+  return parseSsoKey(`sso:${decoded}`) === null ? null : `sso:${decoded}`;
+}
+
+/**
  * Every key an identity may be filed under, most specific first.
  *
  * No label. A GitHub login is renameable and the vacated one reclaimable; a
@@ -155,7 +201,10 @@ export function isProviderName(value: string): value is ProviderName {
  */
 export function identityKeys(profile: ProviderProfile): string[] {
   const keys = [`${profile.provider}:${profile.subject}`];
-  if (profile.email) keys.push(`${profile.provider}:${profile.email}`, `email:${profile.email}`);
+  // An org's IdP has no address namespace of its own: the subject, and the address when the org
+  // verified its domain (SSO spec, D10), which is how an admin's `email:` grant is claimed.
+  if (profile.email && profile.provider === "sso") keys.push(`email:${profile.email}`);
+  else if (profile.email) keys.push(`${profile.provider}:${profile.email}`, `email:${profile.email}`);
   return keys;
 }
 
@@ -169,7 +218,8 @@ export function identityKeys(profile: ProviderProfile): string[] {
  * key is how a token inherits a stranger's plan and org.
  */
 export function immutableKeys(keys: string[]): string[] {
-  return keys.filter((key) => /^(?:github|google):\d+$/.test(key));
+  // An IdP's subject is as immutable as a GitHub id: OIDC promises it never reassigned within the issuer.
+  return keys.filter((key) => /^(?:github|google):\d+$/.test(key) || parseSsoKey(key) !== null);
 }
 
 /**
@@ -194,12 +244,12 @@ export function isStableIdentityKey(key: string): boolean {
   const value = key.slice(separator + 1);
   if (!value) return false;
   if (provider === "email") return value.includes("@");
+  // An org's IdP hands out an opaque subject; the key names the org beside it, and both must parse (SSO spec, D10).
+  if (provider === "sso") return parseSsoKey(key) !== null;
   if (!isProviderName(provider)) return false;
-  // Both providers hand out numeric subjects — GitHub a database id, Google a
-  // string of digits — and an address only reaches this list after the
-  // provider said it was verified. A third provider with opaque subjects would
-  // need this rule widened, and grants would silently stop resolving until it
-  // was, so: assumption stated out loud.
+  // Both hand-written providers hand out numeric subjects — GitHub a database
+  // id, Google a string of digits — and an address only reaches this list after
+  // the provider said it was verified.
   return /^\d+$/.test(value) || value.includes("@");
 }
 
@@ -216,8 +266,9 @@ export function grantKeys(keys: string[]): string[] {
  * they already created.
  */
 export function defaultIdentity(profile: ProviderProfile): Identity {
+  const sso = profile.provider === "sso" ? parseSsoKey(`sso:${profile.subject}`) : null;
   return {
-    userId: `u_${profile.provider}_${profile.subject}`,
+    userId: sso ? ssoUserId(sso.orgId, sso.sub) : `u_${profile.provider}_${profile.subject}`,
     orgId: null,
     plan: "free",
     role: "member",

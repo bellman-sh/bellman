@@ -86,6 +86,25 @@ describe("HTTP surface", () => {
     expect(Array.isArray(((await account.json()) as { bans: unknown }).bans)).toBe(true);
   });
 
+  it("serves the host route beside the room routes", async () => {
+    await store.createSession(session({
+      id: "qs_http_host",
+      manifest: roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+        roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } }),
+      members: [member({ roomRole: "lead" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" })],
+    }));
+    const put = (key: string) => fetch(`${base}/rooms/qs_http_host/host`, {
+      method: "PUT", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({ instructions: "Ask how agents have grown." }),
+    });
+    expect((await put("qk_dev_peer")).status, "a member who did not create the room").toBe(403);
+    expect((await store.getSession("qs_http_host"))!.manifest.host?.instructions).toBeNull();
+    const set = await put("qk_dev_jesse");
+    expect([set.status, await set.json()]).toEqual([200, { instructions: "Ask how agents have grown." }]);
+    expect((await store.getSession("qs_http_host"))!.manifest.host?.instructions).toBe("Ask how agents have grown.");
+  });
+
   // This server has no send_email binding, so a report is stored and the log says no email went. The route's own cases are in
   // tests/http-moderation.test.ts.
   it("serves the report routes beside the room routes, and says in the log that this server sends no email", async () => {
@@ -113,6 +132,14 @@ describe("HTTP surface", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+
+  // The Node server passes no public page origin (src/app.ts): a script on bellman.sh is granted nothing here, as a stranger is not.
+  it("grants the report route's preflight to no origin, bellman.sh included", async () => {
+    const res = await fetch(`${base}/rooms/qs_http_reports/reports`, {
+      method: "OPTIONS", headers: { origin: "https://bellman.sh", "access-control-request-method": "POST" },
+    });
+    expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([204, null]);
   });
 
   // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.

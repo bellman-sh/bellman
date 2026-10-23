@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import worker from "../src/worker.js";
+import { hostMember } from "../src/host.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { AuthStore } from "../src/oauth/store.js";
@@ -41,6 +42,18 @@ const tokenFor = (identity: Identity) => signJwt(
   SECRET, ACCESS_TOKEN_TTL_SECONDS,
 );
 const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
+const PANEL = "https://dash.example.test";
+const PAGE = "https://bellman.sh";
+/** A panel session's cookie for `userId`, as a sign-in leaves one: what the dash and bellman.sh's room pages send. */
+const cookieFor = async (userId: string) => {
+  const now = Date.now();
+  const id = crypto.randomUUID();
+  await new AuthStore(env.AUTH as never).putSession(id, {
+    identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
+    identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+  });
+  return `${sessionCookieName(true)}=${id}`;
+};
 
 describe("the moderation routes through the Worker", () => {
   it("bans at /rooms/:id/bans, lists the ban, and lifts it at /rooms/:id/bans/:banId, over the real room", async () => {
@@ -194,6 +207,42 @@ describe("the moderation routes through the Worker", () => {
     });
   }
 
+  // PUT /rooms/:id/host writes a room's manifest as its caller, and R8 gates it with the rest of /rooms*. Each account
+  // created a room of its own, so with no gate the suspended one's write lands; the control is another creator sent the
+  // same request.
+  it("refuses a suspended creator's PUT /rooms/:id/host with the one message, and serves another creator the same request", async () => {
+    const hostedBy = (userId: string) => {
+      const m = roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+        roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+      return store().createSession(session({
+        id: `qs_${userId}`, createdBy: userId, manifest: m, joinCodes: {},
+        members: [member({ memberId: `m_${userId}`, userId, label: `${userId}@example.dev`, orgId: null, roomRole: "lead" }), hostMember(m, Date.now())],
+      }));
+    };
+    const put = async (userId: string) => worker.fetch(new Request(`${ORIGIN}/rooms/qs_${userId}/host`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "max", role: "member", label: `${userId}@example.dev` })}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ instructions: "Ask how agents have grown." }),
+    }), oauthEnv(), ctx);
+    const instructionsOf = async (userId: string) => (await store().getSession(`qs_${userId}`))!.manifest.host?.instructions;
+
+    const suspended = "u_wire_host_suspended";
+    const control = `${suspended}_control`;
+    await hostedBy(suspended);
+    await hostedBy(control);
+    await store().suspend(suspended, { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const refused = await put(suspended);
+    expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: "This account is suspended." }]);
+    expect(await instructionsOf(suspended), "the suspended creator's write did not land").toBeNull();
+    const served = await put(control);
+    expect([served.status, await served.json()], "the control").toEqual([200, { instructions: "Ask how agents have grown." }]);
+    expect(await instructionsOf(control)).toBe("Ask how agents have grown.");
+  });
+
   // /operator/stats reads the registry as its caller, so R8 gates it too. Both accounts are operators here, so with no
   // gate the suspended one would read the platform's counts; the control is the other operator, served them.
   it("refuses a suspended operator at /operator/stats with the one message, and serves another operator", async () => {
@@ -223,16 +272,6 @@ describe("the moderation routes through the Worker", () => {
   // refusal carries CORS, so the panel can read why. The route reuses the gate's answer, so a request touches its
   // session once rather than once for the gate and again for the route.
   it("refuses a suspended account's panel cookie where the panel can read it, and touches a served session once", async () => {
-    const PANEL = "https://dash.example.test";
-    const cookieFor = async (userId: string) => {
-      const now = Date.now();
-      const id = crypto.randomUUID();
-      await new AuthStore(env.AUTH as never).putSession(id, {
-        identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
-        identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
-      });
-      return `${sessionCookieName(true)}=${id}`;
-    };
     const rooms = async (cookie: string) =>
       worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { cookie, origin: PANEL } }), oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL }), ctx);
     await store().suspend("u_wire_cookie", { note: "wire", by: OPERATOR.userId, at: Date.now() });
@@ -247,6 +286,86 @@ describe("the moderation routes through the Worker", () => {
       expect(touched).toHaveBeenCalledTimes(1);
     } finally {
       touched.mockRestore();
+    }
+  });
+
+  // Public rooms on bellman.sh, D7, the whole path: the cookie a sign-in set, read by the authorization server's `caller`,
+  // then the CSRF check with the page's origin. The reader's cookie files a report from bellman.sh while the var names it
+  // and files none while it does not. The creator's cookie is refused a ban from bellman.sh, and makes it from the panel.
+  it("files a report from bellman.sh with the reader's session cookie, and refuses that page a ban", async () => {
+    const listed = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE });
+    const unlisted = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL });
+    const post = (path: string, body: unknown, cookie: string, origin: string, on = listed) => worker.fetch(new Request(`${ORIGIN}${path}`, {
+      method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }), on, ctx);
+    await seed();
+
+    const reader = await cookieFor("u_wire_reader");
+    const filed = await post("/rooms/qs_wire_mod/reports", { reason: "spam" }, reader, PAGE);
+    expect([filed.status, filed.headers.get("access-control-allow-origin")], await filed.clone().text()).toEqual([201, PAGE]);
+    const refused = await post("/rooms/qs_wire_mod/reports", { reason: "harassment" }, reader, PAGE, unlisted);
+    expect([refused.status, refused.headers.get("access-control-allow-origin")], "the control: the var unset").toEqual([403, null]);
+    expect((await store().listReports(10)).map((r) => r.reporterUserId)).toEqual(["u_wire_reader"]);
+
+    const creator = await cookieFor("u_jesse");
+    const ban = { member_id: "m_peer", scope: "room" };
+    expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PAGE)).status).toBe(403);
+    expect(await store().roomBans("qs_wire_mod")).toEqual([]);
+    expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PANEL)).status, "the control: the panel bans").toBe(200);
+  });
+
+  // The gate answers ahead of the route, so what its refusal grants is the gate's to decide, and it decides as the routes do
+  // (`routeOrigin`). A suspended reader's report from bellman.sh is refused with the page's origin and credentials, so the page
+  // reads "This account is suspended."; with no grant its fetch fails with no reason. The grant is that one write's and no
+  // wider: the same account's ban and its read of a room's reports, which the page may not make, are refused with none, and the
+  // panel is granted all three. Every answer here is the gate's and never the CSRF check's, so each carries the suspension.
+  it("refuses a suspended reader's report from bellman.sh where the page can read it, and grants that page no other refusal", async () => {
+    const listed = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE });
+    const unlisted = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL });
+    await store().suspend("u_wire_page_suspended", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const reader = await cookieFor("u_wire_page_suspended");
+    /** What a browser reads of an answer: its status and body, and whether the page that asked may read it at all. */
+    const refusal = async (method: string, path: string, origin: string, on = listed) => {
+      const res = await worker.fetch(new Request(`${ORIGIN}${path}`, {
+        method, headers: { cookie: reader, origin }, body: method === "POST" ? "{}" : undefined,
+      }), on, ctx);
+      return [res.status, await res.json(), res.headers.get("access-control-allow-origin"), res.headers.get("access-control-allow-credentials")];
+    };
+    const suspended = { error: "suspended", error_description: "This account is suspended." };
+    const reports = "/rooms/qs_wire_mod/reports";
+    const bans = "/rooms/qs_wire_mod/bans";
+
+    expect(await refusal("POST", reports, PAGE)).toEqual([403, suspended, PAGE, "true"]);
+    expect(await refusal("POST", reports, PAGE, unlisted), "the control: the var unset").toEqual([403, suspended, null, null]);
+    expect(await refusal("POST", bans, PAGE), "the control: another path").toEqual([403, suspended, null, null]);
+    expect(await refusal("GET", reports, PAGE), "the control: another method").toEqual([403, suspended, null, null]);
+    for (const [method, path] of [["POST", reports], ["POST", bans], ["GET", reports]] as const) {
+      expect(await refusal(method, path, PANEL), `the panel's ${method} ${path}`).toEqual([403, suspended, PANEL, "true"]);
+    }
+  });
+
+  // The gate's other answer, for a registry that cannot say whether an account is suspended: a 500 in the routes' JSON, under
+  // the same rule. The page reads that one too, where a refusal with no grant is a failed fetch; its ban is granted nothing.
+  it("answers a failed suspension read with the page's origin for its report and with none for its ban", async () => {
+    const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended").mockRejectedValue(new Error("registry down"));
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const reader = await cookieFor("u_wire_page_unread");
+      const answer = async (path: string, origin: string) => {
+        const res = await worker.fetch(new Request(`${ORIGIN}${path}`, {
+          method: "POST", headers: { cookie: reader, origin }, body: "{}",
+        }), oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE }), ctx);
+        return [res.status, await res.json(), res.headers.get("access-control-allow-origin")];
+      };
+      const internal = { error: "internal", error_description: expect.any(String) };
+
+      expect(await answer("/rooms/qs_wire_mod/reports", PAGE)).toEqual([500, internal, PAGE]);
+      expect(await answer("/rooms/qs_wire_mod/bans", PAGE), "the control: another path").toEqual([500, internal, null]);
+      expect(await answer("/rooms/qs_wire_mod/bans", PANEL), "the control: the panel").toEqual([500, internal, PANEL]);
+      expect(read, "each answer is the gate's").toHaveBeenCalledTimes(3);
+    } finally {
+      read.mockRestore();
+      quiet.mockRestore();
     }
   });
 

@@ -1,6 +1,7 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -15,7 +16,7 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -789,6 +790,11 @@ export type HostAppend =
   | { ok: true; event: SessionEvent }
   | { ok: false; reason: "not_found" | "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number };
 
+/** What `setHostInstructions` answered: the instructions as the room now holds them, or why it took none. */
+export type HostInstructionsSet =
+  | { ok: true; instructions: string | null }
+  | { ok: false; reason: "not_found" | "no_host" | "closed" };
+
 /**
  * The meter's decision (hosted seat spec, D3), shared by both stores so they
  * cannot charge differently. Returns the refusal, or the units record to write.
@@ -1559,6 +1565,22 @@ export interface BellmanStore {
    * room is a no-op.
    */
   renewHostAllowance(sessionId: string, month: string, units: number): Promise<void>;
+  /**
+   * Set what the room's creator tells its hosted seat to ask (`PUT /rooms/:id/host`): the manifest's
+   * `host.instructions`, which the seat reads on every wake, so its next question is built from what this
+   * stores. `null` clears them, which leaves the host Bellman's rules alone. The caller trims and bounds the
+   * text (`HostInstructionsShape`); the store writes what it is handed.
+   *
+   * Refused, nothing is written: a missing room (`not_found`), a room whose manifest has no host (`no_host`) and a
+   * closed room (`closed`). The check and the write are one operation, so a room that closes after the route read
+   * it is refused here. A frozen room takes the change: setting instructions is not a send, and a thaw finds the
+   * host already told.
+   *
+   * `audit` is filed with the change and only with a change, as `removeMember` files its rows: the value the
+   * room already holds writes nothing and files nothing, so a retried request leaves one row. A row with no org
+   * names a stream nobody reads, and is dropped.
+   */
+  setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -1643,7 +1665,7 @@ export interface BellmanStore {
    */
   putGrantIfOwned(
     grant: PlanGrant, expectedOrgId: string | null, audit: AuditIntent
-  ): Promise<"written" | "conflict">;
+  ): Promise<"written" | "conflict" | "full">;
   /** Delete a grant only if it belongs to `expectedOrgId`, and say what happened. */
   deleteGrantIfOwned(
     key: string, expectedOrgId: string | null, audit: AuditIntent
@@ -1676,6 +1698,71 @@ export interface BellmanStore {
   /** Scoped to one org when given: grants are org-tenanted data. */
   listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
 
+  /**
+   * The org record (orgs spec, D1), or undefined for an org that is only a string in grants
+   * and overrides. Such an org is not refused anywhere: it has no seat cap and is always active.
+   */
+  getOrg(orgId: string): Promise<Org | undefined>;
+  /**
+   * The operator's creation (D7): the record and the owner's admin grant in ONE operation, with
+   * `org_created` and the grant's rows. `exists` for an id that has a record; `conflict` when the
+   * owner's key holds a live grant in another org, writing nothing. A grant the key holds in this
+   * org is replaced: an org that lived as a string gets its record with its owner seated.
+   */
+  createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict">;
+  /**
+   * The record after the patch, or undefined when there is none. Records `org_updated` naming
+   * only what changed, and nothing for a patch that changed nothing (D8). A field given as
+   * undefined is left as it was.
+   */
+  updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined>;
+  /** How many live grants name the org: its members, the owner among them (D2, D3). */
+  countOrgMembers(orgId: string): Promise<number>;
+  /**
+   * Billing's write (D4): a record for an org that has none, named by its id, `source: "purchase"`
+   * and active; otherwise the seats and `active: true` and nothing else, so a name its owner gave
+   * it survives every Stripe event. `unchanged` writes and records nothing. `not_purchased` is an
+   * org the operator created: billing touches only what billing created (ADR 0014, decision 3),
+   * so it is left as it is, whatever id it was given.
+   */
+  activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased">;
+  /**
+   * The lapse (D5): `active: false`, the members kept. `missing` for no record; `unchanged` when
+   * already inactive; `not_purchased` for an operator org, which billing leaves active.
+   */
+  deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased">;
+
+  /**
+   * An org's identity provider (SSO spec, D9), kept apart from the record under its own key. The
+   * secret arrives sealed and is stored as given. `missing` for an org with no record. Records
+   * `idp_configured` with the issuer.
+   */
+  putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing">;
+  getOrgIdp(orgId: string): Promise<OrgIdp | undefined>;
+  /** Records `idp_removed`; `missing` when there was none. */
+  deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing">;
+  /**
+   * A claim on the record (D11): `{ domain, token, verifiedAt: null }`, routing nothing until it is
+   * verified. `exists` when this org already claims it, the token kept; `missing` for no record.
+   */
+  claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing">;
+  /**
+   * ONE operation (D11): `unknown` when the org has no such claim; `taken` when the index names
+   * another org, the claim left unverified; otherwise the claim is marked (its first time kept)
+   * and the index written. `domain_verified` is recorded on the first verification only.
+   */
+  verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown">;
+  /** Drops the claim, and the index row when it is this org's. `unknown` when there is no claim. */
+  releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown">;
+  /** The org a verified domain routes a sign-in to (D12), and nothing for a claimed one. */
+  orgForDomain(domain: string): Promise<string | undefined>;
+  /**
+   * The seat an SSO sign-in takes on first use (D13), ONE operation: `exists` when the key already
+   * holds a live grant (an sso key names its org, so that grant is this org's), `full` at the seats,
+   * `no_org` for no record, else a team member grant from `sso` with its `plan_granted` row.
+   */
+  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
+
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
@@ -1706,6 +1793,23 @@ const foldKeyOf = (r: Pick<NewReport, "reporterUserId" | "sessionId" | "target">
 /** By id, which is the time filed and then a random suffix: the order the Durable Objects store's key listing gives. */
 const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
+/**
+ * A record with the patch applied (orgs spec, D6, D7): a field given as undefined is left as it
+ * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
+ */
+export function patchedOrg(previous: Org, patch: OrgPatch): Org {
+  const next: Org = { ...previous };
+  if (patch.name !== undefined) next.name = patch.name;
+  if (patch.seats !== undefined) next.seats = patch.seats;
+  if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
+  return next;
+}
+
+/** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
+export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
+  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [] };
+}
+
 export class MemoryStore implements BellmanStore {
   /**
    * The rooms, each with every member it has seated, those who have left included: one array
@@ -1727,6 +1831,12 @@ export class MemoryStore implements BellmanStore {
   private handleByUser = new Map<string, string>(); // userId -> handle
   private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
+  /** The org records (orgs spec, D1), by id. Members are the grants above that name one. */
+  private orgs = new Map<string, Org>();
+  /** Each org's IdP (SSO spec, D9), apart from its record. */
+  private idps = new Map<string, OrgIdp>();
+  /** The one index a verified domain writes (D11): domain to org. */
+  private domainIndex = new Map<string, string>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -2524,6 +2634,21 @@ export class MemoryStore implements BellmanStore {
     s.hostUnits = { month, used: 0, wakes: [] };
   }
 
+  async setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found" };
+    const host = s.manifest.host;
+    if (host === null) return { ok: false, reason: "no_host" };
+    if (s.closed) return { ok: false, reason: "closed" };
+    // No await from the read to the write, as `renewHostAllowance` has none. A new manifest rather than a write
+    // into the old one: a manifest object can be shared.
+    if (host.instructions !== instructions) {
+      s.manifest = { ...s.manifest, host: { ...host, instructions } };
+      this.recordAudit([...audit]);
+    }
+    return { ok: true, instructions };
+  }
+
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
     const done = this.keys.get(sessionId)?.get(idempotencyKey(HOST_MEMBER_ID, key));
     const s = this.sessions.get(sessionId);
@@ -2930,12 +3055,18 @@ export class MemoryStore implements BellmanStore {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     // liveGrant, not the raw map: a lapsed grant is defined as absent
     // everywhere else, and reading past that here would let a dead record from
     // another org hold a key hostage until some unrelated read swept it.
     const existing = this.liveGrant(grant.key);
     if (existing && existing.orgId !== expectedOrgId) return "conflict";
+    // The seat cap (D3), decided in the same synchronous span as the write: a key that is
+    // already a member of this org changes role for no seat; an org with no record has no cap.
+    if (grant.orgId !== null && !(existing && existing.orgId === grant.orgId)) {
+      const org = this.orgs.get(grant.orgId);
+      if (org && this.liveMembers(grant.orgId) >= org.seats) return "full";
+    }
     this.grants.set(grant.key, detach(grant));
     this.recordAudit(grantAuditEntries(existing, grant, audit, Date.now()));
     return "written";
@@ -3000,6 +3131,138 @@ export class MemoryStore implements BellmanStore {
       if (orgId === undefined || grant.orgId === orgId) live.push(grant);
     }
     return detach(live.slice(0, limit));
+  }
+
+  /** Synchronous, for the reason `liveGrant` is: `putGrantIfOwned` decides a seat on it without yielding. */
+  private liveMembers(orgId: string): number {
+    let count = 0;
+    for (const key of [...this.grants.keys()]) {
+      const grant = this.liveGrant(key);
+      if (grant && grant.orgId === orgId) count++;
+    }
+    return count;
+  }
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    const org = this.orgs.get(orgId);
+    return org && detach(org);
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    if (this.orgs.has(org.orgId)) return "exists";
+    const existing = this.liveGrant(ownerGrant.key);
+    if (existing && existing.orgId !== org.orgId) return "conflict";
+    this.orgs.set(org.orgId, detach(org));
+    this.grants.set(ownerGrant.key, detach(ownerGrant));
+    const now = Date.now();
+    this.recordAudit([...orgAuditEntries(undefined, org, audit, now), ...grantAuditEntries(existing, ownerGrant, audit, now)]);
+    return "created";
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    const previous = this.orgs.get(orgId);
+    if (!previous) return undefined;
+    const next = patchedOrg(previous, patch);
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, Date.now()));
+    return detach(next);
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.liveMembers(orgId);
+  }
+
+  async activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
+    const previous = this.orgs.get(orgId);
+    const now = Date.now();
+    if (!previous) {
+      const org = purchasedOrg(orgId, ownerUserId, seats, now);
+      this.orgs.set(orgId, detach(org));
+      this.recordAudit(orgAuditEntries(undefined, org, audit, now));
+      return "created";
+    }
+    if (previous.source !== "purchase") return "not_purchased";
+    if (previous.seats === seats && previous.active) return "unchanged";
+    const next: Org = { ...previous, seats, active: true };
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, now));
+    return "updated";
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
+    const previous = this.orgs.get(orgId);
+    if (!previous) return "missing";
+    if (previous.source !== "purchase") return "not_purchased";
+    if (!previous.active) return "unchanged";
+    const next: Org = { ...previous, active: false };
+    this.orgs.set(orgId, detach(next));
+    this.recordAudit(orgAuditEntries(previous, next, audit, Date.now()));
+    return "updated";
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    if (!this.orgs.has(orgId)) return "missing";
+    this.idps.set(orgId, detach(idp));
+    this.recordAudit([orgEventEntry(orgId, "idp_configured", { issuer: idp.issuer }, audit, Date.now())]);
+    return "written";
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    const idp = this.idps.get(orgId);
+    return idp && detach(idp);
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    if (!this.idps.delete(orgId)) return "missing";
+    this.recordAudit([orgEventEntry(orgId, "idp_removed", {}, audit, Date.now())]);
+    return "deleted";
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    const org = this.orgs.get(orgId);
+    if (!org) return "missing";
+    if (org.domains.some((d) => d.domain === domain)) return "exists";
+    this.orgs.set(orgId, { ...org, domains: [...org.domains, { domain, token, verifiedAt: null }] });
+    this.recordAudit([orgEventEntry(orgId, "domain_claimed", { domain }, audit, now)]);
+    return "claimed";
+  }
+
+  /** Synchronous throughout, as the guarded grant writes are: the index read and the claim's write must not be split. */
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    const org = this.orgs.get(orgId);
+    const claim = org?.domains.find((d) => d.domain === domain);
+    if (!org || !claim) return "unknown";
+    const holder = this.domainIndex.get(domain);
+    if (holder !== undefined && holder !== orgId) return "taken";
+    this.domainIndex.set(domain, orgId);
+    if (claim.verifiedAt !== null) return "verified";
+    this.orgs.set(orgId, { ...org, domains: org.domains.map((d) => (d.domain === domain ? { ...d, verifiedAt: now } : d)) });
+    this.recordAudit([orgEventEntry(orgId, "domain_verified", { domain }, audit, now)]);
+    return "verified";
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    const org = this.orgs.get(orgId);
+    if (!org || !org.domains.some((d) => d.domain === domain)) return "unknown";
+    this.orgs.set(orgId, { ...org, domains: org.domains.filter((d) => d.domain !== domain) });
+    if (this.domainIndex.get(domain) === orgId) this.domainIndex.delete(domain);
+    this.recordAudit([orgEventEntry(orgId, "domain_released", { domain }, audit, Date.now())]);
+    return "released";
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.domainIndex.get(domain);
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    const org = this.orgs.get(orgId);
+    if (!org) return "no_org";
+    if (this.liveGrant(key)) return "exists";
+    if (this.liveMembers(orgId) >= org.seats) return "full";
+    const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
+    this.grants.set(key, detach(grant));
+    this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
+    return "written";
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

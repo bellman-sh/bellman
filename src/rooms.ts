@@ -28,6 +28,7 @@ import {
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
+import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
@@ -371,6 +372,28 @@ export async function readSurface(
     ? surfaceCursor(session)
     : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
   return { cursor, items: visible.map(surfaceItem) };
+}
+
+/**
+ * These events as `reader` may see them (read_context spec, section 1): a `brief_update` its author
+ * keeps is left out, a `member_joined` of one loses its brief, and the author's own account reads both.
+ * `reader` is a user id, or null for a path every member shares.
+ *
+ * The rows of the briefs' authors are read by id, gone from the room or not: the session holds only the
+ * members in the room now (ADR 0019), and a member who left keeps their last grant (D2). One
+ * `getMembers` call, and none when no event carries a brief.
+ *
+ * The result can be shorter than `events`. A caller that moves a cursor takes it from the events it
+ * read and not from this list, so a dropped event is passed over and not asked for again.
+ */
+export async function eventsFor(
+  s: BellmanStore,
+  sessionId: string,
+  events: readonly SessionEvent[],
+  reader: string | null,
+): Promise<SessionEvent[]> {
+  const authors = briefAuthors(events);
+  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader);
 }
 
 /**
@@ -1229,6 +1252,9 @@ export async function evictMember(
   });
 }
 
+/** One refusal for a cursor that names no event and for one that names an event the caller may not read, so the two read alike. */
+const NO_MESSAGE_AT_CURSOR = "no message at that cursor.";
+
 /**
  * File a report (abuse protections spec section 3, R11), for both transports: who may report, what a target must
  * be, the store's fold and daily limit, and the email once a report is filed, never for a fold or a refusal.
@@ -1250,6 +1276,17 @@ export async function evictMember(
  * does not exist: a report must not tell it what the room holds after it was out. A public room's log is public to
  * anyone, so while the room is public there is no cut, and someone removed from it may still report what is said about
  * them afterwards. A member who left keeps the open feed, and so the open cursors.
+ *
+ * A brief_update whose author does not grant `read_context` is one a caller cannot read, unless the caller is the author's
+ * own account (read_context spec, section 1). A cursor that names one is refused in the words for a cursor that names no
+ * event, so the refusal does not say an update is there. The author's row decides as it stands, one who left included,
+ * and a missing row reads as not granting.
+ *
+ * A caller who reads a public room as anyone with its link does reads what the public page shows, and the page shows no
+ * brief_update: a caller with no handle in the room, now or before, and one whose every handle was removed from it. For them
+ * a cursor that names an update is refused whatever its author grants, in the same words, because filed for an author who
+ * grants and refused for one who keeps their brief would tell them what the page keeps from them. A caller with a handle
+ * still in the room, or one that left of its own accord, reads as their account, as above.
  *
  * The shape of the request is checked first, because it reads nothing from the room. The limit on a note applies to what
  * was sent, before it is trimmed, which is what the tool's schema bounds, so the tool and the route agree. A note is then
@@ -1298,9 +1335,20 @@ export async function fileRoomReport(
     }
     // A caller may report what it could read. A public room's log is public, so it has no cut to keep. Past the access
     // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
-    const cut = isPublic(session) ? undefined : cutFor(handles);
+    // `memberCut` is where reading as a member stops, if it does: defined for a caller with no handle and for one whose every
+    // handle was removed, undefined while any handle reads on.
+    const memberCut = cutFor(handles);
+    const cut = isPublic(session) ? undefined : memberCut;
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
-    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", "no message at that cursor.");
+    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
+    // And what read_context lets it read (D2, D3). In a public room, a caller with no member reading of it has the public page
+    // and nothing else, and the page has no brief_update to show. Anyone else reads as their account: a brief_update its author
+    // keeps is no event to any account but the author's, from the author's row as it stands, one who left included, and no row
+    // reads as not granting (R11).
+    const shown = isPublic(session) && memberCut !== undefined
+      ? publicReadEvent(event)
+      : readableEvent(event, await store.getMember(session.id, event.fromMemberId), actor.userId);
+    if (!shown) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
     target = { kind: "message", cursor: event.cursor };
     subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
   }

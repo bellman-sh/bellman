@@ -22,11 +22,12 @@ import {
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
   sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
+import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -68,6 +69,11 @@ const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
+const HOST = /^\/rooms\/([^/]+)\/host$/;
+
+// ponytail: 4 KB, not tuned. A text of at most 300 characters is under 2 KB even with every character written as
+// a six-byte \uXXXX escape, so this leaves room for the braces and for the whitespace that trimming removes.
+export const MAX_HOST_INSTRUCTIONS_BYTES = 4096;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
@@ -206,6 +212,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (unpublish) {
       if (request.method !== "POST") return methodNotAllowed("POST", origin);
       return await unpublishRoom(request, unpublish[1], origin, deps);
+    }
+    const hostRoute = HOST.exec(path);
+    if (hostRoute) {
+      if (request.method !== "PUT") return methodNotAllowed("PUT", origin);
+      return await writeHostInstructions(request, hostRoute[1], origin, deps);
     }
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
@@ -555,6 +566,12 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
  * R3): the creator alone may make a public room private. And `signed` (bylines spec D6): true only
  * for the creator of a room they have signed with their handle, false for every other caller.
+ *
+ * The preview is told who is asking (`who.identity.userId`), on both branches. A hosted room's
+ * creator reads its host's current instructions in `preview.text.data.host_instructions`, the
+ * untrusted text beside the room's name and purpose; no other caller does, and a room with no host
+ * has none. The key follows `mine`: the comparison is `createdBy`, the one `PUT /rooms/:id/host`
+ * admits on, so what the panel can edit is what it can read.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -572,7 +589,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       mine: session.createdBy === who.identity.userId,
       signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
       ...retentionOf(session),
-      preview: roomPreview(session, null),
+      preview: roomPreview(session, null, who.identity.userId),
       ...await liveRoster(deps.store, session),
       my_handles: myHandles(session, mine),
     }, origin);
@@ -599,7 +616,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     mine: session.createdBy === who.identity.userId,
     signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
     ...retentionOf(session),
-    preview: roomPreview(session, viewer.roomRole),
+    preview: roomPreview(session, viewer.roomRole, who.identity.userId),
     ...roster,
     my_handles: myHandles(session, mine),
   }, origin);
@@ -699,6 +716,53 @@ async function writeByline(request: Request, sessionId: string, origin: string |
   return json(200, { handle }, origin);
 }
 
+/**
+ * Change what a hosted room's seat is told to ask, after the room has started (`PUT /rooms/:id/host`). The
+ * creator's alone, admitted as the ban routes admit them: 401 with no caller, the CSRF check for a cookie, one
+ * 404 for a person with no handle in the room and for a room that is not there, then 403 for a member who is not
+ * the creator, all before the body is read. The text is trimmed and an empty one is stored as null, which leaves
+ * the host Bellman's rules alone; what is stored is held to the manifest's own bound (`HostInstructionsShape`),
+ * and any other shape is a 400. Then the store decides, and refuses a room with no host and a closed one with a
+ * 409, in the same transaction as the write.
+ *
+ * The seat reads the manifest on every wake, so the next question it asks is built from what this stored.
+ * A change files an audit row for each org in the room, as an eviction does; it names the creator and the
+ * length, and leaves the text out. Setting what the room already holds files none.
+ */
+async function writeHostInstructions(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  if (session.createdBy !== who.identity.userId) {
+    return problem(403, "forbidden", "only the room's creator may change its host's instructions", origin);
+  }
+  const tooLong = lengthRefusal(request, MAX_HOST_INSTRUCTIONS_BYTES, "a host instructions request", origin);
+  if (tooLong) return tooLong;
+
+  // A body that is not JSON, `null`, an array, a scalar, or an object with any key but `instructions` is the one 400.
+  const body: unknown = await request.json().catch(() => null);
+  if (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).join() !== "instructions") {
+    return problem(400, "invalid_request", 'send {"instructions": a string, or null to clear them}', origin);
+  }
+  const raw = (body as { instructions: unknown }).instructions;
+  const parsed = HostInstructionsShape.nullable().safeParse(typeof raw === "string" ? raw.trim() || null : raw);
+  if (!parsed.success) return problem(400, "invalid_request", `instructions: ${parsed.error.issues[0].message}`, origin);
+  const instructions = parsed.data;
+
+  const set = await deps.store.setHostInstructions(
+    sessionId, instructions,
+    auditEntries(session, who.identity, "host_instructions_changed", { chars: instructions?.length ?? 0 }),
+  );
+  if (set.ok) return json(200, { instructions: set.instructions }, origin);
+  if (set.reason === "not_found") return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  return problem(409, set.reason, set.reason === "closed" ? "the room is closed" : "this room has no hosted seat to instruct", origin);
+}
+
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
 export const surfaceTag = (cursor: number): string => `"${cursor}"`;
 
@@ -718,8 +782,10 @@ export const etagMatches = (header: string | null, tag: string): boolean =>
  * included, because a person reading the log reads the whole conversation. Without `?after`, the
  * newest MAX_EVENTS_READ; with it, the next MAX_EVENTS_READ past that cursor, so a poll that carries
  * the last cursor it saw reads only what is new. The caller rule is the surface read's: membership
- * first, a removed member to its cut, and #65's fallback for an org admin reading a closed room. A
- * read and nothing else: it moves no one's `lastSeenAt` and no bridge's cursor.
+ * first, a removed member to its cut, and #65's fallback for an org admin reading a closed room. The
+ * reader is the caller's account, an org admin's included (read_context spec, section 3): a brief its
+ * author keeps is left out, and the author's own account reads it. A read and nothing else: it moves
+ * no one's `lastSeenAt` and no bridge's cursor.
  */
 async function readEventsRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -748,8 +814,11 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
     // A removed member's newest are the ones before its cut, which the room's tail may not reach.
     read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ), MAX_EVENTS_READ)).filter(within);
   }
+  // The cursor comes from `read`, not from `events`: an event left out is still passed over, so the
+  // next poll does not ask for it again.
+  const events = await eventsFor(deps.store, sessionId, read, who.identity.userId);
   return json(200, {
-    events: read.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
+    events: events.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
     cursor: read.at(-1)?.cursor ?? after ?? 0,
   }, origin);
 }

@@ -3,8 +3,9 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { auditRoutes } from "./http/audit.js";
+import { orgRoutes } from "./http/orgs.js";
 import { handleRoutes } from "./http/handles.js";
-import { moderationRoutes } from "./http/moderation.js";
+import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
@@ -17,7 +18,7 @@ import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
-import { allowedOrigin, parsePanelOrigins } from "./oauth/browser.js";
+import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
@@ -52,6 +53,11 @@ export interface WorkerEnv extends BellmanEnv {
   SEND_EMAIL?: SendEmail;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
+  /**
+   * A secret: what seals an org's IdP client secret at rest (SSO spec, D14). Unset, the token secret
+   * seals it, and rotating that then means every org re-enters its secret; this keeps the two apart.
+   */
+  BELLMAN_SEAL_SECRET?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   GOOGLE_CLIENT_ID?: string;
@@ -72,6 +78,15 @@ export interface WorkerEnv extends BellmanEnv {
    * rather than one that accepts a cookie from anywhere.
    */
   BELLMAN_PANEL_ORIGINS?: string;
+  /**
+   * Comma-separated origins public room pages are served from, e.g.
+   * "https://bellman.sh" (the dash's Worker answers `/r/*` there). Parsed as
+   * BELLMAN_PANEL_ORIGINS is. Honoured by `POST /rooms/:id/reports` (its CORS,
+   * its preflight, its CSRF check and the suspension gate's refusal of it) and by
+   * the sign-in return, and by nothing else: every other signed-in route answers
+   * the panel's origins alone. Unset grants nothing.
+   */
+  BELLMAN_PUBLIC_PAGE_ORIGINS?: string;
   /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
   BELLMAN_BILLING?: string;
   /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
@@ -105,10 +120,12 @@ function oauthConfig(
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
     secret: env.BELLMAN_TOKEN_SECRET,
+    sealSecret: env.BELLMAN_SEAL_SECRET,
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
     panelOrigins: parsePanelOrigins(env.BELLMAN_PANEL_ORIGINS),
+    publicPageOrigins: parsePanelOrigins(env.BELLMAN_PUBLIC_PAGE_ORIGINS, "BELLMAN_PUBLIC_PAGE_ORIGINS"),
     plans,
     operators: parseOperators(env.BELLMAN_OPERATORS),
     paymentLinks: billingSettings(env).paymentLinks,
@@ -219,10 +236,12 @@ export default {
     // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
     // session is touched once. `routeGate` asks first, and refuses a suspended account before a module reads
     // or writes anything as it (plan ruling R8). /public takes no credential, so it has no gate. A throw in
-    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it.
+    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it. The CORS
+    // is the routes' own rule (`routeOrigin`): a suspended reader's report from a public room page is refused with that
+    // page's grant, so the page can read why.
     const who = once(() => roomCaller(request, env, oauth));
     const routeGate = async (): Promise<Response | undefined> => {
-      const origin = allowedOrigin(request, oauth?.panelOrigins ?? []);
+      const origin = routeOrigin(request, oauth?.panelOrigins ?? [], oauth?.publicPageOrigins ?? []);
       try {
         const them = await who();
         return them && (await suspended(them.identity.userId)) ? problem(403, "suspended", SUSPENDED, origin) : undefined;
@@ -261,7 +280,9 @@ export default {
     // guard /ws has covers them all — a deploy with neither a key map nor OAuth
     // serves no room. The moderation routes are asked first: they answer the paths
     // under /rooms/:id/bans and /rooms/:id/reports, and leave every other path to
-    // the room routes. Both report routes are behind the suspension gate here.
+    // the room routes. Both report routes are behind the suspension gate here. They
+    // alone take the public room pages' origins, for the report write, and the gate
+    // refuses that write with the same grant.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
@@ -271,7 +292,8 @@ export default {
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       };
-      const handled = (await moderationRoutes(request, { ...deps, mailReport })) ?? (await roomRoutes(request, deps));
+      const handled = (await moderationRoutes(request, { ...deps, publicPageOrigins: oauth?.publicPageOrigins ?? [], mailReport }))
+        ?? (await roomRoutes(request, deps));
       if (handled) return handled;
     }
 
@@ -309,6 +331,20 @@ export default {
       if (handled) return handled;
     }
 
+    // The org's record and its roster (orgs spec, D6), on the room routes' rules and behind the same guard:
+    // what its members read and its admins seat people through, the panel's cookie included.
+    if (url.pathname === "/org" || url.pathname.startsWith("/org/")) {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await orgRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+        sealSecret: env.BELLMAN_SEAL_SECRET ?? env.BELLMAN_TOKEN_SECRET,
+      });
+      if (handled) return handled;
+    }
+
     // A person's public handle (bylines spec D6), ahead of the OAuth routes, which serve /account and
     // have no store (plan ruling R1). The room routes' rules and the same guard.
     if (url.pathname === "/account/handle" || url.pathname === "/account/handle/") {
@@ -331,6 +367,7 @@ export default {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
+        publicPageOrigins: oauth?.publicPageOrigins ?? [],
       });
       if (handled) return handled;
     }

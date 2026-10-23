@@ -3,14 +3,19 @@ import { isOrgId } from "../grant-index.js";
 import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
+import { isRecord } from "../billing/subscription.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
-import type { BellmanStore } from "../store.js";
-import type { Identity, Plan, PlanGrant } from "../types.js";
+import type { AuditIntent, BellmanStore } from "../store.js";
+import type { Identity, Org, Plan, PlanGrant } from "../types.js";
 import {
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
-  isProviderName, isStableIdentityKey,
+  isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
+import { domainOf } from "./dns.js";
+import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
+import { unseal } from "./sealed.js";
 import {
   SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
   type AuthStorage, type PanelSession,
@@ -41,6 +46,8 @@ export interface OAuthConfig {
   /** Canonical URI tokens are minted for, e.g. https://mcp.bellman.sh/mcp */
   resource: string;
   secret: string;
+  /** What seals an org's IdP client secret (SSO spec, D14): BELLMAN_SEAL_SECRET, or else `secret`. */
+  sealSecret?: string;
   store: AuthStorage;
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
@@ -52,6 +59,15 @@ export interface OAuthConfig {
    * list restricts.
    */
   panelOrigins?: string[];
+  /**
+   * Origins public room pages are served from, e.g. ["https://bellman.sh"] (BELLMAN_PUBLIC_PAGE_ORIGINS).
+   *
+   * This router reads it for the sign-in return alone (`panelDestination`): a sign-in started on one of these pages
+   * comes back to it. It adds nothing to what `panelOrigins` grants: sessions, CORS and the CSRF check here still read
+   * the panel's list. The Worker hands the same list to the report route and to the suspension gate's refusal of it
+   * (`routeOrigin`), the only other things that honour it.
+   */
+  publicPageOrigins?: string[];
   /**
    * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
    * /upgrade/<name> signs the human in and sends them to the link tagged with
@@ -84,6 +100,8 @@ export type PlanStore = Pick<
   BellmanStore,
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
+  | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
+  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
   | "recordSignIn"
@@ -98,6 +116,54 @@ export type PlanStore = Pick<
 export const MAX_REPORTS_LISTED = 200;
 
 export type PlanSource = "operator" | "grant" | "default";
+
+/**
+ * The refusal `require_sso` makes (SSO spec, D13): a GitHub or Google sign-in by someone the org
+ * claims, named so the person knows which door to use. Thrown where plans resolve, so a token or a
+ * panel session from before the switch stops at its next re-check.
+ */
+export class SsoRequired extends Error {
+  constructor(public readonly orgId: string, public readonly orgName: string) {
+    super(`${orgName} requires single sign-on`);
+    this.name = "SsoRequired";
+  }
+}
+
+/** An org with no seat left for the person its IdP just authenticated (D13): nothing is minted. */
+export class SeatsFull extends Error {
+  constructor(orgName: string) {
+    super(`${orgName} has no free seat: ask its admin for one`);
+    this.name = "SeatsFull";
+  }
+}
+
+/**
+ * Whether `require_sso` refuses this person (D13): the org their plan puts them in, and the org a
+ * verified domain of any of their addresses belongs to, each with the switch on, unless they are
+ * that org's owner, whose original provider is the break-glass. An SSO profile is exempt, since it
+ * came through the door the switch points at; an operator override never reaches this.
+ */
+async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SsoRequired | null> {
+  if (!plans || keys.some((key) => key.startsWith("sso:"))) return null;
+  const orgIds = new Set<string>();
+  if (identity.orgId) orgIds.add(identity.orgId);
+  for (const key of keys) {
+    if (!key.startsWith("email:")) continue;
+    const domain = domainOf(key.slice("email:".length));
+    const orgId = domain ? await plans.orgForDomain(domain) : undefined;
+    if (orgId) orgIds.add(orgId);
+  }
+  for (const orgId of orgIds) {
+    const org = await plans.getOrg(orgId);
+    if (org?.requireSso && org.ownerUserId !== identity.userId) return new SsoRequired(orgId, org.name);
+  }
+  return null;
+}
+
+async function refuseUnlessSso(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<void> {
+  const refusal = await ssoRefusal(plans, identity, keys);
+  if (refusal) throw refusal;
+}
 
 /**
  * Which identity a signed-in human gets, and why.
@@ -159,10 +225,15 @@ async function decidePlan(
     // can pin an address-keyed grant to the subject behind it. Where the grant is
     // filed afterwards is the key worth reporting: one moved onto the subject is
     // found there at every re-check, and one that could not be moved is not.
-    const filed = await claimGrant(config.plans!, match.grant, match.key, profile);
     const { grant } = match;
+    const identity: Identity = { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId };
+    // Refused before the claim (SSO spec, D13): a mistaken GitHub click by someone the switch
+    // covers must leave an address grant where their SSO sign-in will claim it, or the role is
+    // stranded under a subject the switch never admits and SSO seats a fresh member beside it.
+    await refuseUnlessSso(config.plans, identity, keys);
+    const filed = await claimGrant(config.plans!, match.grant, match.key, profile);
     return {
-      identity: { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId },
+      identity,
       source: "grant",
       // `source` says a stored grant decided this; `grantSource` says who wrote
       // it. /upgrade needs the second: a purchase may replace a purchase, and
@@ -172,7 +243,9 @@ async function decidePlan(
       key: filed,
     };
   }
-  return { identity: defaultIdentity(profile), source: "default", keys, key: null };
+  const identity = defaultIdentity(profile);
+  await refuseUnlessSso(config.plans, identity, keys);
+  return { identity, source: "default", keys, key: null };
 }
 
 /**
@@ -220,12 +293,12 @@ export async function replanOnRefresh(
     : undefined;
   if (match) {
     const { grant } = match;
-    return {
-      identity: { ...base, plan: grant.plan, role: grant.role, orgId: grant.orgId },
-      source: "grant",
-      key: match.key,
-    };
+    const identity: Identity = { ...base, plan: grant.plan, role: grant.role, orgId: grant.orgId };
+    // The stored keys, addresses included, for the domain half of the check: a stale address refuses, which is the closed direction.
+    await refuseUnlessSso(config.plans, identity, keys);
+    return { identity, source: "grant", key: match.key };
   }
+  await refuseUnlessSso(config.plans, base, keys);
   return { identity: base, source: "default", key: null };
 }
 
@@ -240,9 +313,16 @@ export async function signedInPlan(
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">,
 ): Promise<Plan | null> {
   const subject = /^u_(github|google)_(\d+)$/.exec(userId);
-  if (!subject) return null;
+  const key = subject ? `${subject[1]}:${subject[2]}` : ssoKeyForUser(userId);
+  if (!key) return null;
   const stored: Identity = { userId, orgId: null, plan: "free", role: "member", label: "" };
-  return (await replanOnRefresh(stored, [`${subject[1]}:${subject[2]}`], config)).identity.plan;
+  try {
+    return (await replanOnRefresh(stored, [key], config)).identity.plan;
+  } catch (err) {
+    // An account `require_sso` has closed can no longer sign in, so its plan is as good as free.
+    if (err instanceof SsoRequired) return "free";
+    throw err;
+  }
 }
 
 /**
@@ -266,10 +346,25 @@ async function firstGrant(
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
     if (usableGrant(grant) && (honourPurchases || grant.source !== PURCHASE)) {
-      return { grant, key: stable[i] };
+      // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
+      // refresh, a panel session's re-check and a hosted room's month turn all come through
+      // this function, so a lapse reaches each of them as a revocation does.
+      return { grant: await standingOf(plans, grant), key: stable[i] };
     }
   }
   return undefined;
+}
+
+/**
+ * The grant as the org it names stands (orgs spec, D5): the free plan while the org's record says
+ * nobody is paying, the role and the org kept so the person is still a member of it; the grant
+ * unchanged for an active org and for an org with no record, which is only a string in grants
+ * and overrides and has no standing to lose. One read of the registry, for grants in an org only.
+ */
+export async function standingOf(plans: Pick<PlanStore, "getOrg">, grant: PlanGrant): Promise<PlanGrant> {
+  if (grant.orgId === null) return grant;
+  const org = await plans.getOrg(grant.orgId);
+  return org && !org.active ? { ...grant, plan: "free" } : grant;
 }
 
 /**
@@ -374,14 +469,43 @@ const html = (body: string, status = 200) =>
         a.btn{display:block;padding:.85rem 1rem;margin:.5rem 0;border:1px solid #c7ccd4;
               border-radius:8px;text-decoration:none;color:inherit;font-weight:600}
         a.btn:hover{border-color:#1a5e7a}
+        form.sso{margin:1.25rem 0 .75rem}
+        form.sso label{display:block;font-weight:600;margin-bottom:.35rem}
+        form.sso input{width:100%;box-sizing:border-box;padding:.7rem .8rem;margin-bottom:.5rem;border:1px solid #c7ccd4;
+                       border-radius:8px;font:inherit;background:transparent;color:inherit}
+        button.btn{width:100%;background:none;cursor:pointer;font:inherit;text-align:left}
+        p.notice{color:#8a3b12}
         code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
-        @media (prefers-color-scheme:dark){p{color:#98a2b0}a.btn{border-color:#39424f}}
+        @media (prefers-color-scheme:dark){p{color:#98a2b0}a.btn,form.sso input{border-color:#39424f}p.notice{color:#e8a26a}}
       </style>${body}`,
     { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } }
   );
 
 const escape = (value: string) =>
   value.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
+
+/** The hand-written providers this server has credentials for, in the order the pages list them. */
+const configured = (config: OAuthConfig): ProviderName[] =>
+  (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+
+/**
+ * A sign-in page's body: the heading, a line, the work-email form when single sign-on is offered
+ * (SSO spec, D12), a notice when the last attempt routed nowhere, and the provider buttons. The form
+ * carries the same signed state the buttons do, so the three audiences and the panel's nonce binding
+ * work unchanged.
+ */
+function signInBody(title: string, intro: string, stateToken: string, available: ProviderName[], sso: boolean, notice?: string): string {
+  const buttons = available
+    .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
+    .join("");
+  const form = sso
+    ? `<form class="sso" action="/authorize/sso" method="get"><input type="hidden" name="req" value="${escape(stateToken)}">` +
+      `<label for="sso-email">Work email</label>` +
+      `<input id="sso-email" type="email" name="email" required autocomplete="email" placeholder="you@yourcompany.com">` +
+      `<button class="btn" type="submit">Continue with single sign-on</button></form>`
+    : "";
+  return `<h1>${title}</h1><p>${intro}</p>${notice ? `<p class="notice">${escape(notice)}</p>` : ""}${form}${buttons}`;
+}
 
 /** A redirect_uri must be registered, and must be https or loopback. */
 function usableRedirect(uri: string): boolean {
@@ -436,7 +560,9 @@ function timingSafeEqual(a: string, b: string): boolean {
  * The open redirect. `returnTo` reaches us inside a signed state, so it cannot
  * have been altered mid-flow — but it was supplied by whoever started the flow,
  * and that is not necessarily the person finishing it. So it is validated here
- * too, on exact origin equality against the panel allowlist.
+ * too, on exact origin equality against the panel allowlist and the public room
+ * pages' (BELLMAN_PUBLIC_PAGE_ORIGINS), which a "Sign in to report" on a room's
+ * page comes back to.
  *
  * Exact equality, not a prefix test: startsWith("https://dash.bellman.sh")
  * admits "https://dash.bellman.sh.attacker.example".
@@ -448,7 +574,11 @@ function timingSafeEqual(a: string, b: string): boolean {
  * Anything unusable falls back to the first configured panel origin rather than
  * erroring: a sign-in that completed should end somewhere the human can use.
  */
-function panelDestination(returnTo: string | undefined, panelOrigins: string[]): string {
+function panelDestination(
+  returnTo: string | undefined,
+  panelOrigins: string[],
+  publicPageOrigins: readonly string[]
+): string {
   const fallback = panelOrigins[0];
   if (!returnTo) return fallback;
   let parsed: URL;
@@ -462,13 +592,63 @@ function panelDestination(returnTo: string | undefined, panelOrigins: string[]):
   // finishSession on the way out — and toString() normalises a bare origin to
   // origin + "/", so the second pass would rewrite the first pass's answer.
   // Returning the input makes it idempotent. The origin is what was validated;
-  // the path and query are the panel's business.
-  return panelOrigins.includes(parsed.origin) ? returnTo : fallback;
+  // the path and query are the destination's business.
+  return panelOrigins.includes(parsed.origin) || publicPageOrigins.includes(parsed.origin) ? returnTo : fallback;
 }
 
 /** Carried through the provider round trip when signing in to pay. */
 interface UpgradeRequest {
   link: string;
+}
+
+/**
+ * Complete a client's authorization: the provider's half (`exchange`, GitHub's, Google's or an org's
+ * IdP), the plan, and the code the client redeems; or the client's refusal. A refusal travels as
+ * `access_denied` with a description a person can act on: `require_sso` names the org (D13), a full
+ * org says to ask its admin, and anything else says only that the sign-in failed, with the cause in
+ * the log. `via` names the door for that log line.
+ */
+async function finishAuthorize(
+  exchange: () => Promise<ProviderProfile>,
+  pending: AuthorizeRequest,
+  config: OAuthConfig,
+  via: string,
+): Promise<Response> {
+  const target = new URL(pending.redirect_uri);
+  if (pending.state) target.searchParams.set("state", pending.state);
+  const refuse = (description: string) => {
+    target.searchParams.set("error", "access_denied");
+    target.searchParams.set("error_description", description);
+    return Response.redirect(target.toString(), 302);
+  };
+  let identity: Identity;
+  let planSource: PlanSource = "default";
+  let keys: string[] = [];
+  try {
+    const resolved = await resolvePlan(await exchange(), config);
+    identity = resolved.identity;
+    planSource = resolved.source;
+    keys = resolved.keys;
+  } catch (err) {
+    if (err instanceof SsoRequired) return refuse(`${err.message}: start again and enter your work email`);
+    if (err instanceof SeatsFull) return refuse(err.message);
+    console.error(`${via} sign-in failed:`, err);
+    return refuse(`${via} sign-in failed`);
+  }
+
+  const authCode = randomId();
+  await config.store.putCode(authCode, {
+    client_id: pending.client_id,
+    redirect_uri: pending.redirect_uri,
+    code_challenge: pending.code_challenge,
+    resource: pending.resource,
+    identity,
+    plan_source: planSource,
+    identity_keys: keys,
+    expires_at: Date.now() + AUTH_CODE_TTL_MS,
+  });
+  target.searchParams.set("code", authCode);
+  return Response.redirect(target.toString(), 302);
 }
 
 /** Send a signed-in human to the Payment Link, tagged so the webhook can credit them. */
@@ -491,6 +671,9 @@ async function finishUpgrade(
     resolved = await resolvePlan(profile, config);
     email = profile.email;
   } catch (err) {
+    if (err instanceof SsoRequired) {
+      return html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Nothing was charged. An organisation's plan is its own; ask its admin.</p>`, 403);
+    }
     console.error(`${name} sign-in for upgrade failed:`, err);
     return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
   }
@@ -557,8 +740,7 @@ async function verifyState(
 async function finishSession(
   request: Request,
   url: URL,
-  name: ProviderName,
-  creds: ProviderCredentials,
+  exchange: () => Promise<ProviderProfile>,
   pending: SessionRequest,
   config: OAuthConfig
 ): Promise<Response> {
@@ -596,19 +778,21 @@ async function finishSession(
     ));
   }
 
-  const code = url.searchParams.get("code");
-  if (!code) {
+  if (!url.searchParams.get("code")) {
     return ending(html(`<h1>Sign-in did not complete</h1><p>No authorization code came back. Start again.</p>`, 400));
   }
 
   let resolved: Awaited<ReturnType<typeof resolvePlan>>;
   try {
-    const profile = await PROVIDERS[name].exchange(
-      creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl
-    );
-    resolved = await resolvePlan(profile, config);
+    resolved = await resolvePlan(await exchange(), config);
   } catch (err) {
-    console.error(`${name} sign-in for the panel failed:`, err);
+    if (err instanceof SsoRequired) {
+      return ending(html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Start again from the control panel and enter your work email.</p>`, 403));
+    }
+    if (err instanceof SeatsFull) {
+      return ending(html(`<h1>No free seat</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403));
+    }
+    console.error("the panel's sign-in failed:", err);
     return ending(html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502));
   }
 
@@ -628,7 +812,7 @@ async function finishSession(
   return ending(new Response(null, {
     status: 302,
     headers: {
-      location: panelDestination(pending.return_to, panels),
+      location: panelDestination(pending.return_to, panels, config.publicPageOrigins ?? []),
       "set-cookie": serializeSessionCookie(id, secure, Math.floor(SESSION_TTL_MS / 1000)),
       "cache-control": "no-store",
       // This response's own URL holds the provider's authorization code, and it
@@ -792,18 +976,15 @@ export async function handleOAuth(
       STATE_TTL_SECONDS
     );
 
-    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    const available = configured(config);
     if (available.length === 0) {
       return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
     }
-    const buttons = available
-      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
-      .join("");
-    return html(
-      `<h1>Connect to Bellman</h1>` +
-        `<p><strong>${escape(client.client_name ?? "An application")}</strong> wants to join and create Bellman sessions as you.</p>` +
-        buttons
-    );
+    return html(signInBody(
+      "Connect to Bellman",
+      `<strong>${escape(client.client_name ?? "An application")}</strong> wants to join and create Bellman sessions as you.`,
+      stateToken, available, true,
+    ));
   }
 
   // --------------------------------------------------------- /upgrade/<link>
@@ -814,7 +995,7 @@ export async function handleOAuth(
     if (!paymentLink(config, link)) {
       return html(`<h1>Unknown plan</h1><p>There is no plan called <code>${escape(link)}</code>.</p>`, 404);
     }
-    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    const available = configured(config);
     if (available.length === 0) {
       return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
     }
@@ -823,14 +1004,12 @@ export async function handleOAuth(
       config.secret,
       STATE_TTL_SECONDS
     );
-    const buttons = available
-      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
-      .join("");
-    return html(
-      `<h1>Upgrade Bellman</h1>` +
-        `<p>Sign in with the account you use Bellman with, so the plan lands on it. Then you'll pay on Stripe.</p>` +
-        buttons
-    );
+    // No work-email form: an organisation's plan is its own, and a person pays as the account they use.
+    return html(signInBody(
+      "Upgrade Bellman",
+      "Sign in with the account you use Bellman with, so the plan lands on it. Then you'll pay on Stripe.",
+      stateToken, available, false,
+    ));
   }
 
   // -------------------------------------------------------- /auth/signin
@@ -846,7 +1025,7 @@ export async function handleOAuth(
         503
       );
     }
-    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    const available = configured(config);
     if (available.length === 0) {
       return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
     }
@@ -862,7 +1041,7 @@ export async function handleOAuth(
     // into a signed blob and discovering it after the provider round trip is a
     // worse error message for the same outcome.
     const pending: SessionRequest = {
-      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
+      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels, config.publicPageOrigins ?? []),
       nonce,
     };
     const stateToken = await signJwt(
@@ -870,14 +1049,7 @@ export async function handleOAuth(
       config.secret,
       STATE_TTL_SECONDS
     );
-    const buttons = available
-      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
-      .join("");
-    const page = html(
-      `<h1>Sign in to Bellman</h1>` +
-        `<p>Use the account your rooms belong to.</p>` +
-        buttons
-    );
+    const page = html(signInBody("Sign in to Bellman", "Use the account your rooms belong to.", stateToken, available, true));
     page.headers.append(
       "set-cookie",
       serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS)
@@ -945,6 +1117,37 @@ export async function handleOAuth(
     });
   }
 
+  // ---------------------------------------- the work-email hand-off (SSO spec, D12)
+  // The address's domain picks the org, the org's IdP takes the sign-in, and the same signed state
+  // the buttons carry rides along as the IdP's `state`, so the callback tells the audiences apart as
+  // the provider callbacks do. No match, or an org with no IdP, is the page again with a notice.
+  if (method === "GET" && path === "/authorize/sso") {
+    const req = url.searchParams.get("req") ?? "";
+    const state = await verifyState(req, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE, SESSION_AUDIENCE]);
+    if (!state) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    const available = configured(config);
+    if (state.audience === UPGRADE_AUDIENCE) {
+      return html(signInBody(
+        "Upgrade Bellman",
+        "Single sign-on is not used to pay: an organisation's plan is its own. Sign in with the account you use Bellman with.",
+        req, available, false,
+      ), 400);
+    }
+    const email = url.searchParams.get("email") ?? "";
+    const domain = domainOf(email);
+    const orgId = domain && config.plans ? await config.plans.orgForDomain(domain) : undefined;
+    const idp = orgId && config.plans ? await config.plans.getOrgIdp(orgId) : undefined;
+    if (!orgId || !idp) {
+      return html(signInBody(
+        "Sign in to Bellman",
+        "Enter your work email again, or use one of the buttons.",
+        req, available, true,
+        `No single sign-on is set up for ${domain ?? "that address"}. Use one of the buttons, or ask your admin.`,
+      ));
+    }
+    return Response.redirect(oidcAuthorizeUrl(idp, `${config.issuer}/callback/sso/${orgId}`, req, await nonceFor(req)), 302);
+  }
+
   // ------------------------------------------- hand off to a provider
   const startMatch = /^\/authorize\/([a-z]+)$/.exec(path);
   if (method === "GET" && startMatch) {
@@ -965,6 +1168,58 @@ export async function handleOAuth(
     );
   }
 
+  // ------------------------------------------- an org's IdP comes back (SSO spec, D12, D13)
+  // One redirect URI per org, which is what an Okta or Entra admin registers. The exchange reads the
+  // id token, seats the person on first use, and hands the same tail the provider callbacks run.
+  const ssoCallback = /^\/callback\/sso\/([^/]+)$/.exec(path);
+  if (method === "GET" && ssoCallback) {
+    const stateToken = url.searchParams.get("state") ?? "";
+    const state = await verifyState(stateToken, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE, SESSION_AUDIENCE]);
+    if (!state) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    const orgId = ssoCallback[1];
+    const plans = config.plans;
+    const org = plans && isOrgId(orgId) ? await plans.getOrg(orgId) : undefined;
+    const idp = org && plans ? await plans.getOrgIdp(orgId) : undefined;
+    if (!plans || !org || !idp) {
+      return html(`<h1>No single sign-on here</h1><p>This organisation has no identity provider set up. Start the sign-in again.</p>`, 404);
+    }
+    if (state.audience === UPGRADE_AUDIENCE) {
+      return html(`<h1>Single sign-on is not used to pay</h1><p>Nothing was charged. Start the upgrade again with the account you use Bellman with.</p>`, 400);
+    }
+    const code = url.searchParams.get("code");
+    const upstreamError = url.searchParams.get("error");
+    const redirectUri = `${config.issuer}/callback/sso/${orgId}`;
+    const exchange = async (): Promise<ProviderProfile> => {
+      if (upstreamError || !code) throw new Error(upstreamError ?? "no authorization code returned");
+      const secret = await unseal(config.sealSecret ?? config.secret, idp.clientSecret);
+      const who = await oidcExchange({ ...idp, clientSecret: secret }, code, redirectUri, await nonceFor(stateToken), config.fetchImpl);
+      // The address counts only when the IdP vouched for it and it is under a domain the org
+      // verified (D12): then it is the key an admin's `email:` grant is claimed by; else a label.
+      const domain = who.email ? domainOf(who.email) : null;
+      const vouched = who.emailVerified && domain !== null && org.domains.some((d) => d.domain === domain && d.verifiedAt !== null);
+      const profile: ProviderProfile = {
+        provider: "sso", subject: `${orgId}:${who.sub}`, label: who.name ?? who.email ?? who.sub, email: vouched ? who.email : undefined,
+      };
+      // An admin may have seated the address already (D10): that grant is claimed onto the subject
+      // before the seat is decided, so the person keeps the role they were given and takes no
+      // second seat. Only a grant in this org: an address another org filed is not this org's to move.
+      const key = ssoKey(orgId, who.sub);
+      if (profile.email) {
+        const byAddress = await plans.getGrant(`email:${profile.email}`);
+        if (byAddress?.orgId === orgId && !(await plans.getGrant(key))) await plans.moveGrant(`email:${profile.email}`, key);
+      }
+      // The seat, before any token (D13): a full org refuses here and nothing is minted.
+      const seated = await plans.provisionSsoMember(orgId, key, Date.now(), { actorUserId: "sso", actorOrgId: orgId, detail: { org_id: orgId } });
+      if (seated === "full") throw new SeatsFull(org.name);
+      if (seated === "no_org") throw new Error("the org's record is gone");
+      return profile;
+    };
+    if (state.audience === SESSION_AUDIENCE) {
+      return finishSession(request, url, exchange, state.claims.bellman as unknown as SessionRequest, config);
+    }
+    return finishAuthorize(exchange, state.claims.bellman as unknown as AuthorizeRequest, config, "single sign-on");
+  }
+
   // ------------------------------------------------- provider comes back
   const callbackMatch = /^\/callback\/([a-z]+)$/.exec(path);
   if (method === "GET" && callbackMatch) {
@@ -978,8 +1233,10 @@ export async function handleOAuth(
     if (!state) {
       return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
     }
+    const code = url.searchParams.get("code") ?? "";
+    const exchange = () => PROVIDERS[name].exchange(creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl);
     if (state.audience === SESSION_AUDIENCE) {
-      return finishSession(request, url, name, creds, state.claims.bellman as unknown as SessionRequest, config);
+      return finishSession(request, url, exchange, state.claims.bellman as unknown as SessionRequest, config);
     }
     if (state.audience === UPGRADE_AUDIENCE) {
       // An upgrade came back through the same callback; it ends at Stripe
@@ -987,49 +1244,15 @@ export async function handleOAuth(
       return finishUpgrade(url, name, creds, state.claims.bellman as unknown as UpgradeRequest, config);
     }
     const pending = state.claims.bellman as unknown as AuthorizeRequest;
-
     const upstreamError = url.searchParams.get("error");
-    const code = url.searchParams.get("code");
-    const target = new URL(pending.redirect_uri);
-    if (pending.state) target.searchParams.set("state", pending.state);
-
     if (upstreamError || !code) {
+      const target = new URL(pending.redirect_uri);
+      if (pending.state) target.searchParams.set("state", pending.state);
       target.searchParams.set("error", "access_denied");
       target.searchParams.set("error_description", upstreamError ?? "no authorization code returned");
       return Response.redirect(target.toString(), 302);
     }
-
-    let identity: Identity;
-    let planSource: PlanSource = "default";
-    let keys: string[] = [];
-    try {
-      const profile = await PROVIDERS[name].exchange(
-        creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl
-      );
-      const resolved = await resolvePlan(profile, config);
-      identity = resolved.identity;
-      planSource = resolved.source;
-      keys = resolved.keys;
-    } catch (err) {
-      console.error(`${name} sign-in failed:`, err);
-      target.searchParams.set("error", "access_denied");
-      target.searchParams.set("error_description", `${name} sign-in failed`);
-      return Response.redirect(target.toString(), 302);
-    }
-
-    const authCode = randomId();
-    await config.store.putCode(authCode, {
-      client_id: pending.client_id,
-      redirect_uri: pending.redirect_uri,
-      code_challenge: pending.code_challenge,
-      resource: pending.resource,
-      identity,
-      plan_source: planSource,
-      identity_keys: keys,
-      expires_at: Date.now() + AUTH_CODE_TTL_MS,
-    });
-    target.searchParams.set("code", authCode);
-    return Response.redirect(target.toString(), 302);
+    return finishAuthorize(exchange, pending, config, name);
   }
 
   // ----------------------------------------------------------------- /token
@@ -1106,6 +1329,8 @@ export async function handleOAuth(
           current.source, keys
         );
       } catch (err) {
+        // Not put back: the account signs in through its organisation's IdP from now on (SSO spec, D13).
+        if (err instanceof SsoRequired) return oauthError("invalid_grant", `${err.message}: sign in again through it`);
         console.error("could not complete a refresh:", err);
         await config.store.putRefresh(token, stored).catch(() => {});
         return oauthError("temporarily_unavailable", "could not complete the refresh — retry", 503);
@@ -1325,10 +1550,13 @@ export async function handleOAuth(
       // record: read-then-write let another org's admin land a grant for the
       // same key in the gap, and write-then-audit let the record of a change
       // that already happened be lost with no way to retry it.
-      if ((await config.plans.putGrantIfOwned(grant, identity.orgId,
-        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId })) === "conflict") {
+      const written = await config.plans.putGrantIfOwned(grant, identity.orgId,
+        { actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: identity.orgId });
+      if (written === "conflict") {
         return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
       }
+      // The seat cap (orgs spec, D3): an org with a record holds as many grants as it bought.
+      if (written === "full") return oauthError("conflict", "that org has no free seat", 409);
       return json({ granted: grant }, 201);
     }
 
@@ -1435,12 +1663,89 @@ export async function handleOAuth(
     return report ? json({ report: operatorReportView(report) }) : oauthError("not_found", "no such report", 404);
   }
 
+  // ------------------------------------------------------------ /admin/orgs
+  // The operator creates an org that was not bought, with its owner seated, and resizes one (orgs
+  // spec, D7), on /admin/handles' gate. A purchased org is billing's to create (D4), and BELLMAN_USERS
+  // keeps naming orgs by string; this is for the org that should have a record, a cap and an owner,
+  // so its admin gets the member routes. The order the other operator routes keep: the gate, the
+  // method, the plan store, then the body.
+  if (path === ADMIN_ORGS) {
+    const gate = await operatorGate(request, config, "creating an org");
+    if (gate instanceof Response) return gate;
+    if (method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const body = await jsonObject(request);
+    if (!body) return oauthError("invalid_request", "body must be a JSON object");
+    const orgId = typeof body.org_id === "string" && isOrgId(body.org_id) ? body.org_id : undefined;
+    if (orgId === undefined) return oauthError("invalid_request", "org_id must be 1-64 characters of letters, digits, _ or -");
+    const name = parseOrgName(body.name);
+    if (name === undefined) return oauthError("invalid_request", `name must be 1 to ${MAX_ORG_NAME_CHARS} characters`);
+    const seats = parseSeats(body.seats);
+    if (seats === undefined) return oauthError("invalid_request", `seats must be a whole number from 1 to ${MAX_SEATS}`);
+    // A subject key, never an address: an address names no user id until a sign-in claims it, and
+    // the record needs its owner's id now.
+    const ownerUserId = typeof body.owner_key === "string" ? userIdForKey(body.owner_key) : null;
+    if (ownerUserId === null) {
+      return oauthError("invalid_request", "owner_key must be github:<numeric id> or google:<numeric id> — an address names no user id yet, so it cannot own an org");
+    }
+    const now = Date.now();
+    const org: Org = { orgId, name, ownerUserId, seats, source: "operator", active: true, createdAt: now, requireSso: false, domains: [] };
+    const owner: PlanGrant = {
+      key: body.owner_key as string, plan: "team", role: "admin", orgId, source: "operator",
+      grantedAt: now, grantedBy: gate.identity.userId, expiresAt: null,
+    };
+    const outcome = await config.plans.createOrg(org, owner, operatorIntent(gate.identity));
+    if (outcome === "exists") return oauthError("exists", "an org with that id already has a record", 409);
+    if (outcome === "conflict") return oauthError("conflict", "the owner's key already has a grant in another org", 409);
+    return json({ org: orgView(org, 1, null) }, 201);
+  }
+  const adminOrg = ADMIN_ORG.exec(path);
+  if (adminOrg) {
+    const gate = await operatorGate(request, config, "resizing an org");
+    if (gate instanceof Response) return gate;
+    if (method !== "PATCH") return new Response("Method not allowed", { status: 405, headers: { allow: "PATCH" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    // An org id needs no decoding: its grammar has nothing to encode, so a segment outside it names no org.
+    if (!isOrgId(adminOrg[1])) return oauthError("not_found", "no such org", 404);
+    const body = await jsonObject(request);
+    if (!body) return oauthError("invalid_request", "body must be a JSON object");
+    const name = body.name === undefined ? undefined : parseOrgName(body.name);
+    if (body.name !== undefined && name === undefined) return oauthError("invalid_request", `name must be 1 to ${MAX_ORG_NAME_CHARS} characters`);
+    const seats = body.seats === undefined ? undefined : parseSeats(body.seats);
+    if (body.seats !== undefined && seats === undefined) return oauthError("invalid_request", `seats must be a whole number from 1 to ${MAX_SEATS}`);
+    // `active` is billing's for a purchased org and always true for an operator one; nothing else is editable here.
+    if (name === undefined && seats === undefined) return oauthError("invalid_request", "give a name, seats, or both");
+    // A purchased org's seats are what its subscription sells: the next Stripe event writes them back,
+    // so a resize here would be undone with only a `stripe` row to explain it. The source never
+    // changes, so reading it ahead of the write is safe. The name is not billing's.
+    const current = await config.plans.getOrg(adminOrg[1]);
+    if (!current) return oauthError("not_found", "no such org", 404);
+    if (seats !== undefined && current.source === "purchase") {
+      return oauthError("purchased", "seats are billing's for a purchased org: change the subscription's quantity in Stripe", 409);
+    }
+    const org = await config.plans.updateOrg(adminOrg[1], { name, seats }, operatorIntent(gate.identity));
+    if (!org) return oauthError("not_found", "no such org", 404);
+    return json({ org: orgView(org, await config.plans.countOrgMembers(org.orgId), null) });
+  }
+
   return undefined;
 }
 
+const ADMIN_ORGS = "/admin/orgs";
+const ADMIN_ORG = /^\/admin\/orgs\/([^/]+)$/;
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
 const ADMIN_SUSPENSION = /^\/admin\/suspensions\/([^/]+)$/;
 const ADMIN_REPORT_RESOLVE = /^\/admin\/reports\/([^/]+)\/resolve$/;
+
+/** The body as a JSON object, or undefined: not JSON, `null`, an array and a scalar are all no body. */
+async function jsonObject(request: Request): Promise<Record<string, unknown> | undefined> {
+  const parsed: unknown = await request.json().catch(() => undefined);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+/** How an operator's write is recorded: by their id and label, with no org, since the operator acts for the platform. */
+const operatorIntent = (identity: Identity): AuditIntent =>
+  ({ actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: null });
 
 /**
  * The note an operator's write carries, for a suspension and for a resolution: trimmed, 1 to 500 characters, or
@@ -1568,7 +1873,17 @@ async function sessionCaller(
     return { identity: stored.identity, planSource: stored.plan_source, planKey: stored.plan_key, subjectKey, via: "cookie" };
   }
 
-  const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+  let current: Awaited<ReturnType<typeof replanOnRefresh>>;
+  try {
+    current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+  } catch (err) {
+    // The session ends here (SSO spec, D13): the person signs in again through their organisation's IdP.
+    if (err instanceof SsoRequired) {
+      await config.store.deleteSession(id).catch((e) => console.error("could not end a session require_sso closed:", e));
+      return null;
+    }
+    throw err;
+  }
   // Written back so the next request inside the window is served from the
   // record rather than re-resolving again.
   //

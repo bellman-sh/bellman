@@ -658,3 +658,31 @@ describe("an upgrade the Worker authorized just before a removal", () => {
     expect(watcher.ws.readyState).toBe(1); // OPEN
   });
 });
+
+/**
+ * read_context on the room socket (read_context spec, section 2), through the real route. A frame
+ * is built once and sent to every socket in the room, so it carries a granted brief only, live
+ * and on a reconnect's replay alike.
+ */
+describe("a brief its author keeps", () => {
+  const quiet = member({ memberId: "m_quiet", userId: "u_quiet", label: "quiet@codenerd", roomRole: "peer_b", capabilities: ["receive_messages"] });
+  const by = { fromMemberId: "m_quiet", fromUserId: "u_quiet", fromLabel: "quiet@codenerd", refId: null };
+
+  it("reaches no socket, live or replayed, and their join arrives without it", async () => {
+    const { id, store } = await room(undefined, { members: [member(), quiet] });
+    const live = collect(await upgrade(id));
+    await store.appendEvent(id, { ...by, type: "member_joined", payload: { member: { member_id: "m_quiet" }, brief: { goal: "kept" } } });
+    await store.appendEvent(id, { ...by, type: "brief_update", payload: { goal: "kept" } });
+    await store.appendEvent(id, { ...by, type: "message", payload: { text: "after" } });
+    await vi.waitFor(() => expect(live).toHaveLength(2), { timeout: 3000 });
+
+    const replayed = collect(await upgrade(id, 0));
+    await vi.waitFor(() => expect(replayed).toHaveLength(2), { timeout: 3000 });
+    for (const frames of [live, replayed]) {
+      const shown = frames.map((f) => JSON.parse(f));
+      expect(shown.map((f) => f.type)).toEqual(["member_joined", "message"]);
+      expect(shown[0].payload).toEqual({ member: { member_id: "m_quiet" }, brief: null });
+      expect(frames.join("")).not.toContain("kept");
+    }
+  });
+});

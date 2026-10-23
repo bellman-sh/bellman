@@ -5,6 +5,7 @@ import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.j
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
+import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
@@ -28,7 +29,7 @@ export function registerConfirm(server: McpServer, identity: Identity, s: Bellma
 Args:
   - connect_token: from bellman_connect (single-use, 10 minute TTL)
   - brief: YOUR structured context summary — this is what crosses to the room
-  - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
+  - capabilities: what you allow peers to do to you (default: read_context, receive_messages). read_context lets peers read your brief; it is on by default, and without it only you see your brief.
 
 You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
@@ -153,11 +154,18 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // The briefs of the members heard from most recently, not everyone's (ADR 0018): a room
       // seats thousands, and a joiner's agent reads all it is handed. A member who has left
       // is not among them, and `briefs_omitted` counts the present members not shown.
+      //
+      // A brief its author keeps (no `read_context`) is not handed, unless it is this joiner's own
+      // account's (read_context design, D3). That is decided before the cut, so a brief kept back does
+      // not take one of the places from a brief that could be read (plan ruling R7). `briefs_omitted`
+      // counts it as it counts any brief not handed: the roster above shows each member's capabilities,
+      // so the count tells the joiner nothing the roster did not.
       const peers = joined.members
         .filter((m) => m.memberId !== memberId && isActiveMember(m))
         .sort((a, b) => lastSeen(b) - lastSeen(a));
-      const shownBriefs = await s.getBriefs(joined.id, peers.slice(0, BRIEFS_ON_JOIN).map((m) => m.memberId));
-      const shown = peers.slice(0, BRIEFS_ON_JOIN).filter((m) => shownBriefs[m.memberId] !== undefined);
+      const readable = peers.filter((m) => seesBrief(m, identity.userId)).slice(0, BRIEFS_ON_JOIN);
+      const shownBriefs = await s.getBriefs(joined.id, readable.map((m) => m.memberId));
+      const shown = readable.filter((m) => shownBriefs[m.memberId] !== undefined);
 
       return ok(
         {
@@ -165,7 +173,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           member_id: memberId,
           cursor: joinEvent.cursor,
           members: joined.members.map((m) => publicMember(m, connected)),
-          room: roomPreview(joined, roomRole),
+          room: roomPreview(joined, roomRole, identity.userId),
           briefs: shown.map((m) => untrusted({ memberId: m.memberId, label: m.label }, shownBriefs[m.memberId])),
           briefs_omitted: peers.length - shown.length,
           // Every item, in the writer's envelope (#129): the joiner is a member

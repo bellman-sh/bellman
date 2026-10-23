@@ -186,3 +186,96 @@ describe("/admin/reports and /admin/reports/:id/resolve", () => {
     expect(reports.slice(1).every((r) => r.resolved_at !== null)).toBe(true);
   });
 });
+
+describe("/admin/orgs (orgs spec, D7)", () => {
+  const acme = { org_id: "org_acme", name: " Acme ", owner_key: "github:1", seats: 3 };
+  const error = async (res: Response) => ((await res.json()) as { error: string }).error;
+
+  it("creates an org with its owner seated, and refuses the id a second time", async () => {
+    const auth = await bearer(OPERATOR);
+    const res = await send("POST", "/admin/orgs", auth, acme);
+    expect([res.status, await res.json()]).toEqual([201, { org: {
+      org_id: "org_acme", name: "Acme", owner_user_id: "u_github_1", seats: 3, seats_used: 1, active: true,
+      source: "operator", created_at: expect.any(String), require_sso: false, domains: [], your_role: null,
+    } }]);
+    expect(await store.getGrant("github:1")).toMatchObject({
+      plan: "team", role: "admin", orgId: "org_acme", source: "operator", grantedBy: OPERATOR.userId, expiresAt: null,
+    });
+    expect((await store.auditForOrg("org_acme", 10)).map((e) => [e.action, e.actorUserId]))
+      .toEqual([["org_created", OPERATOR.userId], ["plan_granted", OPERATOR.userId]]);
+    const again = await send("POST", "/admin/orgs", auth, { ...acme, name: "Again" });
+    expect([again.status, await error(again)]).toEqual([409, "exists"]);
+    expect((await store.getOrg("org_acme"))?.name).toBe("Acme");
+  });
+
+  it("refuses an owner key granted in another org, creating nothing", async () => {
+    await store.putGrant({ key: "github:1", plan: "team", role: "admin", orgId: "org_other", source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null });
+    const res = await send("POST", "/admin/orgs", await bearer(OPERATOR), acme);
+    expect([res.status, await error(res)]).toEqual([409, "conflict"]);
+    expect(await store.getOrg("org_acme")).toBeUndefined();
+  });
+
+  it("refuses a body that is not the shape named, creating nothing", async () => {
+    const auth = await bearer(OPERATOR);
+    const bodies: unknown[] = [
+      undefined, [], "acme", { ...acme, owner_key: "email:a@acme.test" }, { ...acme, owner_key: "github:mcfearsome" },
+      { ...acme, org_id: "bad id" }, { ...acme, seats: 0 }, { ...acme, seats: "3" }, { ...acme, name: "a".repeat(81) },
+      { ...acme, name: "  " },
+    ];
+    for (const body of bodies) {
+      expect((await send("POST", "/admin/orgs", auth, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(await store.getOrg("org_acme")).toBeUndefined();
+    expect(await store.getGrant("github:1")).toBeUndefined();
+  });
+
+  it("renames and resizes with PATCH, and knows no other org", async () => {
+    const auth = await bearer(OPERATOR);
+    await send("POST", "/admin/orgs", auth, acme);
+    const res = await send("PATCH", "/admin/orgs/org_acme", auth, { seats: 5, name: "Acme Ltd" });
+    expect([res.status, await res.json()]).toEqual([200, { org: expect.objectContaining({ seats: 5, name: "Acme Ltd", seats_used: 1 }) }]);
+    expect(await store.getOrg("org_acme")).toMatchObject({ seats: 5, name: "Acme Ltd", ownerUserId: "u_github_1" });
+    expect((await send("PATCH", "/admin/orgs/org_acme", auth, { seats: 7 })).status).toBe(200);
+    expect((await store.getOrg("org_acme"))?.name).toBe("Acme Ltd");
+    expect((await send("PATCH", "/admin/orgs/org_nobody", auth, { seats: 2 })).status).toBe(404);
+    expect((await send("PATCH", "/admin/orgs/bad%20id", auth, { seats: 2 })).status).toBe(404);
+    for (const body of [{}, undefined, { seats: 0 }, { name: "" }, { active: false }]) {
+      expect((await send("PATCH", "/admin/orgs/org_acme", auth, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await store.getOrg("org_acme"))?.seats).toBe(7);
+    const get = await send("GET", "/admin/orgs/org_acme", auth);
+    expect([get.status, get.headers.get("allow")]).toEqual([405, "PATCH"]);
+    const list = await send("GET", "/admin/orgs", auth);
+    expect([list.status, list.headers.get("allow")]).toEqual([405, "POST"]);
+  });
+
+  /**
+   * A purchased org's seats are what its subscription sells: the next Stripe event would write
+   * them back, so a resize here would be undone with only a `stripe` row to explain it. The name
+   * is not billing's, so that still goes through.
+   */
+  it("leaves a purchased org's seats to billing, and still renames it", async () => {
+    const auth = await bearer(OPERATOR);
+    await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, { actorUserId: "stripe" });
+    const seats = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { seats: 5 });
+    expect([seats.status, await error(seats)]).toEqual([409, "purchased"]);
+    const both = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { seats: 5, name: "Acme" });
+    expect(both.status).toBe(409);
+    expect(await store.getOrg("org_u_github_4242")).toMatchObject({ seats: 3, name: "org_u_github_4242" });
+    const name = await send("PATCH", "/admin/orgs/org_u_github_4242", auth, { name: "Acme" });
+    expect([name.status, ((await name.json()) as { org: { name: string; seats: number } }).org]).toEqual([200, expect.objectContaining({ name: "Acme", seats: 3 })]);
+  });
+
+  it("lets no one else through, and creates nothing", async () => {
+    for (const operators of [undefined, new Set<string>()]) {
+      const closed = routeWith(panelConfig({ plans: store, operators }));
+      expect((await send("POST", "/admin/orgs", await bearer(OPERATOR), acme, closed)).status).toBe(403);
+    }
+    expect((await send("POST", "/admin/orgs", await bearer(TEAM_ADMIN, "operator"), acme)).status).toBe(403);
+    expect((await send("PATCH", "/admin/orgs/org_acme", await bearer(TEAM_ADMIN, "operator"), { seats: 9 })).status).toBe(403);
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
+    expect((await send("POST", "/admin/orgs", { cookie: `${COOKIE}=${sid}`, origin: PANEL }, acme)).status).toBe(401);
+    expect((await send("POST", "/admin/orgs", {}, acme)).status).toBe(401);
+    expect(await store.getOrg("org_acme")).toBeUndefined();
+  });
+});

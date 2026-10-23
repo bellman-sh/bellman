@@ -36,6 +36,8 @@ preset: review          # pair | swarm | review | social
 
 A hosted seat is a member Bellman runs. Its label is `host@bellman`, whatever its role is called, and public pages call it `host`. When it answers replies, its prompt names each sender as a public page names members, `member 3` and so on, and never by the label they signed in with.
 
+A hosted seat takes `host.instructions` in its manifest block: your words on what it should ask, at most 300 characters. They add to Bellman's own rules for the host and cannot outrank them, and `null` leaves the host with those rules alone. You can change them after the room has started. The room's creator sends `PUT /rooms/:id/host` with `{ "instructions": "…" }`, or `{ "instructions": null }` to clear them; the host reads them on every wake, so its next question is built from the new text. The text is trimmed and an empty one is stored as `null`. A room whose manifest has no host answers `409`, and so does a closed room. The creator can read the current text back: `GET /rooms/:id` carries it as `preview.text.data.host_instructions`, inside the untrusted text beside the room's name and purpose. It is `null` once you clear it. Only the creator gets the key; it is absent for everyone else and for a room with no host.
+
 ## Write the roles
 
 Author the roles when you can name the seat and the reason: the CI agent may send but must never invite, or auditors read and nothing else.

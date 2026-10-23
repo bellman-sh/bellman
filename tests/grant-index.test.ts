@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  NO_ORG, allKeysFor, grantKey, isOrgId, orgIndexKey, orgIndexPrefix, staleIndexKeys,
+  NO_ORG, allKeysFor, domainKey, grantKey, idpKey, isOrgId, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys,
 } from "../src/grant-index.js";
 import type { PlanGrant } from "../src/types.js";
 
@@ -105,5 +105,19 @@ describe("the org-scoped grant index", () => {
       grantKey("github:4242"),
       orgIndexKey("org_mine", "github:4242"),
     ]);
+  });
+});
+
+describe("the org record's key (orgs spec, D1)", () => {
+  /** A prefix of its own: `org:` sits beside `gr:` and `go:` and can collide with neither. */
+  it("files a record under org:<id>", () => {
+    expect(orgKey("org_acme")).toBe("org:org_acme");
+    expect(orgKey("org_acme").startsWith(grantKey("").slice(0, 3))).toBe(false);
+  });
+
+  /** The IdP apart from the record (SSO spec, D9), and the one index a verified domain writes (D11). */
+  it("files an org's IdP under oi:<id> and a verified domain under od:<domain>", () => {
+    expect(idpKey("org_acme")).toBe("oi:org_acme");
+    expect(domainKey("acme.test")).toBe("od:acme.test");
   });
 });

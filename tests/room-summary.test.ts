@@ -133,6 +133,38 @@ describe("roomSummary", () => {
   });
 });
 
+// A hosted room's instructions ride in the room block for the account that created the room (the preview's own rule).
+// `bellman_rooms` is called by an account, so the account is named beside the seats it holds.
+describe("roomSummary and a hosted room's instructions", () => {
+  const TEXT = "Ask about the week.";
+  const hosted = roomManifest({
+    ...manifest,
+    roles: { ...manifest.roles, host: { can: ["send"], description: null, reports: false } },
+    host: { role: "host", model: "haiku", instructions: TEXT },
+  });
+  const room = () => stored({ createdBy: "u_lead", manifest: hosted });
+
+  it("carries them for the creator's account, and for no other", () => {
+    const mine = roomSummary(room(), [lead], NONE, [], T0, "u_lead");
+    expect(mine.room.text.data.host_instructions).toBe(TEXT);
+    const theirs = roomSummary(room(), [helper], NONE, [], T0, "u_help");
+    expect(theirs.room.text.data).not.toHaveProperty("host_instructions");
+    expect(JSON.stringify(theirs)).not.toContain(TEXT);
+  });
+
+  it("leaves them out when the account is not named", () => {
+    expect(roomSummary(room(), [lead], NONE, [], T0).room.text.data).not.toHaveProperty("host_instructions");
+  });
+
+  it("carries them with several seats too: the account is the creator whichever seat is asking", () => {
+    const second = member({ memberId: "m_second", userId: "u_lead", label: "lead@a", roomRole: "lead", seq: 2, joinedAt: T0, lastSeenAt: T0 });
+    const out = roomSummary(room(), [lead, second], NONE, [], T0, "u_lead");
+    expect(out.your_member_id).toBeNull();
+    expect(out.room.your_role).toBeNull();
+    expect(out.room.text.data.host_instructions).toBe(TEXT);
+  });
+});
+
 describe("beatOf", () => {
   it("is the tick's row for an asked seat", () => {
     const s = stored({ members: [{ ...lead, lastReportAt: T0 }, helper] });

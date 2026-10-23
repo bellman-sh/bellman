@@ -23,6 +23,15 @@ export function isOrgId(value: string): boolean {
 
 export const grantKey = (key: string): string => `gr:${key}`;
 
+/** The org record's row (orgs spec, D1): its own prefix, beside the grant's and the index's. */
+export const orgKey = (orgId: string): string => `org:${orgId}`;
+
+/** An org's IdP (SSO spec, D9), apart from its record so a read of the org never hands out a secret. */
+export const idpKey = (orgId: string): string => `oi:${orgId}`;
+
+/** The one index a verified domain writes (SSO spec, D11): the org a domain routes a sign-in to. */
+export const domainKey = (domain: string): string => `od:${domain}`;
+
 /**
  * `go:<org>:<key>` is only unambiguous if the org segment cannot itself contain
  * the separator. Otherwise the encoding is not injective and two different

@@ -1,16 +1,17 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import { allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
+  Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, DepartedMembers, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
+  AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
   SeatOutcome,
 } from "./store.js";
 import {
@@ -27,13 +28,13 @@ import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
-import { publicEvent } from "./public-event.js";
+import { publicEvent, readableEvent, readableEvents } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import {
   AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
-import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
   REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
@@ -852,17 +853,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * Both come BEFORE the events read, so a refusal reads nothing more and
    * accepts nothing, and the events read stays the last await ahead of the
-   * attach. Every one of them is a storage read, which is what keeps the gate
-   * closed across the whole sequence.
+   * attach. So does the list of every member row the frames are judged by
+   * (read_context), after both rechecks, so a refusal still lists nothing.
+   * Every one of them is a storage read, which is what keeps the gate closed
+   * across the whole sequence.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
    * which races an append against an upgrade, is what exercises it.
    *
    * What goes out is publicEvent(e), the shape wake() and the poll use, and not
-   * the stored event, which carries the sender's user id (spec D1a). The frames
-   * are built straight after the read, so that a failure there, like the read's
-   * and the attach's, accepts nothing.
+   * the stored event, which carries the sender's user id (spec D1a). And only
+   * the events as no one may read them (read_context plan, R2), which is what
+   * wake() sends a live socket, so a reconnect is shown no more: a brief its
+   * author keeps is dropped, and their join goes out with its brief null. The
+   * attached cursor is still the last event read, so it moves past one dropped.
+   * The frames are built straight after the read, so that a failure there, like
+   * the read's and the attach's, accepts nothing.
    *
    * The cursor goes on before the accept. wake() has no good answer for a
    * socket whose cursor it does not know: send it everything, or silently
@@ -939,6 +946,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return new Response("Forbidden", { status: 403 });
     }
 
+    // Every member row, departed included: a frame shows a brief only when its
+    // author grants read_context, a member who left keeps their grant (D2), and
+    // the record holds only the members in the room now (ADR 0019). Listed before
+    // the events read, though only the briefs' authors are wanted, because those
+    // are known only from the events, and the events read must stay the last
+    // await (plan ruling R12).
+    // ponytail: every member row on each upgrade, as departedMembers lists them;
+    // read only briefAuthors(missed)'s rows when a roster outgrows one list, which
+    // moves a storage read after the events read and the sequence test with it.
+    const rows = [...(await this.ctx.storage.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+
     // The last await, and every one before it is a storage read, so the gate
     // holds from the first recheck to the return. From here nothing yields.
     const missed = await this.events(cursor, REPLAY_LIMIT + 1);
@@ -948,7 +966,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         { status: 410 },
       );
     }
-    const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
+    // As no one (R2), so the attachment below still takes its cursor from `missed`.
+    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -1906,10 +1925,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<SessionEvent | null> {
     let broughtForward = false as boolean;
     let wakesHost = false;
+    // The rows this transaction read, for the wake's read_context rule.
+    let members: readonly Member[] = [];
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
+      members = s.members;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const owed = await extraRows(txn, s, next, extras);
       const wake = await this.#replyWakeRows(txn, s, next);
@@ -1917,7 +1939,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       broughtForward = await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
       return next;
     });
-    if (event) this.#wake(event);
+    if (event) this.#wake(event, members);
     // After the wake, so the member removed receives the frame announcing it
     // before the socket goes. The notice is the last thing they get.
     if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
@@ -2023,9 +2045,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<EventWrite> {
     let broughtForward = false as boolean;
     let wakesHost = false;
+    // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
+    let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
+      members = s.members;
 
       const storageKey = idempotencyKey(e.fromMemberId, key);
       const record = await txn.get<IdempotencyRecord>(storageKey);
@@ -2080,7 +2105,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       broughtForward = await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts, ...wake }, owed.deletes);
       return { outcome: "appended", event };
     });
-    if (result.outcome === "appended") this.#wake(result.event);
+    if (result.outcome === "appended") this.#wake(result.event, members);
     // The sockets follow the cut down this path as they do down appendEvent's:
     // the contract hands both the same extras, so a cut that held here and left
     // the socket open would be the open feed by another route. A replay counts
@@ -2131,6 +2156,33 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s || s.hostUnits.month >= month) return;
       await putRows(txn, memberRows(s, { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } }));
     });
+  }
+
+  /**
+   * `BellmanStore.setHostInstructions`, for this room: the manifest's `host.instructions` and the audit rows the
+   * change owes in one transaction, the rows riding the outbox as `removeMember`'s do and delivered once it has
+   * committed. The value the room already holds writes nothing and queues nothing. The refusals are read in the
+   * same transaction as the write, so a room that closes after the route read it is refused here.
+   */
+  async setHostInstructions(instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    let queued = false;
+    const result = await this.ctx.storage.transaction<HostInstructionsSet>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found" };
+      const host = s.manifest.host;
+      if (host === null) return { ok: false, reason: "no_host" };
+      if (s.closed) return { ok: false, reason: "closed" };
+      if (host.instructions === instructions) return { ok: true, instructions };
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9, runtime fact 4): filtered here, as
+      // `removeMember` filters its rows, so a dead row never enters the queue.
+      const intents = audit.filter((e) => e.orgId).map(auditIntent);
+      queued = intents.length > 0;
+      const rows = await this.driver.enqueue(txn, intents);
+      await putRows(txn, { ...memberRows(s, { ...s, manifest: { ...s.manifest, host: { ...host, instructions } } }), ...rows });
+      return { ok: true, instructions };
+    });
+    if (queued) await this.driver.deliverNow();
+    return result;
   }
 
   /** `limit` bounds the storage list itself (I4): the hosted seat's read passes one, every other read none. */
@@ -2233,6 +2285,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * receives every other member's events (spec D1a). The waiter arm resolves
    * with the stored event because the poll projects it at the tool boundary.
    *
+   * And it is the event as no one may read it (read_context plan, R2), because
+   * one frame goes to every socket in the room, the author's own included. A
+   * brief_update whose author keeps their brief builds no frame: no socket is
+   * sent it and no attachment moves. A member_joined of theirs goes out with its
+   * brief null. Here the two arms part: the poll reads as its caller's account
+   * (eventsFor), so an author reads their own brief on another handle's sync and
+   * on no socket. The author is judged by their row in `members`, the rows the
+   * append read; appendEvent and appendEventOnce hand theirs. An author not among
+   * them reads as not granting (R11). Every other caller hands none, and none of
+   * their events carries a brief.
+   *
    * Synchronous on purpose. getWebSockets, deserializeAttachment, send and
    * serializeAttachment are all sync, so nothing here yields — an await
    * between reading a socket's cursor and sending would reopen the gap that
@@ -2247,22 +2310,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * is deliberately absent here: it would skip socket delivery whenever nobody
    * is long-polling, which is the common case once the bridge stops polling.
    */
-  #wake(event: SessionEvent): void {
+  #wake(event: SessionEvent, members: readonly Member[] = []): void {
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
 
-    // Built on the first socket that is due the event and shared by the rest: a
+    // Decided on the first socket that is due the event and shared by the rest: a
     // poll-only room pays nothing per append, and a projection failure lands in
     // the per-socket try below instead of failing an append whose event is
-    // already stored.
-    let frame: string | undefined;
+    // already stored. Null is a decision too, the event shown to no socket.
+    let frame: string | null | undefined;
     for (const ws of this.ctx.getWebSockets()) {
       // One socket must not starve the rest. getWebSockets() returns a list, and
       // a throw would end this loop with every later socket missing the event,
       // after the waiter arm had run and the event was stored. So each socket is
       // its own try: log, skip, carry on. The cause known today is building the
-      // frame, JSON.stringify(publicEvent(event)), which sits inside the try and
+      // frame, JSON.stringify(publicEvent(shown)), which sits inside the try and
       // which "contains a frame that cannot be built" drives. The one send
       // failure observed, to a socket that is closing, is skipped below instead
       // of caught; a send to a socket that reads OPEN has not been observed to
@@ -2295,7 +2358,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // wrong, and over-delivering every event to a socket whose cursor we do
         // not know is the worse of the two answers.
         if (!att || event.cursor <= att.cursor) continue;
-        frame ??= JSON.stringify(publicEvent(event));
+        if (frame === undefined) {
+          const shown = readableEvent(event, members.find((m) => m.memberId === event.fromMemberId), null);
+          frame = shown === null ? null : JSON.stringify(publicEvent(shown));
+        }
+        if (frame === null) break;
         ws.send(frame);
         ws.serializeAttachment({ ...att, cursor: event.cursor });
       } catch (err) {
@@ -3230,7 +3297,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     return this.ctx.storage.transaction(async (txn) => {
       const stored = await txn.get<PlanGrant>(grantKey(grant.key));
       // A lapsed grant is not a grant — the same rule getGrant applies. Letting
@@ -3238,6 +3305,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // key indefinitely, because nothing sweeps it until someone reads it.
       const previous = stored && !lapsed(stored) ? stored : undefined;
       if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
+      // The seat cap (orgs spec, D3), decided in the transaction that seats: an org with a
+      // record holds as many grants as it bought, a key already in this org changes role for
+      // no seat, and an org that is only a string in grants has no record and no cap.
+      if (grant.orgId !== null && !(previous && previous.orgId === grant.orgId)) {
+        const org = await txn.get<Org>(orgKey(grant.orgId));
+        if (org && (await this.#countMembers(txn, grant.orgId, Date.now())) >= org.seats) return "full" as const;
+      }
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
@@ -3258,7 +3332,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     const outcome = await this.#putGrantIfOwnedTxn(grant, expectedOrgId, audit);
     if (outcome === "written") await this.driver.deliverNow();
     return outcome;
@@ -3417,6 +3491,244 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       startAfter = last;
     }
     return live;
+  }
+
+  // ------------------------------------------------- orgs (orgs spec, D1 to D5)
+  // The record sits beside the grants that are its members, so a seat is decided in the
+  // transaction that takes it, and the rows an org change owes go out through the same outbox.
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    return this.ctx.storage.get<Org>(orgKey(orgId));
+  }
+
+  /**
+   * The org's live grants: its members (D2), the owner's among them. A scan of the org's index
+   * range, bounded by the org's own size, so it can run inside a transaction with the write it
+   * guards. `#private` because it reads through whatever storage it is handed.
+   * ponytail: a scan per member write; a counter row is the upgrade if an org ever holds thousands.
+   */
+  async #countMembers(from: Pick<DurableObjectTransaction, "list">, orgId: string, now: number): Promise<number> {
+    let count = 0;
+    for (const grant of (await from.list<PlanGrant>({ prefix: orgIndexPrefix(orgId) })).values()) {
+      if (!lapsed(grant, now)) count++;
+    }
+    return count;
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.#countMembers(this.ctx.storage, orgId, Date.now());
+  }
+
+  async #createOrgTxn(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (await txn.get<Org>(orgKey(org.orgId))) return "exists" as const;
+      const stored = await txn.get<PlanGrant>(grantKey(ownerGrant.key));
+      const previous = stored && !lapsed(stored) ? stored : undefined;
+      if (previous && previous.orgId !== org.orgId) return "conflict" as const;
+      for (const stale of staleIndexKeys(stored, ownerGrant)) await txn.delete(stale);
+      const now = Date.now();
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([
+        ...orgAuditEntries(undefined, org, audit, now),
+        ...grantAuditEntries(previous, ownerGrant, audit, now),
+      ]));
+      // The record, the owner's grant, its index copy and the rows to record them, in one commit (D7).
+      await txn.put<unknown>({
+        [orgKey(org.orgId)]: org,
+        [grantKey(ownerGrant.key)]: ownerGrant,
+        [orgIndexKey(ownerGrant.orgId, ownerGrant.key)]: ownerGrant,
+        ...rows,
+      });
+      return "created" as const;
+    });
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    const outcome = await this.#createOrgTxn(org, ownerGrant, audit);
+    if (outcome === "created") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #updateOrgTxn(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      if (!previous) return undefined;
+      const next = patchedOrg(previous, patch);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, Date.now())));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return next;
+    });
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    const next = await this.#updateOrgTxn(orgId, patch, audit);
+    if (next) await this.driver.deliverNow();
+    return next;
+  }
+
+  async #activatePurchasedOrgTxn(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      // Billing touches only what billing created (ADR 0014, decision 3): an operator org stays as it is.
+      if (previous && previous.source !== "purchase") return "not_purchased" as const;
+      if (previous && previous.seats === seats && previous.active) return "unchanged" as const;
+      const now = Date.now();
+      // The seats and the standing, and nothing else (D4): the name its owner gave it survives every Stripe event.
+      const next: Org = previous ? { ...previous, seats, active: true } : purchasedOrg(orgId, ownerUserId, seats, now);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, now)));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return previous ? ("updated" as const) : ("created" as const);
+    });
+  }
+
+  async activatePurchasedOrg(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
+    const outcome = await this.#activatePurchasedOrgTxn(orgId, ownerUserId, seats, audit);
+    if (outcome === "created" || outcome === "updated") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #deactivateOrgTxn(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<Org>(orgKey(orgId));
+      if (!previous) return "missing" as const;
+      if (previous.source !== "purchase") return "not_purchased" as const;
+      if (!previous.active) return "unchanged" as const;
+      const next: Org = { ...previous, active: false };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(orgAuditEntries(previous, next, audit, Date.now())));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "updated" as const;
+    });
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
+    const outcome = await this.#deactivateOrgTxn(orgId, audit);
+    if (outcome === "updated") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  // ------------------------------------------------- SSO (SSO spec, D9, D11, D13)
+
+  async #putOrgIdpTxn(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<Org>(orgKey(orgId)))) return "missing" as const;
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "idp_configured", { issuer: idp.issuer }, audit, Date.now())]));
+      await txn.put<unknown>({ [idpKey(orgId)]: idp, ...rows });
+      return "written" as const;
+    });
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    const outcome = await this.#putOrgIdpTxn(orgId, idp, audit);
+    if (outcome === "written") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    return this.ctx.storage.get<OrgIdp>(idpKey(orgId));
+  }
+
+  async #deleteOrgIdpTxn(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<OrgIdp>(idpKey(orgId)))) return "missing" as const;
+      await txn.delete(idpKey(orgId));
+      await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "idp_removed", {}, audit, Date.now())])));
+      return "deleted" as const;
+    });
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    const outcome = await this.#deleteOrgIdpTxn(orgId, audit);
+    if (outcome === "deleted") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #claimDomainTxn(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "missing" as const;
+      if (org.domains.some((d) => d.domain === domain)) return "exists" as const;
+      const next: Org = { ...org, domains: [...org.domains, { domain, token, verifiedAt: null }] };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_claimed", { domain }, audit, now)]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "claimed" as const;
+    });
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    const outcome = await this.#claimDomainTxn(orgId, domain, token, now, audit);
+    if (outcome === "claimed") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  /** The index read and the claim's write in one transaction (D11): two orgs verifying one domain at once cannot both win. */
+  async #verifyDomainTxn(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      const claim = org?.domains.find((d) => d.domain === domain);
+      if (!org || !claim) return "unknown" as const;
+      const holder = await txn.get<string>(domainKey(domain));
+      if (holder !== undefined && holder !== orgId) return "taken" as const;
+      if (claim.verifiedAt !== null) {
+        await txn.put(domainKey(domain), orgId);
+        return "verified" as const;
+      }
+      const next: Org = { ...org, domains: org.domains.map((d) => (d.domain === domain ? { ...d, verifiedAt: now } : d)) };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_verified", { domain }, audit, now)]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, [domainKey(domain)]: orgId, ...rows });
+      return "verified" as const;
+    });
+  }
+
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    const outcome = await this.#verifyDomainTxn(orgId, domain, now, audit);
+    if (outcome === "verified") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #releaseDomainTxn(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org || !org.domains.some((d) => d.domain === domain)) return "unknown" as const;
+      const next: Org = { ...org, domains: org.domains.filter((d) => d.domain !== domain) };
+      if ((await txn.get<string>(domainKey(domain))) === orgId) await txn.delete(domainKey(domain));
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "domain_released", { domain }, audit, Date.now())]));
+      await txn.put<unknown>({ [orgKey(orgId)]: next, ...rows });
+      return "released" as const;
+    });
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    const outcome = await this.#releaseDomainTxn(orgId, domain, audit);
+    if (outcome === "released") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(domainKey(domain));
+  }
+
+  async #provisionSsoMemberTxn(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const org = await txn.get<Org>(orgKey(orgId));
+      if (!org) return "no_org" as const;
+      const stored = await txn.get<PlanGrant>(grantKey(key));
+      if (stored && !lapsed(stored, now)) return "exists" as const;
+      if ((await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
+      const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
+      for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
+      await txn.put<unknown>({ [grantKey(key)]: grant, [orgIndexKey(orgId, key)]: grant, ...rows });
+      return "written" as const;
+    });
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    const outcome = await this.#provisionSsoMemberTxn(orgId, key, now, audit);
+    if (outcome === "written") await this.driver.deliverNow();
+    return outcome;
   }
 
   /**
@@ -4565,6 +4877,10 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).renewHostAllowance(month, units);
   }
 
+  async setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    return this.session(sessionId).setHostInstructions(instructions, audit);
+  }
+
   async waitForEvents(
     sessionId: string,
     cursor: number,
@@ -4674,7 +4990,7 @@ export class DurableObjectStore implements BellmanStore {
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
-  ): Promise<"written" | "conflict"> {
+  ): Promise<"written" | "conflict" | "full"> {
     return this.registry.putGrantIfOwned(grant, expectedOrgId, audit);
   }
 
@@ -4708,6 +5024,64 @@ export class DurableObjectStore implements BellmanStore {
 
   async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
     return this.registry.listGrants(limit, orgId);
+  }
+
+  async getOrg(orgId: string): Promise<Org | undefined> {
+    return this.registry.getOrg(orgId);
+  }
+
+  async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {
+    return this.registry.createOrg(org, ownerGrant, audit);
+  }
+
+  async updateOrg(orgId: string, patch: OrgPatch, audit: AuditIntent): Promise<Org | undefined> {
+    return this.registry.updateOrg(orgId, patch, audit);
+  }
+
+  async countOrgMembers(orgId: string): Promise<number> {
+    return this.registry.countOrgMembers(orgId);
+  }
+
+  async activatePurchasedOrg(
+    orgId: string, ownerUserId: string, seats: number, audit: AuditIntent,
+  ): Promise<"created" | "updated" | "unchanged" | "not_purchased"> {
+    return this.registry.activatePurchasedOrg(orgId, ownerUserId, seats, audit);
+  }
+
+  async deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased"> {
+    return this.registry.deactivateOrg(orgId, audit);
+  }
+
+  async putOrgIdp(orgId: string, idp: OrgIdp, audit: AuditIntent): Promise<"written" | "missing"> {
+    return this.registry.putOrgIdp(orgId, idp, audit);
+  }
+
+  async getOrgIdp(orgId: string): Promise<OrgIdp | undefined> {
+    return this.registry.getOrgIdp(orgId);
+  }
+
+  async deleteOrgIdp(orgId: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
+    return this.registry.deleteOrgIdp(orgId, audit);
+  }
+
+  async claimDomain(orgId: string, domain: string, token: string, now: number, audit: AuditIntent): Promise<"claimed" | "exists" | "missing"> {
+    return this.registry.claimDomain(orgId, domain, token, now, audit);
+  }
+
+  async verifyDomain(orgId: string, domain: string, now: number, audit: AuditIntent): Promise<"verified" | "taken" | "unknown"> {
+    return this.registry.verifyDomain(orgId, domain, now, audit);
+  }
+
+  async releaseDomain(orgId: string, domain: string, audit: AuditIntent): Promise<"released" | "unknown"> {
+    return this.registry.releaseDomain(orgId, domain, audit);
+  }
+
+  async orgForDomain(domain: string): Promise<string | undefined> {
+    return this.registry.orgForDomain(domain);
+  }
+
+  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+    return this.registry.provisionSsoMember(orgId, key, now, audit);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

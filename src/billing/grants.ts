@@ -89,6 +89,13 @@ export function purchaseGrant(key: string, plan: PlanGrant["plan"], userId: stri
 export interface PurchaseGrantStore {
   putGrantIfSource(grant: PlanGrant, expectedSource: string, audit: AuditIntent): Promise<GrantWrite>;
   deleteGrantIfSource(key: string, expectedSource: string, audit: AuditIntent): Promise<GrantDelete>;
+  /**
+   * The org a team purchase pays for (orgs spec, D4): created on the first payment, its seats and
+   * standing kept current. `not_purchased` is an org the operator created under this id, left alone.
+   */
+  activatePurchasedOrg(orgId: string, ownerUserId: string, seats: number, audit: AuditIntent): Promise<"created" | "updated" | "unchanged" | "not_purchased">;
+  /** The lapse (D5): the org goes inactive and keeps its members. A no-op for an org with no record, and for an operator's. */
+  deactivateOrg(orgId: string, audit: AuditIntent): Promise<"updated" | "unchanged" | "missing" | "not_purchased">;
 }
 
 /**
@@ -123,17 +130,31 @@ export async function reconcilePurchase(
   const paid = await billing.paidPlan(userId);
 
   if (!paid) {
-    const { outcome } = await plans.deleteGrantIfSource(key, PURCHASE, {
-      actorUserId: "stripe",
-      detail: { reason: "subscription no longer paying" },
-    });
+    const lapse: AuditIntent = { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } };
+    const { outcome } = await plans.deleteGrantIfSource(key, PURCHASE, lapse);
+    // The org follows the ledger as the grant does (orgs spec, D4, D5): nobody pays for its seats,
+    // so it goes inactive, after the grant so the stream reads revocation then standing. Its
+    // members stay, resolving to free until a payment brings it back.
+    leftAlone(userId, await plans.deactivateOrg(orgForUser(userId), lapse));
     return outcome;
   }
 
   const grant = purchaseGrant(key, paid.plan, userId);
-  const { outcome } = await plans.putGrantIfSource(grant, PURCHASE, {
-    actorUserId: "stripe",
-    detail: { stripe_customer: paid.customerId },
-  });
+  const payment: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: paid.customerId } };
+  // The org before the grant, so the record exists when its owner's grant lands in it; a plan
+  // that scopes no org (pro, max) pays for no seats, and an org this buyer had goes inactive.
+  if (grant.orgId !== null) leftAlone(userId, await plans.activatePurchasedOrg(grant.orgId, userId, paid.seats, payment));
+  const { outcome } = await plans.putGrantIfSource(grant, PURCHASE, payment);
+  if (grant.orgId === null) leftAlone(userId, await plans.deactivateOrg(orgForUser(userId), payment));
   return outcome;
+}
+
+/**
+ * An org the operator created under the buyer's id is not billing's to resize or deactivate
+ * (ADR 0014, decision 3): said in the log, as a hand-written grant's clash is, and not retried.
+ */
+function leftAlone(userId: string, outcome: string): void {
+  if (outcome === "not_purchased") {
+    console.warn(`${orgForUser(userId)} was created by the operator, so ${userId}'s subscription leaves it as it is`);
+  }
 }

@@ -93,8 +93,9 @@ export function entryView(e: SeqEntry): AuditEntryView {
     seq: e.seq,
     at: new Date(e.at).toISOString(),
     action: e.action,
-    // A grant row is about an org's plan, filed under `grant:<key>`, not about a room.
-    room: e.sessionId.startsWith("grant:") ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
+    // A grant row is about an org's plan, filed under `grant:<key>`, and an org row about the org itself,
+    // under `org:<id>` (orgs spec, D8): neither is about a room.
+    room: /^(grant|org):/.test(e.sessionId) ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
     actor: recorded ? { id: e.actorUserId, label: e.actorLabel ?? null, org_id: e.actorOrgId ?? null } : { id: e.actorUserId },
     parties: recorded ? e.parties ?? [] : null,
     crossing: e.crossing ?? null,

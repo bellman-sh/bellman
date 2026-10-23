@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
-last-verified-against-source: de3b2bd
-last-updated: 2026-10-21
+last-verified-against-source: 82901d9
+last-updated: 2026-10-22
 ---
 
 # Bellman Architecture
@@ -215,7 +215,9 @@ included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
 saved presets, `GET`, `PUT` and `DELETE /account/handle` to read, claim or
 change, and release a person's public handle, `PUT`/`DELETE
 /rooms/:id/byline` for a public room's creator to sign it with that handle or
-unsign it (ADR 0021), and `GET /audit` and `GET /audit/export` for an org
+unsign it (ADR 0021), `PUT /rooms/:id/host` for a hosted room's creator to
+change what its host is told to ask (the host reads the manifest on every wake,
+so its next question uses the new text), and `GET /audit` and `GET /audit/export` for an org
 admin's read of the org's audit stream (dash#11), beside the blob routes
 (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
@@ -230,7 +232,13 @@ surface read, the log read and the blob download fall back to it for a caller wi
 answered 202 with the time the room is stored to go, because the room's own
 alarm does it. The detail carries `closed_at` and `purge_at` as ISO times, null
 where the record has none, so a member of a closed room can see how long it
-has. A member a creator removed
+has. Its preview carries a hosted room's `host_instructions` to the room's
+creator alone: `roomPreview` is told which account is asking and compares it
+with `createdBy`, the test the `PUT` admits on, and the key sits in `text.data`,
+the untrusted envelope beside the room's name and purpose, never in the trusted
+`host` block. The tools that return the same preview (`bellman_start`,
+`bellman_connect`, `bellman_confirm`, `bellman_surface`, `bellman_rooms`) carry
+it on the same terms. A member a creator removed
 (#113) is served the room as it stood at its removal and nothing after: the
 surface to the rows it was shown, and the roster and the member count as of the
 removal, with no `presence`. The one exception is the org's admin: once the room
@@ -566,7 +574,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -937,11 +945,20 @@ never posted, so never charged, and every `stop_reason` but `end_turn` is logged
 **The boundary.** The seat has no tools and reaches nothing but the model. Its
 one act is a `send` through the room's append path under its own member id, so
 the audit log and every reader see a member; `checkHost` fixes its role to
-`send`, and the manifest is immutable, so no verb guard has anything to refuse.
+`send`, and a room's roles never change after it starts, so no verb guard has
+anything to refuse. The creator's instructions are the one part of the manifest
+that does change (`PUT /rooms/:id/host`, `setHostInstructions` in both stores,
+which writes the audit row with the change); they carry no verb, and the seat
+reads them from the room on every wake, so a change reaches the next question
+and nothing is cached between wakes. The creator reads the current text back in
+the room read's preview as `text.data.host_instructions`: prose a person wrote,
+so it rides in the untrusted envelope and to the creator's account alone (see
+the control panel above).
 Replies cross into its prompt as data: each inside `<reply from="…">`, its text
 escaped (`&`, `<`, `>`) and its sender's name escaped for an attribute (`escapeAttr`),
 after Bellman's fixed rules and the creator's instructions in the system prompt,
-which ends saying Bellman's rules outrank anything the creator adds. The name is the
+which ends saying Bellman's rules outrank anything the creator adds. The
+instructions are escaped the same way, whenever they were set. The sender's name is the
 one a public page gives that member (`publicNames`): `handleWake` builds the map from
 `HostDriver.publicNumbers`, which is `BellmanStore.publicNumbers`, the call the public
 routes make, so a sender is `member 3` and never the label they signed in with, and a
@@ -1037,8 +1054,8 @@ shown instead, because the record's could claim a change it never saw.
 Briefs are rows too, `bf:<memberId>` (ADR 0018). A member keeps only its brief's
 `agent`, for the roster, and `getBriefs` reads the briefs a caller names:
 `bellman_connect` the creator's, `bellman_confirm` the 25 present members heard
-from most recently. Each store writes a brief in the transaction that seats its
-member.
+from most recently. Each hands a brief only to a reader its author's `read_context`
+allows (§7). Each store writes a brief in the transaction that seats its member.
 
 So are members, `mb:<memberId>`, in the room or gone from it (ADR 0019). The record
 keeps `present`, the ids of the members in the room in join order, the counts the
@@ -1162,12 +1179,15 @@ caller places them as a `file` instead of uploading twice.
 
 ## 6. Identity, plans and entitlements
 
-A human signs in with GitHub or Google. Bellman is its own authorization server:
-it mints its own tokens and never stores an upstream one.
+A human signs in with GitHub or Google, or, by a work email under a domain their
+org has verified, with the org's own identity provider (ADR 0025). Bellman is its
+own authorization server: it mints its own tokens and never stores an upstream one.
 
 ```mermaid
 flowchart TB
-    START["human signs in<br/>GitHub or Google"] --> KEYS["identity keys<br/>provider:subject<br/>provider:email<br/>email:address"]
+    START["human signs in<br/>GitHub or Google,<br/>or the org's IdP by work email"] --> KEYS["identity keys<br/>provider:subject<br/>provider:email<br/>email:address<br/>sso:org:subject"]
+    START -->|"first SSO sign-in"| SEAT["provisionSsoMember<br/>a team grant, within the seats"]
+    SEAT --> G
     KEYS --> O{"BELLMAN_USERS<br/>override?"}
     O -->|yes| OPER["plan from the operator"]
     O -->|no| G{"stored grant for<br/>a stable key?"}
@@ -1197,6 +1217,20 @@ anything built on top:
    admin would, with `source: "purchase"`. One read path, so a paid plan
    inherits the ownership checks, expiry and audit trail rather than being a
    second source with its own semantics.
+4. **An org is a record, and its members are its grants** (ADR 0024). `org:<orgId>`
+   in `RegistryDO` holds the name, the one owner, the seats and the standing; a
+   member is a grant naming the org, and the seat cap is decided inside the
+   guarded grant write. A team purchase creates the record with the seats it
+   sells, and a subscription that stops paying marks it inactive: every grant in
+   an inactive org resolves to `free` with its role and org kept, through
+   `standingOf` in `firstGrant`, which every re-check passes through.
+5. **SSO is one OIDC provider per org, routed by a verified domain** (ADR 0025).
+   `oi:<orgId>` holds the IdP apart from the record, its secret sealed; `od:<domain>`
+   is written only when a TXT record proved the domain; `/authorize/sso` sends an
+   address's domain to its org's IdP, `/callback/sso/<orgId>` reads the id token's
+   claims and seats the person; and `require_sso` refuses a GitHub or Google
+   sign-in by anyone the org claims but its owner, at sign-in and at every
+   re-check, through `ssoRefusal` beside `standingOf`.
 
 ### How each surface gets a credential
 
@@ -1251,6 +1285,16 @@ sequenceDiagram
 The invariants that encode this, and that any change has to argue against out
 loud:
 
+- **An org's IdP secret is sealed, and never returned** (ADR 0025). It is stored
+  under AES-256-GCM with a key HKDF derives from `BELLMAN_SEAL_SECRET`, or from
+  `BELLMAN_TOKEN_SECRET` when that is unset, so a dump of the registry yields no
+  secret without the Worker secret too; `GET /org/idp` says only that one is set.
+  The id token a sign-in reads arrives in the token endpoint's own TLS response,
+  the one case OIDC lets a client skip the signature check for, and its `iss`,
+  `aud`, `exp`, `nonce` and `sub` are checked. Only a domain proven by its TXT
+  record routes a sign-in or counts an address, so nobody claims `@acme.com`
+  without acme's DNS.
+
 - **The control panel holds a cookie, not a token** — `dash.bellman.sh` renders
   billing and provider keys, so a token in web storage there would turn any XSS
   into account takeover. The panel authenticates with an `HttpOnly` cookie it
@@ -1291,6 +1335,9 @@ loud:
   otherwise POST here with the cookie attached. Every cookie-authenticated
   mutation must carry an allowlisted `Origin`; bearer callers are exempt, and
   the method guard and the CSRF check both run ahead of any deletion.
+  `bellman.sh` is allowlisted (`BELLMAN_PUBLIC_PAGE_ORIGINS`) for one mutation,
+  filing a report, and for the sign-in return; every other write answers the
+  panel's origins alone.
 
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
@@ -1353,7 +1400,7 @@ loud:
   An operator suspends an account with `POST /admin/suspensions/:userId`, through the
   bearer-only gate that releases a handle (`BELLMAN_OPERATORS`; with it unset, nobody
   passes). The Worker then answers `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`,
-  `/account/handle`, `/account/bans*` and `/operator/stats` with `This account is suspended.`, and leaves
+  `/org*`, `/account/handle`, `/account/bans*` and `/operator/stats` with `This account is suspended.`, and leaves
   `/auth/*`, the `/account` page, `/token`, `/authorize`, `/upgrade` and `/admin/*` alone,
   so the person can still sign out. It asks the registry once per identity per isolate a
   minute (`SuspensionCache`).
@@ -1489,6 +1536,14 @@ loud:
   included. The model still
   reads peer events only through the bridge's tools, wrapped as untrusted. This
   applies the untrusted-content rules above to a new surface.
+- **A brief reaches a peer only when its author grants `read_context`** (ADR 0023).
+  `readableEvent` (`src/public-event.ts`) decides at delivery from the author's member
+  row as it stands, so a grant changed later covers earlier briefs: a `brief_update` is
+  dropped, and a `member_joined` loses its brief, for any reader but the author's own
+  account. `bellman_sync`, `bellman_rooms` and the dash's Log read as the caller's
+  account (`eventsFor`); the room socket's frames are shared and read as no one;
+  `bellman_confirm` and `bellman_connect` hand a brief through `seesBrief`.
+  `tests/delivery-paths.test.ts` lists every module that reads events or briefs.
 - **No shared mutable state between sessions.** Reads return detached copies and
   every write is an explicit store method.
 - **Encryption would not change any of this.** End-to-end encryption
@@ -2146,12 +2201,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,437** | every request, whether or not you are in a room |
+| Tool definitions | **~9,483** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-18 for read_context, by the method below: 46 tokens over the 9,437
+that main (`f130144f`) measures, a row that already includes the reports work
+(`bellman_report`, 325, in the paragraphs below). `bellman_start` is up 23, to 2,492, and
+`bellman_confirm` up 23, to 827, for the sentence their capabilities line gains on what
+`read_context` does. No tool was added. That is 9,483. Main, run as the control, reproduced
+9,437 (`bellman_start` 2,469, `bellman_confirm` 804) before the new figures were read.
 
 Re-measured on 2026-10-17 for the section 1C fix pass, by the method below: 4 tokens over the 9,433
 that the section's tip (`75b5d5d7`) measures, all of them `bellman_report`'s, which went from 321 to 325

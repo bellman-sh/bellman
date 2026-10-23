@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
-  identityKeys, immutableKeys, isStableIdentityKey, grantKeys,
+  SSO_SUB, defaultIdentity, identityKeys, immutableKeys, isStableIdentityKey, grantKeys,
+  parseSsoKey, ssoKey, ssoKeyForUser, ssoUserId,
 } from "../src/oauth/providers.js";
+import { isLinkableUserId } from "../src/billing/stripe.js";
 import type { ProviderProfile } from "../src/oauth/providers.js";
 
 const profile = (over: Partial<ProviderProfile> = {}): ProviderProfile => ({
@@ -75,5 +77,56 @@ describe("which keys a grant may be filed against", () => {
   it("filters a stored key list down to the ones a grant can use", () => {
     expect(grantKeys(identityKeys(profile())))
       .toEqual(["github:4242", "github:jesse@example.dev", "email:jesse@example.dev"]);
+  });
+});
+
+describe("SSO keys (SSO spec, D10)", () => {
+  const sso = (over: Partial<ProviderProfile> = {}): ProviderProfile => ({
+    provider: "sso", subject: "org_acme:00u1abc", label: "Ana", email: "ana@acme.com", ...over,
+  });
+
+  it("names the org and the IdP's subject, and reads itself back", () => {
+    expect(ssoKey("org_acme", "00u1abc")).toBe("sso:org_acme:00u1abc");
+    expect(parseSsoKey("sso:org_acme:00u1abc")).toEqual({ orgId: "org_acme", sub: "00u1abc" });
+    expect(parseSsoKey("sso:org_acme:a|b=c/d")).toEqual({ orgId: "org_acme", sub: "a|b=c/d" });
+  });
+
+  /** An org id holds no colon, so the first one after `sso:` is the split; the sub is printable ASCII, bounded. */
+  it("refuses a key whose org or sub is outside the grammar", () => {
+    for (const key of ["sso:org acme:x", "sso:org_acme:", "sso::x", `sso:org_acme:${"a".repeat(129)}`, "sso:org_acme:a b", "sso:org_acme", "github:4242"]) {
+      expect(parseSsoKey(key), key).toBeNull();
+    }
+    expect(SSO_SUB.test("a".repeat(128))).toBe(true);
+  });
+
+  /** The user id grammar has no separator to spare, so the pair is encoded whole and decodes back. */
+  it("mints a user id the rest of the program accepts, and recovers the key from it", () => {
+    const userId = ssoUserId("org_acme", "00u1abc");
+    expect(userId).toMatch(/^u_sso_[A-Za-z0-9_-]+$/);
+    expect(isLinkableUserId(userId)).toBe(true);
+    expect(ssoKeyForUser(userId)).toBe("sso:org_acme:00u1abc");
+    expect(ssoKeyForUser(ssoUserId("org_acme", "a|b=c/d"))).toBe("sso:org_acme:a|b=c/d");
+    for (const id of ["u_github_4242", "u_sso_!!", "u_sso_", "u_sso_" + "AAAA", "u_jesse"]) {
+      expect(ssoKeyForUser(id), id).toBeNull();
+    }
+  });
+
+  it("answers to the subject and a verified address, never a provider-prefixed address", () => {
+    expect(identityKeys(sso())).toEqual(["sso:org_acme:00u1abc", "email:ana@acme.com"]);
+    expect(identityKeys(sso({ email: undefined }))).toEqual(["sso:org_acme:00u1abc"]);
+  });
+
+  it("keeps the subject across a refresh and lets a grant be filed against it", () => {
+    expect(immutableKeys(identityKeys(sso()))).toEqual(["sso:org_acme:00u1abc"]);
+    expect(isStableIdentityKey("sso:org_acme:00u1abc")).toBe(true);
+    expect(isStableIdentityKey("sso:org_acme:")).toBe(false);
+    expect(grantKeys(identityKeys(sso()))).toEqual(["sso:org_acme:00u1abc", "email:ana@acme.com"]);
+  });
+
+  it("mints the default identity from the encoded id, labelled by the address", () => {
+    expect(defaultIdentity(sso())).toEqual({
+      userId: ssoUserId("org_acme", "00u1abc"), orgId: null, plan: "free", role: "member", label: "ana@acme.com",
+    });
+    expect(defaultIdentity(sso({ email: undefined })).label).toBe("Ana@sso");
   });
 });

@@ -43,7 +43,7 @@ function call(key: string | null, path: string, over: { method?: string; body?: 
   if (over.body !== undefined) headers["content-type"] = "application/json";
   return moderationRoutes(new Request(`${ISSUER}${path}`, {
     method: over.method ?? "GET", headers, body: over.body === undefined ? undefined : JSON.stringify(over.body),
-  }), { store, caller, panelOrigins: [PANEL], mailReport: async (r) => { mailed.push(r.id); } });
+  }), { store, caller, panelOrigins: [PANEL], publicPageOrigins: [], mailReport: async (r) => { mailed.push(r.id); } });
 }
 const answer = async (res: Response | undefined) => [res!.status, await res!.json().catch(() => null)];
 
@@ -106,7 +106,7 @@ describe("a creator's bans across their rooms", () => {
 });
 
 describe("every ban route", () => {
-  const raw = (path: string, init: RequestInit) => moderationRoutes(new Request(`${ISSUER}${path}`, init), { store, caller, panelOrigins: [PANEL] });
+  const raw = (path: string, init: RequestInit) => moderationRoutes(new Request(`${ISSUER}${path}`, init), { store, caller, panelOrigins: [PANEL], publicPageOrigins: [] });
   const bearer = { authorization: `Bearer ${DEV_KEY.jesse}` };
   const BAN = "ban_0123456789abcdef";
   const PATHS = [`/rooms/${ROOM}/bans`, `/rooms/${ROOM}/bans/${BAN}`, "/account/bans", `/account/bans/${BAN}`];
@@ -293,7 +293,7 @@ describe("a room's reports", () => {
 describe("the report route's rules", () => {
   const PATH = `/rooms/${ROOM}/reports`;
   const raw = (path: string, init: RequestInit) => moderationRoutes(new Request(`${ISSUER}${path}`, init), {
-    store, caller, panelOrigins: [PANEL], mailReport: async (r) => { mailed.push(r.id); },
+    store, caller, panelOrigins: [PANEL], publicPageOrigins: [], mailReport: async (r) => { mailed.push(r.id); },
   });
   const bearer = { authorization: `Bearer ${DEV_KEY.peer}` };
   const post = (body: string, headers: Record<string, string> = {}) =>

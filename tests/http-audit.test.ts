@@ -155,7 +155,9 @@ describe("GET /audit", () => {
   it("says a row from before crossings were recorded recorded none, and gives a grant row no room", async () => {
     await store.appendAudit({ at: 1_000, orgId: "org_a", sessionId: "qs_old", actorUserId: "u_old", action: "member_left", detail: {} });
     await store.appendAudit(row({ sessionId: "grant:github:1", roomName: null, action: "plan_granted" }));
-    const [grant, old] = (await list("/audit")).entries;
+    await store.appendAudit(row({ sessionId: "org:org_a", roomName: null, action: "org_updated", detail: { seats: 5 } }));
+    const [org, grant, old] = (await list("/audit")).entries;
+    expect(org).toMatchObject({ room: null, action: "org_updated", detail: { seats: 5 } });
     expect(grant).toMatchObject({ room: null, crossing: "internal" });
     expect(old).toEqual({
       seq: 1, at: "1970-01-01T00:00:01.000Z", action: "member_left", room: { id: "qs_old", name: null },

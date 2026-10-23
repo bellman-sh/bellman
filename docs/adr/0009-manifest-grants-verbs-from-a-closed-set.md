@@ -18,8 +18,9 @@ enforced none; #89 enforced them.
    preset (`pair`, `swarm`, `review`, `social`, or one the person saved) or authors
    `mode`, `roles`, `default_role` and `creator_role`. `resolveManifest` in
    `src/manifest.ts` refuses a malformed one before any plan, org or quota check,
-   and the stored manifest never changes: new rules mean a new room (room
-   manifests spec D6).
+   and the stored manifest never changes, bar its host's instructions, which the
+   room's creator may change at `PUT /rooms/:id/host`: new rules mean a new room
+   (room manifests spec D6).
 2. **A role's `can` lists verbs from a closed set.** `VERBS` is `send`, `invite`,
    `revoke`, `request_actions`, `respond_actions` and `write_surface` (#187); any
    other, or a duplicate, is refused. A room declares 1 to 16 roles, keyed

@@ -23,7 +23,7 @@ import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
-import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditEntry, Org, OrgIdp, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
@@ -3106,6 +3106,102 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------------ a live room's host instructions
+    /**
+     * A room's creator can change what its hosted seat is told to ask after the room has started
+     * (`PUT /rooms/:id/host`). The store's part is one write: the instructions on the manifest's
+     * `host`, and the audit rows the change owes, together or not at all. The seat reads the room's
+     * manifest on every wake, so what this stores is what the next question is built from.
+     */
+    describe("setHostInstructions", () => {
+      const NOW = () => Date.now();
+      const hostedRoom = (over: Partial<Session> = {}) => {
+        const m = hostedManifest();
+        return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, lastTickAt: NOW(), lastHostTickAt: NOW(), ...over });
+      };
+      const hostRow = (sessionId: string, chars: number): AuditEntry => ({
+        at: NOW(), orgId: "org_codenerd", sessionId, actorUserId: "u_jesse", action: "host_instructions_changed", detail: { chars },
+      });
+      const instructionsOf = async (id: string) => (await store.getSession(id))!.manifest.host?.instructions;
+
+      it("sets the instructions, changes them and clears them, answering with what is stored", async () => {
+        const s = hostedRoom({ id: "qs_hi_set" });
+        await store.createSession(s);
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [])).toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+        expect(await store.setHostInstructions(s.id, "Ask what they have learned.", [])).toEqual({ ok: true, instructions: "Ask what they have learned." });
+        expect(await instructionsOf(s.id)).toBe("Ask what they have learned.");
+        expect(await store.setHostInstructions(s.id, null, [])).toEqual({ ok: true, instructions: null });
+        expect(await instructionsOf(s.id)).toBeNull();
+      });
+
+      it("changes the instructions and nothing else in the room", async () => {
+        const s = hostedRoom({ id: "qs_hi_only" });
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!;
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", []);
+        const after = (await store.getSession(s.id))!;
+        expect(after.manifest).toEqual({ ...before.manifest, host: { ...before.manifest.host!, instructions: "Ask how agents have grown." } });
+        expect({ ...after, manifest: before.manifest }).toEqual(before);
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      });
+
+      it("refuses a room whose manifest has no host, and leaves the room as it was", async () => {
+        const s = session({ id: "qs_hi_nohost" });
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!;
+        expect(before.manifest.host).toBeNull();
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)])).toEqual({ ok: false, reason: "no_host" });
+        expect(await store.getSession(s.id)).toEqual(before);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("refuses a closed room and a missing one, and leaves the closed room as it was", async () => {
+        const s = hostedRoom({ id: "qs_hi_closed" });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        const before = (await store.getSession(s.id))!;
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)])).toEqual({ ok: false, reason: "closed" });
+        expect(await store.getSession(s.id)).toEqual(before);
+        expect(await store.setHostInstructions("qs_nobody", "Ask how agents have grown.", [])).toEqual({ ok: false, reason: "not_found" });
+        expect(await store.getSession("qs_nobody")).toBeUndefined();
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("files the audit rows it was given with the change, and files none for a repeat of the value it already holds", async () => {
+        const s = hostedRoom({ id: "qs_hi_audit" });
+        await store.createSession(s);
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)]);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id))
+          .toEqual([expect.objectContaining({ orgId: "org_codenerd", actorUserId: "u_jesse", action: "host_instructions_changed", detail: { chars: 26 } })]);
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [hostRow(s.id, 26)]))
+          .toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id), "a repeat is no change").toHaveLength(1);
+        await store.setHostInstructions(s.id, null, [hostRow(s.id, 0)]);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id).map((a) => a.detail)).toEqual([{ chars: 26 }, { chars: 0 }]);
+        expect(await store.setHostInstructions(s.id, null, [hostRow(s.id, 0)]), "clearing what is already clear").toEqual({ ok: true, instructions: null });
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toHaveLength(2);
+      });
+
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9, runtime fact 4); both stores drop such a row.
+      it("drops an audit row addressed to no org, as every audit write does", async () => {
+        const s = hostedRoom({ id: "qs_hi_noorg" });
+        await store.createSession(s);
+        await store.setHostInstructions(s.id, "Ask how agents have grown.", [{ ...hostRow(s.id, 26), orgId: "" }]);
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("takes a frozen room's change, as the creator's setting is not a send", async () => {
+        const s = hostedRoom({ id: "qs_hi_frozen" });
+        await store.createSession(s);
+        await store.freezeSession(s.id, NOW());
+        expect(await store.setHostInstructions(s.id, "Ask how agents have grown.", [])).toEqual({ ok: true, instructions: "Ask how agents have grown." });
+        expect(await instructionsOf(s.id)).toBe("Ask how agents have grown.");
+      });
+    });
+
     describe("the send count (abuse protections spec D5)", () => {
       // A stranger's key is kept apart from a member's by a store that has storage to keep it in, so the same
       // count is asked of both kinds of key.
@@ -4191,6 +4287,268 @@ export function describeStoreContract(
     });
 
     // --------------------------------------------- saved presets (designer)
+    describe("orgs (#53)", () => {
+      const acme = (over: Partial<Org> = {}): Org => ({
+        orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
+        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+      });
+      const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
+        grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
+      });
+      const member = (key: string, over: Partial<PlanGrant> = {}): PlanGrant =>
+        owner({ key, role: "member", source: "org", ...over });
+      const by = { actorUserId: "u_op" };
+      const actions = async (orgId = "org_acme") => (await store.auditForOrg(orgId, 20)).map((e) => e.action);
+
+      it("creates the record and seats its owner in one operation, and refuses the id a second time", async () => {
+        expect(await store.createOrg(acme(), owner(), by)).toBe("created");
+        expect(await store.getOrg("org_acme")).toEqual(acme());
+        expect(await store.getGrant("github:1")).toEqual(owner());
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect(await actions()).toEqual(["org_created", "plan_granted"]);
+
+        expect(await store.createOrg(acme({ name: "Again" }), owner(), by)).toBe("exists");
+        expect((await store.getOrg("org_acme"))?.name).toBe("Acme");
+      });
+
+      it("refuses an owner key granted in another org, and writes neither record nor grant", async () => {
+        await store.putGrant(owner({ orgId: "org_other" }));
+        expect(await store.createOrg(acme(), owner(), by)).toBe("conflict");
+        expect(await store.getOrg("org_acme")).toBeUndefined();
+        expect(await store.getGrant("github:1")).toMatchObject({ orgId: "org_other" });
+        expect(await actions()).toEqual([]);
+      });
+
+      /** An org that lived as a string in grants gets its record later: the owner's old member grant becomes the admin one. */
+      it("replaces a grant the owner's key already holds in this org", async () => {
+        await store.putGrant(owner({ role: "member" }));
+        expect(await store.createOrg(acme(), owner(), by)).toBe("created");
+        expect(await store.getGrant("github:1")).toMatchObject({ role: "admin" });
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+      });
+
+      it("answers undefined for an org nobody created, and a detached copy otherwise", async () => {
+        expect(await store.getOrg("org_nobody")).toBeUndefined();
+        await store.createOrg(acme(), owner(), by);
+        const read = (await store.getOrg("org_acme"))!;
+        read.name = "Mutated";
+        read.domains.push({ domain: "x.test", token: "t", verifiedAt: null });
+        expect(await store.getOrg("org_acme")).toEqual(acme());
+      });
+
+      it("updates the name, the seats and the SSO switch, recording only what changed", async () => {
+        await store.createOrg(acme(), owner(), by);
+        expect(await store.updateOrg("org_acme", { name: "Acme Ltd", seats: 5 }, by)).toEqual(acme({ name: "Acme Ltd", seats: 5 }));
+        expect(await store.updateOrg("org_acme", { requireSso: true }, by)).toMatchObject({ requireSso: true });
+        expect(await store.updateOrg("org_acme", { seats: 5 }, by)).toMatchObject({ seats: 5 });
+        expect(await store.updateOrg("org_nobody", { name: "x" }, by)).toBeUndefined();
+        const rows = (await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "org_updated");
+        expect(rows.map((e) => e.detail)).toEqual([{ name: "Acme Ltd", seats: 5 }, { require_sso: true }]);
+      });
+
+      it("refuses a member past the seats, writing nothing and recording nothing", async () => {
+        await store.createOrg(acme(), owner(), by);
+        expect(await store.putGrantIfOwned(member("github:2"), "org_acme", by)).toBe("written");
+        expect(await store.putGrantIfOwned(member("github:3"), "org_acme", by)).toBe("full");
+        expect(await store.getGrant("github:3")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect((await actions()).filter((a) => a === "plan_granted")).toHaveLength(2);
+      });
+
+      it("takes no seat for a role change at the cap", async () => {
+        await store.createOrg(acme(), owner(), by);
+        await store.putGrantIfOwned(member("github:2"), "org_acme", by);
+        expect(await store.putGrantIfOwned(member("github:2", { role: "admin" }), "org_acme", by)).toBe("written");
+        expect(await store.getGrant("github:2")).toMatchObject({ role: "admin" });
+      });
+
+      it("caps nothing in an org that has no record", async () => {
+        for (const n of [1, 2, 3, 4, 5]) {
+          expect(await store.putGrantIfOwned(member(`github:${n}`, { orgId: "org_free" }), "org_free", by)).toBe("written");
+        }
+        expect(await store.countOrgMembers("org_free")).toBe(5);
+      });
+
+      /** Claiming an address grant onto its subject at sign-in adds nobody, so it must cost no seat. */
+      it("keeps the seat count across a move of a member's key", async () => {
+        await store.createOrg(acme(), owner(), by);
+        await store.putGrantIfOwned(member("email:a@acme.test"), "org_acme", by);
+        await store.moveGrant("email:a@acme.test", "github:9");
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect(await store.putGrantIfOwned(member("github:9", { role: "admin" }), "org_acme", by)).toBe("written");
+        expect(await store.putGrantIfOwned(member("github:10"), "org_acme", by)).toBe("full");
+      });
+
+      it("keeps every member when the seats fall below them, and refuses the next", async () => {
+        await store.createOrg(acme({ seats: 3 }), owner(), by);
+        await store.putGrantIfOwned(member("github:2"), "org_acme", by);
+        await store.putGrantIfOwned(member("github:3"), "org_acme", by);
+        await store.updateOrg("org_acme", { seats: 1 }, by);
+        expect((await store.listGrants(10, "org_acme")).map((g) => g.key).sort()).toEqual(["github:1", "github:2", "github:3"]);
+        expect(await store.putGrantIfOwned(member("github:4"), "org_acme", by)).toBe("full");
+      });
+
+      it("does not count a lapsed grant toward the seats", async () => {
+        await store.createOrg(acme(), owner(), by);
+        await store.putGrant(member("github:2", { expiresAt: Date.now() - 1 }));
+        expect(await store.countOrgMembers("org_acme")).toBe(1);
+        expect(await store.putGrantIfOwned(member("github:3"), "org_acme", by)).toBe("written");
+      });
+
+      it("activates a purchased org: created named by its id, then updated, then unchanged", async () => {
+        const stripe = { actorUserId: "stripe" };
+        expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("created");
+        expect(await store.getOrg("org_u_github_4242")).toEqual({
+          orgId: "org_u_github_4242", name: "org_u_github_4242", ownerUserId: "u_github_4242", seats: 3,
+          source: "purchase", active: true, createdAt: Date.now(), requireSso: false, domains: [],
+        });
+        expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("unchanged");
+        expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 5, stripe)).toBe("updated");
+        const rows = await store.auditForOrg("org_u_github_4242", 20);
+        expect(rows.map((e) => [e.action, e.actorUserId])).toEqual([["org_created", "stripe"], ["org_updated", "stripe"]]);
+        expect(rows[1].detail).toEqual({ seats: 5 });
+      });
+
+      it("keeps the name its owner gave it across a later activation", async () => {
+        const stripe = { actorUserId: "stripe" };
+        await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe);
+        await store.updateOrg("org_u_github_4242", { name: "Acme" }, { actorUserId: "u_github_4242" });
+        await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 4, stripe);
+        expect(await store.getOrg("org_u_github_4242")).toMatchObject({ name: "Acme", seats: 4 });
+      });
+
+      /**
+       * Billing touches only what billing created (ADR 0014, decision 3, carried to the org): an org the
+       * operator made, under whatever id, keeps its seats and stays active whatever a subscription does.
+       */
+      it("leaves an operator org alone: a purchase neither resizes nor deactivates it", async () => {
+        const stripe = { actorUserId: "stripe" };
+        await store.createOrg(acme({ orgId: "org_u_github_1", seats: 10 }), owner({ orgId: "org_u_github_1" }), by);
+        expect(await store.activatePurchasedOrg("org_u_github_1", "u_github_1", 3, stripe)).toBe("not_purchased");
+        expect(await store.deactivateOrg("org_u_github_1", stripe)).toBe("not_purchased");
+        expect(await store.getOrg("org_u_github_1")).toMatchObject({ seats: 10, active: true, source: "operator" });
+        expect((await store.auditForOrg("org_u_github_1", 20)).map((e) => e.action)).toEqual(["org_created", "plan_granted"]);
+      });
+
+      it("deactivates an org once, and a later activation brings it back", async () => {
+        const stripe = { actorUserId: "stripe" };
+        expect(await store.deactivateOrg("org_nobody", stripe)).toBe("missing");
+        await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe);
+        expect(await store.deactivateOrg("org_u_github_4242", stripe)).toBe("updated");
+        expect(await store.getOrg("org_u_github_4242")).toMatchObject({ active: false, seats: 3 });
+        expect(await store.deactivateOrg("org_u_github_4242", stripe)).toBe("unchanged");
+        expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("updated");
+        expect(await store.getOrg("org_u_github_4242")).toMatchObject({ active: true });
+        const rows = (await store.auditForOrg("org_u_github_4242", 20)).filter((e) => e.action === "org_updated");
+        expect(rows.map((e) => e.detail)).toEqual([{ active: false }, { active: true }]);
+      });
+    });
+
+    describe("SSO (#55)", () => {
+      const acme = (over: Partial<Org> = {}): Org => ({
+        orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
+        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+      });
+      const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
+        grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
+      });
+      const idp: OrgIdp = {
+        protocol: "oidc", issuer: "https://idp.test", clientId: "0oa", clientSecret: "v1.sealed.value", tokenAuth: "client_secret_basic",
+        authorizationEndpoint: "https://idp.test/authorize", tokenEndpoint: "https://idp.test/token", userinfoEndpoint: null,
+        configuredAt: 5, configuredBy: "u_github_1",
+      };
+      const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
+      const actions = async (orgId = "org_acme") => (await store.auditForOrg(orgId, 20)).map((e) => e.action);
+      const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+
+      it("keeps an org's IdP apart from its record, untouched, and drops it once", async () => {
+        expect(await store.putOrgIdp("org_acme", idp, by)).toBe("missing");
+        await seated();
+        expect(await store.putOrgIdp("org_acme", idp, by)).toBe("written");
+        expect(await store.getOrgIdp("org_acme")).toEqual(idp);
+        expect(await store.getOrg("org_acme")).toEqual(acme());
+        expect(await store.deleteOrgIdp("org_acme", by)).toBe("deleted");
+        expect(await store.getOrgIdp("org_acme")).toBeUndefined();
+        expect(await store.deleteOrgIdp("org_acme", by)).toBe("missing");
+        expect(await actions()).toEqual(["org_created", "plan_granted", "idp_configured", "idp_removed"]);
+        expect((await store.auditForOrg("org_acme", 20))[2].detail).toEqual({ issuer: "https://idp.test" });
+      });
+
+      it("claims a domain on the record without routing it, once", async () => {
+        await seated();
+        expect(await store.claimDomain("org_acme", "acme.test", "tok", 9, by)).toBe("claimed");
+        expect((await store.getOrg("org_acme"))?.domains).toEqual([{ domain: "acme.test", token: "tok", verifiedAt: null }]);
+        expect(await store.orgForDomain("acme.test")).toBeUndefined();
+        expect(await store.claimDomain("org_acme", "acme.test", "other", 10, by)).toBe("exists");
+        expect((await store.getOrg("org_acme"))?.domains[0].token).toBe("tok");
+        expect(await store.claimDomain("org_nobody", "acme.test", "tok", 9, by)).toBe("missing");
+        expect(await actions()).toEqual(["org_created", "plan_granted", "domain_claimed"]);
+      });
+
+      it("verifies a claim, writes the index, and records the first verification only", async () => {
+        await seated();
+        await store.claimDomain("org_acme", "acme.test", "tok", 9, by);
+        expect(await store.verifyDomain("org_acme", "acme.test", 11, by)).toBe("verified");
+        expect((await store.getOrg("org_acme"))?.domains).toEqual([{ domain: "acme.test", token: "tok", verifiedAt: 11 }]);
+        expect(await store.orgForDomain("acme.test")).toBe("org_acme");
+        expect(await store.verifyDomain("org_acme", "acme.test", 12, by)).toBe("verified");
+        expect((await store.getOrg("org_acme"))?.domains[0].verifiedAt).toBe(11);
+        expect(await store.verifyDomain("org_acme", "nobody.test", 12, by)).toBe("unknown");
+        expect((await actions()).filter((a) => a === "domain_verified")).toHaveLength(1);
+      });
+
+      it("lets one org verify a domain: the second is taken, and its claim stays unverified", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.claimDomain("org_acme", "acme.test", "tok", 9, by);
+        await store.claimDomain("org_b", "acme.test", "tok2", 9, { actorUserId: "u_github_2" });
+        expect(await store.verifyDomain("org_acme", "acme.test", 11, by)).toBe("verified");
+        expect(await store.verifyDomain("org_b", "acme.test", 12, { actorUserId: "u_github_2" })).toBe("taken");
+        expect((await store.getOrg("org_b"))?.domains[0].verifiedAt).toBeNull();
+        expect(await store.orgForDomain("acme.test")).toBe("org_acme");
+      });
+
+      it("releases a claim and its index, and answers unknown after", async () => {
+        await seated();
+        await store.claimDomain("org_acme", "acme.test", "tok", 9, by);
+        await store.verifyDomain("org_acme", "acme.test", 11, by);
+        expect(await store.releaseDomain("org_acme", "acme.test", by)).toBe("released");
+        expect((await store.getOrg("org_acme"))?.domains).toEqual([]);
+        expect(await store.orgForDomain("acme.test")).toBeUndefined();
+        expect(await store.releaseDomain("org_acme", "acme.test", by)).toBe("unknown");
+        expect((await actions()).at(-1)).toBe("domain_released");
+      });
+
+      it("does not release another org's index for a domain this org only claimed", async () => {
+        await seated();
+        await store.createOrg(acme({ orgId: "org_b", ownerUserId: "u_github_2" }), owner({ key: "github:2", orgId: "org_b" }), { actorUserId: "u_op" });
+        await store.claimDomain("org_acme", "acme.test", "tok", 9, by);
+        await store.verifyDomain("org_acme", "acme.test", 11, by);
+        await store.claimDomain("org_b", "acme.test", "tok2", 9, { actorUserId: "u_github_2" });
+        expect(await store.releaseDomain("org_b", "acme.test", { actorUserId: "u_github_2" })).toBe("released");
+        expect(await store.orgForDomain("acme.test")).toBe("org_acme");
+      });
+
+      it("seats an SSO sign-in once, as a team member from sso, within the seats", async () => {
+        await seated();
+        const sso = { actorUserId: "sso", detail: { org_id: "org_acme" } };
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 13, sso)).toBe("written");
+        expect(await store.getGrant("sso:org_acme:00u1")).toEqual({
+          key: "sso:org_acme:00u1", plan: "team", role: "member", orgId: "org_acme", source: "sso", grantedAt: 13, grantedBy: "sso", expiresAt: null,
+        });
+        await store.putGrantIfOwned({ ...owner({ key: "sso:org_acme:00u1", role: "admin", source: "sso" }) }, "org_acme", by);
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u1", 14, sso)).toBe("exists");
+        expect(await store.getGrant("sso:org_acme:00u1")).toMatchObject({ role: "admin" });
+        expect(await store.provisionSsoMember("org_acme", "sso:org_acme:00u2", 15, sso)).toBe("full");
+        expect(await store.getGrant("sso:org_acme:00u2")).toBeUndefined();
+        expect(await store.countOrgMembers("org_acme")).toBe(2);
+        expect(await store.provisionSsoMember("org_nobody", "sso:org_nobody:00u1", 15, sso)).toBe("no_org");
+        expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "plan_granted").map((e) => e.actorUserId)).toEqual(["u_op", "sso", "u_github_1"]);
+      });
+    });
+
     describe("saved presets", () => {
       const preset = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
         name,

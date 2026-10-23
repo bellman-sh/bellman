@@ -286,11 +286,18 @@ const HousekeepingShape = z.strictObject({
 });
 export type HousekeepingInput = z.input<typeof HousekeepingShape>;
 
+/**
+ * What a creator tells a room's hosted seat to ask, at most 300 characters, the bound `purpose` has. One schema
+ * for the manifest and for `PUT /rooms/:id/host`, which changes the instructions on a live room, so what a
+ * creator may set after the start is exactly what a manifest could set at it.
+ */
+export const HostInstructionsShape = z.string().max(300);
+
 const HostShape = z.strictObject({
   // Echoed verbatim by the cross-field errors, as default_role is, so it is bounded the same way.
   role: z.string().max(MAX_ROLE_KEY_LENGTH),
   model: z.enum(HOST_MODEL_NAMES).default("haiku"),
-  instructions: z.string().max(300).nullish(),
+  instructions: HostInstructionsShape.nullish(),
 });
 
 const CiteShape = z.strictObject({

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { ROOM_TAIL, UNTRUSTED_PREAMBLE, roomSummary } from "../projections.js";
+import { eventsFor } from "../rooms.js";
 import { JOINED_SCAN, isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import type { Identity } from "../types.js";
@@ -41,9 +42,10 @@ Closed rooms, and rooms you left or were removed from, are not listed. Peer-writ
       ]);
       const now = Date.now();
       const rooms: ReturnType<typeof roomSummary>[] = [];
-      // ponytail: three object calls per live room, sequentially, on every poll
-      // (15 s from the monitor). Fine over tens of rooms; a registry-side summary
-      // is the upgrade if the panel (#49) polls the same way.
+      // ponytail: three object calls per live room, four when the tail holds a brief
+      // (`eventsFor` reads its authors), sequentially, on every poll (15 s from the
+      // monitor). Fine over tens of rooms; a registry-side summary is the upgrade if
+      // the panel (#49) polls the same way.
       for (const id of ids) {
         if (rooms.length >= ROOMS_LIMIT) break;
         const session = await s.getSession(id);
@@ -57,7 +59,10 @@ Closed rooms, and rooms you left or were removed from, are not listed. Peer-writ
           s.connectedMembers(id),
           s.recentEvents(id, ROOM_TAIL),
         ]);
-        rooms.push(roomSummary(session, mine, connected, tail, now));
+        // The tail as this account may read it (read_context spec, section 1): a brief_update its author
+        // keeps is not a peer's `last_event`, which would name its cursor, type and time.
+        const readable = await eventsFor(s, id, tail, identity.userId);
+        rooms.push(roomSummary(session, mine, connected, readable, now, identity.userId));
       }
       return ok({ rooms }, rooms.length > 0 ? UNTRUSTED_PREAMBLE : undefined);
     },

@@ -99,14 +99,14 @@ const checkout = (customer: string, userId: string | null) =>
  */
 const subscription = (
   type: "created" | "updated" | "deleted",
-  opts: { id?: string; customer?: string; status?: string; lookup?: string; created?: number; stale?: boolean } = {}
+  opts: { id?: string; customer?: string; status?: string; lookup?: string; created?: number; stale?: boolean; items?: unknown[] } = {}
 ) => {
   const snapshot = {
     id: opts.id ?? "sub_1",
     object: "subscription",
     customer: opts.customer ?? "cus_A",
     status: opts.status ?? (type === "deleted" ? "canceled" : "active"),
-    items: { data: [{ price: { lookup_key: opts.lookup ?? "pro_monthly", metadata: {} } }] },
+    items: { data: opts.items ?? [{ price: { lookup_key: opts.lookup ?? "pro_monthly", metadata: {} } }] },
   };
   if (!opts.stale) stripeNow.set(snapshot.id, snapshot);
   return deliver(`customer.subscription.${type}`, snapshot, opts.created ?? NOW);
@@ -152,7 +152,7 @@ describe("subscriptions to plans", () => {
     await checkout("cus_A", "u_github_1");
     await subscription("created");
 
-    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "pro", customerId: "cus_A" });
+    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "pro", customerId: "cus_A", seats: 1 });
   });
 
   it("does not care which of checkout and subscription arrives first", async () => {
@@ -262,7 +262,7 @@ describe("someone else's user id on a checkout", () => {
     await subscription("created", { customer: "cus_EVIL", id: "sub_evil" });
     await subscription("deleted", { customer: "cus_EVIL", id: "sub_evil", status: "canceled", created: NOW + 60 });
 
-    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "pro", customerId: "cus_A" });
+    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "pro", customerId: "cus_A", seats: 1 });
   });
 });
 
@@ -430,6 +430,43 @@ describe("a subscription sells exactly one plan", () => {
     await deliver("customer.subscription.updated", withPrices("pro_monthly", "team_seat_monthly"));
 
     expect(await plans.getGrant("github:1")).toBeUndefined();
+  });
+});
+
+describe("seats (orgs spec, D4)", () => {
+  const team = (quantity?: unknown) => ({ price: { lookup_key: "team_seat_annual", metadata: {} }, ...(quantity === undefined ? {} : { quantity }) });
+
+  it("sums the quantities of the items that sell the plan", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { items: [team(3), team(2)] });
+    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "team", customerId: "cus_A", seats: 5 });
+  });
+
+  it("counts one seat for an item with no whole positive quantity", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { items: [team(0), team(null), team(1.5), team()] });
+    expect((await billing.paidPlan("u_github_1"))?.seats).toBe(4);
+  });
+
+  it("counts no seat for an item that sells no plan it knows", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { items: [team(2), { price: { lookup_key: "addon_storage", metadata: {} }, quantity: 7 }] });
+    expect((await billing.paidPlan("u_github_1"))?.seats).toBe(2);
+  });
+
+  /** A state the ledger recorded before seats were read: the safe count until the next event re-reads it. */
+  it("reads a state recorded without seats as one", async () => {
+    await billing.linkCustomer("cus_A", "u_github_1");
+    await billing.recordSubscription("cus_A", "sub_old", { plan: "team", status: "active", eventAt: 1 });
+    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "team", customerId: "cus_A", seats: 1 });
+  });
+
+  it("takes the larger seat count between two subscriptions selling the same plan", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { id: "sub_1", items: [team(3)] });
+    await subscription("created", { id: "sub_2", items: [team(5)] });
+    await subscription("created", { id: "sub_3", items: [{ price: { lookup_key: "pro_monthly", metadata: {} }, quantity: 9 }] });
+    expect(await billing.paidPlan("u_github_1")).toEqual({ plan: "team", customerId: "cus_A", seats: 5 });
   });
 });
 

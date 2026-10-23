@@ -8,8 +8,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { hostMember } from "../src/host.js";
 import {
-  MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
@@ -1546,6 +1547,49 @@ describe("GET /rooms/:id/events", () => {
     const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
     expect(texts(r)).toEqual(["said in the org's room"]);
   });
+
+  /** Review Focus 2: an org admin reading a closed room (#65) is a reader like any other. */
+  it("reads a closed room's log for an org admin without a brief its author keeps", async () => {
+    await store.createSession(orgRoom({ closed: false, closedAt: null }));
+    await store.updateMember(ORG_ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    await store.appendEvent(ORG_ROOM, {
+      type: "brief_update", fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", payload: { goal: "kept to myself" }, refId: null,
+    });
+    await say(peer(), "said in the org's room", ORG_ROOM);
+    await store.closeSession(ORG_ROOM);
+    const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
+    expect(r.events.map((e) => e.data.type)).toEqual(["message"]);
+  });
+
+  /** The dash's Log route (read_context spec, section 3): the caller's account is the reader. */
+  it("leaves a brief its author keeps out of a peer's log, keeps it in the author's, and moves the cursor past it", async () => {
+    await store.updateMember(ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    const as = { fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", refId: null };
+    await store.appendEvent(ROOM, { ...as, type: "member_joined", payload: { member: { member_id: "m_peer" }, brief: { goal: "kept to myself" } } });
+    const update = (await store.appendEvent(ROOM, { ...as, type: "brief_update", payload: { goal: "still to myself" } }))!;
+
+    const theirs = await read(DEV_KEY.jesse);
+    expect(theirs.events.map((e) => e.data.type)).toEqual(["member_joined"]);
+    expect(theirs.events[0].data.payload).toEqual({ member: { member_id: "m_peer" }, brief: null });
+    expect(theirs.cursor).toBe(update.cursor);
+    expect(JSON.stringify(theirs)).not.toContain("to myself");
+
+    const mine = await read(DEV_KEY.peer);
+    expect(mine.events.map((e) => e.data.type)).toEqual(["member_joined", "brief_update"]);
+  });
+
+  /** The Log polls with ?after, so a poll is a path of its own: no brief its author keeps, and a cursor that still passes it. */
+  it("leaves a brief its author keeps out of a poll past a cursor, and moves the cursor past it", async () => {
+    await store.updateMember(ROOM, "m_peer", { capabilities: ["receive_messages"] });
+    const as = { fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", refId: null };
+    const joined = (await store.appendEvent(ROOM, { ...as, type: "member_joined", payload: { member: { member_id: "m_peer" }, brief: { goal: "kept to myself" } } }))!;
+    const update = (await store.appendEvent(ROOM, { ...as, type: "brief_update", payload: { goal: "still to myself" } }))!;
+
+    expect(await read(DEV_KEY.jesse, `?after=${joined.cursor}`)).toEqual({ events: [], cursor: update.cursor });
+
+    const mine = await read(DEV_KEY.peer, `?after=${joined.cursor}`);
+    expect(mine.events.map((e) => e.data.type)).toEqual(["brief_update"]);
+  });
 });
 
 describe("POST /rooms/:id/unpublish (public rooms)", () => {
@@ -1594,6 +1638,217 @@ describe("POST /rooms/:id/unpublish (public rooms)", () => {
   it("takes POST alone", async () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${PUB}/unpublish`))!;
     expect([res.status, res.headers.get("allow")]).toEqual([405, "POST"]);
+  });
+});
+
+/**
+ * A room's creator changes what its hosted seat is told to ask, after the room has started. The seat
+ * reads the manifest on every wake, so the next question is built from what this stored. The admission is
+ * the ban routes': 401, the CSRF check, one 404 for a stranger and an unknown room, then 403.
+ */
+describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
+  const HOSTED = "qs_host_put";
+  const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: "Ask about the week." } });
+  const set = (key: string | null, body: unknown, over: CallOptions = {}, room = HOSTED) =>
+    call(key, `/rooms/${room}/host`, { method: "PUT", body, ...over });
+  const stored = async (room = HOSTED) => (await store.getSession(room))!.manifest.host?.instructions;
+  const hostRows = async () => (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "host_instructions_changed");
+
+  beforeEach(async () => {
+    const m = hostedManifest();
+    await store.createSession(session({
+      id: HOSTED, manifest: m,
+      members: [member({ roomRole: "lead" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" }), hostMember(m, Date.now())],
+    }));
+  });
+
+  it("lets the creator set, change and clear the instructions, answering with what is stored", async () => {
+    for (const next of ["Ask how agents have grown.", "Ask what they have learned.", null]) {
+      const res = (await set(DEV_KEY.jesse, { instructions: next }))!;
+      expect([res.status, await bodyOf(res)]).toEqual([200, { instructions: next }]);
+      expect(await stored()).toBe(next);
+    }
+  });
+
+  it("changes the instructions and nothing else in the manifest", async () => {
+    const before = (await store.getSession(HOSTED))!.manifest;
+    await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+    expect((await store.getSession(HOSTED))!.manifest).toEqual({ ...before, host: { ...before.host!, instructions: "Ask how agents have grown." } });
+  });
+
+  it("trims the text it stores, and stores an empty or blank string as null", async () => {
+    const padded = (await set(DEV_KEY.jesse, { instructions: "  \n Ask how agents have grown. \t " }))!;
+    expect([padded.status, await bodyOf(padded)]).toEqual([200, { instructions: "Ask how agents have grown." }]);
+    expect(await stored()).toBe("Ask how agents have grown.");
+    for (const blank of ["", "   ", "\n\t "]) {
+      await set(DEV_KEY.jesse, { instructions: "something" });
+      const cleared = (await set(DEV_KEY.jesse, { instructions: blank }))!;
+      expect([cleared.status, await bodyOf(cleared)], JSON.stringify(blank)).toEqual([200, { instructions: null }]);
+      expect(await stored(), JSON.stringify(blank)).toBeNull();
+    }
+  });
+
+  it("accepts 300 characters and refuses 301, as a manifest does, changing nothing; padding does not count against it", async () => {
+    expect((await set(DEV_KEY.jesse, { instructions: "a".repeat(300) }))!.status).toBe(200);
+    expect(await stored()).toBe("a".repeat(300));
+    const over = (await set(DEV_KEY.jesse, { instructions: "b".repeat(301) }))!;
+    expect([over.status, (await bodyOf(over)).error]).toEqual([400, "invalid_request"]);
+    expect(await stored()).toBe("a".repeat(300));
+    expect((await set(DEV_KEY.jesse, { instructions: `  ${"c".repeat(300)}  ` }))!.status).toBe(200);
+    expect(await stored()).toBe("c".repeat(300));
+  });
+
+  it("refuses any other shape with 400, changing nothing", async () => {
+    const shapes: unknown[] = [
+      {}, { instructions: 5 }, { instructions: ["x"] }, { instructions: { text: "x" } }, { instructions: true }, { text: "x" },
+      { instructions: "x", extra: 1 }, [], "x", null, 7,
+    ];
+    for (const body of shapes) expect((await set(DEV_KEY.jesse, body))!.status, JSON.stringify(body)).toBe(400);
+    for (const rawBody of ["not json", "", "{"]) expect((await set(DEV_KEY.jesse, undefined, { rawBody }))!.status, rawBody).toBe(400);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("refuses a member who is not the creator with 403, a stranger and an unknown room with the one 404, and no credential with 401, changing nothing", async () => {
+    const member403 = (await set(DEV_KEY.peer, { instructions: "mine now" }))!;
+    expect([member403.status, await bodyOf(member403)])
+      .toEqual([403, { error: "forbidden", error_description: "only the room's creator may change its host's instructions" }]);
+    const stranger = (await set(DEV_KEY.outsider, { instructions: "mine now" }))!;
+    const unknown = (await set(DEV_KEY.jesse, { instructions: "mine now" }, {}, "qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+    expect((await set(null, { instructions: "mine now" }))!.status).toBe(401);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("refuses a cookie write without the panel's Origin, and takes the panel's", async () => {
+    expect((await set(null, { instructions: "forged" }, { cookie: DEV_KEY.jesse }))!.status).toBe(403);
+    expect((await set(null, { instructions: "forged" }, { cookie: DEV_KEY.jesse, headers: { origin: "https://elsewhere.example.test" } }))!.status).toBe(403);
+    expect(await stored()).toBe("Ask about the week.");
+    const real = (await set(null, { instructions: "from the panel" }, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect([real.status, real.headers.get("access-control-allow-origin"), await bodyOf(real)]).toEqual([200, PANEL, { instructions: "from the panel" }]);
+    expect(await stored()).toBe("from the panel");
+  });
+
+  it("answers 409 for a room with no host and for a closed room, changing nothing", async () => {
+    const noHost = (await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." }, {}, ROOM))!;
+    expect([noHost.status, (await bodyOf(noHost)).error]).toEqual([409, "no_host"]);
+    expect((await store.getSession(ROOM))!.manifest.host).toBeNull();
+    await store.closeSession(HOSTED);
+    const closed = (await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." }))!;
+    expect([closed.status, (await bodyOf(closed)).error]).toEqual([409, "closed"]);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("files an audit row naming the creator, with the length and not the text, once for each change", async () => {
+    await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+    await set(DEV_KEY.jesse, { instructions: "  Ask how agents have grown.  " });
+    await set(DEV_KEY.jesse, { instructions: null });
+    const rows = await hostRows();
+    expect(rows.map((r) => [r.sessionId, r.actorUserId, r.detail])).toEqual([[HOSTED, "u_jesse", { chars: 26 }], [HOSTED, "u_jesse", { chars: 0 }]]);
+    expect(JSON.stringify(rows)).not.toContain("Ask how agents");
+  });
+
+  it("refuses a body over the bound before reading it, and a Content-Length that is not a number", async () => {
+    const fine = JSON.stringify({ instructions: "Ask how agents have grown." });
+    expect((await set(DEV_KEY.jesse, undefined, { rawBody: fine, headers: { "content-length": String(MAX_HOST_INSTRUCTIONS_BYTES + 1) } }))!.status).toBe(413);
+    expect((await set(DEV_KEY.jesse, undefined, { rawBody: fine, headers: { "content-length": "garbage" } }))!.status).toBe(400);
+    expect(await stored()).toBe("Ask about the week.");
+  });
+
+  it("takes PUT alone", async () => {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${HOSTED}/host`, { method }))!;
+      expect([method, res.status, res.headers.get("allow")]).toEqual([method, 405, "PUT"]);
+    }
+  });
+
+  it("answers the panel's preflight with a grant for PUT, and a stranger's with none", async () => {
+    const panel = (await call(null, `/rooms/${HOSTED}/host`, { method: "OPTIONS", headers: { origin: PANEL } }))!;
+    expect([panel.status, panel.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+    expect(panel.headers.get("access-control-allow-methods")?.split(/,\s*/)).toContain("PUT");
+    const stranger = (await call(null, `/rooms/${HOSTED}/host`, { method: "OPTIONS", headers: { origin: "https://elsewhere.example.test" } }))!;
+    expect([stranger.status, stranger.headers.get("access-control-allow-origin")]).toEqual([204, null]);
+  });
+
+  /**
+   * The creator reads the instructions back, so the panel can show and edit them. They are text a person wrote, so
+   * they ride in the preview's untrusted text beside the room's name and purpose and never in the trusted fields
+   * beside the host's `model` and `role`. Present, as a string or null, for the room's creator in a room with a
+   * host; absent for every other reader and for a room with no host.
+   */
+  describe("read back by GET /rooms/:id", () => {
+    const TEXT = "Ask about the week.";
+    type Read = { mine: boolean; preview: Record<string, unknown> & { host: unknown; text: { trust: string; data: Record<string, unknown> } } };
+    const read = async (key: string, room = HOSTED) => (await bodyOf(await call(key, `/rooms/${room}`))) as unknown as Read;
+    const raw = async (key: string, room = HOSTED) => (await call(key, `/rooms/${room}`))!.text();
+
+    it("gives the creator what is stored, the new text after a change, and null once it is cleared", async () => {
+      expect((await read(DEV_KEY.jesse)).preview.text.data.host_instructions).toBe(TEXT);
+      await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+      expect((await read(DEV_KEY.jesse)).preview.text.data.host_instructions).toBe("Ask how agents have grown.");
+      await set(DEV_KEY.jesse, { instructions: null });
+      const { data } = (await read(DEV_KEY.jesse)).preview.text;
+      expect("host_instructions" in data, "cleared is null, not left out").toBe(true);
+      expect(data.host_instructions).toBeNull();
+    });
+
+    it("gives a member who is not the creator no key, and the text nowhere in the body", async () => {
+      const body = await raw(DEV_KEY.peer);
+      expect(JSON.parse(body).preview.text.data).not.toHaveProperty("host_instructions");
+      expect(body).not.toContain(TEXT);
+      // Control: the same room's body does hold the text for the creator, so the line above can fail.
+      expect(await raw(DEV_KEY.jesse)).toContain(TEXT);
+    });
+
+    it("carries no key for a room with no host, to its creator or to a member", async () => {
+      for (const key of [DEV_KEY.jesse, DEV_KEY.peer]) {
+        expect((await read(key, ROOM)).preview.text.data, key).not.toHaveProperty("host_instructions");
+      }
+    });
+
+    it("keeps the text inside the untrusted envelope, and the trusted host block to its role and model", async () => {
+      const { preview } = await read(DEV_KEY.jesse);
+      expect(preview.text.trust).toBe("untrusted");
+      expect(preview.text.data.host_instructions).toBe(TEXT);
+      expect(preview.host).toEqual({ role: "host", model: "haiku" });
+      // Nowhere in the preview but inside `text`: a key beside `host`, or in it, would be a trusted field.
+      expect(JSON.stringify({ ...preview, text: null })).not.toContain(TEXT);
+    });
+
+    it("changes nothing else in the creator's preview", async () => {
+      const { text: creators, ...creatorRest } = (await read(DEV_KEY.jesse)).preview;
+      const { text: members, ...memberRest } = (await read(DEV_KEY.peer)).preview;
+      // The two seats differ in their own role and verbs, so the comparison is on what the room says, not on the seat.
+      const { your_role: _a, your_verbs: _b, your_heartbeat_on: _c, ...fromCreator } = creatorRest;
+      const { your_role: _d, your_verbs: _e, your_heartbeat_on: _f, ...fromMember } = memberRest;
+      expect(fromCreator).toEqual(fromMember);
+      expect(creators.data).toEqual({ ...members.data, host_instructions: TEXT });
+    });
+
+    // The admin's read is the second place the route builds a preview. It follows `mine`, which is the same
+    // comparison the PUT makes: the creator's, and no other admin's.
+    it("follows `mine` on an admin's read of a closed room", async () => {
+      const closed = (id: string, createdBy: string) => session({
+        id, createdBy, closed: true, closedAt: 1_700_000_000_000, manifest: hostedManifest(),
+        members: [member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" }), hostMember(hostedManifest(), Date.now())],
+      });
+      await store.createSession(closed("qs_admin_theirs", "u_peer"));
+      await store.createSession(closed("qs_admin_mine", "u_jesse"));
+
+      const theirs = await raw(DEV_KEY.jesse, "qs_admin_theirs");
+      expect(JSON.parse(theirs)).toMatchObject({ viewer: "admin", mine: false });
+      expect(JSON.parse(theirs).preview.text.data).not.toHaveProperty("host_instructions");
+      expect(theirs).not.toContain(TEXT);
+
+      const mine = await read(DEV_KEY.jesse, "qs_admin_mine");
+      expect(mine).toMatchObject({ viewer: "admin", mine: true });
+      expect(mine.preview.text.data.host_instructions).toBe(TEXT);
+    });
   });
 });
 

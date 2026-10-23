@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
   MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
-  SOCIAL_HOST_INSTRUCTIONS,
+  SOCIAL_HOST_INSTRUCTIONS, HostInstructionsShape,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -846,6 +846,17 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
   it("bounds the instructions like purpose", () => {
     expect(() => resolveManifest(hosted({ host: { role: "host", instructions: "x".repeat(301) } })))
       .toThrow(/host\.instructions/);
+  });
+
+  // PUT /rooms/:id/host changes a live room's instructions under this same shape, so a creator can set
+  // after the start exactly what a manifest could set at it. The two read one schema; this pins that they
+  // agree at the edge, and that the exported shape is the one the manifest reads.
+  it("exports the shape its instructions are held to, and the manifest and the shape agree at the edge", () => {
+    for (const [length, ok] of [[300, true], [301, false]] as const) {
+      const text = "x".repeat(length);
+      expect(HostInstructionsShape.safeParse(text).success, `the shape at ${length}`).toBe(ok);
+      expect(ManifestShape.safeParse(hosted({ host: { role: "host", instructions: text } })).success, `the manifest at ${length}`).toBe(ok);
+    }
   });
 
   it("allows a daily beat now that a host can be slow", () => {

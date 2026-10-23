@@ -195,14 +195,14 @@ export interface Session {
   id: string;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
-  manifest: RoomManifest; // immutable after createSession — the store has no way to change it
+  manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it
   createdBy: string;
   orgId: string | null;
   orgOnly: boolean;
   /**
    * Live join codes, one per role. The map key IS the one-per-role invariant:
    * two live codes for the same seat are unrepresentable rather than prevented
-   * by a check. Bounded by the manifest, which is immutable after createSession.
+   * by a check. Bounded by the manifest's roles, which are immutable after createSession.
    *
    * There is no `joinCode` beside this, for the reason the `mode` comment above
    * gives: two fields for one fact could disagree.
@@ -372,6 +372,70 @@ export interface PlanGrant {
 }
 
 /**
+ * An org as a record (orgs spec, D1). Before it, an org was the string a grant or
+ * BELLMAN_USERS named, and nothing created, owned or counted one.
+ *
+ * Its members are not here: a member is a grant whose `orgId` names this org (D2),
+ * so the roster is the grant index and nothing is derived from anything else.
+ */
+export interface Org {
+  /** The id every grant, room and audit row names it by. `isOrgId`'s grammar, never reused. */
+  orgId: string;
+  /** For display: trimmed, 1 to 80 characters. A purchased org starts out named by its id. */
+  name: string;
+  /** Exactly one, never changes. The break-glass for `requireSso`, and the one member nobody removes. */
+  ownerUserId: string;
+  /** How many grants the org may hold, the owner's among them (D3). Billing's number for a purchased org. */
+  seats: number;
+  /** Who the org answers to: a Stripe subscription, or the operator who created it. */
+  source: "purchase" | "operator";
+  /**
+   * Whether anyone is paying for it (D5). Billing clears it when the subscription stops paying
+   * and sets it when one pays again; every grant in an inactive org resolves to the free plan,
+   * and stays, so a failed card loses no roster. Always true for an operator org.
+   */
+  active: boolean;
+  createdAt: number;
+  /** Whether members must sign in through the org's IdP (SSO, D13). Written false until then. */
+  requireSso: boolean;
+  /** The domains the org has claimed (SSO, D11); only a verified one routes a sign-in. Written empty until then. */
+  domains: OrgDomain[];
+}
+
+/** One domain claim: the token its DNS record must carry, and when it was seen there, or null while it has not been. */
+export interface OrgDomain {
+  domain: string;
+  token: string;
+  verifiedAt: number | null;
+}
+
+/** What `updateOrg` may change: the name (its admin), the seats (the operator), the SSO switch (its admin). */
+export type OrgPatch = Partial<Pick<Org, "name" | "seats" | "requireSso">>;
+
+/**
+ * An org's identity provider (SSO spec, D9): one OIDC provider, discovered when its admin saved it,
+ * stored apart from the `Org` record under its own key so a read of the org never hands out a
+ * secret. `clientSecret` is sealed (D14); no route returns it. `protocol` is the field SAML would
+ * widen, and nothing reads another value yet.
+ */
+export interface OrgIdp {
+  protocol: "oidc";
+  /** As the IdP's discovery document states it: https, no trailing slash, no query or fragment. */
+  issuer: string;
+  clientId: string;
+  /** Sealed with the Worker's seal secret; see `src/oauth/sealed.ts`. */
+  clientSecret: string;
+  /** How the token endpoint takes the client credentials, from the discovery document; basic when it lists it. */
+  tokenAuth: "client_secret_basic" | "client_secret_post";
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  /** Asked for the address and the name only when the id token lacks them; null when the IdP has none. */
+  userinfoEndpoint: string | null;
+  configuredAt: number;
+  configuredBy: string;
+}
+
+/**
  * That a person exists.
  *
  * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org
@@ -445,7 +509,9 @@ export type HostModelName = "haiku" | "sonnet" | "opus";
 /**
  * The one hosted seat a room may declare (hosted seat spec, D1). `role` names a
  * declared role holding exactly `send`; `instructions` is creator prose bounded
- * like `purpose`, and null means Bellman's defaults alone.
+ * like `purpose`, and null means Bellman's defaults alone. It is the one field of
+ * a manifest that changes after the room starts: the creator sets it with
+ * `PUT /rooms/:id/host`, and the seat reads it on every wake.
  */
 export interface HostConfig {
   role: string;
@@ -496,8 +562,9 @@ export interface RoomManifest {
   preset: PresetName | null;
   /**
    * How often the server appends a `heartbeat` tick, or null for a room that
-   * expects no reports. Immutable with the rest of the manifest, so a peer
-   * reading silence reads it against the same number every member was given.
+   * expects no reports. Immutable like the manifest's other fields, the host's
+   * instructions aside, so a peer reading silence reads it against the same
+   * number every member was given.
    */
   heartbeatOnMs: number | null;
   /**
@@ -515,7 +582,7 @@ export interface RoomManifest {
     idleAfterMs: number | null;
     repeatAfterMs: number | null;
   } | null;
-  /** The hosted seat, or null for a room with none. Immutable with the rest. */
+  /** The hosted seat, or null for a room with none. Immutable with the rest, bar its `instructions` (`HostConfig`). */
   host: HostConfig | null;
   /**
    * Whether anyone with the room's link may read it (public rooms spec D1): chosen when the

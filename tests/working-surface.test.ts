@@ -195,7 +195,7 @@ describe("withPlacement", () => {
   });
 
   /** Review Focus 1: every room that predates this holds rows with no placement, which the viewers still lay out. */
-  it("keeps clear of a row stored with no placement, which the viewers draw on the grid in key order", () => {
+  it("keeps clear of a row stored with no placement, which the viewers draw on the grid", () => {
     // `a` and `c` have none, so the viewers draw them at slots 0 and 1; `b` sits at slot 2.
     expect(landsAt([stored("a", null), stored("c", null), stored("b", { x: 720, y: 0 })])).toEqual({ x: 1080, y: 0 });
   });

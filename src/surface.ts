@@ -107,20 +107,20 @@ interface Box { x: number; y: number; w: number; h: number }
 const overlaps = (a: Box, b: Box): boolean =>
   a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
-/** Code-unit order, not `localeCompare`: the viewers' sort, so every reader derives the same grid. */
-const byKey = (a: { key: string }, b: { key: string }): number => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-
 /**
  * What the rows cover as the viewers draw them (`layout` in `ui/src/canvas-layout.ts`, `toFlow` in dash): a
  * row with a placement at it, the grid's size where it has none; a row with none at the next slot of the
- * grid, counting in key order, as a viewer lays out a row nobody has placed. A connector has no box.
- * `skipKey` is the row being written, which the write is about to place or replace.
+ * grid, counting only the rows with none. A connector has no box. `skipKey` is the row being written, which
+ * the write is about to place or replace.
+ *
+ * Order decides nothing. Each row with none covers one full cell, so k of them cover slots 0 to k - 1
+ * whichever of them is drawn where, and the server keeps clear of the same cells the viewers draw them in,
+ * whatever order each viewer sorts them in.
  */
 function coveredBoxes(rows: readonly SurfaceRow[], skipKey: string): Box[] {
   let unplaced = 0;
   return rows
     .filter((r) => r.key !== skipKey && r.kind !== "connector")
-    .sort(byKey)
     .map((r) => {
       const at = r.placement ?? gridSlot(unplaced++);
       return { x: at.x, y: at.y, w: r.placement?.w ?? GRID.w, h: r.placement?.h ?? GRID.h };

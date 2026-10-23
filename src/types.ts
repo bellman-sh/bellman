@@ -191,6 +191,9 @@ export type ArrivingMember = Omit<Member, "agent" | "seq" | "publicNumber"> & { 
  */
 export type NewSession = Omit<Session, "members" | "creator" | "orgs"> & { members: ArrivingMember[] };
 
+/** How a public room's page opens (room pages spec, D3): on its canvas, or as a page to read. */
+export type PublicView = "canvas" | "page";
+
 export interface Session {
   id: string;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
@@ -263,6 +266,11 @@ export interface Session {
    * name only while public and open (`holdsName`). Read as null for a row written before it.
    */
   publicName: string | null;
+  /**
+   * How this room's public page opens (room pages spec, D3): on its canvas, or as a page to read.
+   * Its creator sets it through `PUT /rooms/:id/view`. Read as `"canvas"` for a row written before it.
+   */
+  publicView: PublicView;
   /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
@@ -735,6 +743,12 @@ export interface SurfaceItem {
 export interface SurfaceRow extends SurfaceItem {
   cursor: number;
   at: number;
+  /**
+   * When this key was first written, in epoch milliseconds (room pages spec, D4). Set on its first write, kept by
+   * every edit, and set afresh when a removed key is written again. Absent on a row written before it, which
+   * `createdAtOf` reads as `at`; nothing rewrites such a row (R1).
+   */
+  createdAt?: number;
   byMemberId: string;
   byLabel: string;
 }

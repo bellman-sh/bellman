@@ -173,6 +173,9 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       status: sessionStatus(session),
       closed_at: retentionOf(session).closed_at,
       mode: session.manifest.mode,
+      // How the room opens (room pages spec D3): top level, beside `mode` and outside the envelope, since it is a value the
+      // server checked and not the creator's prose (R9).
+      view: session.publicView,
       // The room's one link: its name's while it holds one, its id's otherwise, whichever the read went by.
       // The dash's Worker writes it as the page's canonical link and og:url.
       public_url: publicRoomUrl(session),

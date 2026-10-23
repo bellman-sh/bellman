@@ -31,6 +31,13 @@ export const SurfaceKeyShape = slugShape("surface keys");
 /** The record's cursor of the last change to a row, 0 for a room that never had one. */
 export const surfaceCursor = (s: StoredSession): number => s.surfaceCursor ?? 0;
 
+/**
+ * When a row's key was first written: its `createdAt`, or its `at` for a row written before `createdAt`
+ * existed. Nothing rewrites such a row (R1), and its `at` is the oldest time the store knows for the key (R2),
+ * so a reader asks here and never reads `createdAt` bare.
+ */
+export const createdAtOf = (row: Pick<SurfaceRow, "at" | "createdAt">): number => row.createdAt ?? row.at;
+
 /** What an append asks the store to do to one key. `item: null` removes it. */
 export type SurfaceWrite = { key: string; item: SurfaceItem | null };
 
@@ -49,6 +56,10 @@ export type SurfaceWrite = { key: string; item: SurfaceItem | null };
  * Returns the row to store, "remove" to delete the row, or null for no change.
  * Removing a key that holds nothing is null: the cursor records changes, not
  * attempts.
+ *
+ * `createdAt` is stamped from the event on a key's first write and carried over by `createdAtOf` on every
+ * edit, so a row from before the field keeps its `at`; a removal leaves no row, so a key written again finds
+ * none and is stamped afresh.
  */
 export function applySurfaceWrite(
   existing: SurfaceRow | undefined,
@@ -61,6 +72,7 @@ export function applySurfaceWrite(
     ...write.item,
     cursor: event.cursor,
     at: event.at,
+    createdAt: existing === undefined ? event.at : createdAtOf(existing),
     byMemberId: event.fromMemberId,
     byLabel: event.fromLabel,
   };
@@ -79,7 +91,7 @@ const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape })
  * The blob a `file`, an `image` or an `html` item names (#183, D5): the id and nothing else.
  * `bytes`, `type` and `name` are the server's to set from the object, so an item
  * sent back as it was read is refused for them until the sender takes them off,
- * as it is for `cursor` and `at`.
+ * as it is for `cursor`, `at`, `created_at` and `changed_at`.
  */
 const BlobShape = z.strictObject({
   id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
@@ -122,8 +134,9 @@ const boundedText = (max: number) =>
 
 /**
  * An item as the wire carries it. Strict, so an unknown field is refused rather
- * than dropped: `cursor` and `at` are the server's to set, and an item sent back
- * as it was read is refused for them until the sender takes them off.
+ * than dropped: `cursor`, `at`, `created_at` and `changed_at` are the server's to
+ * set, and an item sent back as it was read is refused for them until the sender
+ * takes them off.
  *
  * `null` is absence, for the six fields a read spells that way: an item as a
  * member reads it carries `null` for each it left out, and read, edit, send back

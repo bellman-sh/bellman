@@ -128,6 +128,7 @@ export function session(seed: SessionSeed = {}): SeededSession {
     thawedAt: null,
     unpublishedAt: null,
     publicName: null,
+    publicView: "canvas",
     members,
     creator: members.length > 0
       ? creatorOf(members[0])

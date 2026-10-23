@@ -3,6 +3,7 @@
  * when the room starts. Tasks 1, 2 and 4 of the plan add to this file; the routes
  * are tests/http-public.test.ts.
  */
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
@@ -77,6 +78,14 @@ describe("whether a room is publicly readable", () => {
     expect(hydrated.unpublishedAt).toBeNull();
     expect(isPublic(hydrated)).toBe(true);
   });
+
+  it("reads a room stored before room pages as opening on its canvas, and any stored value but page as the canvas", () => {
+    const old = structuredClone(session({ manifest: roomManifest({ public: true }) })) as unknown as Record<string, unknown>;
+    delete old.publicView;
+    expect(hydrateStoredSession(old)!.publicView).toBe("canvas");
+    expect(hydrateStoredSession({ ...old, publicView: "page" })!.publicView).toBe("page");
+    expect(hydrateStoredSession({ ...old, publicView: "log" })!.publicView).toBe("canvas");
+  });
 });
 
 describe("the preview", () => {
@@ -97,10 +106,28 @@ describe("the creator's public link", () => {
       const jesse = await h.connect(DEV_KEY.jesse);
       const open = await jesse.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
       expect(open.data.public_url).not.toBe(open.data.join_url);
       const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "pair" }, brief: brief() });
       expect("public_url" in shut.data).toBe(false);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+// Room pages spec, D3: a room starts on its canvas, and its creator chooses the page later. bellman_start is the
+// one place a room's record is first written, so this is where its value is pinned.
+describe("how a room opens when it starts", () => {
+  it("is the canvas, for a public room and a private one", async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      for (const manifest of [{ room: "Open", preset: "pair", public: true }, { room: "Shut", preset: "pair" }]) {
+        const started = await jesse.call("bellman_start", { manifest, brief: brief() });
+        expect(started.isError, started.text).toBe(false);
+        expect((await h.store.getSession(String(started.data.session_id)))?.publicView, manifest.room).toBe("canvas");
+      }
     } finally {
       await h.close();
     }
@@ -146,9 +173,43 @@ describe("a public room's plan", () => {
       const pro = await h.connectAs({ userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" });
       const open = await pro.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
       expect(open.isError, open.text).toBe(false);
-      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).toBe(`https://bellman.sh/r/${String(open.data.session_id)}`);
     } finally {
       await h.close();
     }
+  });
+});
+
+describe("the tools' words for a public room", () => {
+  /** Every tool's description, by name, as a connected client lists them. */
+  const texts = async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      return Object.fromEntries((await jesse.listTools()).tools.map((t) => [t.name, t.description ?? ""]));
+    } finally {
+      await h.close();
+    }
+  };
+
+  it("put the page on bellman.sh (public rooms on bellman.sh spec, section 1)", async () => {
+    const text = await texts();
+    expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
+    expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
+    expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r/);
+  });
+});
+
+describe("a public room's link", () => {
+  // The dash's Worker answers /r/* on bellman.sh, and dash.bellman.sh/r/ only redirects there.
+  it("names no old host in a tool description, the README or the docs site", () => {
+    const docs = "docs-site/src/content/docs";
+    const files = [
+      "README.md",
+      ...readdirSync("src", { recursive: true, encoding: "utf8" }).map((f) => `src/${f}`),
+      ...readdirSync(docs, { recursive: true, encoding: "utf8" }).map((f) => `${docs}/${f}`),
+    ].filter((f) => /\.(ts|mdx?)$/.test(f));
+    expect(files.length).toBeGreaterThan(50);
+    for (const file of files) expect(readFileSync(file, "utf8"), file).not.toContain("dash.bellman.sh/r/");
   });
 });

@@ -1,6 +1,6 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
@@ -1327,6 +1327,8 @@ export interface BellmanStore {
   releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean>;
   /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
   setPublicName(sessionId: string, name: string): Promise<void>;
+  /** Write how the room's public page opens on its record (room pages spec, D3). A room that is not there stays not there. */
+  setPublicView(sessionId: string, view: PublicView): Promise<void>;
   /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
@@ -1628,6 +1630,15 @@ export interface BellmanStore {
    */
   handleOf(userId: string): Promise<string | undefined>;
   userOfHandle(handle: string): Promise<string | undefined>;
+  /**
+   * Every account holding a handle, in user id order (public rooms on bellman.sh spec, D6). The notice that goes out
+   * before members are named by handle is addressed from it: the operator's `GET /admin/handles` pairs each holder
+   * with a sign-in label. An account that released its handle is not listed, and one that changed it is listed once,
+   * under the handle it holds now.
+   *
+   * ponytail: the whole list in one answer; a page when holders reach thousands.
+   */
+  handleHolders(): Promise<{ userId: string; handle: string }[]>;
   /** "taken" when another user holds it. Claiming a new one frees the old; claiming your own is "claimed". */
   claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
   /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
@@ -2520,6 +2531,11 @@ export class MemoryStore implements BellmanStore {
     if (s) s.publicName = name;
   }
 
+  async setPublicView(sessionId: string, view: PublicView): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) s.publicView = view;
+  }
+
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const mine = this.byCreator.get(userId);
     if (!mine) return [];
@@ -2947,6 +2963,12 @@ export class MemoryStore implements BellmanStore {
 
   async userOfHandle(handle: string): Promise<string | undefined> {
     return this.handles.get(handle);
+  }
+
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    return [...this.handleByUser]
+      .map(([userId, handle]) => ({ userId, handle }))
+      .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
   }
 
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {

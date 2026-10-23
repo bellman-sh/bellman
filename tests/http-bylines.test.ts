@@ -299,7 +299,7 @@ describe("GET /public/handles/:handle", () => {
     expect(body.rooms).toHaveLength(1);
     expect(body.rooms[0]).toMatchObject({
       id: PUB,
-      public_url: `https://dash.bellman.sh/r/${PUB}`,
+      public_url: `https://bellman.sh/r/${PUB}`,
       text: { trust: "untrusted", origin: { label: "@jesse" }, data: { room: "Open review", purpose: "Read along" } },
     });
     expect(typeof body.rooms[0].signed_at).toBe("string");
@@ -340,10 +340,10 @@ describe("GET /public/handles/:handle", () => {
     await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
     await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
     const link = async () => ((await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { public_url: string }[] }).rooms[0].public_url;
-    expect(await link()).toBe(`https://dash.bellman.sh/r/${PUB}`);
+    expect(await link()).toBe(`https://bellman.sh/r/${PUB}`);
     await store.claimPublicName("open-review", { id: PUB, at: Date.now() }, null);
     await store.setPublicName(PUB, "open-review");
-    expect(await link()).toBe("https://dash.bellman.sh/r/open-review");
+    expect(await link()).toBe("https://bellman.sh/r/open-review");
   });
 
   it("answers the handle and its rooms and nothing more", async () => {
@@ -514,9 +514,10 @@ describe("GET /public/handles/:handle", () => {
   });
 });
 
-// The operator's release (ADR 0021): an access token, never a cookie, for a user id BELLMAN_OPERATORS lists. No plan,
-// role or grant passes it. The handle's holder created PUB and signed it, so a release shows on the room's public read.
-describe("DELETE /admin/handles/:handle", () => {
+// The operator's routes on handles: the release (ADR 0021) and the list of holders (public rooms on bellman.sh, D6). Both
+// take an access token, never a cookie, for a user id BELLMAN_OPERATORS lists. No plan, role or grant passes it. The
+// handle's holder created PUB and signed it, so a release shows on the room's public read.
+describe("the operator's /admin/handles routes", () => {
   // Listed, and a free member, so a pass is the list's and not a plan's or a role's.
   const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
   // A team admin BELLMAN_USERS made, whom /admin/grants lets write, and whom the list does not name.
@@ -539,6 +540,8 @@ describe("DELETE /admin/handles/:handle", () => {
   });
   const release = (segment: string, headers: Record<string, string>, method = "DELETE") =>
     route(new Request(`${ISSUER}/admin/handles/${segment}`, { method, headers }));
+  const holders = async (headers: Record<string, string>, method = "GET") =>
+    route(new Request(`${ISSUER}/admin/handles`, { method, headers }));
 
   it("releases the handle and every signature for a user id the list names, a free member's: 204, and the byline and the page go", async () => {
     const res = await release("jesse", await bearer(OPERATOR, "default"));
@@ -605,6 +608,79 @@ describe("DELETE /admin/handles/:handle", () => {
   it("takes DELETE alone: a GET answers 405 and releases nothing", async () => {
     const res = await release("jesse", await bearer(OPERATOR, "default"), "GET");
     expect([res.status, res.headers.get("allow")]).toEqual([405, "DELETE"]);
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+  });
+
+  // Public rooms on bellman.sh, D6: the notice's recipients, each with the sign-in label of a room they sat in.
+  it("lists every holder for an operator, with the label of a room each sat in, and null for one in no room", async () => {
+    await store.claimHandle("u_nowhere", "nowhere");
+    const res = await holders(await bearer(OPERATOR, "default"));
+    expect([res.status, await res.json()]).toEqual([200, { holders: [
+      { handle: "jesse", user_id: "u_jesse", label: "jesse@codenerd" },
+      { handle: "nowhere", user_id: "u_nowhere", label: null },
+    ] }]);
+  });
+
+  it("lists nothing for a user id the list does not name or for no credential, and takes GET alone", async () => {
+    expect((await holders(await bearer(TEAM_ADMIN, "operator"))).status).toBe(403);
+    expect((await holders({})).status).toBe(401);
+    expect((await holders(await bearer(OPERATOR, "default"), "POST")).status).toBe(405);
+  });
+
+  // The control for this is the first list case: the same identity over a bearer token lists.
+  it("refuses a listed user id over a cookie, and lists no one", async () => {
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
+    const res = await holders({ cookie: `${COOKIE}=${sid}`, origin: PANEL });
+    expect([res.status, await res.json()]).toEqual([401, {
+      error: "invalid_token", error_description: "this endpoint requires a bearer token, not a browser session",
+    }]);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  // The label is the holder's own seat's, and not the room's first. A seat that has left the room still names one: the
+  // notice goes to everyone who held a handle, not only to those still in a room.
+  it("labels each holder by its own seat, one who has left the room included", async () => {
+    await store.claimHandle("u_peer", "peer");
+    await store.updateMember(PUB, "m_peer", { leftAt: Date.now() });
+    const res = await holders(await bearer(OPERATOR, "default"));
+    expect([res.status, await res.json()]).toEqual([200, { holders: [
+      { handle: "jesse", user_id: "u_jesse", label: "jesse@codenerd" },
+      { handle: "peer", user_id: "u_peer", label: "peer@codenerd" },
+    ] }]);
+  });
+
+  // What a holder costs, since the Workers cap on subrequests bounds how many the route can list: one room, and a read of
+  // the seat in it only when the index names one. A holder in no room costs one read, not two.
+  it("reads one room for each holder, and a seat only in the room the index names", async () => {
+    await store.claimHandle("u_nowhere", "nowhere");
+    const rooms = vi.spyOn(store, "sessionsJoinedBy");
+    const seats = vi.spyOn(store, "membersOfUser");
+    await holders(await bearer(OPERATOR, "default"));
+    expect(rooms.mock.calls).toEqual([["u_jesse", 1], ["u_nowhere", 1]]);
+    expect(seats.mock.calls).toEqual([[PUB, "u_jesse"]]);
+  });
+
+  // The order every route here takes: the gate, the method, the plan store. A caller the gate refuses learns nothing of
+  // which method the route takes.
+  it("checks the gate before the method, and answers 501 with no plan store once the gate has passed", async () => {
+    expect((await holders(await bearer(TEAM_ADMIN, "operator"), "POST")).status).toBe(403);
+    expect((await holders({}, "POST")).status).toBe(401);
+    const bare = routeWith(panelConfig({ plans: undefined, operators: new Set([OPERATOR.userId]) }));
+    const ask = async (headers: Record<string, string>) => bare(new Request(`${ISSUER}/admin/handles`, { headers }));
+    expect((await ask(await bearer(OPERATOR, "default"))).status).toBe(501);
+    expect((await ask(await bearer(TEAM_ADMIN, "operator"))).status, "the gate first").toBe(403);
+  });
+
+  // The list matches /admin/handles alone and a release a name past it, so neither path lands on the other's route.
+  it("keeps the list and a release apart: a release leaves the list, and one with no name releases nothing", async () => {
+    const auth = await bearer(OPERATOR, "default");
+    const listed = async () => ((await (await holders(auth)).json()) as { holders: { handle: string }[] }).holders.map((h) => h.handle);
+    await store.claimHandle("u_ada", "ada");
+    expect(await listed()).toEqual(["ada", "jesse"]);
+    expect((await release("ada", auth)).status).toBe(204);
+    expect(await listed()).toEqual(["jesse"]);
+    const nameless = await release("", auth);
+    expect([nameless.status, nameless.headers.get("allow")]).toEqual([405, "GET"]);
     expect(await store.userOfHandle("jesse")).toBe("u_jesse");
   });
 });

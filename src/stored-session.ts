@@ -95,7 +95,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Sixteen changes to the stored shape landed after the sessions now in production
+ * Eighteen changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -164,13 +164,16 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   made private. Whether it is public at all is the manifest's `public`, read false for such
  *   a row.
  * - **publicName** (public names) defaults to `null`: a room written before it was never named.
+ * - **publicView** (room pages) defaults to `"canvas"`: a room written before it opened on its canvas.
+ *   Only `"page"` reads as `"page"`; any other stored value, one this code does not know included,
+ *   is the canvas too.
  * - **members** (ADR 0019) are not on a record written since: they are rows, and `present`
  *   names those in the room. That one is not lifted here, because it is a move of rows and
  *   not a default: SessionDO's constructor moves an older record's members out before
  *   anything reads it (`legacyRows` in member-rows.ts), and that move reads its members
  *   through this gate.
  *
- * All sixteen live here, in one gate or beside it, rather than in separate places that could drift.
+ * All eighteen live here, in one gate or beside it, rather than in separate places that could drift.
  */
 /** What a member reads as when its record names no agent at all, which no member written by Bellman lacks. */
 const UNKNOWN_AGENT: AgentInfo = { provider: "unknown", model: "unknown", client: "unknown" };
@@ -222,6 +225,10 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     thawedAt: (row as { thawedAt?: number | null }).thawedAt ?? null,
     unpublishedAt: (row as { unpublishedAt?: number | null }).unpublishedAt ?? null,
     publicName: (row as { publicName?: string | null }).publicName ?? null,
+    // Required on the type, absent on a row written before room pages: the cast says so. Only "page"
+    // opens a room as a page; any other value, one this code does not know included, is the canvas
+    // (room pages spec, D3).
+    publicView: (row as { publicView?: unknown }).publicView === "page" ? "page" : "canvas",
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

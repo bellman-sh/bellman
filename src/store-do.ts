@@ -6,7 +6,7 @@ import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
+  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
   Org, OrgIdp, OrgPatch,
 } from "./types.js";
@@ -1800,6 +1800,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return;
       await putRows(txn, memberRows(s, { ...s, publicName: name }));
+    });
+  }
+
+  /** `BellmanStore.setPublicView`, for this room (room pages spec, D3). An empty object is left empty. */
+  async setPublicView(view: PublicView): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      await putRows(txn, memberRows(s, { ...s, publicView: view }));
     });
   }
 
@@ -3993,6 +4002,15 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.get<string>(`hn:${handle}`);
   }
 
+  /**
+   * `BellmanStore.handleHolders`: one list of the `uh:` rows, the user id being all of the key past the prefix, so an id
+   * that holds a colon is read whole. Storage lists keys in ascending order, which is the user id order the method promises.
+   */
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    const rows = await this.ctx.storage.list<string>({ prefix: "uh:" });
+    return [...rows].map(([key, handle]) => ({ userId: key.slice("uh:".length), handle }));
+  }
+
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
     return this.ctx.storage.transaction(async (txn) => {
       const holder = await txn.get<string>(`hn:${handle}`);
@@ -4739,6 +4757,10 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).setPublicName(name);
   }
 
+  async setPublicView(sessionId: string, view: PublicView): Promise<void> {
+    await this.session(sessionId).setPublicView(view);
+  }
+
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
     return this.session(sessionId).sweepBlobs();
   }
@@ -4936,6 +4958,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async userOfHandle(handle: string): Promise<string | undefined> {
     return this.registry.userOfHandle(handle);
+  }
+
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    return this.registry.handleHolders();
   }
 
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {

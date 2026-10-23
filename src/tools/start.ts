@@ -43,7 +43,7 @@ Args:
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). read_context lets peers read your brief; it is on by default, and without it only you see your brief. Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
-  - public_name: a public room's name in its link, dash.bellman.sh/r/<public_name> (needs public: true). A taken name is refused and nothing is created; check or set one with bellman_public_name.
+  - public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true). A taken name is refused and nothing is created; check or set one with bellman_public_name.
 
 Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, public_url (a public room only: its name's link when named), plan, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
@@ -203,6 +203,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         unpublishedAt: null,
         // The name claimed above, if any (public names spec, D4): the record is what holds it.
         publicName: public_name ?? null,
+        // A room opens on its canvas until its creator chooses the page (room pages spec, D3).
+        publicView: "canvas",
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

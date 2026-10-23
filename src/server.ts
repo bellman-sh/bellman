@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Identity } from "./types.js";
 import type { BellmanStore } from "./store.js";
 import type { BlobStore } from "./blobs.js";
+import type { UpgradeLinks } from "./auth.js";
 import { registerStart } from "./tools/start.js";
 import { registerConnect } from "./tools/connect.js";
 import { registerConfirm } from "./tools/confirm.js";
@@ -58,10 +59,13 @@ const SERVER_VERSION = "0.4.0";
  * defaults to a mailer with no binding, which files the report and logs that no email went: a server built
  * without one still takes reports, and the registry's queue is where they are read. A deployment that sends the
  * email passes `reportMailer(binding)` for the `send_email` binding it has.
+ *
+ * `features.upgrade` is where this server sells plans, handed to `bellman_start` and `bellman_audit` so a plan
+ * refusal ends with its /upgrade link (#203). None, as on a server with no Payment Links, and refusals read as before.
  */
 export function buildServer(
   identity: Identity, s: BellmanStore, blobs: BlobStore,
-  features: { hostedSeat: boolean; mailReport?: ReportMailer },
+  features: { hostedSeat: boolean; mailReport?: ReportMailer; upgrade?: UpgradeLinks },
 ): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
@@ -75,7 +79,7 @@ export function buildServer(
   registerSurface(server, identity, s);
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);
-  registerAudit(server, identity, s);
+  registerAudit(server, identity, s, features);
   registerPublicName(server, identity, s);
   registerReport(server, identity, s, features.mailReport ?? reportMailer(undefined));
 

@@ -522,6 +522,7 @@ export default {
       const server = buildServer(identity, store, blobs, {
         hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS),
         mailReport,
+        upgrade: oauth?.paymentLinks ? { origin: oauth.issuer, paymentLinks: oauth.paymentLinks } : undefined,
       });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

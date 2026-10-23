@@ -259,7 +259,7 @@ an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes it, and with the list
 unset or empty nobody does.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Its creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and the room read carries it as `view` (ADR 00NN). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -937,7 +937,11 @@ is written by `#writeEvent` in the transaction that stores the `surface`
 event, through `AppendExtras.surface`, the `creditReport` pattern: the caller
 says what to index and the store writes the event and the row together. Last
 write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface.ts`,
-one rule for both stores). An idempotent replay applies no surface write: the
+one rule for both stores). A row also keeps when its key was first written,
+`createdAt`, which an edit carries over and a removal ends; a row from before it
+reads its `at` there (`createdAtOf`), and every read of an item carries both as
+`created_at` and `changed_at` (ADR 00NN).
+An idempotent replay applies no surface write: the
 row went in with the event in one transaction, so there is nothing to repair,
 and a removal leaves no tombstone, so re-applying could only put back what was
 removed. The record gains one number, `surfaceCursor`, moved in the same put,
@@ -2022,12 +2026,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,483** | every request, whether or not you are in a room |
+| Tool definitions | **~9,498** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~329 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-23 for room pages, by the method below: 21 tokens over the 9,477
+that trunk (`6e9b1ef4`) measures, all of them `bellman_surface`'s (308 to 329), whose
+`Returns:` line names an item's `created_at` and `changed_at`. No other tool changed. That
+is 9,498. The row read 9,483, trunk's figure before #296 (`ab05459f`), which took
+`bellman_start` from 2,492 to 2,490 and `bellman_public_name` from 309 to 305.
 
 Re-measured on 2026-10-18 for read_context, by the method below: 46 tokens over the 9,437
 that main (`f130144f`) measures, a row that already includes the reports work

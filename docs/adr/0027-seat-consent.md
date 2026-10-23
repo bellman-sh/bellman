@@ -30,10 +30,12 @@ seat the person's to take, and not only an admin's to give.
    pushed (`source: "scim"`, ADR 0029), which may name any address (`isUnownedSeat`). A Join moves a
    pushed seat's SCIM rows onto the subject with it, as a claim does, so the IdP's deprovision still ends
    it; and when an org that owns the address takes the key, the pushing org's IdP keeps no index on it.
-   A SCIM write that creates or restores a seat, a push, a re-push after a delete or a reactivation, never
-   puts it on a personal account the org does not own by its form (`scimSeatKey`): unless the org owns the
-   key, or the address that linked it, the seat goes on the address and is offered at the person's next
-   sign-in again. A write that only ends a seat follows the key as it is. The grant stays
+   A SCIM write that creates or restores a seat, a push, a re-push after a delete or a reactivation, seats
+   only the org's own `sso:` subject or the address, `email:<userName>`, and never a personal account,
+   whatever name the IdP gives the user (`scimSeatKey`). An address the org owns by its form is claimed back
+   onto the person's account at their next sign-in, through their own verified email, which no IdP sets;
+   one it does not own is offered there. A write that only ends a seat follows the key as it is, and a
+   reactivation thaws the rooms a deprovision froze under the key it walked. The grant stays
    as it is, but a sign-in neither resolves it nor claims it onto the subject; the page in 4 offers it,
    the roster lists it as invited, and it keeps its seat until it is answered or removed. It holds the
    person nowhere: it refuses no Join to another org, and an org that owns the address by its form now

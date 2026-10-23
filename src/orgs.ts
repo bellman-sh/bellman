@@ -45,15 +45,13 @@ export function isUnownedSeat(grant: PlanGrant, org: Org | undefined): boolean {
 
 /**
  * Where a SCIM write that creates or restores a seat puts it (ADR 0027, ADR 0029): a push, a re-push after a
- * delete, a reactivation. On `key`, the key the person was last seated under, when the org owns it by its
- * form or owns the address that linked it; otherwise on the address, `email:<userName>`, where the seat is
- * offered at the person's next sign-in and answered there. So a push alone never seats a personal account the
- * person once joined with: a deprovision ended that seat, and taking it again is theirs to answer. Writes that
- * only end a seat follow `key` as it is.
+ * delete, a reactivation. On the org's own `sso:` subject when that is the key, and otherwise on the address,
+ * `email:<userName>`; never on a personal account, whatever the IdP names the user. An address the org owns by
+ * its form is claimed onto the person's account at their next sign-in, through their own verified email, which
+ * no IdP sets; one it does not own is offered there and answered. Writes that only end a seat follow `key`.
  */
 export function scimSeatKey(org: Org, userName: string, key: string): string {
-  const address = `email:${userName}`;
-  return key === address || ownsByForm(org, key) || ownsByForm(org, address) ? key : address;
+  return parseSsoKey(key)?.orgId === org.orgId ? key : `email:${userName}`;
 }
 
 /**

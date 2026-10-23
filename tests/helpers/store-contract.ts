@@ -100,6 +100,11 @@ export interface StoreContractHarness {
    */
   reporterRows: () => Promise<string[]>;
   /**
+   * The SCIM key index rows the store holds, `sk:<key>` (ADR 0029), which `BellmanStore` cannot show: every read
+   * of one goes on to the user it names, so a row left on a key no user names any longer shows only here.
+   */
+  scimIndexRows: () => Promise<string[]>;
+  /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
    * nothing that can leave memory passes none, and the case that calls it then pins the count alone.
@@ -4858,7 +4863,8 @@ export function describeStoreContract(
         expect(isUnownedSeat((await store.getGrant("email:nine@x.test"))!, await store.getOrg("org_acme"))).toBe(true);
       });
 
-      it("re-seats the account an owned address linked by its form, as the org owns that address", async () => {
+      /** Owned by its form, the address is re-seated, and the person's own sign-in claims it back onto their account. */
+      it("re-seats an owned address's person on the address, which their next sign-in claims back by its form", async () => {
         await seated();
         await store.claimDomain("org_acme", "x.test", "tok", 1, by);
         await store.verifyDomain("org_acme", "x.test", 2, by);
@@ -4866,8 +4872,57 @@ export function describeStoreContract(
         await store.moveGrant("email:nine@x.test", "github:9");
         await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
         await store.updateScimUser("org_acme", "x1", { active: true }, 60, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@x.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        await store.moveGrant("email:nine@x.test", "github:9");
         expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", source: "scim" });
-        expect(await store.getGrant("email:nine@x.test")).toBeUndefined();
+        expect(await store.scimUserByKey("github:9")).toMatchObject({ id: "x1" });
+      });
+
+      /** The IdP names the user, so no name it gives makes a personal account its to seat (ADR 0027). */
+      const ownedDomain = async () => {
+        await store.claimDomain("org_acme", "acme.test", "tok", 1, by);
+        await store.verifyDomain("org_acme", "acme.test", 2, by);
+      };
+
+      it("re-seats the address, not the person's account, when the IdP renames them onto an owned domain and then reactivates", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await ownedDomain();
+        expect((await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test" }, 51, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect((await store.updateScimUser("org_acme", "x1", { active: true }, 52, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+        expect(await store.scimUserByKey("github:9")).toBeUndefined();
+      });
+
+      it("re-seats the address for a rename onto an owned domain and a reactivation in one update", async () => {
+        await linkedByJoin();
+        await store.updateScimUser("org_acme", "x1", { active: false }, 50, scimIntent("org_acme"));
+        await ownedDomain();
+        expect((await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test", active: true }, 51, scimIntent("org_acme"))).outcome).toBe("updated");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+      });
+
+      it("seats a re-push of a user renamed onto an owned domain and deleted on the address, not the account", async () => {
+        await linkedByJoin();
+        await ownedDomain();
+        await store.updateScimUser("org_acme", "x1", { userName: "nine@acme.test" }, 50, scimIntent("org_acme"));
+        await store.deleteScimUser("org_acme", "x1", 51, scimIntent("org_acme"));
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        const repushed = pushedUser({ id: "x2", userName: "nine@acme.test", key: "email:nine@acme.test", createdAt: 60, updatedAt: 60 });
+        expect((await store.createScimUser(repushed, scimIntent("org_acme"))).outcome).toBe("written");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.getGrant("email:nine@acme.test")).toMatchObject({ orgId: "org_acme", source: "scim" });
+      });
+
+      it("leaves no index row on the account a re-pushed user no longer names", async () => {
+        await linkedByJoin();
+        await store.deleteScimUser("org_acme", "x1", 50, scimIntent("org_acme"));
+        expect(await harness.scimIndexRows()).toContain("sk:github:9");
+        await store.createScimUser(pushedUser({ id: "x2", createdAt: 60, updatedAt: 60 }), scimIntent("org_acme"));
+        expect(await harness.scimIndexRows()).toEqual(["sk:email:nine@x.test"]);
       });
 
       it("lets the domain's owner take a key another org's IdP pushed, and leaves that org's IdP no index on it", async () => {

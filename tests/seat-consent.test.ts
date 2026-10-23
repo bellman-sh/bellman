@@ -17,7 +17,7 @@ import { sha256Base64url } from "../src/oauth/tokens.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
-import { brief, manifestFixture } from "./helpers/fixtures.js";
+import { brief, manifestFixture, member as seatOf, session } from "./helpers/fixtures.js";
 import { Harness } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -606,6 +606,45 @@ describe("a seat the org's identity provider pushes (ADR 0027, ADR 0029)", () =>
     expect(after.page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
     expect(after.target.searchParams.get("error")).toBeNull();
     expect(after.identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
+  });
+
+  /** The IdP names the user: renamed onto a domain Acme owns and reactivated, the person is still not its to seat. */
+  it("seats no former member's account when the IdP renames them onto an owned domain and reactivates, with single sign-on required", async () => {
+    const id = await joinedThenDeprovisioned();
+    await plans.claimDomain("org_acme", "acme.test", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "acme.test", 2, by);
+    await plans.putOrgIdp("org_acme", {
+      protocol: "oidc", issuer: "https://idp.test", clientId: "0oa", clientSecret: await seal("test-seal-secret", "shh"), tokenAuth: "client_secret_basic",
+      authorizationEndpoint: "https://idp.test/authorize", tokenEndpoint: "https://idp.test/token", userinfoEndpoint: null, configuredAt: 3, configuredBy: "u_github_1",
+    }, by);
+    await plans.updateOrg("org_acme", { requireSso: true }, by);
+    const renamed = await scim("org_acme", `/scim/v2/Users/${id}`, "PATCH", {
+      schemas: [PATCH_SCHEMA], Operations: [{ op: "replace", value: { userName: "jesse@acme.test", active: true } }],
+    });
+    expect(renamed.status).toBe(200);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    const after = await signIn();
+    expect(after.target.searchParams.get("error")).toBeNull();
+    expect(after.identity).toMatchObject({ userId: "u_github_4242", orgId: null, plan: "free" });
+  });
+
+  /** A deprovision froze the org's rooms of a personal account that its owned address linked; the reactivation thaws them. */
+  it("thaws the rooms a deprovision froze at a reactivation, though the seat goes back on the address", async () => {
+    await plans.claimDomain("org_acme", "example.dev", "tok", 1, by);
+    await plans.verifyDomain("org_acme", "example.dev", 2, by);
+    const { id } = await push("jesse@example.dev");
+    expect((await signIn()).identity).toMatchObject({ orgId: "org_acme" });
+    const room = "qs_jesse_org";
+    const seated = (memberId: string, userId: string, roomRole: string) => seatOf({ memberId, userId, label: userId, orgId: "org_acme", roomRole });
+    await plans.createSession(session({
+      id: room, createdBy: "u_github_4242", orgId: "org_acme", members: [seated("m_jesse", "u_github_4242", "peer_a"), seated("m_ana", "u_github_1", "peer_b")],
+    }));
+    expect((await deactivate(id)).status).toBe(200);
+    expect((await plans.getSession(room))?.frozenAt).not.toBeNull();
+    expect((await setActive(id, true)).status).toBe(200);
+    expect((await plans.getSession(room))?.frozenAt).toBeNull();
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    expect((await signIn()).identity).toMatchObject({ orgId: "org_acme", plan: "team" });
   });
 
   /** The domain's owner takes the address from another org's pushed seat; that org's IdP keeps no hold on the person it never seated. */

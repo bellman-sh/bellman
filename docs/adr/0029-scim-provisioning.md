@@ -74,5 +74,6 @@ and nothing froze a room.
   cross-tenant checks, not the domain, are what protect other orgs' seats. Such a seat takes effect only
   when the person accepts it at a sign-in, as an admin's does (ADR 0027): it links no personal account
   until then, and its SCIM rows follow it onto the account that accepts it, so a deprovision still ends it.
-  A reactivation or a fresh push after a delete puts such a seat back on the address, where it is asked
-  again, and never on the account the person joined with.
+  A push, a re-push or a reactivation seats only the org's own `sso:` subject or the address, never a
+  personal account: an address the org owns by its form is claimed back at the person's next sign-in, one
+  it does not own is asked again, and a reactivation still thaws the rooms its deprovision froze.

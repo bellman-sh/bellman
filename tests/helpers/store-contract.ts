@@ -23,7 +23,8 @@ import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
-import type { AuditEntry, Org, OrgIdp, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditEntry, Org, OrgIdp, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
@@ -4546,6 +4547,42 @@ export function describeStoreContract(
         expect(await store.countOrgMembers("org_acme")).toBe(2);
         expect(await store.provisionSsoMember("org_nobody", "sso:org_nobody:00u1", 15, sso)).toBe("no_org");
         expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "plan_granted").map((e) => e.actorUserId)).toEqual(["u_op", "sso", "u_github_1"]);
+      });
+    });
+
+    describe("SCIM (#56)", () => {
+      const acme = (over: Partial<Org> = {}): Org => ({
+        orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
+        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+      });
+      const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
+        grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
+      });
+      const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
+      const actions = async (orgId = "org_acme") => (await store.auditForOrg(orgId, 30)).map((e) => e.action);
+      const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+      const user = (over: Partial<ScimUser> = {}): ScimUser => ({
+        id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: "00u-bo", active: true, key: "email:bo@acme.test", createdAt: 10, updatedAt: 10, ...over,
+      });
+      const scim = scimIntent("org_acme");
+      void user; void scim;
+
+      it("issues one token per org, replaces it, and revokes it, so only the newest hash resolves", async () => {
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" }, by)).toBe("missing");
+        await seated();
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" }, by)).toBe("issued");
+        expect(await store.orgForScimToken("h1")).toBe("org_acme");
+        expect(await store.scimTokenOf("org_acme")).toEqual({ tokenHash: "h1", issuedAt: 5, issuedBy: "u_github_1" });
+        expect(await store.issueScimToken("org_acme", { tokenHash: "h2", issuedAt: 6, issuedBy: "u_github_1" }, by)).toBe("replaced");
+        expect(await store.orgForScimToken("h1")).toBeUndefined();
+        expect(await store.orgForScimToken("h2")).toBe("org_acme");
+        expect(await store.revokeScimToken("org_acme", by)).toBe("revoked");
+        expect(await store.orgForScimToken("h2")).toBeUndefined();
+        expect(await store.scimTokenOf("org_acme")).toBeUndefined();
+        expect(await store.revokeScimToken("org_acme", by)).toBe("missing");
+        expect(await actions()).toEqual(["org_created", "plan_granted", "scim_token_issued", "scim_token_issued", "scim_token_revoked"]);
+        expect((await store.auditForOrg("org_acme", 20)).map((e) => e.detail.replaced)).toEqual([undefined, undefined, false, true, undefined]);
       });
     });
 

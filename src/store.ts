@@ -1,7 +1,7 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
-  Org, OrgIdp, OrgPatch,
+  Org, OrgIdp, OrgPatch, ScimToken,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -1772,6 +1772,19 @@ export interface BellmanStore {
    */
   provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
 
+  /**
+   * An org's SCIM token (SCIM spec, D1), ONE operation: the hash stored and indexed, and the previous token's
+   * index row deleted, so the old token stops at the commit. `replaced` when one was; `missing` for no record.
+   * Records `scim_token_issued` with `replaced`.
+   */
+  issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing">;
+  /** Both rows gone; records `scim_token_revoked`. `missing` when there was none. */
+  revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing">;
+  /** The token's provenance, never the token: `GET /org/scim` says whether one is set and who issued it. */
+  scimTokenOf(orgId: string): Promise<ScimToken | undefined>;
+  /** The org a presented token's hash belongs to, which is the only identity a SCIM request has. */
+  orgForScimToken(tokenHash: string): Promise<string | undefined>;
+
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
@@ -1846,6 +1859,9 @@ export class MemoryStore implements BellmanStore {
   private idps = new Map<string, OrgIdp>();
   /** The one index a verified domain writes (D11): domain to org. */
   private domainIndex = new Map<string, string>();
+  /** Each org's SCIM token (SCIM spec, D1), and the lookup from a hash to its org. */
+  private scimTokens = new Map<string, ScimToken>();
+  private scimTokenIndex = new Map<string, string>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -3278,6 +3294,34 @@ export class MemoryStore implements BellmanStore {
     this.grants.set(key, detach(grant));
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
     return "written";
+  }
+
+  async issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {
+    if (!this.orgs.has(orgId)) return "missing";
+    const previous = this.scimTokens.get(orgId);
+    if (previous) this.scimTokenIndex.delete(previous.tokenHash);
+    this.scimTokens.set(orgId, detach(token));
+    this.scimTokenIndex.set(token.tokenHash, orgId);
+    this.recordAudit([orgEventEntry(orgId, "scim_token_issued", { replaced: previous !== undefined }, audit, token.issuedAt)]);
+    return previous ? "replaced" : "issued";
+  }
+
+  async revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing"> {
+    const token = this.scimTokens.get(orgId);
+    if (!token) return "missing";
+    this.scimTokens.delete(orgId);
+    this.scimTokenIndex.delete(token.tokenHash);
+    this.recordAudit([orgEventEntry(orgId, "scim_token_revoked", {}, audit, Date.now())]);
+    return "revoked";
+  }
+
+  async scimTokenOf(orgId: string): Promise<ScimToken | undefined> {
+    const token = this.scimTokens.get(orgId);
+    return token && detach(token);
+  }
+
+  async orgForScimToken(tokenHash: string): Promise<string | undefined> {
+    return this.scimTokenIndex.get(tokenHash);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

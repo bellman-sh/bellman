@@ -1,6 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import { allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
+import {
+  allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, scimTokenIndex, scimTokenKey, staleIndexKeys,
+} from "./grant-index.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
@@ -8,7 +10,7 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
-  Org, OrgIdp, OrgPatch,
+  Org, OrgIdp, OrgPatch, ScimToken,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -3731,6 +3733,54 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  // ------------------------------------------------- SCIM (SCIM spec, D1)
+  // The token's hash and its lookup row, beside the org: issuing again replaces both in one transaction, so the
+  // old token stops at the commit and no window serves two.
+
+  async #issueScimTokenTxn(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<Org>(orgKey(orgId)))) return "missing" as const;
+      const previous = await txn.get<ScimToken>(scimTokenKey(orgId));
+      if (previous) await txn.delete(scimTokenIndex(previous.tokenHash));
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([
+        orgEventEntry(orgId, "scim_token_issued", { replaced: previous !== undefined }, audit, token.issuedAt),
+      ]));
+      await txn.put<unknown>({ [scimTokenKey(orgId)]: token, [scimTokenIndex(token.tokenHash)]: orgId, ...rows });
+      return previous ? ("replaced" as const) : ("issued" as const);
+    });
+  }
+
+  async issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {
+    const outcome = await this.#issueScimTokenTxn(orgId, token, audit);
+    if (outcome !== "missing") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async #revokeScimTokenTxn(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const token = await txn.get<ScimToken>(scimTokenKey(orgId));
+      if (!token) return "missing" as const;
+      await txn.delete([scimTokenKey(orgId), scimTokenIndex(token.tokenHash)]);
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "scim_token_revoked", {}, audit, Date.now())]));
+      await txn.put<unknown>(rows);
+      return "revoked" as const;
+    });
+  }
+
+  async revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing"> {
+    const outcome = await this.#revokeScimTokenTxn(orgId, audit);
+    if (outcome === "revoked") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async scimTokenOf(orgId: string): Promise<ScimToken | undefined> {
+    return this.ctx.storage.get<ScimToken>(scimTokenKey(orgId));
+  }
+
+  async orgForScimToken(tokenHash: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(scimTokenIndex(tokenHash));
+  }
+
   /**
    * Remove both copies of a grant. Every delete path goes through here, and in
    * one transaction: half a delete leaves the grant listed but unresolvable,
@@ -5095,6 +5145,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
     return this.registry.provisionSsoMember(orgId, key, now, audit);
+  }
+
+  async issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {
+    return this.registry.issueScimToken(orgId, token, audit);
+  }
+
+  async revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing"> {
+    return this.registry.revokeScimToken(orgId, audit);
+  }
+
+  async scimTokenOf(orgId: string): Promise<ScimToken | undefined> {
+    return this.registry.scimTokenOf(orgId);
+  }
+
+  async orgForScimToken(tokenHash: string): Promise<string | undefined> {
+    return this.registry.orgForScimToken(tokenHash);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

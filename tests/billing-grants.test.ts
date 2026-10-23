@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryStore, type GrantDelete, type GrantWrite } from "../src/store.js";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 import {
   PURCHASE, canPurchaseAs, grantKeyForUser, orgForUser, purchaseGrant, reconcilePurchase,
   type PurchaseGrantStore,
@@ -307,7 +308,7 @@ describe("reconciling what Stripe says with what is stored", () => {
     const plans = new MemoryStore();
     const org = {
       orgId: "org_u_github_4242", name: "Comped", ownerUserId: user, seats: 10, source: "operator" as const,
-      active: true, createdAt: 1, requireSso: false, domains: [],
+      active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
     };
     await plans.createOrg(org, { key: "github:4242", plan: "team", role: "admin", orgId: org.orgId, source: "operator", grantedAt: 1, grantedBy: "u_op", expiresAt: null }, { actorUserId: "u_op" });
     await billing.linkCustomer("cus_A", user);

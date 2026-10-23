@@ -1,6 +1,6 @@
 import { domainOf } from "./oauth/dns.js";
 import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
-import type { Org, PlanGrant, Role } from "./types.js";
+import { DEFAULT_POLICY, type Org, type PlanGrant, type Role } from "./types.js";
 
 /**
  * What the org routes share (orgs spec, D6, D7): the rules a body is read by and the shape an org
@@ -10,6 +10,11 @@ import type { Org, PlanGrant, Role } from "./types.js";
 
 /** A display name, not an id: long enough for a company's legal name, short enough for a heading. */
 export const MAX_ORG_NAME_CHARS = 80;
+
+/** The record as the code reads it: a row written before `policy` carries the default, as its own object. */
+export function liftOrg(org: Org): Org {
+  return { ...org, policy: { ...(org.policy ?? DEFAULT_POLICY) } };
+}
 
 // ponytail: a ceiling on seats so a typo cannot store a number nothing counts up to; not a plan limit.
 export const MAX_SEATS = 100_000;

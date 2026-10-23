@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, liftOrg, orgView, parseOrgName, parseSeats, userIdForKey } from "../src/orgs.js";
+import { patchedOrg } from "../src/store.js";
 import { ssoUserId } from "../src/oauth/providers.js";
-import type { Org } from "../src/types.js";
+import { DEFAULT_POLICY, type Org } from "../src/types.js";
 
 /** The runtime-free rules the org routes share (orgs spec, D6, D7). */
 
@@ -78,6 +79,7 @@ describe("the org as the routes show it", () => {
       { domain: "acme.com", token: "the-secret-token", verifiedAt: Date.parse("2026-10-22T00:00:00Z") },
       { domain: "acme.dev", token: "another", verifiedAt: null },
     ],
+    policy: DEFAULT_POLICY,
   };
 
   it("formats the dates, carries the seats used and the caller's role, and never a domain's token", () => {
@@ -92,5 +94,25 @@ describe("the org as the routes show it", () => {
     });
     expect(JSON.stringify(orgView(org, 2, null))).not.toContain("secret");
     expect(orgView(org, 0, null).your_role).toBeNull();
+  });
+});
+
+describe("liftOrg", () => {
+  const org: Org = {
+    orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase", active: true,
+    createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY,
+  };
+
+  it("gives a row written before the field the default policy, and leaves a policy it has", () => {
+    const legacy = { ...org, policy: undefined } as unknown as Org;
+    expect(liftOrg(legacy).policy).toEqual(DEFAULT_POLICY);
+    expect(liftOrg(legacy).policy).not.toBe(DEFAULT_POLICY);
+    expect(liftOrg({ ...org, policy: { ...DEFAULT_POLICY, requireOrgOnly: true } }).policy.requireOrgOnly).toBe(true);
+  });
+
+  it("is what patchedOrg starts from: a legacy previous takes a field over the default, untouched itself", () => {
+    const legacy = { ...org, policy: undefined } as unknown as Org;
+    expect(patchedOrg(legacy, { policy: { whoMayCreate: "admins_only" } }).policy).toEqual({ ...DEFAULT_POLICY, whoMayCreate: "admins_only" });
+    expect(legacy.policy).toBeUndefined();
   });
 });

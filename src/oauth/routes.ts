@@ -7,7 +7,7 @@ import { isRecord } from "../billing/subscription.js";
 import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
-import type { Identity, Org, OrgInvite, Plan, PlanGrant } from "../types.js";
+import { DEFAULT_POLICY, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
 import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
@@ -2005,7 +2005,7 @@ export async function handleOAuth(
       return oauthError("invalid_request", "owner_key must be github:<numeric id> or google:<numeric id> — an address names no user id yet, so it cannot own an org");
     }
     const now = Date.now();
-    const org: Org = { orgId, name, ownerUserId, seats, source: "operator", active: true, createdAt: now, requireSso: false, domains: [] };
+    const org: Org = { orgId, name, ownerUserId, seats, source: "operator", active: true, createdAt: now, requireSso: false, domains: [], policy: DEFAULT_POLICY };
     const owner: PlanGrant = {
       key: body.owner_key as string, plan: "team", role: "admin", orgId, source: "operator",
       grantedAt: now, grantedBy: gate.identity.userId, expiresAt: null,

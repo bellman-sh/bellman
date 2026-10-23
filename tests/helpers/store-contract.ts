@@ -25,6 +25,7 @@ import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
+import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
@@ -4378,7 +4379,7 @@ export function describeStoreContract(
     describe("orgs (#53)", () => {
       const acme = (over: Partial<Org> = {}): Org => ({
         orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
-        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+        active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY, ...over,
       });
       const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
         key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
@@ -4435,6 +4436,20 @@ export function describeStoreContract(
         expect(rows.map((e) => e.detail)).toEqual([{ name: "Acme Ltd", seats: 5 }, { require_sso: true }]);
       });
 
+      it("updates the policy field by field, recording only the fields that changed, under policy", async () => {
+        await store.createOrg(acme(), owner(), by);
+        const tight = { requireOrgOnly: true, allowedCounterpartyOrgs: ["org_b"] };
+        expect(await store.updateOrg("org_acme", { policy: tight }, by)).toEqual(acme({ policy: { ...DEFAULT_POLICY, ...tight } }));
+        expect(await store.updateOrg("org_acme", { policy: { requireOrgOnly: true } }, by)).toMatchObject({ policy: { ...DEFAULT_POLICY, ...tight } });
+        expect(await store.updateOrg("org_acme", { name: "Acme Ltd", policy: { whoMayCreate: "admins_only" } }, by))
+          .toMatchObject({ name: "Acme Ltd", policy: { whoMayCreate: "admins_only", requireOrgOnly: true } });
+        const rows = (await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "org_updated");
+        expect(rows.map((e) => e.detail)).toEqual([
+          { policy: { require_org_only: true, allowed_counterparty_orgs: ["org_b"] } },
+          { name: "Acme Ltd", policy: { who_may_create: "admins_only" } },
+        ]);
+      });
+
       it("refuses a member past the seats, writing nothing and recording nothing", async () => {
         await store.createOrg(acme(), owner(), by);
         expect(await store.putGrantIfOwned(member("github:2"), "org_acme", by)).toBe("written");
@@ -4489,7 +4504,7 @@ export function describeStoreContract(
         expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("created");
         expect(await store.getOrg("org_u_github_4242")).toEqual({
           orgId: "org_u_github_4242", name: "org_u_github_4242", ownerUserId: "u_github_4242", seats: 3,
-          source: "purchase", active: true, createdAt: Date.now(), requireSso: false, domains: [],
+          source: "purchase", active: true, createdAt: Date.now(), requireSso: false, domains: [], policy: DEFAULT_POLICY,
         });
         expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 3, stripe)).toBe("unchanged");
         expect(await store.activatePurchasedOrg("org_u_github_4242", "u_github_4242", 5, stripe)).toBe("updated");
@@ -4536,7 +4551,7 @@ export function describeStoreContract(
     describe("SSO (#55)", () => {
       const acme = (over: Partial<Org> = {}): Org => ({
         orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
-        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+        active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY, ...over,
       });
       const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
         key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
@@ -4645,7 +4660,7 @@ export function describeStoreContract(
     describe("invites (ADR 0027)", () => {
       const acme = (over: Partial<Org> = {}): Org => ({
         orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
-        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+        active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY, ...over,
       });
       const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
         key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",
@@ -4983,7 +4998,7 @@ export function describeStoreContract(
     describe("SCIM (#56)", () => {
       const acme = (over: Partial<Org> = {}): Org => ({
         orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 2, source: "operator",
-        active: true, createdAt: 1, requireSso: false, domains: [], ...over,
+        active: true, createdAt: 1, requireSso: false, domains: [], policy: DEFAULT_POLICY, ...over,
       });
       const owner = (over: Partial<PlanGrant> = {}): PlanGrant => ({
         key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",

@@ -3,7 +3,7 @@ import { purchaseGrant } from "../src/billing/grants.js";
 import {
   grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimIntent, scimUserEntry, type AuditIntent,
 } from "../src/grant-audit.js";
-import type { Org, PlanGrant } from "../src/types.js";
+import { DEFAULT_POLICY, type Org, type PlanGrant } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;
 const admin: AuditIntent = { actorUserId: "u_admin" };
@@ -409,7 +409,7 @@ describe("every entry", () => {
 describe("org rows (orgs spec, D8)", () => {
   const org = (over: Partial<Org> = {}): Org => ({
     orgId: "org_acme", name: "Acme", ownerUserId: "u_github_4242", seats: 3, source: "purchase",
-    active: true, createdAt: NOW, requireSso: false, domains: [], ...over,
+    active: true, createdAt: NOW, requireSso: false, domains: [], policy: DEFAULT_POLICY, ...over,
   });
   const stripe: AuditIntent = { actorUserId: "stripe" };
 
@@ -436,6 +436,12 @@ describe("org rows (orgs spec, D8)", () => {
     expect(orgAuditEntries(org(), org(), stripe, 5)).toEqual([]);
     expect(orgAuditEntries(org(), org({ domains: [{ domain: "acme.com", token: "t", verifiedAt: null }] }), stripe, 5)).toEqual([]);
     expect(orgAuditEntries(org(), org({ createdAt: NOW + 1 }), stripe, 5)).toEqual([]);
+  });
+
+  it("reads a row written before policy as the default, so a rename of it records no policy", () => {
+    const legacy = { ...org(), policy: undefined } as unknown as Org;
+    expect(orgAuditEntries(legacy, org({ name: "New" }), stripe, NOW)[0]!.detail).toEqual({ name: "New" });
+    expect(orgAuditEntries(legacy, org(), stripe, NOW)).toEqual([]);
   });
 
   it("names the acting admin as a grant row does", () => {

@@ -11,7 +11,7 @@ import { ssoUserId } from "../src/oauth/providers.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
-import type { Identity, Org, PlanGrant } from "../src/types.js";
+import { DEFAULT_POLICY, type Identity, type Org, type PlanGrant } from "../src/types.js";
 
 const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";
@@ -37,7 +37,7 @@ const caller = async (request: Request): Promise<RoomCaller | null> => {
 /** A purchased org, so billing's deactivation applies to it; the routes read the same of either kind. */
 const acme: Org = {
   orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "purchase", active: true,
-  createdAt: Date.parse("2026-10-21T00:00:00Z"), requireSso: false, domains: [],
+  createdAt: Date.parse("2026-10-21T00:00:00Z"), requireSso: false, domains: [], policy: DEFAULT_POLICY,
 };
 const ownerGrant: PlanGrant = {
   key: "github:1", plan: "team", role: "admin", orgId: "org_acme", source: "operator",

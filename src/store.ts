@@ -3,7 +3,8 @@ import type {
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { DEFAULT_POLICY } from "./types.js";
+import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1904,16 +1905,19 @@ const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > 
  * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
  */
 export function patchedOrg(previous: Org, patch: OrgPatch): Org {
-  const next: Org = { ...previous };
+  const next: Org = liftOrg(previous);
   if (patch.name !== undefined) next.name = patch.name;
   if (patch.seats !== undefined) next.seats = patch.seats;
   if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
+  for (const [field, value] of Object.entries(patch.policy ?? {})) {
+    if (value !== undefined) (next.policy as unknown as Record<string, unknown>)[field] = value;
+  }
   return next;
 }
 
 /** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
 export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
-  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [] };
+  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [], policy: DEFAULT_POLICY };
 }
 
 export class MemoryStore implements BellmanStore {
@@ -3303,7 +3307,7 @@ export class MemoryStore implements BellmanStore {
 
   async getOrg(orgId: string): Promise<Org | undefined> {
     const org = this.orgs.get(orgId);
-    return org && detach(org);
+    return org && liftOrg(detach(org));
   }
 
   async createOrg(org: Org, ownerGrant: PlanGrant, audit: AuditIntent): Promise<"created" | "exists" | "conflict"> {

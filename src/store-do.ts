@@ -3269,6 +3269,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.get<PublicNameEntry>(`pn:${name}`);
   }
 
+  /** `BellmanStore.publicNameEntries`: the index's first `limit` rows, in key order, which is name order. */
+  async listPublicNames(limit: number): Promise<{ name: string; entry: PublicNameEntry }[]> {
+    const rows = await this.ctx.storage.list<PublicNameEntry>({ prefix: "pn:", limit });
+    return [...rows].map(([key, entry]) => ({ name: key.slice("pn:".length), entry }));
+  }
+
   /** `BellmanStore.claimPublicName`, in one transaction (public names spec, D5). */
   async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
@@ -5386,6 +5392,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
     return (await this.registry.lookupPublicName(name)) ?? null;
+  }
+
+  async publicNameEntries(limit: number): Promise<{ name: string; entry: PublicNameEntry }[]> {
+    return this.registry.listPublicNames(limit);
   }
 
   async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {

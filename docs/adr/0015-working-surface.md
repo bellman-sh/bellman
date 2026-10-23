@@ -1,6 +1,6 @@
 # ADR 0015 — The working surface: keyed items, last write wins, html only on another origin
 
-**Date:** 2026-10-06 · **Status:** accepted · **Recorded:** 2026-10-09 · **Closes:** #129, #183, #185 · **Spec:** `docs/superpowers/specs/2026-10-06-working-surface-design.md`, `docs/superpowers/specs/2026-10-06-surface-html-artifacts-design.md`
+**Date:** 2026-10-06 · **Status:** accepted; decision 1 amended by ADR 0030 · **Recorded:** 2026-10-09 · **Closes:** #129, #183, #185 · **Spec:** `docs/superpowers/specs/2026-10-06-working-surface-design.md`, `docs/superpowers/specs/2026-10-06-surface-html-artifacts-design.md`
 
 ## Context
 

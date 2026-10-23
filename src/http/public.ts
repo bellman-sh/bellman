@@ -3,7 +3,8 @@
  * read by anyone with its link. `GET` under `/public/rooms/:id`: the room's name and purpose, its
  * byline when its creator signed it (bylines spec D4), its surface with the surface cursor as an
  * ETag, its log, and the bytes of a blob an item on its surface names. And `GET
- * /public/handles/:handle`: the public rooms a handle has signed (D5). Nothing else.
+ * /public/handles/:handle`: the public rooms a handle has signed (D5). And `GET /public/rooms`: the
+ * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml. Nothing else.
  *
  * No credential is read here, by design. A cookie or a bearer changes nothing, so a member's
  * credential cannot open a private room through these paths, and every origin is answered
@@ -23,7 +24,7 @@ import { handleFromSegment } from "../handles.js";
 import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
-import { PUBLIC_NAME, roomNamed } from "../public-names.js";
+import { PUBLIC_NAME, holdsName, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, sessionStatus } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 import { surfaceCursor } from "../surface.js";
@@ -120,6 +121,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
   try {
     const page = HANDLE_PAGE.exec(path);
     if (page) return await handlePage(page[1], deps);
+    if (path === "/public/rooms") return await namedRooms(deps);
     const m = PATH.exec(path);
     if (!m) return notFound("no such route");
     const [, key, part, blobId] = m;
@@ -236,4 +238,23 @@ async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response>
     }
   }
   return answer(200, { handle, rooms });
+}
+
+/**
+ * The named public rooms, name order, at most `MAX_ROOMS_LISTED`: each index entry checked against its room's
+ * record, as a read by name is, so a name whose room closed or went private is left out. A room public by its id
+ * alone is in no index and so not here: its link is shared, not listed. `HANDLE_PAGE_BATCH` rooms are read at once.
+ * ponytail: the first MAX_ROOMS_LISTED names of the index, dead ones included; a cursor when the index outgrows it.
+ */
+async function namedRooms(deps: PublicRouteDeps): Promise<Response> {
+  const entries = await deps.store.publicNameEntries(MAX_ROOMS_LISTED);
+  const rooms: unknown[] = [];
+  for (let at = 0; at < entries.length; at += HANDLE_PAGE_BATCH) {
+    const batch = entries.slice(at, at + HANDLE_PAGE_BATCH);
+    const sessions = await Promise.all(batch.map(({ entry }) => deps.store.getSession(entry.id)));
+    for (const [k, s] of sessions.entries()) {
+      if (holdsName(s, batch[k].name)) rooms.push({ id: s!.id, name: batch[k].name, public_url: publicRoomUrl(s!) });
+    }
+  }
+  return answer(200, { rooms });
 }

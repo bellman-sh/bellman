@@ -388,6 +388,25 @@ describe("a public room read by its name (public names spec, D6)", () => {
     await store.setPublicName(id, n);
   };
 
+  // The sitemap's list: only rooms that hold their name, each at the link its own read gives.
+  it("lists the named public rooms at GET /public/rooms, in name order, leaving out a name its room no longer holds", async () => {
+    await store.createSession(session({ id: "qs_closed_pub", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: Date.now(), joinCodes: {} }));
+    await store.createSession(session({ id: "qs_other", manifest: roomManifest({ public: true, room: "Other" }), members: [member()] }));
+    await name("qs_closed_pub", "closed-room");
+    await name(PUB, "open-review");
+    await name("qs_other", "another");
+    await store.claimPublicName("in-flight", { id: "qs_nowhere", at: Date.now() }, null);
+    const res = (await read("/public/rooms"))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await res.json()).toEqual({ rooms: [
+      { id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another" },
+      { id: PUB, name: "open-review", public_url: "https://bellman.sh/r/open-review" },
+    ] });
+    await store.unpublishSession(PUB, Date.now());
+    expect(await bodyOf(await read("/public/rooms"))).toEqual({ rooms: [{ id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another" }] });
+  });
+
   it("reads the room, its surface and its log by its name as by its session id", async () => {
     await name(PUB, "open-review");
     // The room's one link, whichever way it was read: its name's while it holds one.

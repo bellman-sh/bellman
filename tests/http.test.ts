@@ -66,7 +66,7 @@ describe("HTTP surface", () => {
   it("serves the preset routes beside the room routes", async () => {
     const res = await fetch(`${base}/presets`, { headers: { authorization: "Bearer qk_dev_jesse" } });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
+    expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(5);
   });
 
   it("serves the ban routes beside the room routes", async () => {

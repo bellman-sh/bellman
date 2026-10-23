@@ -509,7 +509,7 @@ export type Verb =
   | "respond_actions"
   | "write_surface";
 
-export type PresetName = "pair" | "swarm" | "review" | "social";
+export type PresetName = "pair" | "swarm" | "review" | "social" | "topic";
 
 /** The names a manifest may give `host.model`. The ids and weights live in src/host.ts. */
 export type HostModelName = "haiku" | "sonnet" | "opus";

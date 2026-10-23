@@ -12,6 +12,7 @@ import { hostMember } from "../src/host.js";
 import {
   MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
+import { resolveManifest } from "../src/manifest.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
 import { JOINED_SCAN, MemoryStore } from "../src/store.js";
@@ -1773,6 +1774,15 @@ describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
     expect([closed.status, (await bodyOf(closed)).error]).toEqual([409, "closed"]);
     expect(await stored()).toBe("Ask about the week.");
     expect(await hostRows()).toEqual([]);
+  });
+
+  it("answers 409 no_host for a topic room, which has none", async () => {
+    await store.createSession(session({
+      id: "qs_topic", manifest: resolveManifest({ room: "mcp", preset: "topic", public: true }),
+      members: [member({ roomRole: "maintainer" })],
+    }));
+    const res = (await set(DEV_KEY.jesse, { instructions: "Ask a question." }, {}, "qs_topic"))!;
+    expect([res.status, (await bodyOf(res)).error]).toEqual([409, "no_host"]);
   });
 
   it("files an audit row naming the creator, with the length and not the text, once for each change", async () => {

@@ -70,9 +70,9 @@ describe("the preset routes", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 
-  it("list the four built-ins expanded, and the caller's own presets and nobody else's", async () => {
+  it("list the five built-ins expanded, and the caller's own presets and nobody else's", async () => {
     let body = await bodyOf(await call(DEV_KEY.jesse, "/presets"));
-    expect((body.builtin as { name: string }[]).map((p) => p.name)).toEqual(["pair", "swarm", "review", "social"]);
+    expect((body.builtin as { name: string }[]).map((p) => p.name)).toEqual(["pair", "swarm", "review", "social", "topic"]);
     expect(body.mine).toEqual([]);
     expect((await put(DEV_KEY.jesse, "my_review"))!.status).toBe(200);
     body = await bodyOf(await call(DEV_KEY.jesse, "/presets"));
@@ -191,6 +191,21 @@ describe("the preset routes", () => {
     expect(((await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string }[]).map((p) => p.name)).toEqual(["social"]);
     expect((await call(DEV_KEY.jesse, "/presets/social", { method: "DELETE" }))!.status).toBe(204);
     expect(await store.getPreset("u_jesse", "social")).toBeUndefined();
+  });
+
+  /** `topic` became a built-in after saved presets shipped, as `social` did (topic rooms plan, R3). */
+  it("refuse topic as a built-in's name, and still list and delete one saved under it before", async () => {
+    const refused = (await put(DEV_KEY.jesse, "topic"))!;
+    expect(refused.status).toBe(409);
+    expect(await bodyOf(refused)).toMatchObject({ error: "builtin" });
+    await store.putPreset("u_jesse", {
+      name: "topic", description: null, mode: "pair", heartbeat_on: null, housekeeping: null,
+      roles: { solo: { can: ["send"], description: null, reports: false } },
+      default_role: "solo", creator_role: "solo", updated_at: "2026-10-09T12:00:00.000Z",
+    } as never, MAX_PRESETS);
+    expect(((await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string }[]).map((p) => p.name)).toEqual(["topic"]);
+    expect((await call(DEV_KEY.jesse, "/presets/topic", { method: "DELETE" }))!.status).toBe(204);
+    expect(await store.getPreset("u_jesse", "topic")).toBeUndefined();
   });
 
   it("save a host block and answer with it as stored", async () => {

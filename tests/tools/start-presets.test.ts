@@ -110,7 +110,7 @@ describe("bellman_start citing a saved preset", () => {
     await h.store.putPreset("u_jesse", saved("beta"), 20);
     const out = await start("gamma");
     expect(out.isError).toBe(true);
-    expect(out.text).toContain('invalid manifest — unknown preset "gamma" (built-in: pair, swarm, review, social; yours: alpha, beta)');
+    expect(out.text).toContain('invalid manifest — unknown preset "gamma" (built-in: pair, swarm, review, social, topic; yours: alpha, beta)');
   });
 
   it("does not let one person cite another's preset", async () => {
@@ -138,6 +138,13 @@ describe("bellman_start citing a saved preset", () => {
     const { tools } = await jesse.listTools();
     expect(tools.find((t) => t.name === "bellman_start")!.description)
       .toContain("or the name of a preset you saved at dash.bellman.sh/presets");
+  });
+
+  it("lists topic among the presets it may cite, and among those that make swarm rooms", async () => {
+    const { tools } = await jesse.listTools();
+    const doc = tools.find((t) => t.name === "bellman_start")!.description!;
+    expect(doc).toContain('preset: "pair" | "swarm" | "review" | "social" | "topic"');
+    expect(doc).toContain("the swarm, social and topic presets make swarm rooms.");
   });
 
   /**

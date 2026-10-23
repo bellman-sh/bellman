@@ -26,7 +26,7 @@ describe("a manifest's public flag", () => {
   it("is false unless given, and the built-ins are private", () => {
     expect(resolveManifest({ room: "r", preset: "pair" }).public).toBe(false);
     expect(resolveManifest(authored).public).toBe(false);
-    expect(builtinPresets().map((p) => p.public)).toEqual([false, false, false, false]);
+    expect(builtinPresets().map((p) => p.public)).toEqual([false, false, false, false, false]);
   });
 
   it("is refused when it is not a boolean", () => {

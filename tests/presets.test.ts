@@ -51,7 +51,7 @@ describe("checkPreset", () => {
     });
   });
 
-  it.each(["pair", "swarm", "review", "social"])("refuses the built-in name %s with its own error", (name) => {
+  it.each(["pair", "swarm", "review", "social", "topic"])("refuses the built-in name %s with its own error", (name) => {
     expect(checkPreset(name, body(), NOW)).toMatchObject({ ok: false, status: 409, error: "builtin" });
   });
 
@@ -221,9 +221,9 @@ describe("a saved preset with a host (#188 beneath the designer)", () => {
 });
 
 describe("builtinPresets", () => {
-  it("lists the four built-ins in a saved preset's form, each of which saves under a new name", () => {
+  it("lists the five built-ins in a saved preset's form, each of which saves under a new name", () => {
     const all = builtinPresets();
-    expect(all.map((p) => p.name)).toEqual(["pair", "swarm", "review", "social"]);
+    expect(all.map((p) => p.name)).toEqual(["pair", "swarm", "review", "social", "topic"]);
     for (const p of all) {
       expect(p.updated_at).toBeNull();
       expect(typeof p.description).toBe("string");
@@ -244,6 +244,15 @@ describe("builtinPresets", () => {
     for (const p of builtinPresets().filter((b) => b.name !== "social")) {
       expect({ name: p.name, heartbeat: p.heartbeat, host: p.host }).toEqual({ name: p.name, heartbeat: null, host: null });
     }
+  });
+
+  it("shows topic as a swarm of maintainers and contributors with no host and no beat", () => {
+    const topic = builtinPresets().find((p) => p.name === "topic")!;
+    expect(topic).toMatchObject({
+      description: "Maintainers who approve what contributors propose and write and restore the cards, and contributors who propose cards and talk with the room.",
+      mode: "swarm", heartbeat: null, host: null, default_role: "contributor", creator_role: "maintainer",
+    });
+    expect(Object.keys(topic.roles).sort()).toEqual(["contributor", "maintainer"]);
   });
 
   it("hands out fresh copies: changing one leaves the next call alone", () => {

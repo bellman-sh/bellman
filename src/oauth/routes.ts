@@ -1584,11 +1584,14 @@ export async function handleOAuth(
   // The operator lists every account holding a handle, for the notice that goes to every holder 30 days before members
   // are named by handle (public rooms on bellman.sh spec, D6). Each holder comes with the sign-in label of its seat in
   // one room it sat in. For most accounts that is an email address, or `<login>@<provider>` when the provider gave none,
-  // and it is where the notice goes. An account in no room, as the room index knows it (`sessionsJoinedBy`), has
-  // `label: null` and needs no notice: the change shows its handle nowhere. On /admin/handles/:handle's gate, and
-  // outside the suspension check as /admin/reports is (R8), in the order every route here takes: the gate, the method,
-  // the plan store, then the answer. The path is exact, so a release's never lands here and this one never lands on a
-  // release.
+  // and it is where the notice goes. `label: null` means the room index (`sessionsJoinedBy`) names no room for the
+  // holder. A holder who sat in none reads that way, and so does one who sat only in rooms from before the index, one
+  // whose index write failed (`DurableObjectStore.writeIndex` logs a failed put and moves on), and one whose user id
+  // another extends past a colon, since the list then answers the other's rooms in place of its own (#295). So null
+  // does not say that no notice is owed: the owner cross-checks null holders by hand before leaving one off. On
+  // /admin/handles/:handle's gate, and outside the suspension check as /admin/reports is (R8), in the order every
+  // route here takes: the gate, the method, the plan store, then the answer. The path is exact, so a release's never
+  // lands here and this one never lands on a release.
   //
   // ponytail: the whole list in one answer, and two reads per holder (a room, then its seat). The Workers cap of 1,000
   // subrequests ends it near 500 holders, with an error and not a short list. Page it before then.

@@ -11,7 +11,8 @@ import { MemoryAuthStore, SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { seal } from "../src/oauth/sealed.js";
 import { MemoryStore } from "../src/store.js";
-import type { Identity, Org, PlanGrant } from "../src/types.js";
+import { scimIntent } from "../src/grant-audit.js";
+import type { Identity, Org, PlanGrant, ScimUser } from "../src/types.js";
 
 const ISSUER = "https://mcp.example.test";
 const RESOURCE = "https://mcp.example.test/mcp";
@@ -251,6 +252,41 @@ describe("the callback (D12, D13)", () => {
     expect((await call(`/callback/sso/org_nobody?code=c&state=${encodeURIComponent(req)}`)).status).toBe(404);
     expect((await call(`/callback/sso/org_acme?code=c&state=forged`)).status).toBe(400);
     expect((await call(`/callback/sso/bad%20id?code=c&state=${encodeURIComponent(req)}`)).status).toBe(404);
+  });
+});
+
+describe("SCIM-provisioned members (SCIM spec, D4)", () => {
+  const pushed = (over: Partial<ScimUser> = {}): ScimUser => ({
+    id: "x1", orgId: "org_acme", userName: "ana@acme.test", externalId: "00u1abc", active: true, key: "email:ana@acme.test", createdAt: 5, updatedAt: 5, ...over,
+  });
+
+  it("signs in a pushed address onto its seat, taking no second one, and links the subject to the SCIM user", async () => {
+    expect((await plans.createScimUser(pushed(), scimIntent("org_acme"))).outcome).toBe("written");
+    const { identity } = await signInThroughSso();
+    expect(identity).toMatchObject({ orgId: "org_acme", plan: "team", role: "member", userId: ssoUserId("org_acme", "00u1abc") });
+    expect(await plans.getGrant("email:ana@acme.test")).toBeUndefined();
+    expect(await plans.getGrant("sso:org_acme:00u1abc")).toMatchObject({ source: "scim" });
+    expect(await plans.scimUserByKey("sso:org_acme:00u1abc")).toMatchObject({ id: "x1", key: "sso:org_acme:00u1abc" });
+    expect(await plans.countOrgMembers("org_acme")).toBe(2);
+  });
+
+  it("links a push to a person who signed in before the connector existed", async () => {
+    await signInThroughSso();
+    expect((await plans.createScimUser(pushed(), scimIntent("org_acme"))).outcome).toBe("linked");
+    expect(await plans.scimUserByKey("sso:org_acme:00u1abc")).toMatchObject({ id: "x1" });
+    expect(await plans.countOrgMembers("org_acme")).toBe(2);
+  });
+
+  it("refuses a deactivated person at the callback, minting nothing", async () => {
+    await plans.createScimUser(pushed(), scimIntent("org_acme"));
+    await signInThroughSso();
+    await plans.updateScimUser("org_acme", "x1", { active: false }, Date.now(), scimIntent("org_acme"));
+    const { identity, target } = await signInThroughSso();
+    expect(identity).toBeNull();
+    expect(target.searchParams.get("error")).toBe("access_denied");
+    expect(target.searchParams.get("error_description")).toContain("removed your access");
+    expect(await plans.getGrant("sso:org_acme:00u1abc")).toBeUndefined();
+    expect(await plans.countOrgMembers("org_acme")).toBe(1);
   });
 });
 

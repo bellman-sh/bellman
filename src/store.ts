@@ -567,7 +567,7 @@ export interface RemovalOutcome {
 /** What a push did (SCIM spec, D5). */
 export type ScimCreate = { outcome: "written" | "linked"; user: ScimUser } | { outcome: "exists" | "conflict" | "full" | "no_org" };
 /** What an update did (SCIM spec, D6 to D8): the row after and before, or why nothing was written. */
-export type ScimUpdate = { outcome: "updated"; user: ScimUser; was: ScimUser } | { outcome: "missing" | "full" | "exists" };
+export type ScimUpdate = { outcome: "updated"; user: ScimUser; was: ScimUser } | { outcome: "missing" | "full" | "exists" | "conflict" };
 
 /** The grant a SCIM user holds while active (SCIM spec, D2): a team member from scim, lapsing never. */
 export const scimGrant = (key: string, orgId: string, now: number): PlanGrant => ({
@@ -1777,11 +1777,16 @@ export interface BellmanStore {
   /** The org a verified domain routes a sign-in to (D12), and nothing for a claimed one. */
   orgForDomain(domain: string): Promise<string | undefined>;
   /**
-   * The seat an SSO sign-in takes on first use (D13), ONE operation: `exists` when the key already
-   * holds a live grant (an sso key names its org, so that grant is this org's), `full` at the seats,
-   * `no_org` for no record, else a team member grant from `sso` with its `plan_granted` row.
+   * The seat an SSO sign-in takes on first use (D13), ONE operation, in this order (SCIM spec, D4): a SCIM user
+   * managing `key` that is inactive is `deprovisioned`; a live grant at `key` is `exists` (an sso key names its
+   * org, so that grant is this org's); with `address`, the IdP's vouched address under a verified domain, a
+   * directory entry naming an inactive SCIM user is `deprovisioned`, and a live grant of this org's at the
+   * directory's key or at `email:<address>` is moved onto `key` with its role and source, the SCIM rows and the
+   * directory following, and no seat taken: `written`; else `full` at the seats, `no_org` for no record, and
+   * otherwise a team member grant from `sso` with its `plan_granted` row, and the directory entry for the
+   * address, `written`.
    */
-  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
+  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent, address?: string): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned">;
 
   /**
    * An org's SCIM token (SCIM spec, D1), ONE operation: the hash stored and indexed, and the previous token's
@@ -1818,7 +1823,10 @@ export interface BellmanStore {
    * deletes the grant at the row's key when it is this org's (its `plan_revoked` row filed) and keeps the row; a
    * reactivation writes a `team` member grant from `scim` under the key again, `full` at the seats; a rename moves
    * an `email:` grant to the new address and the directory entry with it, and leaves a key a sign-in claimed; a
-   * new name another SCIM user holds is `exists`. A patch that changes nothing writes nothing and records nothing.
+   * new name another SCIM user or a member of this org holds is `exists`. A key the rename or the reactivation
+   * would write that another org holds a live grant under is `conflict`, nothing written: a tenant's seat is
+   * never handed to another. A reactivation whose key this org seated by hand meanwhile keeps that grant, role
+   * included, and takes no seat. A patch that changes nothing writes nothing and records nothing.
    * Records `scim_user_deactivated`, `scim_user_reactivated` or `scim_user_updated`, naming `user_name`, `key`,
    * and `from` for a rename and `external_id` for a change of it.
    */
@@ -3354,15 +3362,48 @@ export class MemoryStore implements BellmanStore {
     return this.domainIndex.get(domain);
   }
 
-  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+  async provisionSsoMember(
+    orgId: string, key: string, now: number, audit: AuditIntent, address?: string,
+  ): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned"> {
     const org = this.orgs.get(orgId);
     if (!org) return "no_org";
+    if (this.scimInactive(this.scimByKey.get(scimKeyIndex(key)))) return "deprovisioned";
     if (this.liveGrant(key)) return "exists";
+    const name = address === undefined ? undefined : scimNameKey(orgId, address);
+    const entry = name === undefined ? undefined : this.directory.get(name);
+    if (entry?.scimId && this.scimInactive({ orgId, scimId: entry.scimId })) return "deprovisioned";
+    // The grant the address is seated under, this org's: at the directory's key, else at the address itself. It
+    // moves onto the subject with its role and source, as `claimGrant` moves an admin's address grant.
+    const candidates = [entry?.key, address === undefined ? undefined : `email:${address}`];
+    for (const from of candidates) {
+      const held = from === undefined || from === key ? undefined : this.liveGrant(from);
+      if (!held || held.orgId !== orgId) continue;
+      this.grants.delete(from!);
+      this.grants.set(key, { ...held, key });
+      this.repointScim(held, key);
+      this.directory.set(name!, { key, scimId: entry?.scimId ?? null });
+      return "written";
+    }
     if (this.liveMembers(orgId) >= org.seats) return "full";
     const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
     this.grants.set(key, detach(grant));
+    if (name !== undefined) {
+      this.directory.set(name, { key, scimId: entry?.scimId ?? null });
+      // A SCIM user whose grant is gone follows the subject that just signed in.
+      const user = entry?.scimId ? this.scimUsers.get(scimUserKey(orgId, entry.scimId)) : undefined;
+      if (user) {
+        this.scimByKey.delete(scimKeyIndex(user.key));
+        this.writeScimRows({ ...user, key });
+      }
+    }
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
     return "written";
+  }
+
+  /** Whether a key index row names a SCIM user the IdP deactivated (SCIM spec, D4). */
+  private scimInactive(managed: { orgId: string; scimId: string } | undefined): boolean {
+    const user = managed && this.scimUsers.get(scimUserKey(managed.orgId, managed.scimId));
+    return user !== undefined && !user.active;
   }
 
   // ------------------------------------------------- SCIM users (SCIM spec, D2 to D8)
@@ -3428,20 +3469,29 @@ export class MemoryStore implements BellmanStore {
     const active = patch.active !== undefined && patch.active !== was.active ? patch.active : undefined;
     if (rename === undefined && externalId === undefined && active === undefined) return { outcome: "updated", user: detach(was), was: detach(was) };
     // Every refusal before any write.
+    const moves = rename !== undefined && was.key === `email:${was.userName}`;
+    const toKey = moves ? `email:${rename}` : was.key;
     if (rename !== undefined) {
       const taken = this.directory.get(scimNameKey(orgId, rename));
       if (taken?.scimId && taken.scimId !== id) return { outcome: "exists" };
+      const target = moves ? this.liveGrant(toKey) : undefined;
+      if (target && target.orgId !== orgId) return { outcome: "conflict" };
+      if (target) return { outcome: "exists" };
     }
-    const seats = this.orgs.get(orgId)?.seats ?? Infinity;
-    if (active === true && this.liveMembers(orgId) >= seats) return { outcome: "full" };
+    let reuse: PlanGrant | undefined;
+    if (active === true) {
+      const held = moves ? undefined : this.liveGrant(toKey);
+      if (held && held.orgId !== orgId) return { outcome: "conflict" };
+      reuse = held;
+      if (!reuse && this.liveMembers(orgId) >= (this.orgs.get(orgId)?.seats ?? Infinity)) return { outcome: "full" };
+    }
 
     const entries: AuditEntry[] = [];
     const detail: Record<string, unknown> = {};
     let next: ScimUser = { ...was, updatedAt: now };
     if (rename !== undefined) {
       // An address key names the address, so it moves with it; a key a sign-in claimed names the person and stays.
-      if (was.key === `email:${was.userName}`) {
-        const toKey = `email:${rename}`;
+      if (moves) {
         const grant = this.liveGrant(was.key);
         if (grant) {
           this.grants.delete(was.key);
@@ -3460,9 +3510,11 @@ export class MemoryStore implements BellmanStore {
     }
     let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
     if (active === true) {
-      const grant = scimGrant(next.key, orgId, now);
-      this.grants.set(next.key, grant);
-      entries.push(...grantAuditEntries(undefined, grant, audit, now));
+      if (!reuse) {
+        const grant = scimGrant(next.key, orgId, now);
+        this.grants.set(next.key, grant);
+        entries.push(...grantAuditEntries(undefined, grant, audit, now));
+      }
       action = "scim_user_reactivated";
     } else if (active === false) {
       const grant = this.liveGrant(next.key);

@@ -137,6 +137,14 @@ export class SeatsFull extends Error {
   }
 }
 
+/** A person the org's identity provider deprovisioned (SCIM spec, D4): no sign-in, and nothing minted. */
+export class AccessRemoved extends Error {
+  constructor(public readonly orgName: string) {
+    super(`${orgName} has removed your access: ask its admin`);
+    this.name = "AccessRemoved";
+  }
+}
+
 /**
  * Whether `require_sso` refuses this person (D13): the org their plan puts them in, and the org a
  * verified domain of any of their addresses belongs to, each with the switch on, unless they are
@@ -631,7 +639,7 @@ async function finishAuthorize(
     keys = resolved.keys;
   } catch (err) {
     if (err instanceof SsoRequired) return refuse(`${err.message}: start again and enter your work email`);
-    if (err instanceof SeatsFull) return refuse(err.message);
+    if (err instanceof SeatsFull || err instanceof AccessRemoved) return refuse(err.message);
     console.error(`${via} sign-in failed:`, err);
     return refuse(`${via} sign-in failed`);
   }
@@ -791,6 +799,9 @@ async function finishSession(
     }
     if (err instanceof SeatsFull) {
       return ending(html(`<h1>No free seat</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403));
+    }
+    if (err instanceof AccessRemoved) {
+      return ending(html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403));
     }
     console.error("the panel's sign-in failed:", err);
     return ending(html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502));
@@ -1200,17 +1211,14 @@ export async function handleOAuth(
       const profile: ProviderProfile = {
         provider: "sso", subject: `${orgId}:${who.sub}`, label: who.name ?? who.email ?? who.sub, email: vouched ? who.email : undefined,
       };
-      // An admin may have seated the address already (D10): that grant is claimed onto the subject
-      // before the seat is decided, so the person keeps the role they were given and takes no
-      // second seat. Only a grant in this org: an address another org filed is not this org's to move.
+      // The seat, before any token (D13), with the vouched address (SCIM spec, D4): an address an admin or
+      // the IdP's connector seated is claimed onto the subject inside the same transaction, so the person
+      // keeps the role they were given and takes no second seat; a full org refuses here and nothing is
+      // minted; a person the IdP deprovisioned is refused the same way.
       const key = ssoKey(orgId, who.sub);
-      if (profile.email) {
-        const byAddress = await plans.getGrant(`email:${profile.email}`);
-        if (byAddress?.orgId === orgId && !(await plans.getGrant(key))) await plans.moveGrant(`email:${profile.email}`, key);
-      }
-      // The seat, before any token (D13): a full org refuses here and nothing is minted.
-      const seated = await plans.provisionSsoMember(orgId, key, Date.now(), { actorUserId: "sso", actorOrgId: orgId, detail: { org_id: orgId } });
+      const seated = await plans.provisionSsoMember(orgId, key, Date.now(), { actorUserId: "sso", actorOrgId: orgId, detail: { org_id: orgId } }, profile.email);
       if (seated === "full") throw new SeatsFull(org.name);
+      if (seated === "deprovisioned") throw new AccessRemoved(org.name);
       if (seated === "no_org") throw new Error("the org's record is gone");
       return profile;
     };

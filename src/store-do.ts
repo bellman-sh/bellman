@@ -3740,23 +3740,61 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.get<string>(domainKey(domain));
   }
 
-  async #provisionSsoMemberTxn(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+  /** Whether a key index row names a SCIM user the IdP deactivated (SCIM spec, D4). */
+  async #scimInactive(txn: Pick<DurableObjectTransaction, "get">, managed: { orgId: string; scimId: string } | undefined): Promise<boolean> {
+    const user = managed && await txn.get<ScimUser>(scimUserKey(managed.orgId, managed.scimId));
+    return user !== undefined && !user.active;
+  }
+
+  async #provisionSsoMemberTxn(
+    orgId: string, key: string, now: number, audit: AuditIntent, address?: string,
+  ): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned"> {
     return this.ctx.storage.transaction(async (txn) => {
       const org = await txn.get<Org>(orgKey(orgId));
       if (!org) return "no_org" as const;
+      if (await this.#scimInactive(txn, await txn.get<{ orgId: string; scimId: string }>(scimKeyIndex(key)))) return "deprovisioned" as const;
       const stored = await txn.get<PlanGrant>(grantKey(key));
       if (stored && !lapsed(stored, now)) return "exists" as const;
+      const name = address === undefined ? undefined : scimNameKey(orgId, address);
+      const entry = name === undefined ? undefined : await txn.get<DirectoryEntry>(name);
+      if (entry?.scimId && (await this.#scimInactive(txn, { orgId, scimId: entry.scimId }))) return "deprovisioned" as const;
+      // The grant the address is seated under, this org's: at the directory's key, else at the address itself. It
+      // moves onto the subject with its role and source, as `moveGrant` moves an admin's address grant.
+      const candidates = [entry?.key, address === undefined ? undefined : `email:${address}`];
+      for (const from of candidates) {
+        const found = from === undefined || from === key ? undefined : await txn.get<PlanGrant>(grantKey(from));
+        const held = found && !lapsed(found, now) ? found : undefined;
+        if (!held || held.orgId !== orgId) continue;
+        for (const storageKey of allKeysFor(held)) await txn.delete(storageKey);
+        for (const storageKey of stored ? allKeysFor(stored) : []) await txn.delete(storageKey);
+        const moved: PlanGrant = { ...held, key };
+        await txn.put<unknown>({ [grantKey(key)]: moved, [orgIndexKey(moved.orgId, key)]: moved, [name!]: { key, scimId: entry?.scimId ?? null } });
+        await this.#repointScim(txn, held, key);
+        return "written" as const;
+      }
       if ((await this.#countMembers(txn, orgId, now)) >= org.seats) return "full" as const;
       const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
+      const extra: Record<string, unknown> = {};
+      if (name !== undefined) {
+        extra[name] = { key, scimId: entry?.scimId ?? null } satisfies DirectoryEntry;
+        // A SCIM user whose grant is gone follows the subject that just signed in.
+        const user = entry?.scimId ? await txn.get<ScimUser>(scimUserKey(orgId, entry.scimId)) : undefined;
+        if (user) {
+          await txn.delete(scimKeyIndex(user.key));
+          Object.assign(extra, this.#scimRows({ ...user, key }));
+        }
+      }
       const rows = await this.driver.enqueue(txn, this.#auditIntents(grantAuditEntries(undefined, grant, audit, now)));
-      await txn.put<unknown>({ [grantKey(key)]: grant, [orgIndexKey(orgId, key)]: grant, ...rows });
+      await txn.put<unknown>({ [grantKey(key)]: grant, [orgIndexKey(orgId, key)]: grant, ...extra, ...rows });
       return "written" as const;
     });
   }
 
-  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
-    const outcome = await this.#provisionSsoMemberTxn(orgId, key, now, audit);
+  async provisionSsoMember(
+    orgId: string, key: string, now: number, audit: AuditIntent, address?: string,
+  ): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned"> {
+    const outcome = await this.#provisionSsoMemberTxn(orgId, key, now, audit, address);
     if (outcome === "written") await this.driver.deliverNow();
     return outcome;
   }
@@ -3837,12 +3875,28 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const active = patch.active !== undefined && patch.active !== was.active ? patch.active : undefined;
       if (rename === undefined && externalId === undefined && active === undefined) return { outcome: "updated" as const, user: was, was };
       // Every refusal before any write: a transaction rolls back on a throw and not on a return.
+      const moves = rename !== undefined && was.key === `email:${was.userName}`;
+      const toKey = moves ? `email:${rename}` : was.key;
+      const liveAt = async (storageKey: string): Promise<PlanGrant | undefined> => {
+        const found = await txn.get<PlanGrant>(grantKey(storageKey));
+        return found && !lapsed(found, now) ? found : undefined;
+      };
       if (rename !== undefined) {
         const taken = await txn.get<DirectoryEntry>(scimNameKey(orgId, rename));
         if (taken?.scimId && taken.scimId !== id) return { outcome: "exists" as const };
+        // A tenant's seat is never handed to another: a live grant at the new address refuses the rename.
+        const target = moves ? await liveAt(toKey) : undefined;
+        if (target && target.orgId !== orgId) return { outcome: "conflict" as const };
+        if (target) return { outcome: "exists" as const };
       }
-      const org = await txn.get<Org>(orgKey(orgId));
-      if (active === true && org && (await this.#countMembers(txn, orgId, now)) >= org.seats) return { outcome: "full" as const };
+      let reuse: PlanGrant | undefined;
+      if (active === true) {
+        const held = moves ? undefined : await liveAt(toKey);
+        if (held && held.orgId !== orgId) return { outcome: "conflict" as const };
+        reuse = held;
+        const org = await txn.get<Org>(orgKey(orgId));
+        if (!reuse && org && (await this.#countMembers(txn, orgId, now)) >= org.seats) return { outcome: "full" as const };
+      }
 
       const entries: AuditEntry[] = [];
       const rows: Record<string, unknown> = {};
@@ -3850,8 +3904,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       let next: ScimUser = { ...was, updatedAt: now };
       if (rename !== undefined) {
         // An address key names the address, so it moves with it; a key a sign-in claimed names the person and stays.
-        if (was.key === `email:${was.userName}`) {
-          const toKey = `email:${rename}`;
+        if (moves) {
           const stored = await txn.get<PlanGrant>(grantKey(was.key));
           if (stored && !lapsed(stored, now)) {
             for (const storageKey of allKeysFor(stored)) await txn.delete(storageKey);
@@ -3872,12 +3925,14 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       }
       let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
       if (active === true) {
-        const grant = scimGrant(next.key, orgId, now);
-        const stale = rows[grantKey(next.key)] === undefined ? await txn.get<PlanGrant>(grantKey(next.key)) : undefined;
-        for (const staleKey of staleIndexKeys(stale, grant)) await txn.delete(staleKey);
-        rows[grantKey(next.key)] = grant;
-        rows[orgIndexKey(orgId, next.key)] = grant;
-        entries.push(...grantAuditEntries(undefined, grant, audit, now));
+        if (!reuse) {
+          const grant = scimGrant(next.key, orgId, now);
+          const stale = rows[grantKey(next.key)] === undefined ? await txn.get<PlanGrant>(grantKey(next.key)) : undefined;
+          for (const staleKey of staleIndexKeys(stale, grant)) await txn.delete(staleKey);
+          rows[grantKey(next.key)] = grant;
+          rows[orgIndexKey(orgId, next.key)] = grant;
+          entries.push(...grantAuditEntries(undefined, grant, audit, now));
+        }
         action = "scim_user_reactivated";
       } else if (active === false) {
         const held = rows[grantKey(next.key)] as PlanGrant | undefined ?? await txn.get<PlanGrant>(grantKey(next.key));
@@ -5337,8 +5392,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.orgForDomain(domain);
   }
 
-  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
-    return this.registry.provisionSsoMember(orgId, key, now, audit);
+  async provisionSsoMember(
+    orgId: string, key: string, now: number, audit: AuditIntent, address?: string,
+  ): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned"> {
+    return this.registry.provisionSsoMember(orgId, key, now, audit, address);
   }
 
   async issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {

@@ -5068,6 +5068,33 @@ export function describeStoreContract(
         expect(await store.signedRooms("u_x")).toEqual([]);
         expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
       });
+
+      // The operator's list of holders, for the notice that goes out before members are named by handle (public rooms
+      // on bellman.sh spec, D6). Claimed out of order, so the order it answers in is the list's and not the claims'.
+      it("lists every account holding a handle, by user id, and none that released one", async () => {
+        await store.claimHandle("u_b", "grace");
+        await store.claimHandle("u_a", "ada");
+        await store.claimHandle("u_c", "cleo");
+        await store.releaseHandle("u_c");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_a", handle: "ada" }, { userId: "u_b", handle: "grace" }]);
+      });
+
+      it("lists nobody before a claim, a holder once under the handle it holds now, and none the operator released by name", async () => {
+        expect(await store.handleHolders()).toEqual([]);
+        await store.claimHandle("u_a", "ada");
+        await store.claimHandle("u_a", "lovelace");
+        await store.claimHandle("u_b", "grace");
+        expect(await store.releaseHandleNamed("grace")).toBe("u_b");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_a", handle: "lovelace" }]);
+      });
+
+      // An operator-issued id may hold a colon. The id is all of the key past its prefix, so it is read whole, and the
+      // id it extends is a holder of its own.
+      it("lists an id that holds a colon whole, beside the id it extends", async () => {
+        await store.claimHandle("u_x:y", "yara");
+        await store.claimHandle("u_x", "xena");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_x", handle: "xena" }, { userId: "u_x:y", handle: "yara" }]);
+      });
     });
 
     // ----------------------------------------------------------------- audit

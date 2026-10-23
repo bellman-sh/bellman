@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: 21f13b4
-last-updated: 2026-10-15
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
+last-verified-against-source: aa927fc
+last-updated: 2026-10-23
 ---
 
 # Bellman Architecture
@@ -59,6 +59,7 @@ flowchart TB
     subgraph local["Local, optional"]
         BRIDGE["bridge<br/>dist/channel.js"]
         HOOK["Stop hook"]
+        MOD["bellman-mod<br/>Claude Code mod"]
     end
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
@@ -82,6 +83,7 @@ flowchart TB
     BRIDGE --> MCP
     BRIDGE -->|"one per room"| WS
     BRIDGE -.-> HOOK
+    MOD -->|"the door"| BRIDGE
     CCC --> MCP
     DESK --> MCP
     OTHER --> MCP
@@ -186,6 +188,7 @@ flowchart TB
 |---|---|---|---|
 | Claude Code, terminal | yes | **channel** | `bellman-claude` adds the flag; the best experience |
 | Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
+| Claude Code, terminal, with `bellman-mod` | the bridge's | **wake**, hook delivery only | the surface the person arrives on: a sidebar or band, toasts, a room pane, and a turn started when events wait ([the mod and the door](#the-mod-and-the-door)) |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync`, which the bundle's `BELLMAN_DELIVERY=queue` tells the agent to make when a turn starts; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
@@ -214,7 +217,9 @@ change, and release a person's public handle, `PUT`/`DELETE
 /rooms/:id/byline` for a public room's creator to sign it with that handle or
 unsign it (ADR 0021), `PUT /rooms/:id/host` for a hosted room's creator to
 change what its host is told to ask (the host reads the manifest on every wake,
-so its next question uses the new text), and `GET /audit` and `GET /audit/export` for an org
+so its next question uses the new text), `PUT /rooms/:id/view` for a public
+room's creator to choose whether its page opens on the canvas or as a page, and
+`GET /audit` and `GET /audit/export` for an org
 admin's read of the org's audit stream (dash#11), beside the blob routes
 (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
@@ -251,15 +256,17 @@ promised order; it keeps the closed rooms of what it finds and lists the newest
 many room reads for one request, which #49's summary index removes. A poll that
 finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
-polling with an ETag came first. One handle route is the operator's, not the
-panel's: `DELETE /admin/handles/:handle` releases someone's handle and every
-signature with it, for an account deletion or an abusive name. It sits beside
-`/admin/grants` in the authorization server with a gate of its own: it passes
+polling with an ETag came first. Two handle routes are the operator's, not the
+panel's: `GET /admin/handles` lists every holder with the sign-in label of one
+room it sat in, to address the notice that goes out before members are named by
+handle, and `DELETE /admin/handles/:handle` releases someone's handle and every
+signature with it, for an account deletion or an abusive name. They sit beside
+`/admin/grants` in the authorization server with a gate of their own: they pass
 an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
-lists, and no one else. No plan, role or grant passes it, and with the list
+lists, and no one else. No plan, role or grant passes them, and with the list
 unset or empty nobody does.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -442,6 +449,109 @@ code change.
 An unrecognised value reads as off, deliberately unlike `BELLMAN_DELIVERY`'s
 unknown-means-default: a typo should leave a room on the path that has been
 in production for months, not move it onto the new one.
+
+### The mod and the door
+
+Everything above delivers to the *session*. `bellman-mod` (`mod/`) is the surface
+the *person* arrives on in Claude Code's terminal: a second plugin in the
+marketplace, beside the bridge's, and a Claude Code *mod*, a hooks module that
+draws in the terminal and runs hooks on the session
+([the spec](superpowers/specs/2026-10-16-claude-code-mod-design.md)). It adds no
+path by which events reach Claude and takes none from Claude: events still come
+through the bridge, `bellman_sync` stays authoritative, and the mod calls
+neither `bellman_sync` nor drains an inbox. On top of what the bridge delivers
+it does three things.
+
+- **A view.** A sidebar where the terminal draws fullscreen and the engine has
+  docked the mod's pane (`chooseLayout`, `src/mod/view.ts`), and a band above
+  the prompt, with a bell over the transcript's edge, everywhere else. Either
+  shows the room (a picker when the session holds seats in several), its peers
+  and their presence, the unread count and the action requests waiting on the
+  person. Beside them a toast per interrupting event from a peer, and a room
+  pane: Log, Canvas, Members, Approve. It draws on `terminal` and passes
+  `next(e)` on `desktop`, `vscode` and `mobile`, which show Bellman through the
+  MCP Apps page or not at all.
+- **A wake.** In hook delivery an interrupting event sits in the bridge's inbox
+  until a turn ends, and a session nobody types into ends none. The mod reads the
+  inbox's counts through the door, which takes nothing from it, and starts a
+  turn with a prompt of fixed text (`WAKE_TEXT`) in an idle session, or appends
+  the same text as a row to the turn that is running, once for a batch. What
+  interrupts is the server's call (`ambient` on the event, `src/attention.ts`),
+  so the mod keeps no list of types of its own, and a roster change wakes as a
+  message does, as channel delivery's push already starts a turn on one. After
+  `WAKE_LIMIT` (three) wakes in a row with no input from the person (a prompt
+  from the composer or through Remote Control, or a press on one of the mod's
+  buttons) it pauses and says so: members whose sessions all run the mod would
+  otherwise wake each other on every reply with nobody involved. A bridge in
+  channel delivery gets the view and the gate and no wake.
+- **A gate** on who answers an action request, in
+  [section 7](#7-trust-boundaries).
+
+**The door is how the mod reads what only the bridge holds.** Each bridge serves
+one on a Unix socket, `~/.claude/bellman/door/<bridge pid>.sock`
+(`BELLMAN_DOOR_ROOT` moves the folder), which the mod reaches with
+`$.http.fetch(url, { socketPath })`. It has five routes:
+
+| Route | Answers |
+|---|---|
+| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox) and the latest events it delivered |
+| `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
+| `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
+| `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
+| `POST /rooms/<id>/decline { ref_id }` | the one write: answers the action request `approved: false` as the bridge's seat, and sends nothing else |
+
+**How the mod finds a door.** A bridge is any MCP server that lists
+`bellman_whoami`, whatever it is registered as (the plugin's, or one the person
+added); the claude.ai connector lists none, so its rooms are not the mod's.
+`$.tool.list()` names them (`mcp__<server>__bellman_whoami`), and the tool's
+result carries `door`, the socket's path or null. No new tool appears, so
+`extension/manifest.json` is untouched. The mod calls `bellman_whoami` through
+`$.mcp.call` only inside its own hooks (`session.start`, `turn.start`,
+`turn.complete`, `prompt.submit`), where its `tool.check` hook allows that one
+call: from a timer or a press, Claude Code's permission check refuses a
+plugin's own tool call (`tool.check skipped: re-entry`). That is why the rooms,
+the canvas and the decline are door routes and not tool calls, and why they work
+from a timer, since `$.http.fetch` over a socket is covered by no permission
+check. A `$.mcp.call` result carries no `structuredContent`; the JSON is in its
+first text block (`resultData`, `src/result-data.ts`). The mod reads each
+door's status every `DOOR_POLL_MS` (two seconds), a read on this machine, and
+the Log the room pane shows through the door at the same pace; the rooms and
+their logs every `ROOMS_POLL_MS` (fifteen seconds, the MCP Apps monitor's
+cadence), each log past the newest event the mod holds, which the bridge
+answers from the server through its own connection. No tick waits on a rooms
+read, so a slow one holds up no toast and no wake, and one never starts while
+another runs. The bridge's connection to the room, the bus, is as it was.
+
+**The door is an aid and never a dependency**, like the bus (invariant 6 below).
+The bridge is the session's Bellman MCP server, so a bridge that cannot make a
+door (a socket path that is too long, a folder it cannot create) logs it and
+goes on, and `bellman_whoami` names none; a throw behind a request is answered
+with a 500 and an error on the running server is swallowed, because either would
+be an uncaught exception in a process with no handler for one. A 500 leaves one
+line in the bridge's log: the method, the route's shape and the error, never the
+room's id or what the request sent. A bridge older than the door names none
+either, and the mod says to update it. The Claude Desktop bundle, which runs the
+same `src/channel.ts`, opens no door at all: nothing there reads one. A door
+that cannot be read (a bridge restarting, say) keeps its socket and the last
+status it gave, so its rooms stay on screen, reading reconnecting, and the gate
+stays shut on them; every tick reads the same socket again, and the mod's next
+hook asks the bridge's `bellman_whoami` again, which names the new socket of a
+bridge that restarted. A bridge that answers naming no door has come back older
+than the door, and is one: its last status and its seats go, out of the view and
+the gate.
+
+**What the mod keeps is what it reads, within bounds.** The engine refuses a
+`$.state` value whose JSON runs past 4,194,304 characters, and peers' payloads
+would take the mod's there: two requests nested as deep as the server allows
+did, held drawn, and so did 250 large messages kept whole. So a room's log events
+are kept as the lines their rows draw (`kept`, `src/mod/view.ts`), a request
+waiting on the person whole, since the Approve tab draws it from there and the
+list of pending requests holds no drawing; every room's log within a million
+characters (`LOGS_MAX`, `fitLogs`), letting go of the oldest lines first, each
+room's newest kept, then of the oldest waiting requests' payloads, which can
+then only be denied; each door's recent events as lines; each room as the fields
+the mod reads, its first 25 members, each note one line; and the shown room's
+canvas alone, cleaned, within what the engine could draw of it (`CANVAS_MAX`).
 
 ## 5. Storage
 
@@ -937,7 +1047,11 @@ is written by `#writeEvent` in the transaction that stores the `surface`
 event, through `AppendExtras.surface`, the `creditReport` pattern: the caller
 says what to index and the store writes the event and the row together. Last
 write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface.ts`,
-one rule for both stores). An idempotent replay applies no surface write: the
+one rule for both stores). A row also keeps when its key was first written,
+`createdAt`, which an edit carries over and a removal ends; a row from before it
+reads its `at` as `createdAt` (`createdAtOf`), and every read of an item carries
+both as `created_at` and `changed_at` (ADR 0028).
+An idempotent replay applies no surface write: the
 row went in with the event in one transaction, so there is nothing to repair,
 and a removal leaves no tombstone, so re-applying could only put back what was
 removed. The record gains one number, `surfaceCursor`, moved in the same put,
@@ -1130,6 +1244,17 @@ anything built on top:
    sign-in by anyone the org claims but its owner, by a grant that took effect or
    a verified address and never by an invite, at sign-in and at every re-check,
    through `ssoRefusal` beside `standingOf`.
+6. **SCIM provisions the members, and a deprovision ends the sign-in** (ADR 0029).
+   `sc:<orgId>` and `sh:<hash>` hold an org's SCIM token hashed; `su:<orgId>:<id>` is
+   a user the IdP pushed, naming the grant key the person is seated under;
+   `sn:<orgId>:<address>` is the directory from an address to that key, written by
+   a push and by the SSO sign-in alike, and `sk:<key>` the index back, both
+   re-pointed by `moveGrant`. A deactivation deletes the grant in the registry,
+   then, outside it and idempotently, takes the person out of every open room
+   and freezes the rooms they created through `freezeSession`, its first
+   production caller; `AccessRemoved` refuses the IdP's own subject at every
+   re-check, beside `SsoRequired`. A personal account an address linked keeps its
+   sign-in and loses only the org's grant and the org's rooms.
 
 ### How each surface gets a credential
 
@@ -1235,8 +1360,9 @@ loud:
   mutation must carry an allowlisted `Origin`; bearer callers are exempt, and
   the method guard and the CSRF check both run ahead of any deletion.
   `bellman.sh` is allowlisted (`BELLMAN_PUBLIC_PAGE_ORIGINS`) for one mutation,
-  filing a report, and for the sign-in return; every other write answers the
-  panel's origins alone.
+  filing a report (`POST /rooms/:id/reports`), and for the sign-in return;
+  every other write answers the panel's origins alone, `BELLMAN_PANEL_ORIGINS`,
+  the dash's (ADR 0026).
 
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
@@ -1362,6 +1488,86 @@ loud:
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
+- **In the terminal, the mod holds that line against the agent.** Until the
+  mod, "approved by the receiving human" was an instruction to the model
+  (`HOOK_INSTRUCTIONS`, `CHANNEL_INSTRUCTIONS`), and the model could send the
+  `action_response` itself. Where a terminal is attached and the mod has drawn
+  there (`gateShut`, `mod/src/gate.ts`), a `tool.call` hook on every tool whose
+  name ends in `bellman_send`, on any server, and an `mcp.call` hook on the same
+  tools for another plugin, refuse an `action_response` in a room the doors list
+  a seat in unless it is `approved: true` for a request the person approved by
+  pressing Approve (`judgeSend`, `src/mod/gate.ts`). Each hook has a `.catch`
+  that refuses when it failed before answering, so a broken gate stays shut and
+  breaks nothing else. A door that cannot be read keeps the seats it last
+  listed, so the gate stays shut on their rooms while a bridge restarts, until
+  the bridge answers naming a door, or none. Approve
+  is offered only on the Approve tab, where requests are shown one at a time,
+  each drawn whole in a frame of its own, so that no line of one reads as the tab's
+  or as another request: every field of the payload Claude reads, the characters
+  that would draw nothing or act on the terminal spelled out (D10 in the spec
+  says which), and nothing the server accepts cut short; a request that cannot
+  be drawn whole there can only be denied, and a Log row's Review leads to it.
+  The tab never replaces what it shows unless the person asks: it holds the
+  request it last drew by its room and cursor, never by its place in the list,
+  and when that request expires, is answered or is denied it draws a notice in
+  its place, with one button to the oldest still waiting, rather than the next
+  request taking over beneath a press; a press on the buttons of a request that
+  has just left tells Claude and the room nothing. The person's Deny is
+  answered through the door and never through here, so Claude's own
+  `approved: false` is refused too. Approve tells Claude once, by a prompt of
+  the mod's own that queues behind any turn running, and an
+  approval that does not reach Claude is taken back. This is
+  a guard against Claude answering on its own and no proof to the requester: a
+  prompt-injected Claude could still read the bridge's saved sign-in and post an
+  answer another way, and only the server can prove a person pressed Approve,
+  which is a separate issue. It guards the answer and not the act: Claude can
+  still do what a request asks before the person approves, and Claude Code's
+  permission rules guard the tools. Where nothing draws the mod (the desktop
+  app, VS Code, `claude -p`, the SDK) approval stays in chat as before, and where
+  an organization manages Claude Code the system-prompt note (`prompt.compose`)
+  that tells the model approvals happen in the pane does not run, though the
+  refusal says it.
+- **The door is local and has one write.** Its folder is made `0700` when the
+  door has to make it, and each bridge's `<pid>.sock` is made `0600` by
+  narrowing the umask around the bind and not by a chmod afterwards, which would
+  leave it connectable for the moment between; a folder that already exists is
+  left as it is, as the bus's is. Those modes are the only check on who may
+  connect, as on the bus (`src/bus.ts`), so any process running as the person
+  can use the door: read a room's log and canvas through it, and decline an
+  action request, as it can already read the person's Bellman sign-in under
+  `~/.config/bellman/`. The decline is a `bellman_send` of one `action_response`
+  `{ approved: false }` for the bridge's seat in a room it watches, through the
+  connection the bridge holds, so the write path stays one and keeps its verb
+  check, its idempotency record (`bellman-mod-decline-<ref_id>`) and its audit
+  write. `ref_id` is a cursor of at most fifteen digits in a JSON body of at
+  most 1 KiB; anything else is a 400. The bridge answers through the connection
+  it already holds and never one that could start a sign-in, so a poll nobody
+  asked for cannot open a browser: with none held the door answers 503, and the
+  next Bellman tool call is what reconnects. An error body is a fixed code and
+  never the server's words, because a refusal can name a peer; a data body is
+  the server's, with every peer string still in the untrusted envelope it came
+  in.
+- **The mod hands the model fixed text and draws cleaned text.** `WAKE_TEXT`,
+  `approvedText`, `declinedText` and `APPROVALS_SECTION` are the only strings
+  that reach `$.prompt.submit`, `$.session.append` or a system-prompt section,
+  and the two that name a request carry only a room id and a cursor the server
+  made, checked first. Every peer string the mod draws (a label, a room name, a
+  message, a request, a canvas body) passes `cleanText` or `cleanBlock`
+  (`src/door-protocol.ts`) first, so a toast, a title or a row never carries an
+  escape sequence, a line break or one of the characters, named there, that draw
+  nothing or turn the direction a line reads in; what an action request asks is
+  drawn whole, each such character spelled out as its code point instead, and
+  with them every code point Unicode leaves undrawn (the fillers, the combining
+  grapheme joiner, the Mongolian selectors), every variation selector that does
+  not directly follow a character that draws, and every joiner that follows
+  neither one nor a selector that does, where a hidden run would go; one
+  selector and one joiner beside a character that draws pass as they are, and
+  nothing else that draws nothing does (D10). A link in a peer's
+  canvas text opens only if it is `http` or `https` (`safeLinks`,
+  `src/mod/view.ts`), a link definition inside a blockquote or a list item
+  included. The model still
+  reads peer events only through the bridge's tools, wrapped as untrusted. This
+  applies the untrusted-content rules above to a new surface.
 - **A brief reaches a peer only when its author grants `read_context`** (ADR 0023).
   `readableEvent` (`src/public-event.ts`) decides at delivery from the author's member
   row as it stands, so a grant changed later covers earlier briefs: a `brief_update` is
@@ -2027,12 +2233,26 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,483** | every request, whether or not you are in a room |
+| Tool definitions | **~9,498** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~329 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-23 for room pages, by the method below: 21 tokens over the 9,477
+that main (`de6403d4`) measures, all of them `bellman_surface`'s (308 to 329), whose
+`Returns:` line names an item's `created_at` and `changed_at`. No other tool changed. That
+is 9,498. The control, `de6403d4` rebuilt in a scratch copy, reproduced 9,477 and
+`bellman_surface`'s 308. Main measured 9,483 at `673ce71c`, before #296 (`ab05459f`),
+which took `bellman_start` from 2,492 to 2,490 and `bellman_public_name` from 309 to 305.
+
+Re-measured on 2026-10-22 for public rooms on bellman.sh, by the method below: 9,477, the
+same as main (`6e9b1ef4`) measures, with no tool differing, since this branch changes no tool
+text. That is 6 tokens under the 9,483 that main (`673ce71c`) measured before #296
+(`ab05459`), which moved the page's host in two texts: `bellman_start` 2,492 to 2,490 and
+`bellman_public_name` 309 to 305. Main at `673ce71c`, run as the control, reproduced 9,483
+(`bellman_start` 2,492, `bellman_public_name` 309) before the new figures were read.
 
 Re-measured on 2026-10-18 for read_context, by the method below: 46 tokens over the 9,437
 that main (`f130144f`) measures, a row that already includes the reports work

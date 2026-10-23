@@ -33,6 +33,25 @@ export const idpKey = (orgId: string): string => `oi:${orgId}`;
 export const domainKey = (domain: string): string => `od:${domain}`;
 
 /**
+ * The SCIM rows (SCIM spec, D1 to D3). An org id holds no colon, so `su:<org>:` is a prefix of exactly one org's
+ * users; the directory and the key index are read by exact key and never scanned, so an address or a key holding
+ * a colon is no ambiguity there.
+ */
+export const scimUserKey = (orgId: string, id: string): string => `su:${orgId}:${id}`;
+export const scimUserPrefix = (orgId: string): string => `su:${orgId}:`;
+/**
+ * The org's directory by address: the key it is seated under, and the SCIM user managing it. The address is
+ * lowercased here, whoever writes it: a connector lowercases `userName`, an IdP's `email` claim may carry
+ * capitals, and one person must be one entry.
+ */
+export const scimNameKey = (orgId: string, address: string): string => `sn:${orgId}:${address.toLowerCase()}`;
+/** The SCIM user a grant key is managed by. */
+export const scimKeyIndex = (key: string): string => `sk:${key}`;
+/** An org's SCIM token, and the lookup from its hash to the org. */
+export const scimTokenKey = (orgId: string): string => `sc:${orgId}`;
+export const scimTokenIndex = (tokenHash: string): string => `sh:${tokenHash}`;
+
+/**
  * `go:<org>:<key>` is only unambiguous if the org segment cannot itself contain
  * the separator. Otherwise the encoding is not injective and two different
  * (org, key) pairs collide: `("org_a", "github:google:y")` and

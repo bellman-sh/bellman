@@ -189,8 +189,8 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * #insertClient, #purgeStale and #clientCount take the handle they work through so that
    * it does.
    *
-   * Not every method here has been converted. takeCode, takeRefresh, markClientUsed,
-   * putRefresh, registerClient and purgeStale still read and then write. They are
+   * Not every method here has been converted. markClientUsed, putRefresh, registerClient and
+   * purgeStale still read and then write. They are
    * unconverted, not exempt: the input gate covers them in production, since every await
    * between their read and their write is storage, and the transaction is the stronger
    * form. registerClient and purgeStale have no production caller: /register goes through
@@ -458,11 +458,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
   /** Single use: a replayed authorization code finds nothing. */
   async takeCode(code: string): Promise<AuthCode | undefined> {
-    const key = `${CODE}${code}`;
-    const value = await this.ctx.storage.get<AuthCode>(key);
-    if (!value) return undefined;
-    await this.ctx.storage.delete(key);
-    return Date.now() > value.expires_at ? undefined : value;
+    return this.#take<AuthCode>(`${CODE}${code}`);
   }
 
   /**
@@ -485,11 +481,24 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
   /** Single use as well: refresh tokens rotate, so using one retires it. */
   async takeRefresh(token: string): Promise<RefreshToken | undefined> {
-    const key = `${REFRESH}${token}`;
-    const value = await this.ctx.storage.get<RefreshToken>(key);
-    if (!value) return undefined;
-    await this.ctx.storage.delete(key);
-    return Date.now() > value.expires_at ? undefined : value;
+    return this.#take<RefreshToken>(`${REFRESH}${token}`);
+  }
+
+  /**
+   * A single-use record read and deleted in one transaction (#173), so two takes of one code
+   * or token cannot both get it. It awaits nothing but storage, which is why the input gate
+   * covered it before the transaction did; the transaction holds if that stops being true, as
+   * touchSession's does. An expired record is deleted and not returned.
+   *
+   * `#private`; see #clientCount.
+   */
+  async #take<T extends { expires_at: number }>(key: string): Promise<T | undefined> {
+    return this.ctx.storage.transaction<T | undefined>(async (txn) => {
+      const value = await txn.get<T>(key);
+      if (!value) return undefined;
+      await txn.delete(key);
+      return Date.now() > value.expires_at ? undefined : value;
+    });
   }
 
   async putSession(id: string, value: PanelSession): Promise<void> {

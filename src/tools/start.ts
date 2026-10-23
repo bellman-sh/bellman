@@ -203,6 +203,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         unpublishedAt: null,
         // The name claimed above, if any (public names spec, D4): the record is what holds it.
         publicName: public_name ?? null,
+        // A room opens on its canvas until its creator chooses the page (room pages spec, D3).
+        publicView: "canvas",
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

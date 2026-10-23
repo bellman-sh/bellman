@@ -1,6 +1,7 @@
 /**
- * AuthDO's three guarded read-then-writes, held open in workerd: `admitRegistration` (the
- * per-address window and the client cap), `touchSession` and `replanSession`. Each reads a
+ * AuthDO's guarded read-then-writes, held open in workerd: `admitRegistration` (the
+ * per-address window and the client cap), `touchSession`, `replanSession`, and the single-use
+ * `takeCode` and `takeRefresh` (#173). Each reads a
  * record, decides from it and writes, and what it promises holds only if no other call can
  * read the same record and then write: two registrations that both find the last slot free
  * and both take it, or a touch that reads a session just before a sign-out and writes it
@@ -42,7 +43,7 @@ import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudfla
 import type { AuthDO } from "../src/oauth/store.js";
 import {
   CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, REGISTRATIONS_PER_HOUR, SESSION_TOUCH_MS,
-  SESSION_TTL_MS, type PanelSession, type RegisteredClient,
+  SESSION_TTL_MS, type AuthCode, type PanelSession, type RefreshToken, type RegisteredClient,
 } from "../src/oauth/storage.js";
 import type { Identity } from "../src/types.js";
 
@@ -446,4 +447,49 @@ describe("a session method, the first call held between its read and its write",
       expect(stored?.plan_source).toBe("grant");
     });
   });
+});
+
+describe("a single-use credential, the first take held between its read and its delete", () => {
+  const IDENTITY: Identity = {
+    userId: "u_github_4242", orgId: null, plan: "free", role: "member", label: "jesse@example.dev",
+  };
+  const RESOURCE = "https://mcp.bellman.sh/mcp";
+  const code = (): AuthCode => ({
+    client_id: "c_race", redirect_uri: "https://client.example/callback", code_challenge: "c".repeat(43),
+    resource: RESOURCE, identity: IDENTITY, plan_source: "default", identity_keys: ["github:4242"],
+    expires_at: Date.now() + 60_000,
+  });
+  const refresh = (): RefreshToken => ({
+    client_id: "c_race", resource: RESOURCE, identity: IDENTITY, plan_source: "default",
+    identity_keys: ["github:4242"], expires_at: Date.now() + 60_000,
+  });
+
+  /** Stored straight into the object, so neither put's sweep nor its promotion is in the case. */
+  const store = (name: string, key: string, value: AuthCode | RefreshToken) =>
+    runInDurableObject<AuthDO, void>(auth(name), (_instance, ctx) => ctx.storage.put(key, value));
+
+  // A code redeemed twice is two sets of tokens from one consent, which RFC 6749 §4.1.2
+  // forbids, and a refresh token rotates, so a second use of one is a replay.
+  for (const [method, prefix, value] of [
+    ["takeCode", "code:", code],
+    ["takeRefresh", "refresh:", refresh],
+  ] as const) {
+    it(`${method} hands the credential to one of two takes`, async () => {
+      const name = `race-${method}`;
+      const key = `${prefix}abc`;
+      await store(name, key, value());
+      const hold = newHold();
+      await holdFirstReadOf(name, key, hold);
+
+      const first = track(auth(name)[method]("abc")); // reads the credential, then is held
+      await until(() => hold.held, "the first take to be held");
+      const second = track(auth(name)[method]("abc"));
+      await settlesWithin(second, 300);
+      hold.release();
+      const taken = (await Promise.all([first, second])).filter((v) => v !== undefined);
+
+      expect(taken, `${method} handed one credential to both takes`).toHaveLength(1);
+      expect(await keysUnder(name, prefix), "the credential is still stored").toEqual([]);
+    });
+  }
 });

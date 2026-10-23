@@ -191,6 +191,9 @@ export type ArrivingMember = Omit<Member, "agent" | "seq" | "publicNumber"> & { 
  */
 export type NewSession = Omit<Session, "members" | "creator" | "orgs"> & { members: ArrivingMember[] };
 
+/** How a public room's page opens (room pages spec, D3): on its canvas, or as a page to read. */
+export type PublicView = "canvas" | "page";
+
 export interface Session {
   id: string;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
@@ -263,6 +266,11 @@ export interface Session {
    * name only while public and open (`holdsName`). Read as null for a row written before it.
    */
   publicName: string | null;
+  /**
+   * How this room's public page opens (room pages spec, D3): on its canvas, or as a page to read.
+   * Its creator sets it through `PUT /rooms/:id/view`. Read as `"canvas"` for a row written before it.
+   */
+  publicView: PublicView;
   /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
@@ -450,6 +458,46 @@ export interface OrgIdp {
   userinfoEndpoint: string | null;
   configuredAt: number;
   configuredBy: string;
+}
+
+/**
+ * A member as an org's identity provider pushed them (SCIM spec, D2): the row the IdP reads back by `id`,
+ * and the one place a key, an address and the IdP's own id for the person are tied together. Membership is
+ * still the grant: an active user holds a `team` member grant from `scim` under `key`, an inactive one none.
+ */
+export interface ScimUser {
+  /** Opaque and random: the IdP stores it and asks by it. */
+  id: string;
+  orgId: string;
+  /** The address, lowercased whole. */
+  userName: string;
+  externalId: string | null;
+  active: boolean;
+  /** The grant key the person is seated under, as it stands now: `email:<userName>` until a sign-in claims it onto a subject. */
+  key: string;
+  createdAt: number;
+  updatedAt: number;
+  /**
+   * When the IdP deleted the row, or null. A deleted user is a tombstone: hidden from every read but the key
+   * index, which keeps refusing the subject as a deactivated one is refused, until a push starts them over.
+   */
+  deletedAt: number | null;
+}
+
+/** What a push may change (SCIM spec, D8): the name, the IdP's id, and whether the person is active. */
+export type ScimUserPatch = Partial<Pick<ScimUser, "userName" | "externalId" | "active">>;
+
+/** An org's SCIM bearer token (SCIM spec, D1): its SHA-256 and its provenance, never the token itself. */
+export interface ScimToken {
+  tokenHash: string;
+  issuedAt: number;
+  issuedBy: string;
+}
+
+/** The directory row (SCIM spec, D3): the key an address is seated under, and the SCIM user managing it, if one does. */
+export interface DirectoryEntry {
+  key: string;
+  scimId: string | null;
 }
 
 /**
@@ -712,6 +760,12 @@ export interface SurfaceItem {
 export interface SurfaceRow extends SurfaceItem {
   cursor: number;
   at: number;
+  /**
+   * When this key was first written, in epoch milliseconds (room pages spec, D4). Set on its first write, kept by
+   * every edit, and set afresh when a removed key is written again. Absent on a row written before it, which
+   * `createdAtOf` reads as `at`; nothing rewrites such a row (R1).
+   */
+  createdAt?: number;
   byMemberId: string;
   byLabel: string;
 }

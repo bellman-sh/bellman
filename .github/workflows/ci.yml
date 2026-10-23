@@ -22,9 +22,10 @@ jobs:
 
       - run: npm ci
 
-      # The marketplace serves main, so the plugin ships when a release PR merges,
+      # The marketplace serves main, so the plugins ship when a release PR merges,
       # before publish.yml runs. A PR that moves the version must carry bundles
-      # built from its own source; any other PR leaves them alone (ADR 0019).
+      # built from its own source, the bridge's and the mod's; any other PR leaves
+      # them alone (ADR 0019).
       - name: A release PR's plugin bundles must match the source
         if: github.event_name == 'pull_request'
         env:
@@ -35,12 +36,12 @@ jobs:
           base=$(git show FETCH_HEAD:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
           head=$(node -p "require('./package.json').version")
           if [ "$base" = "$head" ]; then
-            echo "version unchanged ($head): plugin/bridge/ is rebuilt only in release PRs"
+            echo "version unchanged ($head): plugin/bridge/ and mod/hooks/ are rebuilt only in release PRs"
             exit 0
           fi
           npm run build:plugin
-          if ! git diff --exit-code --stat -- plugin/bridge; then
-            echo "::error::this PR moves the version from $base to $head, and plugin/bridge/ is out of date: run npm run build:plugin and commit the result"
+          if ! git diff --exit-code --stat -- plugin/bridge mod/hooks; then
+            echo "::error::this PR moves the version from $base to $head, and plugin/bridge/ or mod/hooks/ is out of date: run npm run build:plugin and commit the result"
             exit 1
           fi
 

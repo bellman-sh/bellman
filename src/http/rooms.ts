@@ -69,11 +69,16 @@ const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
+const VIEW = /^\/rooms\/([^/]+)\/view$/;
 const HOST = /^\/rooms\/([^/]+)\/host$/;
 
 // ponytail: 4 KB, not tuned. A text of at most 300 characters is under 2 KB even with every character written as
 // a six-byte \uXXXX escape, so this leaves room for the braces and for the whitespace that trimming removes.
 export const MAX_HOST_INSTRUCTIONS_BYTES = 4096;
+
+// ponytail: 256 bytes, not tuned. The body is one of two short strings, {"view":"canvas"} at its longest, which is 17
+// bytes, so this leaves room for the whitespace a client adds and no more.
+export const MAX_VIEW_BYTES = 256;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
@@ -207,6 +212,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (byline) {
       if (request.method !== "PUT" && request.method !== "DELETE") return methodNotAllowed("PUT, DELETE", origin);
       return await writeByline(request, byline[1], origin, deps);
+    }
+    const view = VIEW.exec(path);
+    if (view) {
+      if (request.method !== "PUT") return methodNotAllowed("PUT", origin);
+      return await writePublicView(request, view[1], origin, deps);
     }
     const unpublish = UNPUBLISH.exec(path);
     if (unpublish) {
@@ -566,6 +576,9 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
  * R3): the creator alone may make a public room private. And `signed` (bylines spec D6): true only
  * for the creator of a room they have signed with their handle, false for every other caller.
+ * And `view` (room pages spec D3, R8): how the room's public page opens, `"canvas"` or `"page"`, so the creator's
+ * "Opens as" control can show it. It rides beside `signed` for every caller, since the public read tells anyone, and
+ * stays out of `roomPreview`, which five tools return.
  *
  * The preview is told who is asking (`who.identity.userId`), on both branches. A hosted room's
  * creator reads its host's current instructions in `preview.text.data.host_instructions`, the
@@ -588,6 +601,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       viewer: "admin",
       mine: session.createdBy === who.identity.userId,
       signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
+      view: session.publicView,
       ...retentionOf(session),
       preview: roomPreview(session, null, who.identity.userId),
       ...await liveRoster(deps.store, session),
@@ -615,6 +629,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     viewer: "member",
     mine: session.createdBy === who.identity.userId,
     signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
+    view: session.publicView,
     ...retentionOf(session),
     preview: roomPreview(session, viewer.roomRole, who.identity.userId),
     ...roster,
@@ -714,6 +729,47 @@ async function writeByline(request: Request, sessionId: string, origin: string |
   const handle = await deps.store.signRoom(userId, sessionId, Date.now());
   if (handle === undefined) return problem(409, "no_handle", "claim a handle in Settings first", origin);
   return json(200, { handle }, origin);
+}
+
+/**
+ * Choose how a public room's page opens, on its canvas or as a page (`PUT /rooms/:id/view`, room pages spec D3). The
+ * creator's alone, admitted as the byline is (R7): 401 with no caller, the CSRF check for a cookie, one 404 for a
+ * person with no handle in the room and for a room that is not there, then 403 for a member who is not the creator,
+ * all before the body is read. Then the length (413) and the body (400), which is an object whose only key is `view`,
+ * holding `"canvas"` or `"page"`. Then 409 `room_not_public` for a room that is not public, one made private included.
+ * A closed public room may still change it, since it reads until it is deleted. It files no audit row, as neither the
+ * byline nor the unpublish route does.
+ *
+ * The answer is `{ view }`, what the store now holds. The public read and the creator's room read both carry it.
+ */
+async function writePublicView(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  if (session.createdBy !== who.identity.userId) {
+    return problem(403, "forbidden", "only the room's creator may choose how it opens", origin);
+  }
+  const tooLong = lengthRefusal(request, MAX_VIEW_BYTES, "a view request", origin);
+  if (tooLong) return tooLong;
+
+  // A body that is not JSON, `null`, an array, a scalar, or an object with any key but `view` has no view; so does
+  // a `view` that is neither value. All of them are the one 400.
+  const body: unknown = await request.json().catch(() => null);
+  const view = typeof body === "object" && body !== null && !Array.isArray(body) && Object.keys(body).join() === "view"
+    ? (body as { view: unknown }).view
+    : undefined;
+  if (view !== "canvas" && view !== "page") {
+    return problem(400, "invalid_request", 'send {"view": "canvas" or "page"}', origin);
+  }
+  if (!isPublic(session)) return problem(409, "room_not_public", "only a public room opens as a page", origin);
+
+  await deps.store.setPublicView(sessionId, view);
+  return json(200, { view }, origin);
 }
 
 /**

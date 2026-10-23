@@ -1,7 +1,7 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
-  Org, OrgIdp, OrgInvite, OrgPatch,
+  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { MAX_PENDING_INVITES, isUnownedSeat, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
@@ -17,7 +17,8 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -563,6 +564,16 @@ export interface RemovalOutcome {
    */
   codeRetired: string | null;
 }
+
+/** What a push did (SCIM spec, D5). */
+export type ScimCreate = { outcome: "written" | "linked"; user: ScimUser } | { outcome: "exists" | "conflict" | "full" | "no_org" };
+/** What an update did (SCIM spec, D6 to D8): the row after and before, or why nothing was written. */
+export type ScimUpdate = { outcome: "updated"; user: ScimUser; was: ScimUser } | { outcome: "missing" | "full" | "exists" | "conflict" };
+
+/** The grant a SCIM user holds while active (SCIM spec, D2): a team member from scim, lapsing never. */
+export const scimGrant = (key: string, orgId: string, now: number): PlanGrant => ({
+  key, plan: "team", role: "member", orgId, source: "scim", grantedAt: now, grantedBy: "scim", expiresAt: null,
+});
 
 /** The guard and the writes a removal performs, handed in by its caller. */
 export interface RemovalRequest {
@@ -1328,6 +1339,8 @@ export interface BellmanStore {
   releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean>;
   /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
   setPublicName(sessionId: string, name: string): Promise<void>;
+  /** Write how the room's public page opens on its record (room pages spec, D3). A room that is not there stays not there. */
+  setPublicView(sessionId: string, view: PublicView): Promise<void>;
   /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
@@ -1629,6 +1642,15 @@ export interface BellmanStore {
    */
   handleOf(userId: string): Promise<string | undefined>;
   userOfHandle(handle: string): Promise<string | undefined>;
+  /**
+   * Every account holding a handle, in user id order (public rooms on bellman.sh spec, D6). The notice that goes out
+   * before members are named by handle is addressed from it: the operator's `GET /admin/handles` pairs each holder
+   * with a sign-in label. An account that released its handle is not listed, and one that changed it is listed once,
+   * under the handle it holds now.
+   *
+   * ponytail: the whole list in one answer; a page when holders reach thousands.
+   */
+  handleHolders(): Promise<{ userId: string; handle: string }[]>;
   /** "taken" when another user holds it. Claiming a new one frees the old; claiming your own is "claimed". */
   claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
   /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
@@ -1758,11 +1780,62 @@ export interface BellmanStore {
   /** The org a verified domain routes a sign-in to (D12), and nothing for a claimed one. */
   orgForDomain(domain: string): Promise<string | undefined>;
   /**
-   * The seat an SSO sign-in takes on first use (D13), ONE operation: `exists` when the key already
-   * holds a live grant (an sso key names its org, so that grant is this org's), `full` at the seats,
-   * `no_org` for no record, else a team member grant from `sso` with its `plan_granted` row.
+   * The seat an SSO sign-in takes on first use (D13), ONE operation, in this order (SCIM spec, D4): a SCIM user
+   * managing `key` that is inactive is `deprovisioned`; a live grant at `key` is `exists` (an sso key names its
+   * org, so that grant is this org's); with `address`, the IdP's vouched address under a verified domain, a
+   * directory entry naming an inactive SCIM user is `deprovisioned`, and a live grant of this org's at the
+   * directory's key or at `email:<address>` is moved onto `key` with its role and source, the SCIM rows and the
+   * directory following, and no seat taken: `written`; else `full` at the seats, `no_org` for no record, and
+   * otherwise a team member grant from `sso` with its `plan_granted` row, and the directory entry for the
+   * address, `written`.
    */
-  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
+  provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent, address?: string): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned">;
+
+  /**
+   * An org's SCIM token (SCIM spec, D1), ONE operation: the hash stored and indexed, and the previous token's
+   * index row deleted, so the old token stops at the commit. `replaced` when one was; `missing` for no record.
+   * Records `scim_token_issued` with `replaced`.
+   */
+  issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing">;
+  /** Both rows gone; records `scim_token_revoked`. `missing` when there was none. */
+  revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing">;
+  /** The token's provenance, never the token: `GET /org/scim` says whether one is set and who issued it. */
+  scimTokenOf(orgId: string): Promise<ScimToken | undefined>;
+  /** The org a presented token's hash belongs to, which is the only identity a SCIM request has. */
+  orgForScimToken(tokenHash: string): Promise<string | undefined>;
+
+  /**
+   * A push (SCIM spec, D5), ONE operation. `user.key` is what the caller proposes, `email:<userName>`; the stored
+   * row's key is what the directory or an existing grant said. In order: a directory entry naming a SCIM user is
+   * `exists`; a directory entry with none, or a live grant at the proposed key in this org, is `linked`, the row
+   * written to point at that key and no seat taken (a grant the entry names that is gone is written again, since
+   * the IdP owns whom it pushes); a grant in another org is `conflict`; else, when active, a `team` member grant
+   * from `scim` within the seats (`full` otherwise), and with `active: false` the row alone: `written`. Records
+   * `scim_user_created` with `linked`, after the grant's own row.
+   */
+  createScimUser(user: ScimUser, audit: AuditIntent): Promise<ScimCreate>;
+  getScimUser(orgId: string, id: string): Promise<ScimUser | undefined>;
+  /** By the directory: the address lowercased whole. Only a user the IdP pushed; an address the SSO sign-in alone wrote is not one. */
+  scimUserByName(orgId: string, userName: string): Promise<ScimUser | undefined>;
+  /** The SCIM user managing a grant key, active or not. */
+  scimUserByKey(key: string): Promise<ScimUser | undefined>;
+  /** In id order in both stores, so a page is stable between two reads. */
+  listScimUsers(orgId: string, limit: number): Promise<ScimUser[]>;
+  /**
+   * ONE operation (SCIM spec, D6 to D8). Every check runs before any write. `was` is the row before. A deactivation
+   * deletes the grant at the row's key when it is this org's (its `plan_revoked` row filed) and keeps the row; a
+   * reactivation writes a `team` member grant from `scim` under the key again, `full` at the seats; a rename moves
+   * an `email:` grant to the new address and the directory entry with it, and leaves a key a sign-in claimed; a
+   * new name another SCIM user or a member of this org holds is `exists`. A key the rename or the reactivation
+   * would write that another org holds a live grant under is `conflict`, nothing written: a tenant's seat is
+   * never handed to another. A reactivation whose key this org seated by hand meanwhile keeps that grant, role
+   * included, and takes no seat. A patch that changes nothing writes nothing and records nothing.
+   * Records `scim_user_deactivated`, `scim_user_reactivated` or `scim_user_updated`, naming `user_name`, `key`,
+   * and `from` for a rename and `external_id` for a change of it.
+   */
+  updateScimUser(orgId: string, id: string, patch: ScimUserPatch, now: number, audit: AuditIntent): Promise<ScimUpdate>;
+  /** The grant (when active), the row, the directory entry and the key index gone; records `scim_user_deleted`. The row as it was, or undefined. */
+  deleteScimUser(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined>;
 
   /**
    * An org's offer of a seat (ADR 0027), kept apart from its grants, ONE operation: `no_org` for no
@@ -1874,6 +1947,13 @@ export class MemoryStore implements BellmanStore {
   private invites = new Map<string, Map<string, OrgInvite>>();
   /** The orgs each person declined (ADR 0027), subject key to org to when: the person's side, not the org's. */
   private declines = new Map<string, Map<string, number>>();
+  /** Each org's SCIM token (SCIM spec, D1), and the lookup from a hash to its org. */
+  private scimTokens = new Map<string, ScimToken>();
+  private scimTokenIndex = new Map<string, string>();
+  /** The SCIM users (SCIM spec, D2), the directory by address (D3) and the index by key, under the keys the registry uses. */
+  private scimUsers = new Map<string, ScimUser>();
+  private directory = new Map<string, DirectoryEntry>();
+  private scimByKey = new Map<string, { orgId: string; scimId: string }>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -2557,6 +2637,11 @@ export class MemoryStore implements BellmanStore {
     if (s) s.publicName = name;
   }
 
+  async setPublicView(sessionId: string, view: PublicView): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) s.publicView = view;
+  }
+
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const mine = this.byCreator.get(userId);
     if (!mine) return [];
@@ -2986,6 +3071,12 @@ export class MemoryStore implements BellmanStore {
     return this.handles.get(handle);
   }
 
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    return [...this.handleByUser]
+      .map(([userId, handle]) => ({ userId, handle }))
+      .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
+  }
+
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
     const holder = this.handles.get(handle);
     if (holder !== undefined) return holder === userId ? "claimed" : "taken";
@@ -3157,6 +3248,30 @@ export class MemoryStore implements BellmanStore {
     if (!grant) return;
     this.grants.delete(fromKey);
     this.grants.set(toKey, { ...grant, key: toKey });
+    this.repointScim(grant, toKey);
+  }
+
+  /**
+   * The SCIM rows follow a moved key (SCIM spec, D3): the user the key is managed by, its key index, and the
+   * directory entry for its address; and a directory entry an SSO sign-in alone wrote follows an address key.
+   */
+  private repointScim(moved: PlanGrant, toKey: string): void {
+    const managed = this.scimByKey.get(scimKeyIndex(moved.key));
+    if (managed) {
+      const user = this.scimUsers.get(scimUserKey(managed.orgId, managed.scimId));
+      if (user) {
+        this.scimUsers.set(scimUserKey(managed.orgId, managed.scimId), { ...user, key: toKey });
+        this.directory.set(scimNameKey(managed.orgId, user.userName), { key: toKey, scimId: managed.scimId });
+      }
+      this.scimByKey.delete(scimKeyIndex(moved.key));
+      this.scimByKey.set(scimKeyIndex(toKey), managed);
+      return;
+    }
+    if (moved.orgId && moved.key.startsWith("email:")) {
+      const name = scimNameKey(moved.orgId, moved.key.slice("email:".length));
+      const entry = this.directory.get(name);
+      if (entry && entry.key === moved.key) this.directory.set(name, { ...entry, key: toKey });
+    }
   }
 
   async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
@@ -3295,13 +3410,41 @@ export class MemoryStore implements BellmanStore {
     return this.domainIndex.get(domain);
   }
 
-  async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
+  async provisionSsoMember(
+    orgId: string, key: string, now: number, audit: AuditIntent, address?: string,
+  ): Promise<"written" | "exists" | "full" | "no_org" | "deprovisioned"> {
     const org = this.orgs.get(orgId);
     if (!org) return "no_org";
+    if (this.scimInactive(this.scimByKey.get(scimKeyIndex(key)))) return "deprovisioned";
     if (this.liveGrant(key)) return "exists";
+    const name = address === undefined ? undefined : scimNameKey(orgId, address);
+    const entry = name === undefined ? undefined : this.directory.get(name);
+    if (entry?.scimId && this.scimInactive({ orgId, scimId: entry.scimId })) return "deprovisioned";
+    // The grant the address is seated under, this org's: at the directory's key, else at the address as given or
+    // lowercased (a push seats the lowercased address). It moves onto the subject with its role and source, as
+    // `claimGrant` moves an admin's address grant: the seat follows the door the person last came through.
+    const candidates = address === undefined ? [entry?.key] : [entry?.key, `email:${address}`, `email:${address.toLowerCase()}`];
+    for (const from of candidates) {
+      const held = from === undefined || from === key ? undefined : this.liveGrant(from);
+      if (!held || held.orgId !== orgId) continue;
+      this.grants.delete(from!);
+      this.grants.set(key, { ...held, key });
+      this.repointScim(held, key);
+      this.directory.set(name!, { key, scimId: entry?.scimId ?? null });
+      return "written";
+    }
     if (this.liveMembers(orgId) >= org.seats) return "full";
     const grant: PlanGrant = { key, plan: "team", role: "member", orgId, source: "sso", grantedAt: now, grantedBy: "sso", expiresAt: null };
     this.grants.set(key, detach(grant));
+    if (name !== undefined) {
+      this.directory.set(name, { key, scimId: entry?.scimId ?? null });
+      // A SCIM user whose grant is gone follows the subject that just signed in.
+      const user = entry?.scimId ? this.scimUsers.get(scimUserKey(orgId, entry.scimId)) : undefined;
+      if (user) {
+        this.scimByKey.delete(scimKeyIndex(user.key));
+        this.writeScimRows({ ...user, key });
+      }
+    }
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
     return "written";
   }
@@ -3373,6 +3516,197 @@ export class MemoryStore implements BellmanStore {
 
   async declinedOrgs(subjectKey: string): Promise<{ orgId: string; at: number }[]> {
     return [...(this.declines.get(subjectKey) ?? [])].map(([orgId, at]) => ({ orgId, at })).sort((a, b) => (a.orgId < b.orgId ? -1 : 1));
+  }
+
+  /** Whether a key index row names a SCIM user the IdP deactivated (SCIM spec, D4). */
+  private scimInactive(managed: { orgId: string; scimId: string } | undefined): boolean {
+    const user = managed && this.scimUsers.get(scimUserKey(managed.orgId, managed.scimId));
+    return user !== undefined && !user.active;
+  }
+
+  // ------------------------------------------------- SCIM users (SCIM spec, D2 to D8)
+  // Synchronous throughout, as the guarded grant writes are: every check runs before any write, so a refusal
+  // leaves nothing half done, which is what the registry's transaction gives the Durable Objects store.
+
+  private writeScimRows(user: ScimUser): void {
+    this.scimUsers.set(scimUserKey(user.orgId, user.id), detach(user));
+    this.directory.set(scimNameKey(user.orgId, user.userName), { key: user.key, scimId: user.id });
+    this.scimByKey.set(scimKeyIndex(user.key), { orgId: user.orgId, scimId: user.id });
+  }
+
+  async createScimUser(user: ScimUser, audit: AuditIntent): Promise<ScimCreate> {
+    const org = this.orgs.get(user.orgId);
+    if (!org) return { outcome: "no_org" };
+    const entry = this.directory.get(scimNameKey(user.orgId, user.userName));
+    // A tombstone (a user the IdP deleted) is no user: the push starts them over under the key it kept.
+    const prior = entry?.scimId ? this.scimUsers.get(scimUserKey(user.orgId, entry.scimId)) : undefined;
+    if (prior && prior.deletedAt === null) return { outcome: "exists" };
+    const key = entry?.key ?? user.key;
+    const held = this.liveGrant(key);
+    if (held && held.orgId !== user.orgId) return { outcome: "conflict" };
+    const linked = held !== undefined;
+    const entries: AuditEntry[] = [];
+    if (!linked && user.active) {
+      if (this.liveMembers(user.orgId) >= org.seats) return { outcome: "full" };
+      const grant = scimGrant(key, user.orgId, user.createdAt);
+      this.grants.set(key, grant);
+      entries.push(...grantAuditEntries(undefined, grant, audit, user.createdAt));
+    } else if (held && !user.active) {
+      // Pushed as inactive onto a seat a sign-in or an admin gave: the push is the deactivation (review finding 5).
+      this.grants.delete(key);
+      entries.push(...revokeAuditEntries(held, audit, user.createdAt));
+    }
+    if (prior) this.scimUsers.delete(scimUserKey(user.orgId, prior.id));
+    const stored: ScimUser = { ...user, key, deletedAt: null };
+    this.writeScimRows(stored);
+    entries.push(scimUserEntry(user.orgId, user.id, "scim_user_created", {
+      user_name: user.userName, external_id: user.externalId, key, linked,
+    }, audit, user.createdAt));
+    this.recordAudit(entries);
+    return { outcome: linked ? "linked" : "written", user: detach(stored) };
+  }
+
+  /** A tombstone is hidden from every read but `scimUserByKey`, which the sign-in refusal reads. */
+  async getScimUser(orgId: string, id: string): Promise<ScimUser | undefined> {
+    const user = this.scimUsers.get(scimUserKey(orgId, id));
+    return user && user.deletedAt === null ? detach(user) : undefined;
+  }
+
+  async scimUserByName(orgId: string, userName: string): Promise<ScimUser | undefined> {
+    const entry = this.directory.get(scimNameKey(orgId, userName));
+    return entry?.scimId ? this.getScimUser(orgId, entry.scimId) : undefined;
+  }
+
+  async scimUserByKey(key: string): Promise<ScimUser | undefined> {
+    const managed = this.scimByKey.get(scimKeyIndex(key));
+    const user = managed && this.scimUsers.get(scimUserKey(managed.orgId, managed.scimId));
+    return user && detach(user);
+  }
+
+  async listScimUsers(orgId: string, limit: number): Promise<ScimUser[]> {
+    const mine = [...this.scimUsers.values()]
+      .filter((u) => u.orgId === orgId && u.deletedAt === null)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return detach(mine.slice(0, limit));
+  }
+
+  async updateScimUser(orgId: string, id: string, patch: ScimUserPatch, now: number, audit: AuditIntent): Promise<ScimUpdate> {
+    const was = this.scimUsers.get(scimUserKey(orgId, id));
+    if (!was || was.deletedAt !== null) return { outcome: "missing" };
+    const rename = patch.userName !== undefined && patch.userName !== was.userName ? patch.userName : undefined;
+    const externalId = patch.externalId !== undefined && patch.externalId !== was.externalId ? patch.externalId : undefined;
+    const active = patch.active !== undefined && patch.active !== was.active ? patch.active : undefined;
+    if (rename === undefined && externalId === undefined && active === undefined) return { outcome: "updated", user: detach(was), was: detach(was) };
+    // Every refusal before any write.
+    const moves = rename !== undefined && was.key === `email:${was.userName}`;
+    const toKey = moves ? `email:${rename}` : was.key;
+    if (rename !== undefined) {
+      const taken = this.directory.get(scimNameKey(orgId, rename));
+      if (taken?.scimId && taken.scimId !== id) return { outcome: "exists" };
+      const target = moves ? this.liveGrant(toKey) : undefined;
+      if (target && target.orgId !== orgId) return { outcome: "conflict" };
+      if (target) return { outcome: "exists" };
+    }
+    let reuse: PlanGrant | undefined;
+    if (active === true) {
+      const held = moves ? undefined : this.liveGrant(toKey);
+      if (held && held.orgId !== orgId) return { outcome: "conflict" };
+      reuse = held;
+      if (!reuse && this.liveMembers(orgId) >= (this.orgs.get(orgId)?.seats ?? Infinity)) return { outcome: "full" };
+    }
+
+    const entries: AuditEntry[] = [];
+    const detail: Record<string, unknown> = {};
+    let next: ScimUser = { ...was, updatedAt: now };
+    if (rename !== undefined) {
+      // An address key names the address, so it moves with it; a key a sign-in claimed names the person and stays.
+      if (moves) {
+        const grant = this.liveGrant(was.key);
+        if (grant) {
+          this.grants.delete(was.key);
+          this.grants.set(toKey, { ...grant, key: toKey });
+        }
+        this.scimByKey.delete(scimKeyIndex(was.key));
+        next = { ...next, key: toKey };
+      }
+      this.directory.delete(scimNameKey(orgId, was.userName));
+      next = { ...next, userName: rename };
+      detail.from = was.userName;
+    }
+    if (externalId !== undefined) {
+      next = { ...next, externalId };
+      detail.external_id = externalId;
+    }
+    let action: "scim_user_updated" | "scim_user_deactivated" | "scim_user_reactivated" = "scim_user_updated";
+    if (active === true) {
+      if (!reuse) {
+        const grant = scimGrant(next.key, orgId, now);
+        this.grants.set(next.key, grant);
+        entries.push(...grantAuditEntries(undefined, grant, audit, now));
+      }
+      action = "scim_user_reactivated";
+    } else if (active === false) {
+      const grant = this.liveGrant(next.key);
+      if (grant && grant.orgId === orgId) {
+        this.grants.delete(next.key);
+        entries.push(...revokeAuditEntries(grant, audit, now));
+      }
+      action = "scim_user_deactivated";
+    }
+    if (active !== undefined) next = { ...next, active };
+    this.writeScimRows(next);
+    entries.push(scimUserEntry(orgId, id, action, { user_name: next.userName, key: next.key, ...detail }, audit, now));
+    this.recordAudit(entries);
+    return { outcome: "updated", user: detach(next), was: detach(was) };
+  }
+
+  /**
+   * A delete is a deactivation that also hides the row (review finding 3): the grant goes, the row stays as a
+   * tombstone with its directory entry and key index, so the subject is refused as a deactivated one is, and a
+   * repeat answers the tombstone so a room walk cut short can be finished. A push for the address starts over.
+   */
+  async deleteScimUser(orgId: string, id: string, now: number, audit: AuditIntent): Promise<ScimUser | undefined> {
+    const was = this.scimUsers.get(scimUserKey(orgId, id));
+    if (!was) return undefined;
+    if (was.deletedAt !== null) return detach(was);
+    const entries: AuditEntry[] = [];
+    const grant = was.active ? this.liveGrant(was.key) : undefined;
+    if (grant && grant.orgId === orgId) {
+      this.grants.delete(was.key);
+      entries.push(...revokeAuditEntries(grant, audit, now));
+    }
+    this.scimUsers.set(scimUserKey(orgId, id), { ...was, active: false, updatedAt: now, deletedAt: now });
+    entries.push(scimUserEntry(orgId, id, "scim_user_deleted", { user_name: was.userName, key: was.key }, audit, now));
+    this.recordAudit(entries);
+    return detach(was);
+  }
+
+  async issueScimToken(orgId: string, token: ScimToken, audit: AuditIntent): Promise<"issued" | "replaced" | "missing"> {
+    if (!this.orgs.has(orgId)) return "missing";
+    const previous = this.scimTokens.get(orgId);
+    if (previous) this.scimTokenIndex.delete(previous.tokenHash);
+    this.scimTokens.set(orgId, detach(token));
+    this.scimTokenIndex.set(token.tokenHash, orgId);
+    this.recordAudit([orgEventEntry(orgId, "scim_token_issued", { replaced: previous !== undefined }, audit, token.issuedAt)]);
+    return previous ? "replaced" : "issued";
+  }
+
+  async revokeScimToken(orgId: string, audit: AuditIntent): Promise<"revoked" | "missing"> {
+    const token = this.scimTokens.get(orgId);
+    if (!token) return "missing";
+    this.scimTokens.delete(orgId);
+    this.scimTokenIndex.delete(token.tokenHash);
+    this.recordAudit([orgEventEntry(orgId, "scim_token_revoked", {}, audit, Date.now())]);
+    return "revoked";
+  }
+
+  async scimTokenOf(orgId: string): Promise<ScimToken | undefined> {
+    const token = this.scimTokens.get(orgId);
+    return token && detach(token);
+  }
+
+  async orgForScimToken(tokenHash: string): Promise<string | undefined> {
+    return this.scimTokenIndex.get(tokenHash);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

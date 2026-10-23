@@ -6,8 +6,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ORG_WRITE_BYTES, orgRoutes, type OrgRouteDeps } from "../src/http/orgs.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
+import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
+import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 
@@ -453,5 +455,58 @@ describe("PATCH /org { require_sso } (SSO spec, D13)", () => {
     expect((await call("owner", "/org", "PATCH", { require_sso: "yes" }))!.status).toBe(400);
     expect((await call("owner", "/org", "PATCH", { require_sso: false }))!.status).toBe(200);
     expect((await store.getOrg("org_acme"))?.requireSso).toBe(false);
+  });
+});
+
+describe("SCIM (SCIM spec, D1, D10)", () => {
+  it("tells an admin whether a token is set, and a member nothing", async () => {
+    expect((await call("member", "/org/scim"))!.status).toBe(403);
+    expect(await json(await call("owner", "/org/scim"))).toEqual({ base_url: `${ISSUER}/scim/v2`, token_set: false, issued_at: null, issued_by: null });
+    const res = (await call("owner", "/org/scim", "DELETE"))!;
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "GET"]);
+  });
+
+  it("issues a token once, replaces it on a second issue, and revokes it", async () => {
+    const first = (await call("owner", "/org/scim/token", "POST"))!;
+    const issued = await json(first);
+    expect(first.status).toBe(201);
+    expect(issued).toMatchObject({ replaced: false, issued_by: "u_github_1", base_url: `${ISSUER}/scim/v2` });
+    expect(issued.token).toMatch(/^bst_[A-Za-z0-9_-]{43}$/);
+    expect(await store.orgForScimToken(await sha256Base64url(issued.token as string))).toBe("org_acme");
+    expect(await json(await call("owner", "/org/scim"))).toMatchObject({ token_set: true, issued_by: "u_github_1" });
+    const second = await json(await call("admin-2", "/org/scim/token", "POST"));
+    expect(second).toMatchObject({ replaced: true, issued_by: "u_github_9" });
+    expect(await store.orgForScimToken(await sha256Base64url(issued.token as string))).toBeUndefined();
+    expect(await store.orgForScimToken(await sha256Base64url(second.token as string))).toBe("org_acme");
+    expect((await store.auditForOrg("org_acme", 20)).filter((e) => e.action === "scim_token_issued").map((e) => e.detail.replaced)).toEqual([false, true]);
+    expect((await call("owner", "/org/scim/token", "DELETE"))!.status).toBe(204);
+    expect(await store.orgForScimToken(await sha256Base64url(second.token as string))).toBeUndefined();
+    expect((await call("owner", "/org/scim/token", "DELETE"))!.status).toBe(404);
+    expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "scim_token_revoked", actorUserId: "u_github_1" });
+  });
+
+  it("refuses a cookie without the panel's Origin, a member, and an org with no record", async () => {
+    expect((await call("cookie-owner", "/org/scim/token", "POST", undefined, null))!.status).toBe(403);
+    expect((await call("member", "/org/scim/token", "POST"))!.status).toBe(403);
+    expect((await call("unrecorded", "/org/scim/token", "POST"))!.status).toBe(404);
+    expect(await store.scimTokenOf("org_acme")).toBeUndefined();
+  });
+
+  it("leaves a member the IdP pushed to the IdP, and still removes one an admin seated", async () => {
+    await store.createScimUser({
+      id: "x1", orgId: "org_acme", userName: "bo@acme.test", externalId: null, active: true, key: "email:bo@acme.test", createdAt: 1, updatedAt: 1, deletedAt: null,
+    }, scimIntent("org_acme"));
+    const managed = (await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!;
+    const refusal = await json(managed);
+    expect([managed.status, refusal.error, refusal.error_description]).toEqual([409, "managed", "this member is provisioned by your identity provider; remove them there"]);
+    expect(await store.getGrant("email:bo@acme.test")).toBeDefined();
+    expect((await call("owner", "/org/members/email%3Abo%40acme.test", "PATCH", { role: "admin" }))!.status).toBe(200);
+    await store.updateScimUser("org_acme", "x1", { active: false }, 2, scimIntent("org_acme"));
+    // Seating a deactivated person by hand would make a member the IdP keeps refusing: they come back through the IdP.
+    const dead = (await call("owner", "/org/members", "POST", { key: "email:bo@acme.test", role: "member" }))!;
+    expect([dead.status, (await json(dead)).error]).toEqual([409, "managed"]);
+    expect(await store.getGrant("email:bo@acme.test")).toBeUndefined();
+    await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
+    expect((await call("owner", "/org/members/email%3Abo%40acme.test", "DELETE"))!.status).toBe(204);
   });
 });

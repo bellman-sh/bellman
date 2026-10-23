@@ -8,7 +8,7 @@ import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, isUnownedSeat, orgView, pa
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
 import type { Identity, Org, OrgInvite, Plan, PlanGrant } from "../types.js";
-import {
+import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
@@ -88,8 +88,8 @@ export interface OAuthConfig {
   /**
    * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
    * operator's platform-wide powers, which no plan, role or grant confers.
-   * Today that is releasing anyone's handle, suspending an account and working
-   * the report queue. Absent or empty names no one.
+   * Today that is releasing anyone's handle, listing who holds one, suspending an
+   * account and working the report queue. Absent or empty names no one.
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
@@ -101,10 +101,10 @@ export type PlanStore = Pick<
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
-  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
+  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember" | "scimUserByKey"
   | "invitesFor" | "acceptOrgInvite" | "declineOrg" | "declinedOrgs"
   | "countCreatesThisMonth"
-  | "releaseHandleNamed"
+  | "releaseHandleNamed" | "handleHolders" | "sessionsJoinedBy" | "membersOfUser"
   | "recordSignIn"
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
@@ -119,11 +119,17 @@ export const MAX_REPORTS_LISTED = 200;
 export type PlanSource = "operator" | "grant" | "default";
 
 /**
- * The refusal `require_sso` makes (SSO spec, D13): a GitHub or Google sign-in by someone the org
- * claims, named so the person knows which door to use. Thrown where plans resolve, so a token or a
- * panel session from before the switch stops at its next re-check.
+ * A sign-in an org has closed, thrown where plans resolve, so a token or a panel session from before the
+ * closing stops at its next re-check: `require_sso` (SSO spec, D13) or a deprovision (SCIM spec, D4). The
+ * places that catch one end the sign-in with its message; the SSO one adds which door to use.
  */
-export class SsoRequired extends Error {
+export class SignInRefused extends Error {}
+
+/**
+ * The refusal `require_sso` makes (SSO spec, D13): a GitHub or Google sign-in by someone the org
+ * claims, named so the person knows which door to use.
+ */
+export class SsoRequired extends SignInRefused {
   constructor(public readonly orgId: string, public readonly orgName: string) {
     super(`${orgName} requires single sign-on`);
     this.name = "SsoRequired";
@@ -138,6 +144,14 @@ export class SeatsFull extends Error {
   }
 }
 
+/** A person the org's identity provider deprovisioned (SCIM spec, D4): no sign-in, and nothing minted. */
+export class AccessRemoved extends SignInRefused {
+  constructor(public readonly orgName: string) {
+    super(`${orgName} has removed your access: ask its admin`);
+    this.name = "AccessRemoved";
+  }
+}
+
 /**
  * Whether `require_sso` refuses this person (D13): the org their plan puts them in, and the org a
  * verified domain of any of their addresses belongs to, each with the switch on, unless they are
@@ -148,8 +162,20 @@ export class SeatsFull extends Error {
  * apart from the grants and nothing that resolves a plan reads it, so an org that has only invited a
  * person refuses none of their sign-ins. The domain half is the org's by its form, as before.
  */
-async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SsoRequired | null> {
-  if (!plans || keys.some((key) => key.startsWith("sso:"))) return null;
+async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SignInRefused | null> {
+  if (!plans) return null;
+  // A person the org's identity provider deprovisioned (SCIM spec, D4): one read per stable key, here so that a
+  // token refresh, a panel session's re-check and a hosted room's month turn all stop them, as the switch stops
+  // its people. Before the exemption below: the subject the IdP deprovisioned is an `sso:` key. Only that key: a
+  // personal GitHub or Google account that an address linked to the org loses the org's grant and nothing else,
+  // or an org could end a stranger's sign-in by pushing their address.
+  for (const key of grantKeys(keys)) {
+    const managed = await plans.scimUserByKey(key);
+    if (managed && !managed.active && parseSsoKey(key)?.orgId === managed.orgId) {
+      return new AccessRemoved((await plans.getOrg(managed.orgId))?.name ?? managed.orgId);
+    }
+  }
+  if (keys.some((key) => key.startsWith("sso:"))) return null;
   const orgIds = new Set<string>();
   if (identity.orgId) orgIds.add(identity.orgId);
   for (const key of keys) {
@@ -324,8 +350,8 @@ export async function signedInPlan(
   try {
     return (await replanOnRefresh(stored, [key], config)).identity.plan;
   } catch (err) {
-    // An account `require_sso` has closed can no longer sign in, so its plan is as good as free.
-    if (err instanceof SsoRequired) return "free";
+    // An account `require_sso` or a deprovision has closed can no longer sign in, so its plan is as good as free.
+    if (err instanceof SignInRefused) return "free";
     throw err;
   }
 }
@@ -638,7 +664,7 @@ function refuseAuthorize(pending: AuthorizeRequest, err: unknown, via: string): 
   if (pending.state) target.searchParams.set("state", pending.state);
   let description = `${via} sign-in failed`;
   if (err instanceof SsoRequired) description = `${err.message}: start again and enter your work email`;
-  else if (err instanceof SeatsFull) description = err.message;
+  else if (err instanceof SeatsFull || err instanceof AccessRemoved) description = err.message;
   else console.error(`${via} sign-in failed:`, err);
   target.searchParams.set("error", "access_denied");
   target.searchParams.set("error_description", description);
@@ -698,6 +724,9 @@ async function finishUpgrade(
   } catch (err) {
     if (err instanceof SsoRequired) {
       return html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Nothing was charged. An organisation's plan is its own; ask its admin.</p>`, 403);
+    }
+    if (err instanceof AccessRemoved) {
+      return html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was charged.</p>`, 403);
     }
     console.error(`${name} sign-in for upgrade failed:`, err);
     return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
@@ -822,12 +851,13 @@ function signinNonceMatches(request: Request, pending: SessionRequest, secure: b
   return Boolean(presented && pending.nonce && timingSafeEqual(presented, pending.nonce));
 }
 
-/** A panel sign-in's refusal, as a page: `require_sso` names the org (D13), a full org says so, anything else is logged. */
+/** A panel sign-in's refusal, as a page: `require_sso` names the org (D13), a full org and a removed access say so, anything else is logged. */
 function sessionRefusal(err: unknown): Response {
   if (err instanceof SsoRequired) {
     return html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Start again from the control panel and enter your work email.</p>`, 403);
   }
   if (err instanceof SeatsFull) return html(`<h1>No free seat</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403);
+  if (err instanceof AccessRemoved) return html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was signed in.</p>`, 403);
   console.error("the panel's sign-in failed:", err);
   return html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502);
 }
@@ -1458,17 +1488,14 @@ export async function handleOAuth(
       const profile: ProviderProfile = {
         provider: "sso", subject: `${orgId}:${who.sub}`, label: who.name ?? who.email ?? who.sub, email: vouched ? who.email : undefined,
       };
-      // An admin may have seated the address already (D10): that grant is claimed onto the subject
-      // before the seat is decided, so the person keeps the role they were given and takes no
-      // second seat. Only a grant in this org: an address another org filed is not this org's to move.
+      // The seat, before any token (D13), with the vouched address (SCIM spec, D4): an address an admin or
+      // the IdP's connector seated is claimed onto the subject inside the same transaction, so the person
+      // keeps the role they were given and takes no second seat; a full org refuses here and nothing is
+      // minted; a person the IdP deprovisioned is refused the same way.
       const key = ssoKey(orgId, who.sub);
-      if (profile.email) {
-        const byAddress = await plans.getGrant(`email:${profile.email}`);
-        if (byAddress?.orgId === orgId && !(await plans.getGrant(key))) await plans.moveGrant(`email:${profile.email}`, key);
-      }
-      // The seat, before any token (D13): a full org refuses here and nothing is minted.
-      const seated = await plans.provisionSsoMember(orgId, key, Date.now(), { actorUserId: "sso", actorOrgId: orgId, detail: { org_id: orgId } });
+      const seated = await plans.provisionSsoMember(orgId, key, Date.now(), { actorUserId: "sso", actorOrgId: orgId, detail: { org_id: orgId } }, profile.email);
       if (seated === "full") throw new SeatsFull(org.name);
+      if (seated === "deprovisioned") throw new AccessRemoved(org.name);
       if (seated === "no_org") throw new Error("the org's record is gone");
       return profile;
     };
@@ -1587,8 +1614,10 @@ export async function handleOAuth(
           current.source, keys
         );
       } catch (err) {
-        // Not put back: the account signs in through its organisation's IdP from now on (SSO spec, D13).
+        // Not put back: the account signs in through its organisation's IdP from now on (SSO spec, D13), or
+        // not at all (SCIM spec, D4).
         if (err instanceof SsoRequired) return oauthError("invalid_grant", `${err.message}: sign in again through it`);
+        if (err instanceof AccessRemoved) return oauthError("invalid_grant", err.message);
         console.error("could not complete a refresh:", err);
         await config.store.putRefresh(token, stored).catch(() => {});
         return oauthError("temporarily_unavailable", "could not complete the refresh — retry", 503);
@@ -1836,6 +1865,35 @@ export async function handleOAuth(
     }
 
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST, DELETE" } });
+  }
+
+  // ------------------------------------------------------ /admin/handles
+  // The operator lists every account holding a handle, for the notice that goes to every holder 30 days before members
+  // are named by handle (public rooms on bellman.sh spec, D6). Each holder comes with the sign-in label of its seat in
+  // one room it sat in. For most accounts that is an email address, or `<login>@<provider>` when the provider gave none,
+  // and it is where the notice goes. `label: null` means the room index (`sessionsJoinedBy`) names no room for the
+  // holder. A holder who sat in none reads that way, and so does one who sat only in rooms from before the index, one
+  // whose index write failed (`DurableObjectStore.writeIndex` logs a failed put and moves on), and one whose user id
+  // another extends past a colon, since the list then answers the other's rooms in place of its own (#295). So null
+  // does not say that no notice is owed: the owner cross-checks null holders by hand before leaving one off. On
+  // /admin/handles/:handle's gate, and outside the suspension check as /admin/reports is (R8), in the order every
+  // route here takes: the gate, the method, the plan store, then the answer. The path is exact, so a release's never
+  // lands here and this one never lands on a release.
+  //
+  // ponytail: the whole list in one answer, and two reads per holder (a room, then its seat). The Workers cap of 1,000
+  // subrequests ends it near 500 holders, with an error and not a short list. Page it before then.
+  if (path === "/admin/handles") {
+    const gate = await operatorGate(request, config, "listing handle holders");
+    if (gate instanceof Response) return gate;
+    if (method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+    const { plans } = config;
+    if (!plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const holders = await Promise.all((await plans.handleHolders()).map(async ({ userId, handle }) => {
+      const room = (await plans.sessionsJoinedBy(userId, 1))[0];
+      const seat = room === undefined ? undefined : (await plans.membersOfUser(room, userId))[0];
+      return { handle, user_id: userId, label: seat?.label ?? null };
+    }));
+    return json({ holders });
   }
 
   // ---------------------------------------------- /admin/handles/:handle
@@ -2135,9 +2193,10 @@ async function sessionCaller(
   try {
     current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
   } catch (err) {
-    // The session ends here (SSO spec, D13): the person signs in again through their organisation's IdP.
-    if (err instanceof SsoRequired) {
-      await config.store.deleteSession(id).catch((e) => console.error("could not end a session require_sso closed:", e));
+    // The session ends here (SSO spec, D13; SCIM spec, D4): the person signs in again through their
+    // organisation's IdP, or not at all.
+    if (err instanceof SignInRefused) {
+      await config.store.deleteSession(id).catch((e) => console.error("could not end a session the org closed:", e));
       return null;
     }
     throw err;

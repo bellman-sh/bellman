@@ -56,6 +56,16 @@ An org's admin can have everyone sign in through the company's identity provider
 
 Once those work, turn `require_sso` on. From then on everyone the org claims, by a seat they hold or by a verified address, must sign in through the IdP; GitHub and Google refuse them and say so. An invite nobody has accepted claims no one. The org's owner may still sign in with their original provider, which is the way back in if the IdP is ever down. A person who had a personal Bellman account under a company address signs in through SSO as a new account, and their earlier rooms stay with the old one, so seat existing members by their GitHub or Google key first if those accounts should be kept, and have each accept their invite before the switch goes on.
 
+## Provisioning with SCIM
+
+Once single sign-on works, the IdP can also keep the roster: push a person when they are assigned Bellman, and take them out when they leave. Three steps:
+
+1. **Mint the token.** `POST /org/scim/token`, as an org admin over a bearer token or the control panel's session, answers the token once and the base URL, `https://mcp.bellman.sh/scim/v2`; the control panel's Org page will offer the same button. Minting again replaces the token; `DELETE /org/scim/token` revokes it. The token can do SCIM and nothing else.
+2. **Give both to the IdP.** In Okta, the app's Provisioning tab takes the base URL and the token as a bearer; in Entra ID, the enterprise app's Provisioning page takes them as the tenant URL and the secret token. Turn on create, update and deactivate for users. Group push is not managed: Bellman lists no groups, and roles are set on the Org page.
+3. **Assign people.** A push seats the person as a member, within the seats, under their email address. Someone who already signed in through SSO, or whom an admin already seated by that address, is linked rather than seated again, and keeps the role they had. The first sign-in after a push claims the seat onto the IdP's subject.
+
+When the IdP deactivates someone, their seat is freed, their sign-in is refused from the next re-check (within ten minutes), they are taken out of every room, and the rooms they created are frozen: members stay, history stays readable, and nothing can be written until the person is reactivated, which seats them again as a member and thaws the rooms. The audit log shows the deactivation, each `member_evicted` and each `room_frozen`. A member the IdP pushed is removed through the IdP; the roster refuses to remove them by hand, since the next sync would seat them again. Changing their role stays yours.
+
 ## The audit log
 
 [`bellman_audit`](/reference/tools/bellman_audit/) returns the latest entries of your org's log, oldest first. `limit` defaults to 50 and goes up to 500. It needs the team plan, the admin role and an org, and refuses without them:

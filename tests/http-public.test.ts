@@ -74,11 +74,19 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text"]);
-    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", by: null });
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "public_url", "status", "text", "view"]);
+    expect(body).toMatchObject({
+      id: PUB, status: "active", closed_at: null, mode: "pair", view: "canvas", by: null, public_url: "https://bellman.sh/r/qs_public",
+    });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });
+  });
+
+  it("carries how the room opens, the canvas until its creator chooses the page", async () => {
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("canvas");
+    await store.setPublicView(PUB, "page");
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("page");
   });
 
   it("answers a private, an unpublished, an unknown and a purged room, and their sub-routes, with one 404", async () => {
@@ -126,6 +134,29 @@ describe("GET /public/rooms/:id/surface", () => {
     expect(body.items[0].origin).toEqual({ memberId: "m_creator", label: "member 1" });
     const again = (await read(`/public/rooms/${PUB}/surface`, { "if-none-match": tag }))!;
     expect([again.status, again.headers.get("etag"), again.headers.get("access-control-allow-origin")]).toEqual([304, tag, "*"]);
+  });
+
+  // Room pages spec, D4: what the page orders and dates a post by.
+  it("dates each item: when its key was first written and when it last changed, ISO 8601", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const put = async (body: string) => {
+        const res = (await asCreator(`/rooms/${PUB}/surface/plan?member_id=m_creator`, {
+          method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "text", title: "The plan", body }),
+        }))!;
+        expect(res.status, await res.clone().text()).toBe(200);
+      };
+      vi.setSystemTime(new Date("2026-10-18T09:00:00.000Z"));
+      await put("first");
+      vi.setSystemTime(new Date("2026-10-19T10:30:00.000Z"));
+      await put("revised");
+      const { items } = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as unknown as { items: { data: Record<string, unknown> }[] };
+      expect(items[0].data).toMatchObject({
+        created_at: "2026-10-18T09:00:00.000Z", changed_at: "2026-10-19T10:30:00.000Z", at: "2026-10-19T10:30:00.000Z",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -330,6 +361,8 @@ describe("a public room read by its name (public names spec, D6)", () => {
 
   it("reads the room, its surface and its log by its name as by its session id", async () => {
     await name(PUB, "open-review");
+    // The room's one link, whichever way it was read: its name's while it holds one.
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).public_url).toBe("https://bellman.sh/r/open-review");
     for (const part of ["", "/surface", "/events"]) {
       const byName = (await read(`/public/rooms/open-review${part}`))!;
       expect(byName.status, part).toBe(200);
@@ -344,7 +377,10 @@ describe("a public room read by its name (public names spec, D6)", () => {
     }));
     await name("qs_closed_pub", "closed-room");
     expect((await read("/public/rooms/closed-room"))!.status).toBe(404);
-    expect((await read("/public/rooms/qs_closed_pub"))!.status).toBe(200);
+    const byId = (await read("/public/rooms/qs_closed_pub"))!;
+    expect(byId.status).toBe(200);
+    // The record still carries the name, which the room no longer holds, so its one link is its id's.
+    expect((await bodyOf(byId)).public_url).toBe("https://bellman.sh/r/qs_closed_pub");
     await name(PUB, "open-review");
     // The positive control: the name reads while its room holds it, so the 404 below is the release.
     expect((await read("/public/rooms/open-review"))!.status).toBe(200);

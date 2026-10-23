@@ -2141,6 +2141,21 @@ export function describeStoreContract(
       expect((await store.eventsAfter(s.id, 0))).toHaveLength(2);
     });
 
+    /** The tool reads the key before the checks that depend on the room, so it has to be readable without appending. */
+    it("reads the record a keyed append left: present after it, null before it, and null under another member's name", async () => {
+      const s = session();
+      (await store.createSession(s));
+      expect(await store.idempotencyRecord(s.id, "m_creator", "send-0001")).toBeNull();
+
+      const first = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      if (first.outcome !== "appended") throw new Error(`first send said ${first.outcome}`);
+
+      expect(await store.idempotencyRecord(s.id, "m_creator", "send-0001")).toMatchObject({ cursor: first.event.cursor });
+      expect(await store.idempotencyRecord(s.id, "m_joiner", "send-0001")).toBeNull();
+      expect(await store.idempotencyRecord(s.id, "m_creator", "send-0002")).toBeNull();
+      expect((await store.eventsAfter(s.id, 0)), "reading the record appends nothing").toHaveLength(1);
+    });
+
     /**
      * A write that already succeeded keeps reporting its result even if the
      * room froze afterwards. The replay appends nothing, so nothing new enters
@@ -3138,6 +3153,7 @@ export function describeStoreContract(
         const out = landed(await approve(id, request));
         expect(out.event.cursor).toBe(request.cursor + 1);
         expect(out.written).toMatchObject({ type: "surface", cursor: request.cursor + 2, fromMemberId: "m_ada", fromLabel: "ada@lovelace", payload: card() });
+        expect(out.written!.refId, "the card carries no refId (R30)").toBeNull();
         expect(await store.surfaceOf(id)).toEqual([expect.objectContaining({
           ...card(), cursor: out.written!.cursor, at: out.written!.at,
           byMemberId: "m_ada", byLabel: "ada@lovelace", approvedBy: { memberId: "m_maint", label: "jesse@codenerd" },
@@ -3245,9 +3261,30 @@ export function describeStoreContract(
 
         const retry = await approve(id, request, {}, "ap-0001");
 
-        expect(retry).toEqual({ outcome: "replayed", event: first.event });
+        expect(retry).toEqual({ outcome: "replayed", event: first.event, written: first.written });
         expect(await events(id)).toEqual(log);
         expect((await store.surfaceOf(id))[0].body).toBe("changed after");
+      });
+
+      // The record names the card by its own cursor: the event after the response can be anyone's when no card was written.
+      it("a replayed approval returns the card it wrote, and null when it wrote none", async () => {
+        const id = await room();
+        const request = (await proposed(id))!;
+        const first = landed(await approve(id, request, {}, "ap-0001"));
+        expect(first.written, "the premise: the approval wrote a card").not.toBeNull();
+        const retry = await approve(id, request, {}, "ap-0001");
+        expect(retry).toEqual({ outcome: "replayed", event: first.event, written: first.written });
+
+        const lead = { ...MAINT, roomRole: "lead" };
+        const bare = await room({ id: "qs_bare", manifest: resolveManifest({ room: "s", preset: "swarm" }), members: [lead, { ...ADA, roomRole: "helper" }] });
+        const ask = (await proposed(bare))!;
+        const alone = landed(await approve(bare, ask, {}, "ap-0002", lead));
+        expect(alone.written).toBeNull();
+        // Someone else's event lands right after the response, where a read of `cursor + 1` would find it.
+        await store.appendEvent(bare, {
+          type: "message", fromMemberId: "m_ada", fromUserId: "u_ada", fromLabel: "ada@lovelace", payload: { text: "after" }, refId: null,
+        });
+        expect(await approve(bare, ask, {}, "ap-0002", lead)).toEqual({ outcome: "replayed", event: alone.event, written: null });
       });
 
       it("reports a conflict for a key reused with a different response, and writes nothing", async () => {
@@ -3302,7 +3339,7 @@ export function describeStoreContract(
         const request = (await proposed(id))!;
         const first = landed(await approve(id, request, {}, "ap-0001", lead));
         const log = await events(id);
-        expect(await approve(id, request, {}, "ap-0001", lead)).toEqual({ outcome: "replayed", event: first.event });
+        expect(await approve(id, request, {}, "ap-0001", lead)).toEqual({ outcome: "replayed", event: first.event, written: null });
         expect(await events(id)).toEqual(log);
       });
 

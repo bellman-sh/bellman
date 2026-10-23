@@ -757,12 +757,13 @@ export interface ProposalApproval {
 
 /**
  * What `approveProposal` did. `appended` carries the response and the card's `surface` event, which is null when
- * the seat applied none (R13). `replayed` carries the response the key named. `stale`, `answered`, `conflict` and
- * `frozen` wrote nothing at all, not even a record.
+ * the seat applied none (R13). `replayed` carries the response the key named and the card that call wrote, read by
+ * the cursor the key's record holds, so it is null exactly when the first call wrote none. `stale`, `answered`,
+ * `conflict` and `frozen` wrote nothing at all, not even a record.
  */
 export type ApprovalWrite =
   | { outcome: "appended"; event: SessionEvent; written: SessionEvent | null }
-  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "replayed"; event: SessionEvent; written: SessionEvent | null }
   | { outcome: "stale"; cursor: number }
   | { outcome: "answered"; by: string }
   | { outcome: "conflict" }
@@ -959,7 +960,7 @@ export interface AppendExtras {
    */
   surface?: SurfaceWrite;
   /**
-   * The member whose approval put this version on the surface, or who restored it (topic rooms spec, D2 and
+   * The seat whose approval put this version on the surface in a topic room, or that restored it in any room (topic rooms spec, D2 and
    * D5), stamped on the row the `surface` write stores. It is read with `surface` and so, like `surface`, NOT
    * applied on an idempotent replay: the row keeps what the first append stamped. A `surface` write without
    * one stores a row without one, whatever the key held before (R20).
@@ -1511,6 +1512,13 @@ export interface BellmanStore {
     extras?: AppendExtras
   ): Promise<EventWrite>;
   /**
+   * The record a keyed append left for `memberId` under `key`, or null when there is none (never used, or another
+   * member's key). A plain read that appends and counts nothing. `bellman_send` reads it before the checks that
+   * depend on the room's state, so a retry of a send that landed is let through to the append, which replays it
+   * (or reports `conflict` for a key reused for other content), whatever the room has become since.
+   */
+  idempotencyRecord(sessionId: string, memberId: string, key: string): Promise<IdempotencyRecord | null>;
+  /**
    * Approve a proposal (topic rooms spec, D2; plan R12): append `e`, the maintainer's `action_response`, and, when
    * `decideApproval` says `apply`, the card's `surface` event and row after it, in the same operation. The card is
    * authored by the proposer (the request's sender), stamped with the approver, and goes through the same
@@ -1522,9 +1530,10 @@ export interface BellmanStore {
    * before it appends and cannot stop them: of two that meet, one appends and the other reads `answered`.
    *
    * A `key` names the response, as `appendEventOnce`'s names its event, and `null` is unkeyed, as `appendEvent` is.
-   * A retry returns the response as `replayed`, appends and applies nothing, and re-checks nothing. The key check
-   * precedes the frozen check and the decision, so a retry learns what its first attempt did however the room has
-   * changed since, and never reads `stale`.
+   * A retry returns the response, and the card that call wrote or null, as `replayed`: it appends and applies
+   * nothing and re-checks nothing. The card is read by the cursor the key's record holds (`IdempotencyRecord.applied`),
+   * never by the cursor after the response. The key check precedes the frozen check and the decision, so a retry
+   * learns what its first attempt did however the room has changed since, and never reads `stale`.
    *
    * A refusal writes nothing, not even the key's record, so a retry after one runs again: `stale` (the key changed
    * since `approval.base`, a removal included; `cursor` names the change), `answered` (an earlier response to the
@@ -2848,6 +2857,11 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "appended", event: detach(event) };
   }
 
+  async idempotencyRecord(sessionId: string, memberId: string, key: string): Promise<IdempotencyRecord | null> {
+    const record = this.keys.get(sessionId)?.get(idempotencyKey(memberId, key));
+    return record ? { ...record } : null;
+  }
+
   async approveProposal(
     sessionId: string,
     e: EventBody,
@@ -2871,7 +2885,12 @@ export class MemoryStore implements BellmanStore {
       if (!original) {
         throw new Error(`Idempotency record for ${sessionId} names missing cursor ${record.cursor}`);
       }
-      return { outcome: "replayed", event: detach(original) };
+      // The card by the cursor the record names; a record without one wrote none.
+      const card = record.applied === undefined ? null : s.events.find((ev) => ev.cursor === record.applied);
+      if (card === undefined) {
+        throw new Error(`Idempotency record for ${sessionId} names missing card cursor ${record.applied}`);
+      }
+      return { outcome: "replayed", event: detach(original), written: card === null ? null : detach(card) };
     }
     if (s.frozenAt !== null) return { outcome: "frozen" };
 
@@ -2896,12 +2915,15 @@ export class MemoryStore implements BellmanStore {
     // to the host (`isReplyToHost` reads a message or a progress event), so neither event wakes it.
     const at = Date.now();
     const response = this.appendNow(s, e, at);
-    if (keyed !== null) {
+    // Written once the card's cursor is known, so a retry finds both.
+    const remember = (applied?: number) => {
+      if (keyed === null) return;
       const map = seen ?? new Map<string, IdempotencyRecord>();
-      map.set(keyed.storageKey, { cursor: response.cursor, print: keyed.print });
+      map.set(keyed.storageKey, { cursor: response.cursor, print: keyed.print, ...(applied === undefined ? {} : { applied }) });
       this.keys.set(sessionId, map);
-    }
+    };
     if (decided.kind === "record" || write === null) {
+      remember();
       return { outcome: "appended", event: detach(response), written: null };
     }
 
@@ -2915,6 +2937,7 @@ export class MemoryStore implements BellmanStore {
     // free slot, and the event carries the placement the row will (R19).
     const placed = this.placed(s, draft, { surface: write });
     const card = this.appendNow(s, placed.e, at);
+    remember(card.cursor);
     this.applyExtras(s, card, { surface: placed.extras.surface, approvedBy: decided.approvedBy });
     return { outcome: "appended", event: detach(response), written: detach(card) };
   }

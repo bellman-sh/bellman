@@ -249,6 +249,28 @@ describe("the limit on open proposals (D3)", () => {
     expect(over.data).toMatchObject({ error: "rate_limited" });
   });
 
+  // A retry of a send that landed is the same send, so the room's state since (here, the cap its own landing filled)
+  // does not refuse it: the key is read first.
+  it("replays a keyed retry of a third proposal that landed, and does not count it against its own cap", async () => {
+    const r = await topicRoom(h);
+    const keyed = (key: string, extra: Record<string, unknown> = {}) => r.contributor.call("bellman_send", {
+      session_id: r.sessionId, member_id: r.contributorId, type: "action_request",
+      payload: { kind: "surface_proposal", item: card({ key }), base: 0 }, ...extra,
+    });
+    for (const key of ["a", "b"]) expect((await keyed(key)).isError, key).toBe(false);
+    const third = await keyed("c", { idempotency_key: "propose-0003" });
+    expect(third.isError, third.text).toBe(false);
+    const before = await eventCount(r);
+
+    const retry = await keyed("c", { idempotency_key: "propose-0003" });
+
+    expect(retry.isError, retry.text).toBe(false);
+    expect(retry.data).toMatchObject({ cursor: third.data.cursor, replayed: true });
+    expect(await eventCount(r)).toBe(before);
+    // The cap itself still holds for a fresh key.
+    expect((await keyed("d", { idempotency_key: "propose-0004" })).text).toContain("3 open proposals");
+  });
+
   it("cannot be sent by an account the creator evicted: the handle has left, which needs no check of its own", async () => {
     const r = await topicRoom(h);
     const gone = await r.maintainer.call("bellman_evict", { session_id: r.sessionId, member_id: r.contributorId, ban: "room" });

@@ -2028,18 +2028,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,745** | every request, whether or not you are in a room |
+| Tool definitions | **~9,751** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~358 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~364 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-23 for topic rooms, by the method below: 247 tokens over the 9,498
+Re-measured on 2026-10-23 for topic rooms, by the method below: 253 tokens over the 9,498
 that main records and this branch's base (`e3a0dd39`) measures, in `bellman_send` (1,425 to
 1,637: the proposal, `restore`, `applied` and the two refusals), `bellman_surface` (329 to
-358: `approved_by`) and `bellman_start` (2,490 to 2,496: one preset name). No tool was
-added. That is 9,745.
+364: `approved_by`, said of the seat that approved or restored) and `bellman_start` (2,490 to
+2,496: one preset name). No tool was added. That is 9,751.
 
 Re-measured on 2026-10-23 for room pages, by the method below: 21 tokens over the 9,477
 that trunk (`6e9b1ef4`) measures, all of them `bellman_surface`'s (308 to 329), whose

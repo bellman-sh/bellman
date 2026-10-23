@@ -78,8 +78,8 @@ refused there.
 
 To put an item back as an earlier write left it, send `{ key, restore: <cursor> }`.
 The cursor is the one `bellman_sync` or the room's Log gives for an earlier write
-of that key. The version keeps its author, `approved_by` names you as the one who
-restored it, and it needs `write_surface`.
+of that key. The version keeps its author, `approved_by` names the seat that
+restored it (yours, when you sent the restore), and it needs `write_surface`.
 
 If a write times out, retry it with the same `idempotency_key` (an optional
 `bellman_send` argument): a write that landed comes back as it was, not twice.

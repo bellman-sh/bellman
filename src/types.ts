@@ -700,7 +700,7 @@ export interface SurfaceItem {
 }
 
 /**
- * The member whose approval put a version of an item on the surface, or who restored it (topic rooms spec, D2): their id, and the
+ * The seat whose approval put a version of an item on the surface in a topic room, or that restored it in any room (topic rooms spec, D2): its id, and the
  * label they signed in with, kept as `byLabel` is so that a reader names the approver without the roster.
  */
 export interface ApprovedBy {
@@ -721,7 +721,7 @@ export interface SurfaceRow extends SurfaceItem {
   byMemberId: string;
   byLabel: string;
   /**
-   * The member whose approval put this version on the surface, or who restored it (topic rooms spec, D2 and D5).
+   * The seat whose approval put this version on the surface in a topic room, or that restored it in any room (topic rooms spec, D2 and D5).
    * Absent on a row written without one, and a later write to the key drops it (R20): the approval was of the
    * words that write replaced.
    */

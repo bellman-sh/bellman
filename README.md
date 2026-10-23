@@ -106,8 +106,8 @@ that way; the surface is where things stand.
   alone (`maintainer` in `topic`, which any maintainer code also seats); a manifest
   may give it to any seat. Reading is never gated.
 - An item read back carries fields the server set: `cursor`, `at`, `created_at`,
-  `changed_at` and `approved_by`, the maintainer whose approval put the version there,
-  or who restored it, `{ member_id, label }`, and `null` when none did.
+  `changed_at` and `approved_by`, the seat whose approval put the version there in a topic room,
+  or that restored it in any room, `{ member_id, label }`, and `null` when none did.
 - `{ key, restore: <cursor> }` re-applies the version of that key written at that
   cursor, with its author kept; it needs `write_surface` and works in every room.
 - A joiner's preview lists what the surface holds — keys, kinds and sizes — and

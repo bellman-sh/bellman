@@ -67,6 +67,30 @@ describe("approving a proposal", () => {
     expect(items[0].data.approved_by).toEqual({ member_id: r.maintainerId, label: r.maintainer.identity.label });
   });
 
+  // `decideApproval` checks the approver's seat and nothing about the proposer's, which is intended: the card is
+  // the proposer's words and keeps their name whether or not they are still in the room.
+  it.each(["leaves", "is evicted"])("writes the card under the proposer's name when the proposer %s before the approval", async (how) => {
+    const r = await topicRoom(h);
+    const asked = await propose(r);
+    // Someone else stays, so the maintainer is not answering an empty room.
+    const bystander = await h.connect(DEV_KEY.peer);
+    expect((await joinWith(bystander, r.code)).isError).toBe(false);
+    const gone = how === "leaves"
+      ? await r.contributor.call("bellman_leave", { session_id: r.sessionId, member_id: r.contributorId })
+      : await r.maintainer.call("bellman_evict", { session_id: r.sessionId, member_id: r.contributorId, ban: "room" });
+    expect(gone.isError, gone.text).toBe(false);
+
+    const out = await answer(r, asked.data.cursor);
+
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data.applied).toMatchObject({ key: "tools" });
+    expect(await rowsOf(r)).toEqual([expect.objectContaining({
+      key: "tools", byMemberId: r.contributorId, byLabel: r.contributor.identity.label,
+      approvedBy: { memberId: r.maintainerId, label: r.maintainer.identity.label },
+    })]);
+    expect((await eventsOf(r)).at(-1)).toMatchObject({ type: "surface", fromMemberId: r.contributorId });
+  });
+
   it("files an audit row for the response and one for the card, the card's naming the proposal it came from", async () => {
     const r = await topicRoom(h);
     const asked = await propose(r);
@@ -160,8 +184,9 @@ describe("approving a proposal", () => {
     });
     expect(asked.isError, asked.text).toBe(false);
     return {
-      approve: () => maintainer.call("bellman_send", {
+      approve: (extra: Record<string, unknown> = {}) => maintainer.call("bellman_send", {
         session_id: "qs_nowrite", member_id: "m_maint", type: "action_response", ref_id: String(asked.data.cursor), payload: { approved: true },
+        ...extra,
       }),
     };
   };
@@ -173,6 +198,17 @@ describe("approving a proposal", () => {
     expect(out.isError, out.text).toBe(false);
     expect(out.data.applied).toBeUndefined();
     expect(await h.store.surfaceOf("qs_nowrite")).toEqual([]);
+  });
+
+  // The retry of a response that wrote no card says so as the first call did: `applied` is absent, not borrowed from the next event.
+  it("replays a seat's recorded response without an applied card: a retry names none", async () => {
+    const { approve } = await roomWithoutWriter(card());
+    const first = await approve({ idempotency_key: "approve-0001" });
+    expect(first.isError, first.text).toBe(false);
+    const retry = await approve({ idempotency_key: "approve-0001" });
+    expect(retry.isError, retry.text).toBe(false);
+    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true });
+    expect(retry.data.applied).toBeUndefined();
   });
 
   // Such a seat has no card to write, so there is none to settle and none to refuse: its answer is recorded whatever the card is.
@@ -312,8 +348,8 @@ describe("an idempotent retry of an approval", () => {
     const retry = await answer(r, asked.data.cursor, { approved: true }, { idempotency_key: "approve-0001" });
 
     expect(retry.isError, retry.text).toBe(false);
-    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true });
-    expect(retry.data.applied).toBeUndefined();
+    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true, applied: first.data.applied });
+    expect(first.data.applied, "the premise: the first call wrote a card").toBeDefined();
     expect((await eventsOf(r)).length).toBe(before);
     expect((await rowsOf(r))[0].body).toBe("Edited. https://example.com/e");
   });
@@ -334,7 +370,8 @@ describe("an idempotent retry of an approval", () => {
     const retry = await answer(r, asked.data.cursor, { approved: true }, { idempotency_key: "approve-0001" });
 
     expect(retry.isError, retry.text).toBe(false);
-    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true });
+    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true, applied: first.data.applied });
+    expect(first.data.applied, "the premise: the first call wrote a card").toBeDefined();
     expect((await eventsOf(r)).length).toBe(before);
   });
 
@@ -364,6 +401,43 @@ describe("an idempotent retry of an approval", () => {
     expect(again.isError).toBe(true);
     expect(again.text).toContain("was already answered");
     expect((await eventsOf(r)).length).toBe(before);
+  });
+
+  // The key is read before the check for an earlier answer, so the decline's own record is what the retry meets.
+  it("replays a keyed retry of a decline, not refusing it as already answered", async () => {
+    const r = await topicRoom(h);
+    const asked = await propose(r);
+    const first = await answer(r, asked.data.cursor, { approved: false }, { idempotency_key: "decline-0001" });
+    expect(first.isError, first.text).toBe(false);
+    const before = (await eventsOf(r)).length;
+
+    const retry = await answer(r, asked.data.cursor, { approved: false }, { idempotency_key: "decline-0001" });
+
+    expect(retry.isError, retry.text).toBe(false);
+    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true });
+    expect(retry.data.applied).toBeUndefined();
+    expect((await eventsOf(r)).length).toBe(before);
+  });
+
+  it("replays a keyed retry of an answer outside a topic room", async () => {
+    const p = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const asked = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, type: "action_request", payload: { ask: "run it" },
+    });
+    expect(asked.isError, asked.text).toBe(false);
+    const respond = () => p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, type: "action_response", ref_id: String(asked.data.cursor),
+      payload: { approved: true }, idempotency_key: "answer-0001",
+    });
+    const first = await respond();
+    expect(first.isError, first.text).toBe(false);
+    const before = (await h.store.eventsAfter(p.sessionId, 0)).length;
+
+    const retry = await respond();
+
+    expect(retry.isError, retry.text).toBe(false);
+    expect(retry.data).toMatchObject({ cursor: first.data.cursor, replayed: true });
+    expect((await h.store.eventsAfter(p.sessionId, 0)).length).toBe(before);
   });
 
   it("refuses a key already used for a different answer, and writes nothing for it", async () => {

@@ -163,6 +163,17 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         return fail(`payload too large (${serialized.length} chars, limit ${MAX_PAYLOAD_CHARS}). Send a summary and offer details on request.`);
       }
 
+      // The key, read once and before the checks below that depend on what the room has become: the proposal's
+      // checks and the look for an earlier answer. A record means this call is the retry of a send that landed, so
+      // neither is asked again: the cap would count the original against its own retry, and the look for an answer
+      // would find the retry's own first response. The append below then replays it, or reports `conflict` for a key
+      // reused for other content. A key with no record is a fresh send, or a retry of a refused one: both are checked
+      // in full. What the call alone decides (the verb, the depth, the length, the shape) is checked whatever the key,
+      // and so is the minute's count, which ADR 0022 (R6) charges a retry.
+      const known = idempotency_key
+        ? await s.idempotencyRecord(session_id, member_id, idempotency_key)
+        : null;
+
       // Hoisted past the guard, not moved into it: the capability checks below,
       // and `room_members` in the result, read it on every kind.
       const others = activeMembers(session).filter((m) => m.memberId !== member_id);
@@ -204,7 +215,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         }
         // The proposal's own checks sit before the minute's count below, so a proposal refused for its shape,
         // its source, its base, its blob or the cap spends no place under the send limit.
-        if (proposing) {
+        if (proposing && known === null) {
           const checked = await checkProposal(s, blobs, session, me, payload);
           if (!checked.ok) return refusal(checked);
         }
@@ -245,17 +256,20 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         // in the store would be the real answer to. The derivation stays the
         // backstop, so the state is right either way; this is what keeps the
         // feed from showing an answer that does not count.
-        const answered = (await s.eventsAfter(session_id, req.cursor))
-          .find((e) => e.type === "action_response" && e.refId === ref_id);
-        if (answered) {
-          // The one answer this lets through is a keyed retry of an approval (plan R21). Its own first response is
-          // what the check finds, and refusing on that would answer every retry with "already answered by you"
-          // when the key is there to say it is the same send. The store reads the key before anything else, so it
-          // replays the response the key names and refuses a key used for another answer; with no such key it finds
-          // the first answer itself and refuses as answered. Every other answer keeps this check as its only one.
-          retrying = idempotency_key !== undefined && answered.fromMemberId === member_id && proposal !== null;
-          if (!retrying) return fail(alreadyAnswered(ref_id, answered.fromLabel));
+        //
+        // Skipped for a key that has a record (`known`, read above): that answer is this call's own first
+        // response, and refusing on it would answer every retry with "already answered by you" when the key is
+        // there to say it is the same send. The append replays the response the key names and refuses a key used
+        // for another answer, an approval's included (plan R21). Keyed or not, an answer with no record keeps this
+        // check as its only one.
+        if (known === null) {
+          const answered = (await s.eventsAfter(session_id, req.cursor))
+            .find((e) => e.type === "action_response" && e.refId === ref_id);
+          if (answered) return fail(alreadyAnswered(ref_id, answered.fromLabel));
         }
+        // A retry of an approval settles no card again: the store answers it from its key, however the room has
+        // changed since.
+        retrying = known !== null && proposal !== null;
       }
       // Validated here so an invalid brief never appends an event; applied
       // after the append, because a send the store refuses must not leave a
@@ -307,6 +321,9 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // The minute's count (ADR 0022): after the last check that can refuse this send, so one refused anyway
       // spends no place, and before the first write, so a refusal leaves the log as it was. The surface kind
       // counts inside writeSurface, at the same point in its own sequence.
+      //
+      // Asked of a keyed retry too, record or not (ADR 0022, R6): a retry is a call, and one that replayed free would
+      // be an unbounded loop of reads through the room's object.
       const admitted = await admitSend(s, session_id, me);
       if (!admitted.ok) return refusal(admitted);
 
@@ -354,8 +371,10 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       );
 
       let event: SessionEvent;
-      // The card an approval wrote: the audit row and the result both name it.
-      let written: { write: SurfaceWrite; cursor: number; approved: number } | null = null;
+      // The card an approval wrote, as the result names it: the first call's and a retry's alike.
+      let applied: { key: string; cursor: number } | null = null;
+      // The same card, for the audit row, which only the call that wrote it files.
+      let written: { write: SurfaceWrite; approved: number } | null = null;
       let replayed = false;
       if (approval) {
         // One call writes the response and the card, or neither (plan R12). Four of its outcomes refuse and write
@@ -371,8 +390,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (outcome.outcome === "frozen") return fail(FROZEN);
         event = outcome.event;
         replayed = outcome.outcome === "replayed";
-        if (outcome.outcome === "appended" && outcome.written !== null && approval.write !== null) {
-          written = { write: approval.write, cursor: outcome.written.cursor, approved: approval.requestCursor };
+        if (outcome.written !== null) {
+          // A replay names the card its first call wrote, as that call did. A retry settles no write of its own
+          // (`approval.write` is null for it), so the key is the card event's, whose payload is the item or the removal.
+          const key = approval.write?.key ?? String((outcome.written.payload as { key?: unknown }).key);
+          applied = { key, cursor: outcome.written.cursor };
+          if (outcome.outcome === "appended" && approval.write !== null) {
+            written = { write: approval.write, approved: approval.requestCursor };
+          }
         }
       } else if (idempotency_key) {
         // No PayloadTooDeepError catch here any more. `appendEventOnce`
@@ -440,7 +465,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         cursor: event.cursor,
         ...(replayed ? { replayed: true } : {}),
         // The card an approval wrote, at the cursor it was written at: the response's `cursor` is the one before it.
-        ...(written !== null ? { applied: { key: written.write.key, cursor: written.cursor } } : {}),
+        ...(applied !== null ? { applied } : {}),
         note: type === "action_request"
           ? "The peer's HUMAN must approve this — expect an action_response event, possibly after a delay."
           : undefined,

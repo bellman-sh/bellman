@@ -2165,6 +2165,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /** `BellmanStore.idempotencyRecord`: one `get`, with no transaction, because it reads one row and writes nothing. */
+  async idempotencyRecord(memberId: string, key: string): Promise<IdempotencyRecord | null> {
+    return (await this.ctx.storage.get<IdempotencyRecord>(idempotencyKey(memberId, key))) ?? null;
+  }
+
   /**
    * `BellmanStore.approveProposal` (topic rooms spec, D2; plan R12): a maintainer's response and, when
    * `decideApproval` says apply, the proposer's card and its row, in one transaction.
@@ -2204,7 +2209,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
           if (record.print !== keyed.print) return { outcome: "conflict" };
           const original = await txn.get<SessionEvent>(eventKey(record.cursor));
           if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
-          return { outcome: "replayed", event: original };
+          // The card by the cursor the record names; a record without one wrote none.
+          let written: SessionEvent | null = null;
+          if (record.applied !== undefined) {
+            const card = await txn.get<SessionEvent>(eventKey(record.applied));
+            if (!card) throw new Error(`Idempotency record names missing card cursor ${record.applied}`);
+            written = card;
+          }
+          return { outcome: "replayed", event: original, written };
         }
       }
       if (s.frozenAt !== null) return { outcome: "frozen" };
@@ -2251,7 +2263,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await putRows(txn, {
         ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
         cursor: events[events.length - 1].cursor,
-        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: response.cursor, print: keyed.print } satisfies IdempotencyRecord }),
+        ...(keyed === null ? {} : {
+          [keyed.storageKey]: {
+            cursor: response.cursor, print: keyed.print, ...(card === null ? {} : { applied: card.cursor }),
+          } satisfies IdempotencyRecord,
+        }),
         ...asRows(s, { ...owed.puts, session: owed.puts.session ?? (kept === s ? undefined : kept) }),
       });
       for (const gone of owed.deletes) await txn.delete(gone);
@@ -4981,6 +4997,10 @@ export class DurableObjectStore implements BellmanStore {
     extras: AppendExtras = {}
   ): Promise<EventWrite> {
     return this.session(sessionId).appendEventOnce(e, key, extras);
+  }
+
+  async idempotencyRecord(sessionId: string, memberId: string, key: string): Promise<IdempotencyRecord | null> {
+    return this.session(sessionId).idempotencyRecord(memberId, key);
   }
 
   async approveProposal(sessionId: string, e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite> {

@@ -52,6 +52,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect. "your org
       _meta: APP_UI_META,
     },
     async ({ connect_token, brief, capabilities }): Promise<ToolResult> => {
+      // The joiner's own org's rule on what it may grant, read before the token is taken: the token
+      // is single-use, and the refusal says "call again without it" (ADR 0006, every refusal before
+      // any write). The checks that need the room follow the take, since they read the room as it is now.
+      const joinerOrg = identity.orgId ? await s.getOrg(identity.orgId) : undefined;
+      const forbidden = joinerOrg ? forbiddenCapabilityRefusal(joinerOrg.policy, capabilities) : null;
+      if (forbidden) return fail(forbidden);
       const pending = await s.takePendingConnect(connect_token);
       if (!pending || pending.userId !== identity.userId) {
         return fail("connect token invalid or expired. Re-run bellman_connect with the join code.");
@@ -64,13 +70,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect. "your org
       // below, where the room's own record cannot move under the read.
       if (await s.isBannedByCreator(session.createdBy, identity.userId)) return fail(BANNED);
       // The policies the preview checked, read again over the room as it is now (ADR 0031): the
-      // orgs in it may have grown since, and a policy may have tightened. Then the joiner's own
-      // org's rule on what it may grant, which only the capabilities given here can meet.
+      // orgs in it may have grown since, and a policy may have tightened.
       const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, rosterHasOrgless(session));
       if (barred) return fail(barred);
-      const joinerOrg = identity.orgId ? await s.getOrg(identity.orgId) : undefined;
-      const forbidden = joinerOrg ? forbiddenCapabilityRefusal(joinerOrg.policy, capabilities) : null;
-      if (forbidden) return fail(forbidden);
       // No capacity check here. It used to be one, and a read-then-write
       // capacity check is the bug: `seatMember` below decides and writes inside
       // the object, so there is no gap for a second confirm to agree on the same

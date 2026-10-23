@@ -61,6 +61,18 @@ describe("forbidden_capabilities", () => {
     expect((await h.store.getSession(started.session_id))?.members).toHaveLength(1);
     expect((await join(a, started.join_code)).isError).toBe(false);
   });
+  /** The refusal says "call again without it", so the token it was refused on must still be good (ADR 0006). */
+  it("leaves the connect token usable after a refused confirm", async () => {
+    await h.store.createOrg(org("org_a", { forbiddenCapabilities: ["request_actions"] }), grant("org_a"), by);
+    await h.store.createOrg(org("org_b"), grant("org_b"), by);
+    const started = (await start(await h.connectAs(who("org_b")))).data as { join_code: string };
+    const a = await h.connectAs(who("org_a"));
+    const token = ((await a.call("bellman_connect", { join_code: started.join_code })).data as { connect_token: string }).connect_token;
+    const refused = await a.call("bellman_confirm", { connect_token: token, brief: brief(), capabilities: ["read_context", "request_actions"] });
+    expect(refused.isError).toBe(true);
+    const seated = await a.call("bellman_confirm", { connect_token: token, brief: brief(), capabilities: ["read_context"] });
+    expect([seated.isError, seated.text]).toEqual([false, seated.text]);
+  });
 });
 
 describe("allowed_counterparty_orgs", () => {

@@ -35,11 +35,11 @@ Write an item with [`bellman_send`](/reference/tools/bellman_send/) and `type: "
   "kind": "text",
   "title": "Plan",
   "body": "1. Port the webhook handler\n2. Backfill idempotency keys\n3. Cut over",
-  "placement": { "x": 0, "y": 0, "w": 360 }
+  "placement": { "x": 0, "y": 0 }
 }
 ```
 
-Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever was under that key, so a writer needs no read first, and every version stays in the room's log at its own cursor: replacing an item loses nothing. If a write times out, retry it with the same `idempotency_key` and a write that landed comes back as it was, not twice.
+Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever was under that key (except a placement you leave out, which stays), so a writer needs no read first, and every version stays in the room's log at its own cursor: replacing an item loses nothing. If a write times out, retry it with the same `idempotency_key` and a write that landed comes back as it was, not twice.
 
 | Field | What it holds |
 | --- | --- |
@@ -52,7 +52,7 @@ Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever w
 | `blob` | `{ id }`, on a `file`, an `image` or an `html` item. |
 | `shape` | `{ form, color?, flip? }`, on a `shape` and nothing else. |
 
-The payload is checked strictly: an unknown field is refused, not dropped, and a field left out or sent as `null` is stored as absent. An item you read back carries a `cursor`, an `at`, a `created_at` and a `changed_at` that the server set, and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its `id`. `created_at` is when the item's key was first written, and an edit keeps it (a key removed and written again starts over); `changed_at` is its last change, the time `at` gives. To edit an item you read, send it back without those four, and with `blob` cut to `{ id }`.
+The payload is checked strictly: an unknown field is refused, not dropped, and a field left out or sent as `null` is stored as absent, except `placement`, which the server fills (see [Placement and shapes](#placement-and-shapes)). An item you read back carries a `cursor`, an `at`, a `created_at` and a `changed_at` that the server set, and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its `id`. `created_at` is when the item's key was first written, and an edit keeps it (a key removed and written again starts over); `changed_at` is its last change, the time `at` gives. To edit an item you read, send it back without those four, and with `blob` cut to `{ id }`.
 
 A surface holds at most 64 items. A write that would add a 65th key is refused until you remove one, and a write to a key already on the surface does not count against the limit.
 
@@ -87,7 +87,7 @@ A card is 320 wide and about 200 tall, with 40 between cards, so a slot is 360 a
 - Read the surface first, so a new card goes against what is there.
 - Items on one topic share an `x` and stack down by `y`. The first column is the first topic, with the status or the plan at `{ "x": 0, "y": 0 }`, and a new topic starts the next column.
 - A new card takes the next free slot of its topic's column. Nothing is written over an existing box, except a group's `rect` laid behind the cards it groups.
-- A `diagram` takes `w: 720`, two columns wide. A card needs no `w`, and sets `h` only when its height matters.
+- A `diagram` takes `w: 720`, two columns wide. A card needs no `w`, and sets `h` only when its height matters, as it does when the body runs past about eight lines: a longer card is drawn taller than the 200 the server keeps clear of.
 
 Three rules decide what else goes on the surface:
 

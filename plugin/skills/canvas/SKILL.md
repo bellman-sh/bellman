@@ -10,8 +10,8 @@ member reads and a seat holding `write_surface` keeps current. The log is the
 conversation and its history; the surface is where things stand now. A member
 who joins a room that has run for a week reads the surface first.
 
-- **An item lives under a key.** Writing a key replaces whatever was there, and
-  removing it deletes the item.
+- **An item lives under a key.** Writing a key replaces whatever was there,
+  except a placement you leave out, which stays; removing it deletes the item.
 - **Every version is kept.** Each write and each removal is a `surface` event in
   the room's log at its own cursor, so replacing an item loses nothing.
 - **Reading is never gated; writing needs `write_surface`.** Every preset gives
@@ -51,7 +51,7 @@ second, worse log. Write what the conversation decided, not the conversation.
   "kind": "text",
   "title": "Plan",
   "body": "1. Port the webhook handler\n2. Backfill idempotency keys\n3. Cut over",
-  "placement": { "x": 0, "y": 0, "w": 360 }
+  "placement": { "x": 0, "y": 0 }
 }
 ```
 
@@ -73,8 +73,8 @@ carries `cursor`, `at`, `created_at` and `changed_at`, which the server sets,
 and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its
 `id`. To edit an item you read, send it back without those four, and with
 `blob` cut to `{ id }`. A field left out, or sent as `null`, is stored as
-absent. Inside `shape`, leave `color` or `flip` out for its default; `null` is
-refused there.
+absent, except `placement`, which the server fills (see Placement). Inside
+`shape`, leave `color` or `flip` out for its default; `null` is refused there.
 
 If a write times out, retry it with the same `idempotency_key` (an optional
 `bellman_send` argument): a write that landed comes back as it was, not twice.
@@ -183,9 +183,10 @@ Work to it:
    column's slot at that `y` empty.
 
 **A worked example.** A plan of three steps in one column, a decision in the
-next, a connector from the decision to the step it changed, and a `rect` behind
-the plan titled "Phase 1". Each line is its own `bellman_send`, and the
-connector goes last, because its ends must be on the surface:
+next, a connector from each step to the next, a connector from the decision to
+the step it changed, and a `rect` behind the plan titled "Phase 1". Each line is
+its own `bellman_send`, and the connectors go last, because their ends must be
+on the surface:
 
 ```json
 { "key": "step_1", "kind": "text", "title": "Port the webhook handler", "body": "Move the handler to the new queue.", "placement": { "x": 0, "y": 0 } }
@@ -193,6 +194,8 @@ connector goes last, because its ends must be on the surface:
 { "key": "step_3", "kind": "text", "title": "Cut over", "body": "Switch traffic once the backfill is clean.", "placement": { "x": 0, "y": 480 } }
 { "key": "decision_1", "kind": "text", "title": "Keep the old endpoint for a week", "body": "Peers still call it until they update.", "placement": { "x": 360, "y": 0 } }
 { "key": "phase_1", "kind": "shape", "title": "Phase 1", "shape": { "form": "rect", "color": "blue" }, "placement": { "x": -20, "y": -20, "w": 360, "h": 720 } }
+{ "key": "step_1_to_step_2", "kind": "connector", "ends": { "from": "step_1", "to": "step_2" }, "title": "then" }
+{ "key": "step_2_to_step_3", "kind": "connector", "ends": { "from": "step_2", "to": "step_3" }, "title": "then" }
 { "key": "decision_to_step_3", "kind": "connector", "ends": { "from": "decision_1", "to": "step_3" }, "title": "changed" }
 ```
 
@@ -230,7 +233,7 @@ Three rules decide what goes on the surface beside the cards.
 
 | | Size |
 |---|---|
-| A card | 320 wide, so leave `w` out. About 200 tall, so set `h` only when its height matters; over 240 it covers the slot below, which then stays empty. |
+| A card | 320 wide, so leave `w` out. About 200 tall, so set `h` only when its height matters, and set it when the body runs past about eight lines: a longer card is drawn taller than the 200 the server keeps clear of. An `h` over 240 covers the slot below, which then stays empty. |
 | A shape | `w` and `h`, always: its box is its placement. |
 | A diagram | `w: 720`. |
 

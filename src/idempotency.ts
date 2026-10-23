@@ -15,6 +15,12 @@ import type { SessionEvent } from "./types.js";
 export interface IdempotencyRecord {
   cursor: number;
   print: string;
+  /**
+   * The cursor of the card an approval wrote beside this response, set by `approveProposal` when it wrote one and
+   * absent otherwise. A replay reads the card by this cursor and never by `cursor + 1`: a seat without
+   * `write_surface` records its response alone, and the next event can be anyone's.
+   */
+  applied?: number;
 }
 
 /**

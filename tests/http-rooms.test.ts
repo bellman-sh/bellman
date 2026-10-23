@@ -12,6 +12,7 @@ import { hostMember } from "../src/host.js";
 import {
   MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
+import { resolveManifest } from "../src/manifest.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
 import { JOINED_SCAN, MemoryStore } from "../src/store.js";
@@ -496,6 +497,25 @@ describe("GET /rooms/:id/surface", () => {
     expect(items[0].data.changed_at).toBe(items[0].data.at);
   });
 
+  // Topic rooms spec, D2 and R20: a member reads the approver by the label the roster holds, and a direct write to the key drops it.
+  it("reads a card's approver by label for a member, and a direct write to the key drops it", async () => {
+    const item = { key: "plan", kind: "text" as const, title: null, body: "hello", ends: null, placement: null, blob: null, shape: null };
+    await store.appendEvent(
+      ROOM,
+      { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: "plan", item }, approvedBy: { memberId: "m_peer", label: "peer@codenerd" } },
+    );
+    const approverRead = async () => {
+      const { items } = (await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))) as unknown as { items: { data: Record<string, unknown> }[] };
+      return items[0].data.approved_by;
+    };
+    expect(await approverRead()).toEqual({ member_id: "m_peer", label: "peer@codenerd" });
+
+    const edited = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method: "PUT", body: { kind: "text", body: "edited by hand" } }))!;
+    expect(edited.status, await edited.clone().text()).toBe(200);
+    expect(await approverRead()).toBeNull();
+  });
+
   it("answers 304 from the record alone when If-None-Match names the cursor, and 200 once a write moves it", async () => {
     const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
     const reads = { n: 0 };
@@ -806,6 +826,17 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(res.status, field).toBe(400);
       expect(String((await bodyOf(res)).error_description), field).toContain(field);
     }
+  });
+
+  // Topic rooms spec, R20: read, edit, send back. The server's approver is refused by name, as cursor and at are.
+  // This passes before the change too: it pins the refusal the strict shape already gives.
+  it("refuses an item sent back with approved_by, naming the field, and writes nothing", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, {
+      method: "PUT", body: { kind: "text", body: "hello", approved_by: { member_id: "m_peer", label: "peer@codenerd" } },
+    }))!;
+    expect(res.status).toBe(400);
+    expect(String((await bodyOf(res)).error_description)).toContain("approved_by");
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
   });
 
   it("refuses a body whose key disagrees with the path, and accepts one that agrees", async () => {
@@ -1784,6 +1815,15 @@ describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
     expect([closed.status, (await bodyOf(closed)).error]).toEqual([409, "closed"]);
     expect(await stored()).toBe("Ask about the week.");
     expect(await hostRows()).toEqual([]);
+  });
+
+  it("answers 409 no_host for a topic room, which has none", async () => {
+    await store.createSession(session({
+      id: "qs_topic", manifest: resolveManifest({ room: "mcp", preset: "topic", public: true }),
+      members: [member({ roomRole: "maintainer" })],
+    }));
+    const res = (await set(DEV_KEY.jesse, { instructions: "Ask a question." }, {}, "qs_topic"))!;
+    expect([res.status, (await bodyOf(res)).error]).toEqual([409, "no_host"]);
   });
 
   it("files an audit row naming the creator, with the length and not the text, once for each change", async () => {

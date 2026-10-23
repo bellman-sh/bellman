@@ -52,7 +52,7 @@ Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever w
 | `blob` | `{ id }`, on a `file`, an `image` or an `html` item. |
 | `shape` | `{ form, color?, flip? }`, on a `shape` and nothing else. |
 
-The payload is checked strictly: an unknown field is refused, not dropped, and a field left out or sent as `null` is stored as absent, except `placement`, which the server fills (see [Placement and shapes](#placement-and-shapes)). An item you read back carries a `cursor`, an `at`, a `created_at` and a `changed_at` that the server set, and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its `id`. `created_at` is when the item's key was first written, and an edit keeps it (a key removed and written again starts over); `changed_at` is its last change, the time `at` gives. To edit an item you read, send it back without those four, and with `blob` cut to `{ id }`.
+The payload is checked strictly: an unknown field is refused, not dropped, and a field left out or sent as `null` is stored as absent, except `placement`, which the server fills (see [Placement and shapes](#placement-and-shapes)). An item you read back carries a `cursor`, an `at`, a `created_at`, a `changed_at` and an `approved_by` that the server set, and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its `id`. `created_at` is when the item's key was first written, and an edit keeps it (a key removed and written again starts over); `changed_at` is its last change, the time `at` gives. `approved_by` names the seat whose approval put the version there in a topic room, or that restored it in any room, `null` when none did. To edit an item you read, send it back without those five, and with `blob` cut to `{ id }`.
 
 A surface holds at most 64 items. A write that would add a 65th key is refused until you remove one, and a write to a key already on the surface does not count against the limit.
 
@@ -99,9 +99,13 @@ Remove what is finished, and the connectors that pointed at it.
 
 ## Who can write
 
-Writing needs the `write_surface` verb. Every preset gives it to the creator's seat alone: `peer_a` in `pair`, `lead` in `swarm` and `social`, and `author` in `review`. A manifest you write may give it to any seat; the [manifests guide](/guides/manifests/) shows how. A seat without the verb is refused by name, and nothing is written. Your seat's verbs are `your_verbs` in the room you were shown when you started or joined.
+Writing needs the `write_surface` verb. Every preset gives it to the creator's seat alone: `peer_a` in `pair`, `lead` in `swarm` and `social`, `maintainer` in `topic`, and `author` in `review`. A manifest you write may give it to any seat; the [manifests guide](/guides/manifests/) shows how. A seat without the verb is refused by name, and nothing is written. Your seat's verbs are `your_verbs` in the room you were shown when you started or joined.
 
 Uploading the bytes that a `file`, `image` or `html` item names takes the same verb. Reading never does: every member reads the surface, a seat with `can: []` included.
+
+## Restoring a version
+
+`{ key, restore: <cursor> }` re-applies the version of `key` that was written at `cursor`, the cursor `bellman_sync` or the room's Log gives for that earlier write. It needs `write_surface` and works in every room. Three refusals, each writing nothing: no event you can read sits at that cursor, the event there is not a surface write, or it wrote a different key. The version is then held to today's rules, so one whose file is gone, or that would be the 65th item, is refused as any write would be. The restored version keeps its author, and `approved_by` names the seat that restored it. A cursor that wrote a removal restores as a removal.
 
 ## Files and images
 

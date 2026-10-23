@@ -10,6 +10,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, type RoomRouteDeps } from "../src/http/rooms.js";
+import { resolveManifest } from "../src/manifest.js";
 import { storedMember } from "../src/projections.js";
 import { MemoryStore } from "../src/store.js";
 import type { EventType, Member, Session } from "../src/types.js";
@@ -74,7 +75,7 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "public_url", "status", "text", "view"]);
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "preset", "public_url", "status", "text", "view"]);
     expect(body).toMatchObject({
       id: PUB, status: "active", closed_at: null, mode: "pair", view: "canvas", by: null, public_url: "https://bellman.sh/r/qs_public",
     });
@@ -87,6 +88,17 @@ describe("GET /public/rooms/:id", () => {
     expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("canvas");
     await store.setPublicView(PUB, "page");
     expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("page");
+  });
+
+  // Topic rooms spec, R4 and R5.
+  it("names the room's preset, null for a room that cites none, and a topic room opens as a page", async () => {
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).preset).toBe("pair");
+    await store.createSession(publicRoom({
+      id: "qs_topic", manifest: roomManifest({ ...resolveManifest({ room: "mcp", preset: "topic", public: true }) }), publicView: "page",
+    }));
+    expect(await bodyOf(await read("/public/rooms/qs_topic"))).toMatchObject({ preset: "topic", view: "page", mode: "swarm" });
+    await store.createSession(publicRoom({ id: "qs_authored", manifest: roomManifest({ public: true, preset: null }) }));
+    expect((await bodyOf(await read("/public/rooms/qs_authored"))).preset).toBeNull();
   });
 
   it("answers a private, an unpublished, an unknown and a purged room, and their sub-routes, with one 404", async () => {
@@ -157,6 +169,23 @@ describe("GET /public/rooms/:id/surface", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Topic rooms spec, section 2 and R20: the approver is named as the author is, by the public name rule.
+  it("names a card's approver by number, as it names its author", async () => {
+    const item = { key: "plan", kind: "text" as const, title: "The plan", body: "hello", ends: null, placement: null, blob: null, shape: null };
+    await store.appendEvent(
+      PUB,
+      { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: "plan", item }, approvedBy: { memberId: "m_peer", label: "peer@codenerd" } },
+    );
+    const { items } = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as unknown as {
+      items: { origin: { label: string }; data: { approved_by: { member_id: string; label: string } | null } }[];
+    };
+    expect(items[0].origin.label).toBe("member 1");
+    expect(items[0].data.approved_by).toEqual({ member_id: "m_peer", label: "member 2" });
+    // The sign-in label is nowhere in what a reader gets, whichever key a later change files the approver under.
+    expect(JSON.stringify(items)).not.toContain("peer@codenerd");
   });
 });
 

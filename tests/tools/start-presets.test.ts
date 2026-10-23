@@ -5,7 +5,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { startRoom } from "../helpers/flows.js";
 import { HOST_MEMBER_ID } from "../../src/host.js";
 import type { Identity, SavedPreset } from "../../src/types.js";
 
@@ -110,7 +111,7 @@ describe("bellman_start citing a saved preset", () => {
     await h.store.putPreset("u_jesse", saved("beta"), 20);
     const out = await start("gamma");
     expect(out.isError).toBe(true);
-    expect(out.text).toContain('invalid manifest — unknown preset "gamma" (built-in: pair, swarm, review, social; yours: alpha, beta)');
+    expect(out.text).toContain('invalid manifest — unknown preset "gamma" (built-in: pair, swarm, review, social, topic; yours: alpha, beta)');
   });
 
   it("does not let one person cite another's preset", async () => {
@@ -138,6 +139,27 @@ describe("bellman_start citing a saved preset", () => {
     const { tools } = await jesse.listTools();
     expect(tools.find((t) => t.name === "bellman_start")!.description)
       .toContain("or the name of a preset you saved at dash.bellman.sh/presets");
+  });
+
+  it("lists topic among the presets it may cite, and among those that make swarm rooms", async () => {
+    const { tools } = await jesse.listTools();
+    const doc = tools.find((t) => t.name === "bellman_start")!.description!;
+    expect(doc).toContain('preset: "pair" | "swarm" | "review" | "social" | "topic"');
+    expect(doc).toContain("the swarm, social and topic presets make swarm rooms.");
+  });
+
+  // Topic rooms spec, D6 and R4: a topic room opens as a page; every other preset as its canvas.
+  it("starts a topic room opening as a page, and every other preset opening as its canvas", async () => {
+    for (const [preset, isPublic, view] of [
+      ["topic", true, "page"],
+      ["topic", false, "page"],
+      ["swarm", true, "canvas"],
+      ["pair", true, "canvas"],
+    ] as const) {
+      const manifest = isPublic ? manifestFixture({ preset, public: true }) : manifestFixture({ preset });
+      const { sessionId } = await startRoom(jesse, manifest);
+      expect((await h.store.getSession(sessionId))!.publicView, `${preset}, public ${isPublic}`).toBe(view);
+    }
   });
 
   /**

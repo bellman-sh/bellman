@@ -20,7 +20,7 @@ Cite a preset unless a seat in the room needs permissions no preset gives it. Th
 ```yaml
 room: payments-migration
 purpose: Port Stripe v2 to v3
-preset: review          # pair | swarm | review | social
+preset: review          # pair | swarm | review | social | topic
 ```
 
 `room` is required, 1 to 80 characters. Beside `preset` you can add `purpose` (at most 300 characters), `public` and a `housekeeping` block. Adding `roles`, `mode`, `default_role` or `creator_role` next to `preset` is refused: the two forms are exclusive.
@@ -31,8 +31,11 @@ preset: review          # pair | swarm | review | social
 | `swarm` | swarm | `lead`, the creator, holds all six. `helper`, the default, holds `send`, `request_actions` and `respond_actions`. `observer` holds none and reads. |
 | `review` | pair | `author`, the creator, holds all six. `reviewer`, the default, holds `send` and `respond_actions`: it answers action requests and cannot start one. |
 | `social` | swarm | `lead`, the creator, holds all six. `guest`, the default, holds `send`. `host` holds `send` and is a seat Bellman runs. |
+| `topic` | swarm | `maintainer`, the creator, holds all six. `contributor`, the default, holds `send` and `request_actions`: it proposes cards and cannot approve them. |
 
 `social` declares a hosted seat, so `bellman_start` refuses it with `hosted seats are not available yet` for as long as hosted seats are unavailable.
+
+`topic` has no host and no heartbeat, and a manifest that cites it and sets either is refused. [Topic rooms](/guides/rooms/#topic-rooms) covers how a contributor's proposal becomes a card.
 
 A hosted seat is a member Bellman runs. Its label is `host@bellman`, whatever its role is called, and public pages call it `host`. When it answers replies, its prompt names each sender as a public page names members, `member 3` and so on, and never by the label they signed in with.
 
@@ -126,7 +129,7 @@ A preset is yours alone. A teammate who cites it gets `unknown preset`. For a sh
 The server checks a manifest before any plan, org or quota check. A refusal names the rule, nothing is created, and no quota is spent:
 
 ```text
-invalid manifest — unknown preset "triage" (built-in: pair, swarm, review, social; yours: none)
+invalid manifest — unknown preset "triage" (built-in: pair, swarm, review, social, topic; yours: none)
 invalid manifest — default_role "helpr" is not defined in roles (defined: lead, helper, observer)
 invalid manifest — role "helper" lists duplicate verb "send"
 ```

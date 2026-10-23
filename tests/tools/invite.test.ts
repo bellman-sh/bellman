@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
-import { pairUp } from "../helpers/flows.js";
+import { joinWith, pairUp, startRoom } from "../helpers/flows.js";
 import { DEV_KEY, Harness, envelopes } from "../helpers/harness.js";
 
 /**
@@ -377,6 +377,20 @@ describe("bellman_invite permanent", () => {
     expect(r.isError).toBe(true);
     expect(r.text).toContain('default role, "helper"');
     expect(await eventCount(sessionId)).toBe(before);
+  });
+
+  it("seats a topic room's contributors through the permanent code, and refuses it for a maintainer", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const { sessionId, memberId } = await startRoom(jesse, manifestFixture({ preset: "topic", public: true }));
+    const door = await jesse.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true });
+    expect(door.isError, door.text).toBe(false);
+    expect(door.data).toMatchObject({ role: "contributor", permanent: true, join_code_expires_at: null });
+    const joined = await joinWith(await h.connect(DEV_KEY.peer), String(door.data.join_code));
+    expect(joined.isError, joined.text).toBe(false);
+    expect((await h.store.getMember(sessionId, String(joined.data.member_id)))!.roomRole).toBe("contributor");
+    const asked = await jesse.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true, role: "maintainer" });
+    expect(asked.isError).toBe(true);
+    expect(asked.text).toContain(`a permanent code seats only the room's default role, "contributor"`);
   });
 
   it("issues a public room's default seat a code with no expiry, named or not, and says so", async () => {

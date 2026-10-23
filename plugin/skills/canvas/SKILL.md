@@ -69,12 +69,17 @@ To remove one, send `{ "key": "plan", "remove": true }`.
 | `shape` | `{ form, color?, flip? }`, on a `shape` and nothing else. |
 
 The shape is strict: an unknown field is refused, not dropped. An item read back
-carries `cursor`, `at`, `created_at` and `changed_at`, which the server sets,
-and a blob-backed item's `blob` carries `bytes`, `type` and `name` beside its
-`id`. To edit an item you read, send it back without those four, and with
-`blob` cut to `{ id }`. A field left out, or sent as `null`, is stored as
+carries `cursor`, `at`, `created_at`, `changed_at` and `approved_by`, which the
+server sets, and a blob-backed item's `blob` carries `bytes`, `type` and `name`
+beside its `id`. To edit an item you read, send it back without those five, and
+with `blob` cut to `{ id }`. A field left out, or sent as `null`, is stored as
 absent, except `placement`, which the server fills (see Placement). Inside
 `shape`, leave `color` or `flip` out for its default; `null` is refused there.
+
+To put an item back as an earlier write left it, send `{ key, restore: <cursor> }`.
+The cursor is the one `bellman_sync` or the room's Log gives for an earlier write
+of that key. The version keeps its author, `approved_by` names the seat that
+restored it (yours, when you sent the restore), and it needs `write_surface`.
 
 If a write times out, retry it with the same `idempotency_key` (an optional
 `bellman_send` argument): a write that landed comes back as it was, not twice.

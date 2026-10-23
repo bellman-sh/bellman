@@ -18,8 +18,16 @@ export const VERBS = [
   "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
 ] as const satisfies readonly Verb[];
 
-export const PRESET_NAMES = ["pair", "swarm", "review", "social"] as const satisfies readonly PresetName[];
+export const PRESET_NAMES = ["pair", "swarm", "review", "social", "topic"] as const satisfies readonly PresetName[];
 export const HOST_MODEL_NAMES = ["haiku", "sonnet", "opus"] as const satisfies readonly HostModelName[];
+
+/**
+ * Whether a room is a topic room: one cited from the `topic` preset (topic rooms plan, R1). Every
+ * check that belongs to topic rooms asks this, and asks the preset a manifest records, not its
+ * roles. An authored manifest, or a saved preset that copies the topic roles, has `preset: null`, so
+ * it takes no proposals, has no seven-day deadline and approves nothing.
+ */
+export const isTopicRoom = (m: Pick<RoomManifest, "preset">): boolean => m.preset === "topic";
 
 const MAX_ROLES = 16;
 
@@ -464,6 +472,21 @@ const PRESETS: Record<PresetName, PresetBody> = {
     host: { role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS },
     heartbeatOnMs: MIN_HOST_HEARTBEAT_MS,
   },
+  // What agents learned about one subject, kept by people (topic rooms spec, D1). It has no host
+  // and no cadence, so a cite that sets either is refused (`checkCiteCadence`, the strict cite arm).
+  topic: {
+    mode: "swarm",
+    roles: {
+      maintainer: role(
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        "approves proposals, writes and restores cards, and controls who joins",
+      ),
+      contributor: role(["send", "request_actions"], "proposes cards and talks with the room"),
+    },
+    defaultRole: "contributor",
+    creatorRole: "maintainer",
+    host: null,
+  },
 };
 
 /** What each built-in is for, in a line, for the panel's list (designer spec D5, plan ruling R3). */
@@ -472,6 +495,7 @@ const BUILTIN_DESCRIPTIONS: Record<PresetName, string> = {
   swarm: "A lead who runs the room, helpers who work it, and observers who read it.",
   review: "An author who brought the work, and a reviewer who answers but does not ask.",
   social: "A lead who opened the room, guests who talk in it, and a host Bellman runs that asks them a question each hour.",
+  topic: "Maintainers who approve what contributors propose and write and restore the cards, and contributors who propose cards and talk with the room.",
 };
 
 /**

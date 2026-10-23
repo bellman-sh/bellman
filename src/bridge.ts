@@ -1584,8 +1584,8 @@ export function createBridge(opts: BridgeOptions) {
   /**
    * The door's one write: the action request `refId` in a room this bridge holds a seat in is answered `approved: false`
    * as that seat (the first, as `readEvents` has it), and nothing else is sent. The key names the request, so that a
-   * decline made twice, by two presses or by two panes, lands once if the second reaches the server's append
-   * (src/tools/send.ts); one made after the first has landed is refused by the server's own first-answer-wins check.
+   * decline made twice, by two presses or by two panes, lands once: the server reads the key before its
+   * first-answer-wins check, so the second gets the first's cursor whether it overlaps or follows (src/tools/send.ts).
    * `refId` is a cursor the door has checked. It never rejects.
    */
   async function decline(sessionId: string, refId: string): Promise<{ status: number; body: DoorDeclined | { error: string } }> {

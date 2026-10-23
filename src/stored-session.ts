@@ -49,9 +49,10 @@ export interface StoredSession extends Omit<Session, "events"> {
    *
    * Two things fall out of it, and the second is why it is a timestamp rather
    * than a cursor. Absent means no `action_request` has ever been appended
-   * here, so nothing can be outstanding. Present but older than
-   * ACTION_REQUEST_TTL_MS means the NEWEST request has expired, so every
-   * request has, and nothing can be outstanding then either. Only a room with a
+   * here, so nothing can be outstanding. Present but older than the longest
+   * life a request has in this room (ACTION_REQUEST_TTL_MS, and PROPOSAL_TTL_MS
+   * in a topic room) means the NEWEST request has expired, so every request
+   * has, and nothing can be outstanding then either. Only a room with a
    * request inside the window pays for the read.
    *
    * Absent on records written before this landed, which reads as "no requests"

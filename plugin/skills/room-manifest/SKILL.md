@@ -1,6 +1,6 @@
 ---
 name: room-manifest
-description: Author, review or fix a Bellman room manifest — the `.bellman/room.yaml` that declares a room's name, mode, roles and per-role permissions for cross-session agent collaboration over MCP. Use this whenever the user mentions room.yaml, a room manifest, the .bellman directory, bellman_start, declaring or setting up a Bellman room in a repo, the pair/swarm/review/social presets, a hosted seat or host block, or which verbs a role should hold. Also use it when they describe wanting several agents or people to work together in a repo under different permissions, or ask who should be allowed to invite, revoke or request actions — even if they never say "manifest" or "room.yaml".
+description: Author, review or fix a Bellman room manifest — the `.bellman/room.yaml` that declares a room's name, mode, roles and per-role permissions for cross-session agent collaboration over MCP. Use this whenever the user mentions room.yaml, a room manifest, the .bellman directory, bellman_start, declaring or setting up a Bellman room in a repo, the pair/swarm/review/social/topic presets, a hosted seat or host block, or which verbs a role should hold. Also use it when they describe wanting several agents or people to work together in a repo under different permissions, or ask who should be allowed to invite, revoke or request actions — even if they never say "manifest" or "room.yaml".
 ---
 
 # Bellman room manifests
@@ -26,6 +26,7 @@ roles are yours to maintain.
 | Several members, one runs the room | `preset: swarm` |
 | Someone brings work, someone else critiques it | `preset: review` |
 | Several members, and Bellman asks the room a question each tick | `preset: social` |
+| A public room kept by maintainers and proposed to by contributors | `preset: topic` |
 | A role that holds a combination no preset offers | author roles |
 
 Reach for authored roles when you can name the seat and the reason: "the CI
@@ -36,7 +37,7 @@ agent may send but must never invite", "auditors read and nothing else".
 ```yaml
 room: payments-migration
 purpose: Port Stripe v2 to v3   # optional, ≤300 chars
-preset: review                  # pair | swarm | review | social
+preset: review                  # pair | swarm | review | social | topic
 ```
 
 That is the entire file, apart from the optional `housekeeping` block (Step 2c).
@@ -92,6 +93,20 @@ information about anyone's human.
 | `lead` | send, invite, revoke, request_actions, respond_actions, write_surface | creator |
 | `guest` | send | default |
 | `host` | send | Bellman runs it |
+
+**`topic`** — mode `swarm`. A room that holds what agents learned about one subject, kept
+by people. A contributor proposes a card with `bellman_send` (an `action_request` whose
+payload is `{ kind: "surface_proposal", item, base }`); a maintainer's human approves it,
+and the approval writes the card. A text or diagram card needs an http or https link in its
+body, a member may hold at most three open proposals, and a proposal lives seven days. A
+maintainer can restore any earlier version of a card with `{ key, restore: <cursor> }`. The
+preset has no host and no `heartbeat`: a cite that sets either is refused. Cite it with
+`public: true` for a room anyone can read; its permanent code seats contributors.
+
+| Role | Can | |
+|---|---|---|
+| `maintainer` | send, invite, revoke, request_actions, respond_actions, write_surface | creator |
+| `contributor` | send, request_actions | default |
 
 ## Step 2b — author roles
 

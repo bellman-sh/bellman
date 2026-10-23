@@ -29,9 +29,13 @@ import {
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
-import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
+import {
+  MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
+} from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
+import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
+import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -90,6 +94,15 @@ export const FROZEN =
 const NOT_PUBLIC =
   "this room is not public, so it cannot hold a permanent code: a link that never expires belongs only to a room " +
   "anyone can already read. Omit permanent for a code that expires in 15 minutes.";
+
+/**
+ * A proposal sent into a topic room where no active seat can answer it (topic rooms plan, R6). Its audience is the
+ * seats that hold `respond_actions`, and a proposer cannot answer their own, so with none of them here it would
+ * sit open for its seven days and hold the proposer's place under the cap. It is refused when sent, and the
+ * sentence says who can put it right.
+ */
+export const NO_ANSWERER =
+  "no other active member can answer a proposal: no seat but yours holds respond_actions. Ask the room's creator to seat a maintainer.";
 
 export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
@@ -395,6 +408,25 @@ export async function eventsFor(
 ): Promise<SessionEvent[]> {
   const authors = briefAuthors(events);
   return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader);
+}
+
+/**
+ * The log since `since` (#208): with `since` a request's whole life back, every request that can still
+ * be outstanding and everything after it. The log is in time order, so its tail is read, doubled
+ * until it reaches back past `since` or holds the whole log, and trimmed to the window.
+ *
+ * Exported so that a second reader of open requests, the cap on a member's open proposals (topic
+ * rooms plan, R11), takes the window `bellman_sync` derives its outstanding list from and cannot
+ * disagree with the poll about how far back it reaches. The caller says how far back `since` is: a
+ * topic room's proposal lives seven days and every other request half an hour.
+ */
+export async function requestWindow(store: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
+  // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
+  // said in the window; a store read that pages backward is the upgrade if that gets large.
+  for (let n = 256; ; n *= 2) {
+    const tail = await store.recentEvents(sessionId, n);
+    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
+  }
 }
 
 /**
@@ -825,74 +857,138 @@ function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
 }
 
 /**
- * A seat writes one item on the room's working surface, or removes one (#129).
+ * The blob a write names, settled against the room's object and the kind's type rule: the write with the
+ * object's size, type and name filled in, or the refusal (topic rooms plan, R14). A write that names no blob
+ * settles as itself.
  *
- * One operation for both transports — `bellman_send type: "surface"` and
- * `PUT`/`DELETE /rooms/:id/surface/:key` (#184) — for the reason this module
- * exists: a second transport re-typing the sequence is a second chance to skip
- * the verb guard or the audit row. The order is the write path the spec gives:
- * the seat's guards (`gateSeat`, which also touches the caller), the payload's
- * shape and each kind's rule, the blob a file, image or html item names, the rows for the
- * cap and a connector's ends, the append with the row riding it, the audit row.
+ * A blob-backed item carries the object's metadata, not the writer's (#183, D5): the writer named an id, and
+ * what readers get is what the bucket holds under this room's prefix. `head` resolves nothing from another
+ * room (D1), so a foreign id is "no blob" here too. The image and html checks are on the STORED type, which D6
+ * already decided at upload.
  *
- * The rows are read once and then the append happens, which is a
- * read-then-write with the window open: two writers can both add a 64th item,
- * and a connector can name a key removed a millisecond earlier. Both are
- * courtesy bounds — a 65th row costs nothing and a dangling connector is a
- * state the spec declares a reader handles — so neither moves into the store.
- * The verb guard, the frozen guard and the row's write are not courtesies, and
- * each is where it has to be.
- *
- * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
- * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
- * dash's group drag writes one PUT per card and would pass 30.
+ * `writeSurface` called these steps inline. They are one function now so that a card a contributor proposes is
+ * held to the rule a card a maintainer writes is held to, by the same words in the same order.
  */
-export async function writeSurface(
+export async function settleBlob(
+  blobs: BlobStore,
+  sessionId: string,
+  write: SurfaceWrite,
+  blobId: string,
+): Promise<RoomResult<SurfaceWrite>> {
+  if (write.item === null) return succeed(write);
+  const meta = await blobs.head(sessionId, blobId);
+  if (!meta) {
+    return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${blobId} has been uploaded to this room.`);
+  }
+  if (write.item.kind === "image" && !isImageType(meta.type)) {
+    return refuse(
+      "invalid",
+      `surface image "${write.key}": blob ${blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
+    );
+  }
+  // normalizeMediaType drops parameters and lower-cases, so text/html; charset=utf-8 places; a type it cannot
+  // read comes back as an octet-stream, which is no more text/html than the original was.
+  if (write.item.kind === "html" && normalizeMediaType(meta.type) !== "text/html") {
+    return refuse(
+      "invalid",
+      `surface html "${write.key}": blob ${blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,
+    );
+  }
+  return succeed({
+    key: write.key,
+    item: { ...write.item, blob: { id: blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
+  });
+}
+
+/**
+ * Whether `me` may send this proposal now (topic rooms plan, R7): its shape, its item, its source, its base,
+ * its blob and the cap of three open ones. The first refusal is the answer, in that order, so a proposal that
+ * is malformed is told so before it is told about the cap.
+ *
+ * It appends nothing and counts nothing against the send limit. `bellman_send` asks for the minute's place
+ * after this returns (`admitSend`), so a proposal refused here spends none.
+ *
+ * The item is read here as text and structure only. When a maintainer approves the proposal it is normalised
+ * again and settled again, since what the room holds by then may differ: a proposal is never applied on trust.
+ *
+ * The cap is read before the append, as the 64-item cap in `writeSurface` is, so two proposals landing together
+ * can make a fourth (R11). It is a courtesy bound and is checked here and in no store.
+ *
+ * ponytail: the cap reads the log back across a proposal's seven days for every proposal sent, the window
+ * `bellman_sync` reads for `outstanding`. Proposing is human-paced; a stored count of a member's open
+ * proposals is the upgrade if it ever is not.
+ */
+export async function checkProposal(
   store: BellmanStore,
   blobs: BlobStore,
-  actor: Identity,
-  sessionId: string,
-  memberId: string,
+  session: StoredSession,
+  me: Member,
   payload: unknown,
-  idempotencyKey?: string,
-  countSend = false,
-): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
-  const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
-  if (!gate.ok) return gate;
-  const session = gate.value;
+  now: number = Date.now(),
+): Promise<RoomResult<null>> {
+  const read = readProposal(payload);
+  if (!read.ok) return refuse("invalid", read.reason);
 
+  const normalized = normalizeSurfaceWrite(read.item);
+  if (!normalized.ok) return refuse("invalid", `surface_proposal item: ${normalized.reason}`);
+
+  const unsourced = sourceRefusal(normalized.write);
+  if (unsourced !== null) return refuse("invalid", `surface_proposal "${normalized.write.key}": ${unsourced}`);
+
+  // A base from the future means nothing: it names a surface cursor the room has not reached.
+  const cursor = surfaceCursor(session);
+  if (read.base > cursor) {
+    return refuse(
+      "invalid",
+      `surface_proposal base ${read.base} is ahead of the room's surface cursor ${cursor}: base is the surface_cursor you read`,
+    );
+  }
+
+  if (normalized.blobId !== null) {
+    const settled = await settleBlob(blobs, session.id, normalized.write, normalized.blobId);
+    if (!settled.ok) return settled;
+  }
+
+  const open = openProposalsOf(await requestWindow(store, session.id, now - PROPOSAL_TTL_MS), me.memberId, now);
+  if (open >= MAX_OPEN_PROPOSALS) {
+    return refuse(
+      "conflict",
+      `you already hold ${MAX_OPEN_PROPOSALS} open proposals, the most a member may hold in a topic room. ` +
+        "A maintainer answering one, or its seven days passing, makes room for another.",
+    );
+  }
+  return succeed(null);
+}
+
+/**
+ * The checks of a surface write that come before it counts as a send, for any payload (topic rooms plan, R14): the
+ * shape and each kind's rule (`normalizeSurfaceWrite`), the blob a file, image or html item names
+ * (`settleBlob`), the 64-item cap, and a connector's ends. The write it returns carries the object's size, type and
+ * name where a blob is named, and is what the append is handed.
+ *
+ * `writeSurface` calls it after its gate, and an approval calls it for the proposal's item, so a card a
+ * maintainer's human approves is held to the rule a card a maintainer writes is held to, in the same words and the
+ * same order. It appends nothing and spends no place under the send limit, so a refusal here leaves the log and the
+ * minute's count as they were.
+ *
+ * The rows are read once, and the caller's append is a separate step: the cap and a connector's ends are
+ * courtesy bounds, as `writeSurface` says.
+ */
+export async function resolveSurfaceWrite(
+  store: BellmanStore,
+  blobs: BlobStore,
+  sessionId: string,
+  payload: unknown,
+): Promise<RoomResult<{ write: SurfaceWrite }>> {
   const normalized = normalizeSurfaceWrite(payload);
   if (!normalized.ok) return refuse("invalid", normalized.reason);
   let { write } = normalized;
 
-  // A blob-backed item carries the object's metadata, not the writer's (#183,
-  // D5): the writer named an id, and what readers get is what the bucket holds
-  // under this room's prefix. `head` resolves nothing from another room (D1),
-  // so a foreign id is "no blob" here too. The image and html checks are on the
-  // STORED type, which D6 already decided at upload.
+  // A blob-backed item carries the object's metadata, not the writer's: `settleBlob` reads it.
   if (normalized.blobId !== null && write.item !== null) {
-    const meta = await blobs.head(sessionId, normalized.blobId);
-    if (!meta) {
-      return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${normalized.blobId} has been uploaded to this room.`);
-    }
-    if (write.item.kind === "image" && !isImageType(meta.type)) {
-      return refuse(
-        "invalid",
-        `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
-      );
-    }
-    // normalizeMediaType drops parameters and lower-cases, so text/html; charset=utf-8 places; a type it cannot
-    // read comes back as an octet-stream, which is no more text/html than the original was.
-    if (write.item.kind === "html" && normalizeMediaType(meta.type) !== "text/html") {
-      return refuse(
-        "invalid",
-        `surface html "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,
-      );
-    }
-    write = {
-      key: write.key,
-      item: { ...write.item, blob: { id: normalized.blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
-    };
+    const settled = await settleBlob(blobs, sessionId, write, normalized.blobId);
+    if (!settled.ok) return settled;
+    write = settled.value;
   }
 
   const rows = await store.surfaceOf(sessionId);
@@ -916,30 +1012,170 @@ export async function writeSurface(
       }
     }
   }
+  return succeed({ write });
+}
 
+/**
+ * What a `sent_surface` audit row says about a write: the key, the kind, the body's length and the object's bytes,
+ * or that the write removed the key. One function for a direct write and an approved card, so the two rows read alike.
+ */
+export function surfaceAuditDetail(write: SurfaceWrite): Record<string, unknown> {
+  return write.item !== null
+    ? {
+        key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
+        ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
+      }
+    : { key: write.key, removed: true };
+}
+
+/** A version of a key as the log holds it, read for a restore. */
+interface RestoredVersion {
+  /** What `resolveSurfaceWrite` settles: the version's item with its blob cut to `{ id }`, or a removal. */
+  payload: unknown;
+  /** Who wrote the version, kept on the restored one. Null for a removal, which is the restorer's act now. */
+  author: Pick<SessionEvent, "fromMemberId" | "fromUserId" | "fromLabel"> | null;
+  /** The cursor read, which the audit row names. */
+  cursor: number;
+}
+
+/**
+ * The version `{ key, restore: <cursor> }` names, read back from the log (topic rooms spec, D5; plan R22). The log
+ * is the history: a version is the `surface` event of its key at its cursor, in whatever room it was written.
+ *
+ * Refused, each naming what the cursor is: a cursor no event holds, an event of another type, and a surface write for
+ * another key. The version is then handed back as a payload for `resolveSurfaceWrite`, the checker every write
+ * goes through, so a version is held to today's rules and not those of the day it was written: a blob since gone,
+ * a full surface and a missing connector end refuse it there, in that checker's words.
+ *
+ * The read rule comes first (read_context spec, section 3), as `fileRoomReport` applies it for a reported cursor: a
+ * `brief_update` whose author keeps their brief is no event to any account but the author's, so a cursor that holds
+ * one reads as a cursor that holds nothing, and the refusal that names an event's type never names that one.
+ * `reader` is the restoring account.
+ *
+ * Its `blob` is cut to `{ id }`. The log holds the object's size, type and name beside the id, and the wire takes the
+ * id alone (`BlobShape`); `settleBlob` reads the rest from the bucket as it stands, as for any write.
+ *
+ * A removal restores as a removal, with no author: it is the restorer's act now, and there is no row for it to
+ * have been written by. Any other version keeps its author, as an approved card does (R18).
+ */
+async function restoreVersion(
+  store: BellmanStore,
+  sessionId: string,
+  payload: unknown,
+  reader: string,
+): Promise<RoomResult<RestoredVersion>> {
+  const asked = normalizeRestore(payload);
+  if (!asked.ok) return refuse("invalid", asked.reason);
+  const { key, cursor } = asked;
+
+  const stored = await store.eventAt(sessionId, cursor);
+  const event = stored && readableEvent(stored, await store.getMember(sessionId, stored.fromMemberId), reader);
+  if (!event) return refuse("invalid", `restore: no event at cursor ${cursor}`);
+  if (event.type !== "surface") {
+    return refuse("invalid", `restore: cursor ${cursor} is a ${event.type} event, not a surface write`);
+  }
+  const version = event.payload as { key?: unknown; remove?: unknown; blob?: unknown } | null;
+  if (version?.key !== key) {
+    return refuse("invalid", `restore: cursor ${cursor} wrote "${String(version?.key)}", not "${key}"`);
+  }
+
+  if (version.remove === true) return succeed({ payload: { key, remove: true }, author: null, cursor });
+  const blob = typeof version.blob === "object" && version.blob !== null ? { id: (version.blob as { id?: unknown }).id } : null;
+  return succeed({
+    payload: { ...version, blob },
+    author: { fromMemberId: event.fromMemberId, fromUserId: event.fromUserId, fromLabel: event.fromLabel },
+    cursor,
+  });
+}
+
+/**
+ * A seat writes one item on the room's working surface, or removes one (#129).
+ *
+ * One operation for both transports — `bellman_send type: "surface"` and
+ * `PUT`/`DELETE /rooms/:id/surface/:key` (#184) — for the reason this module
+ * exists: a second transport re-typing the sequence is a second chance to skip
+ * the verb guard or the audit row. The order is the write path the spec gives:
+ * the seat's guards (`gateSeat`, which also touches the caller), the payload's
+ * shape and each kind's rule, the blob a file, image or html item names, the rows for the
+ * cap and a connector's ends, the append with the row riding it, the audit row.
+ *
+ * The rows are read once and then the append happens, which is a
+ * read-then-write with the window open: two writers can both add a 64th item,
+ * and a connector can name a key removed a millisecond earlier. Both are
+ * courtesy bounds — a 65th row costs nothing and a dangling connector is a
+ * state the spec declares a reader handles — so neither moves into the store.
+ * The verb guard, the frozen guard and the row's write are not courtesies, and
+ * each is where it has to be.
+ *
+ * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
+ * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
+ * dash's group drag writes one PUT per card and would pass 30.
+ *
+ * `{ key, restore: <cursor> }` re-applies a version of the key from the log (topic rooms spec, D5; plan R22), in every
+ * kind of room. `restoreVersion` reads it and `resolveSurfaceWrite` settles it like any item, and what follows is
+ * the code a plain write runs, with three differences: the event is authored by the version's author, the row takes
+ * the restoring seat as its approver, and the audit row names the cursor restored.
+ */
+export async function writeSurface(
+  store: BellmanStore,
+  blobs: BlobStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  payload: unknown,
+  idempotencyKey?: string,
+  countSend = false,
+): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
+  if (!gate.ok) return gate;
+  const session = gate.value;
+
+  // After the gate, so a seat without the verb is refused for it and reads nothing of the log.
+  let restored: RestoredVersion | null = null;
+  if (isRestorePayload(payload)) {
+    const version = await restoreVersion(store, sessionId, payload, actor.userId);
+    if (!version.ok) return version;
+    restored = version.value;
+  }
+
+  const resolved = await resolveSurfaceWrite(store, blobs, sessionId, restored === null ? payload : restored.payload);
+  if (!resolved.ok) return resolved;
+  const { write } = resolved.value;
+
+  // The gate has just found this handle, so this is the same read. A restore needs the seat for the approver it
+  // stamps, a counted send for the minute it spends.
+  const me = await findMember(store, session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
   if (countSend) {
-    const me = await findMember(store, session, memberId, actor);
-    if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
     const admitted = await admitSend(store, sessionId, me);
     if (!admitted.ok) return admitted;
   }
 
   const draft: EventBody = {
     type: "surface",
-    fromMemberId: memberId,
-    fromUserId: actor.userId,
-    fromLabel: actor.label,
+    // A restored version keeps its author (R22); every other write is the caller's.
+    ...(restored?.author ?? { fromMemberId: memberId, fromUserId: actor.userId, fromLabel: actor.label }),
     // The normalised item, so the event reads as the row does: every optional
     // field present as null. A removal's payload is the tombstone itself.
     payload: write.item ?? { key: write.key, remove: true },
     refId: null,
   };
-  const extras: AppendExtras = { surface: write };
+  const extras: AppendExtras = {
+    surface: write,
+    // The seat that restores a version approves it, whoever wrote it (D5).
+    ...(restored === null ? {} : { approvedBy: { memberId: me.memberId, label: me.label } }),
+  };
+
+  // A restore's event is authored by the version's author (R18), and a store scopes a key by the author of the
+  // event it keys (`idempotencyKey`). Two members restoring with the same words would meet under that author's id,
+  // and the second would be answered with the first's restore. The restorer's id goes in front of the caller's key
+  // so each restorer's keys are their own (R23); the refusal below still names the key as the caller wrote it.
+  const key = restored === null || !idempotencyKey ? idempotencyKey : `${memberId}:${idempotencyKey}`;
 
   let event: SessionEvent;
   let replayed = false;
-  if (idempotencyKey) {
-    const w = await store.appendEventOnce(sessionId, draft, idempotencyKey, extras);
+  if (key) {
+    const w = await store.appendEventOnce(sessionId, draft, key, extras);
     if (w.outcome === "conflict") {
       return refuse(
         "conflict",
@@ -957,15 +1193,10 @@ export async function writeSurface(
 
   // Nothing below happens twice: a replay's original call did it.
   if (!replayed) {
-    await audit(
-      store, session, actor, "sent_surface",
-      write.item !== null
-        ? {
-            key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
-            ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
-          }
-        : { key: write.key, removed: true },
-    );
+    await audit(store, session, actor, "sent_surface", {
+      ...surfaceAuditDetail(write),
+      ...(restored === null ? {} : { restored: restored.cursor }),
+    });
   }
 
   return succeed({

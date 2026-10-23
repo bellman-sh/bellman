@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  ACTION_REQUEST_TTL_MS, actionStates, outstandingFor,
+  ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates, isProposalPayload, openProposalsOf, outstandingFor,
 } from "../src/action-state.js";
 import type { EventType, SessionEvent } from "../src/types.js";
 
@@ -202,5 +202,58 @@ describe("outstandingFor", () => {
     expect(first.age_seconds).toBe(90);
     expect(first.expires_at).toBe(new Date(T0 + ACTION_REQUEST_TTL_MS).toISOString());
     expect(first.from_label).toBe("jesse@codenerd");
+  });
+});
+
+describe("a topic room's proposals (topic rooms spec, D3)", () => {
+  const proposal = (cursor: number, over: Partial<SessionEvent> = {}) =>
+    request(cursor, { payload: { kind: "surface_proposal", item: { key: "k", remove: true }, base: 0 }, ...over });
+
+  it("keeps a proposal outstanding for seven days and expires it after, where the room is a topic room", () => {
+    expect(actionStates([proposal(1)], T0 + PROPOSAL_TTL_MS, true).get(1)).toBe("outstanding");
+    expect(actionStates([proposal(1)], T0 + PROPOSAL_TTL_MS + 1, true).get(1)).toBe("expired");
+  });
+
+  // R9: elsewhere a surface_proposal is an ordinary request, and any other request is thirty minutes everywhere.
+  it("keeps thirty minutes for any other request in a topic room, and for a proposal's payload in any other room", () => {
+    expect(actionStates([request(1)], T0 + ACTION_REQUEST_TTL_MS + 1, true).get(1)).toBe("expired");
+    expect(actionStates([proposal(1)], T0 + ACTION_REQUEST_TTL_MS + 1).get(1)).toBe("expired");
+    expect(actionStates([proposal(1)], T0 + ACTION_REQUEST_TTL_MS + 1, false).get(1)).toBe("expired");
+  });
+
+  it("lets an answer that comes after the seven days still answer it", () => {
+    expect(actionStates([proposal(1), response(2, 1, true)], T0 + PROPOSAL_TTL_MS + 60_000, true).get(1)).toBe("answered");
+  });
+
+  it("lists a proposal while it is open, with an expires_at a week on", () => {
+    const at = T0 + 2 * 60 * 60_000;
+    expect(outstandingFor([proposal(1)], "m_b", at, true)).toEqual([
+      expect.objectContaining({ cursor: 1, mine: false, expires_at: new Date(T0 + PROPOSAL_TTL_MS).toISOString() }),
+    ]);
+    expect(outstandingFor([proposal(1)], "m_b", at)).toEqual([]);
+  });
+
+  it("counts a member's open proposals: an answered, a declined and an expired one are not open, nor is anyone else's", () => {
+    const events = [
+      proposal(1), proposal(2), proposal(3), proposal(4, { fromMemberId: "m_c" }),
+      response(5, 2, true), response(6, 3, false),
+    ];
+    expect(openProposalsOf(events, "m_a", T0)).toBe(1);
+    expect(openProposalsOf(events, "m_a", T0 + PROPOSAL_TTL_MS + 1)).toBe(0);
+    expect(openProposalsOf(events, "m_c", T0)).toBe(1);
+  });
+
+  // The count reads the log as a topic room's: a proposal does not stop holding its place after half an hour.
+  it("does not count a plain request, and still counts a proposal past half an hour", () => {
+    expect(openProposalsOf([request(1), proposal(2)], "m_a", T0)).toBe(1);
+    expect(openProposalsOf([proposal(1)], "m_a", T0 + 2 * 60 * 60_000)).toBe(1);
+  });
+
+  it("recognizes a proposal by its kind alone", () => {
+    expect(isProposalPayload({ kind: "surface_proposal" })).toBe(true);
+    expect(isProposalPayload({ kind: "surface_proposal", item: { key: "k", remove: true }, base: 0 })).toBe(true);
+    for (const other of [null, undefined, "surface_proposal", 7, [], {}, { kind: "other" }, { kind: ["surface_proposal"] }]) {
+      expect(isProposalPayload(other), JSON.stringify(other)).toBe(false);
+    }
   });
 });

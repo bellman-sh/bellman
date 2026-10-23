@@ -60,12 +60,12 @@ const PUBLIC_EVENT: Listing = {
 /** Each caller of a store's event read (`eventsAfter`, `waitForEvents`, `recentEvents`, `eventAt`), and what it hands out. */
 const EVENT_READS: Listing = {
   "src/store-do.ts": { calls: 4, serves: "the store facade: passes each read on and reads for no one. The socket's own reads in this module are under PUBLIC_EVENT" },
-  "src/tools/sync.ts": { calls: 4, serves: "bellman_sync's events, read as the caller's account; and outstanding, which is action requests' cursors and labels and no brief" },
+  "src/tools/sync.ts": { calls: 3, serves: "bellman_sync's events, read as the caller's account" },
   "src/http/rooms.ts": { calls: 3, serves: "the dash's Log route, as above" },
   "src/tools/rooms.ts": { calls: 1, serves: "bellman_rooms' last_event, read as the caller's account" },
   "src/http/public.ts": { calls: 2, serves: "the public page, through publicReadEvent" },
   "src/tools/send.ts": { calls: 2, serves: "an action_response's checks, on the request and on an earlier answer: hands out no event, only a refusal that names the earlier answerer" },
-  "src/rooms.ts": { calls: 1, serves: "fileRoomReport: reads a reported cursor's event for its sender and hands the caller no event, only filed or refused; it applies the read rule first, as the reporter's account, or as the public for a caller with no handle in a public room or removed from it" },
+  "src/rooms.ts": { calls: 3, serves: "fileRoomReport: reads a reported cursor's event for its sender and hands the caller no event, only filed or refused; it applies the read rule first, as the reporter's account, or as the public for a caller with no handle in a public room or removed from it. requestWindow: the log's tail since a moment, which bellman_sync derives outstanding from, and outstanding is action requests' cursors and labels and no brief. restoreVersion: reads a restored cursor's event for its payload and author and hands the caller no event, only a card written again or a refusal that names the event's type; it applies the read rule first, as the restorer's account, so a brief_update its author keeps reads as no event at that cursor" },
   "src/host-do.ts": { calls: 1, serves: "the hosted seat's read; its transcript holds message and progress replies only (decide)" },
   "src/host-memory.ts": { calls: 1, serves: "the same read, on the Node server" },
 };

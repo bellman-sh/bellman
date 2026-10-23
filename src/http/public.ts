@@ -175,6 +175,10 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       status: sessionStatus(session),
       closed_at: retentionOf(session).closed_at,
       mode: session.manifest.mode,
+      // Which built-in preset the room cites, or null for an authored manifest or a saved preset (topic rooms spec, R5). Top
+      // level and outside the envelope, like `view`: the page tells a topic room by this, since `view: "page"` says nothing
+      // about a room's roles.
+      preset: session.manifest.preset,
       // How the room opens (room pages spec D3): top level, beside `mode` and outside the envelope, since it is a value the
       // server checked and not the creator's prose (R9).
       view: session.publicView,

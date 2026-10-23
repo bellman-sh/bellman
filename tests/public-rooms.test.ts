@@ -26,7 +26,7 @@ describe("a manifest's public flag", () => {
   it("is false unless given, and the built-ins are private", () => {
     expect(resolveManifest({ room: "r", preset: "pair" }).public).toBe(false);
     expect(resolveManifest(authored).public).toBe(false);
-    expect(builtinPresets().map((p) => p.public)).toEqual([false, false, false, false]);
+    expect(builtinPresets().map((p) => p.public)).toEqual([false, false, false, false, false]);
   });
 
   it("is refused when it is not a boolean", () => {
@@ -116,8 +116,9 @@ describe("the creator's public link", () => {
   });
 });
 
-// Room pages spec, D3: a room starts on its canvas, and its creator chooses the page later. bellman_start is the
-// one place a room's record is first written, so this is where its value is pinned.
+// Room pages spec, D3: a room starts on its canvas, and its creator chooses the page later; a topic room is the
+// exception, which opens as a page (tests/tools/start-presets.test.ts). bellman_start is the one place a room's
+// record is first written, so this is where its value is pinned.
 describe("how a room opens when it starts", () => {
   it("is the canvas, for a public room and a private one", async () => {
     const h = new Harness();

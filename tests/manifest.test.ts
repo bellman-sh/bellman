@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
   MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
-  SOCIAL_HOST_INSTRUCTIONS, HostInstructionsShape,
+  SOCIAL_HOST_INSTRUCTIONS, HostInstructionsShape, isTopicRoom,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -54,7 +54,7 @@ describe("presets", () => {
 
   it("names the valid presets when given an unknown one", () => {
     expect(() => resolveManifest({ room: "r", preset: "duo" } as never))
-      .toThrow(/pair, swarm, review, social/);
+      .toThrow(/pair, swarm, review, social, topic/);
   });
 
   it("records preset as null when roles are authored", () => {
@@ -125,6 +125,10 @@ describe("presets", () => {
       lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
       guest: ["send"],
       host: ["send"],
+    },
+    topic: {
+      maintainer: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      contributor: ["send", "request_actions"],
     },
   };
   it.each(PRESET_NAMES)("%s holds the verbs the design's table gives it, and no other roles", (name) => {
@@ -934,5 +938,44 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
       default_role: "lead", creator_role: "lead",
       host: { role: "host", instructions: SOCIAL_HOST_INSTRUCTIONS },
     })).not.toThrow();
+  });
+});
+
+describe("the topic preset (topic rooms spec, D1)", () => {
+  const topic = () => resolveManifest({ room: "mcp", purpose: "What agents learned about MCP", preset: "topic", public: true });
+
+  it("expands to a swarm room: maintainers hold all six verbs, contributors hold send and request_actions", () => {
+    const m = topic();
+    expect(m).toMatchObject({ mode: "swarm", preset: "topic", public: true, host: null, heartbeatOnMs: null, housekeeping: null });
+    expect(Object.keys(m.roles).sort()).toEqual(["contributor", "maintainer"]);
+    expect([...m.roles.maintainer.can].sort()).toEqual([...VERBS].sort());
+    expect(m.roles.contributor.can).toEqual(["send", "request_actions"]);
+    expect(isTopicRoom(m)).toBe(true);
+    expect(isTopicRoom(resolveManifest({ room: "r", preset: "swarm" }))).toBe(false);
+  });
+
+  it("seats its creator as a maintainer and a newcomer as a contributor, and describes both for the panel", () => {
+    const m = topic();
+    expect([m.creatorRole, m.defaultRole]).toEqual(["maintainer", "contributor"]);
+    expect(m.roles.maintainer.description).toBe("approves proposals, writes and restores cards, and controls who joins");
+    expect(m.roles.contributor.description).toBe("proposes cards and talks with the room");
+  });
+
+  it("is public only when the cite says so", () => {
+    expect(resolveManifest({ room: "r", preset: "topic" }).public).toBe(false);
+  });
+
+  // Topic rooms plan, R2: a page does not tick. Three rules that already exist refuse a heartbeat
+  // and a host for a preset with no host, and this pins them for topic.
+  it("refuses a cite that sets a heartbeat in either spelling, or a host, because a page does not tick", () => {
+    expect(() => resolveManifest({ room: "r", preset: "topic", heartbeat: "1h" }))
+      .toThrow('heartbeat: the "topic" preset has no host, so a cite of it cannot set a cadence');
+    expect(() => resolveManifest({ room: "r", preset: "topic", heartbeat_on: "1h" })).toThrow(/no host/);
+    expect(() => resolveManifest({ room: "r", preset: "topic", host: { role: "host" } } as never)).toThrow('Unrecognized key: "host"');
+  });
+
+  it("hands each room its own roles, not the catalog's", () => {
+    topic().roles.contributor.can.push("write_surface");
+    expect(topic().roles.contributor.can).toEqual(["send", "request_actions"]);
   });
 });

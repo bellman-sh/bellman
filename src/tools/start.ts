@@ -8,7 +8,7 @@ import { hostMember } from "../host.js";
 import type { ArrivingMember, Identity, NewSession, RoomManifest } from "../types.js";
 import { entitlementsFor, upgradeHint, type UpgradeLinks } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
-import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
+import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, isTopicRoom, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { forbiddenCapabilityRefusal } from "../orgs.js";
 import { claimName, publicNameRefusal } from "../public-names.js";
@@ -29,7 +29,7 @@ The join code (e.g. BELL-7F3K-92-PEER-B) is human-relayable: paste it into anoth
 
 Args:
   - manifest: the room's declaration. Either cite a preset —
-    { room, purpose?, public?, preset: "pair" | "swarm" | "review" | "social", or the name of a preset you saved at dash.bellman.sh/presets } — or author roles:
+    { room, purpose?, public?, preset: "pair" | "swarm" | "review" | "social" | "topic", or the name of a preset you saved at dash.bellman.sh/presets } — or author roles:
     { room, purpose?, public?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     heartbeat: <duration, 30s to 24h> sets how often the room's heartbeat ticks; a role's heartbeat_on: true puts that seat on it, and heartbeat_on: "<what to report>" does so with your instruction. The older top-level heartbeat_on and a role's reports/report still work.
     Verbs: send, invite, revoke, request_actions, respond_actions, write_surface.
@@ -38,7 +38,7 @@ Args:
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds as many as you invite, up to
     ${ROOM_MEMBER_CEILING} — Bellman's ceiling for one room, the same on every plan.
-    The pair and review presets make pair rooms; the swarm and social presets make swarm rooms.
+    The pair and review presets make pair rooms; the swarm, social and topic presets make swarm rooms.
     A manifest may declare a \`host\`, a seat Bellman runs that asks the room a question on each heartbeat and answers replies; it needs the max or team plan, a \`heartbeat\` of at least 1h, and a swarm room. The social preset declares one. The host never keeps a room open.
     public: true (pro, max or team plan) lets anyone with the room's public_url read its surface and its log, never a brief, with members named by number; joining still takes a code, and joiners are told before they accept. False unless given; a saved preset's is the default for its rooms. Share public_url for people to read, never join_url, which seats whoever redeems it until it expires.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
@@ -215,8 +215,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         unpublishedAt: null,
         // The name claimed above, if any (public names spec, D4): the record is what holds it.
         publicName: public_name ?? null,
-        // A room opens on its canvas until its creator chooses the page (room pages spec, D3).
-        publicView: "canvas",
+        // A room opens on its canvas until its creator chooses the page (room pages spec, D3). A topic room opens as a
+        // page (topic rooms spec, D6 and R4); its creator keeps PUT /rooms/:id/view.
+        publicView: isTopicRoom(manifest) ? "page" : "canvas",
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

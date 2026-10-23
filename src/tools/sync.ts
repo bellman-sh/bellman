@@ -4,13 +4,14 @@ import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
-import type { Identity, SessionEvent } from "../types.js";
-import { eventsFor, findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
+import type { Identity } from "../types.js";
+import { eventsFor, findMember, readSurface, requestWindow, sessionStatus, touchMember } from "../rooms.js";
 import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
-import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
+import { isTopicRoom } from "../manifest.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../action-state.js";
 
 /**
  * The most events one poll returns (#208), the earliest after the caller's cursor. A member
@@ -22,20 +23,6 @@ import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
  * bridge pages the rest at poll speed, so the smaller page costs a catch-up a few more calls.
  */
 export const SYNC_PAGE = 50;
-
-/**
- * The log since `since` (#208): with `since` half an hour back, every request that can still
- * be outstanding and everything after it. The log is in time order, so its tail is read,
- * doubled until it reaches back past `since` or holds the whole log, and trimmed to the window.
- */
-async function requestWindow(s: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
-  // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
-  // said in the window; a store read that pages backward is the upgrade if that gets large.
-  for (let n = 256; ; n *= 2) {
-    const tail = await s.recentEvents(sessionId, n);
-    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
-  }
-}
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
@@ -207,11 +194,20 @@ If a room's creator has removed you, you still get the history up to and includi
         s, session_id, all.filter((e) => e.fromMemberId !== member_id), identity.userId,
       );
 
-      // The last half hour of the log, not the slice. A request made before
+      // The last half hour of the log (a week in a topic room, below), not the slice. A request made before
       // `since_cursor` is still outstanding, and the point of this list is what the
       // caller is WAITING ON rather than what just happened — a slice would show a
-      // request once, on the poll that carried it, and never again. Half an hour is a
-      // request's whole life (ACTION_REQUEST_TTL_MS), so nothing older is waiting (#208).
+      // request once, on the poll that carried it, and never again. In a room that is not
+      // a topic room, half an hour is a request's whole life (ACTION_REQUEST_TTL_MS), so
+      // nothing older is waiting (#208).
+      //
+      // A topic room's proposal lives seven days (PROPOSAL_TTL_MS), so there the window is
+      // seven days. Every other request in that room still ends in half an hour, and is read
+      // out of the same window as expired (topic rooms plan, R9 and R10). `ttl` below is the
+      // longest life any request in this room can have, and the window, the guard on the
+      // record and the test on the slice all take it.
+      //
+      // ponytail: a topic room reads up to seven days of its log per poll while a proposal under a week old exists; the upgrade is the oldest open proposal's cursor kept on the record.
       //
       // Capped at the cut for the same reason the slice is: a removed member
       // reads its history and nothing after it (#113), and a request that
@@ -223,14 +219,14 @@ If a room's creator has removed you, you still get the history up to and includi
       // derived.
       //
       // Absent: no `action_request` has ever been appended, so nothing can be
-      // outstanding. Older than the TTL: the NEWEST request has expired, so all
+      // outstanding. Older than `ttl`: the NEWEST request has expired, so all
       // of them have. Either way the answer is the empty list, and a full read
       // of the log would produce it the expensive way — on every poll, from
       // every watcher, for the whole life of a room that may never use the
       // feature at all.
       //
-      // What is left is a room with a request inside the last half hour, which
-      // reads that half hour (`requestWindow`). It read its whole log, from cursor
+      // What is left is a room with a request inside the last `ttl`, which
+      // reads that window (`requestWindow`). It read its whole log, from cursor
       // 0, on every poll for half an hour after each request, until #208.
       //
       // From the record this poll ANSWERS with, not the one it began with. A long
@@ -240,24 +236,26 @@ If a room's creator has removed you, you still get the history up to and includi
       // carried the request event with no `outstanding` entry beside it — the
       // one case the field exists for, missing it.
       const stampedAt = answering.lastActionRequestAt;
+      const topic = isTopicRoom(answering.manifest);
+      const ttl = topic ? PROPOSAL_TTL_MS : ACTION_REQUEST_TTL_MS;
 
       // Or the slice itself carries one. The stamp is a separate write from the
       // event, so between this poll's record read and its event read a request
       // can land that the record does not know about yet. The events are the
       // truth here as everywhere; the stamp is only the cheap way to skip them.
-      // Within the TTL, not merely present: a request older than that is expired
-      // and cannot be outstanding, so an old one sitting in the slice of a poll
-      // that asked from cursor 0 must not drag the whole log back in.
+      // Within its own life, not merely present: a request older than that is
+      // expired and cannot be outstanding, so an old one sitting in the slice of
+      // a poll that asked from cursor 0 must not drag the whole log back in.
       const askedInSlice = read.some(
-        (e) => e.type === "action_request" && Date.now() <= e.at + ACTION_REQUEST_TTL_MS
+        (e) => e.type === "action_request" && Date.now() <= e.at + requestTtlMs(e, topic)
       );
 
       const mayHaveOutstanding =
         askedInSlice
-        || (stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS);
+        || (stampedAt !== undefined && Date.now() <= stampedAt + ttl);
 
       const recent = mayHaveOutstanding
-        ? await requestWindow(s, session_id, Date.now() - ACTION_REQUEST_TTL_MS)
+        ? await requestWindow(s, session_id, Date.now() - ttl)
         : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
@@ -277,7 +275,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // Their OWN requests still show. Those are what they were waiting on when
       // they went, and reading the room is something a departed member may still
       // do — the eviction cut above already bounds how much.
-      const outstanding = outstandingFor(visible, member_id, Date.now())
+      const outstanding = outstandingFor(visible, member_id, Date.now(), topic)
         .filter((o) => o.mine || isActiveMember(me));
 
       // The surface's cursor, and the surface when it was asked for, capped by

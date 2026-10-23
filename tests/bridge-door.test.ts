@@ -527,16 +527,16 @@ describe("the room routes, against the real tools", () => {
       { cursor: (reply.body as { cursor: number }).cursor, type: "action_response", ref_id: ref, payload: { approved: false }, from: { member_id: mine.memberId } },
     ]);
 
-    // Said again once it has landed, the server refuses it (the first answer is the one that counts) and nothing more lands.
-    expect(await bridge.decline(mine.sessionId, ref)).toEqual({ status: 422, body: { error: "refused" } });
+    // Said again once it has landed, the server reads the key first and replays the first answer's cursor
+    // (ADR 0032), so the door gets the same reply, and nothing more lands.
+    expect(await bridge.decline(mine.sessionId, ref)).toEqual(reply);
     expect(await mine.answers()).toHaveLength(1);
   });
 
   // Two declines of one request that overlap, as a double press or a second pane make them, both get past the server's
   // "already answered" check before either has appended. What collapses them is the key: the server gives the second the
   // first's cursor, and one answer lands. Without it two land (src/tools/send.ts, and the cross-object gap in
-  // docs/ARCHITECTURE.md). Were the server to close that window itself, the second would be refused as above, and this
-  // test is the one to change. Another request's decline has another key, and lands of its own.
+  // docs/ARCHITECTURE.md). Another request's decline has another key, and lands of its own.
   it("lands one action_response when two declines of the same request overlap", async () => {
     const { bridge, room } = await roomBridge();
     const mine = await room();

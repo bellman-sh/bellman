@@ -587,7 +587,7 @@ export type Verb =
   | "respond_actions"
   | "write_surface";
 
-export type PresetName = "pair" | "swarm" | "review" | "social";
+export type PresetName = "pair" | "swarm" | "review" | "social" | "topic";
 
 /** The names a manifest may give `host.model`. The ids and weights live in src/host.ts. */
 export type HostModelName = "haiku" | "sonnet" | "opus";
@@ -777,6 +777,15 @@ export interface SurfaceItem {
   shape: Shape | null;
 }
 
+/**
+ * The seat whose approval put a version of an item on the surface in a topic room, or that restored it in any room (topic rooms spec, D2): its id, and the
+ * label they signed in with, kept as `byLabel` is so that a reader names the approver without the roster.
+ */
+export interface ApprovedBy {
+  memberId: string;
+  label: string;
+}
+
 /** An item as stored: the item plus the write that put it there. */
 export interface SurfaceRow extends SurfaceItem {
   cursor: number;
@@ -789,4 +798,10 @@ export interface SurfaceRow extends SurfaceItem {
   createdAt?: number;
   byMemberId: string;
   byLabel: string;
+  /**
+   * The seat whose approval put this version on the surface in a topic room, or that restored it in any room (topic rooms spec, D2 and D5).
+   * Absent on a row written without one, and a later write to the key drops it (R20): the approval was of the
+   * words that write replaced.
+   */
+  approvedBy?: ApprovedBy;
 }

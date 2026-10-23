@@ -224,20 +224,21 @@ export function forbiddenCapabilityRefusal(policy: OrgPolicy, capabilities: read
 const admits = (list: string[] | null, other: string | null): boolean => list === null || (other !== null && list.includes(other));
 
 /**
- * Spec D3, both sides: the joiner's org must allow every org in the room (a no-org creator included),
- * and every org in the room must allow the joiner's. `roomOrgIds` is `session.orgs`; `creatorHasOrg`
- * is false when the room's creator is outside any org. A room org with no record reads as open.
+ * Spec D3, both sides: the joiner's org must allow every org in the room, and every org in the room
+ * must allow the joiner's. `roomOrgIds` is `session.orgs`; `roomHasOrgless` is true when the creator
+ * or any member on the roster is outside any org, which no list admits. A room org with no record
+ * reads as open.
  */
 export async function joinRefusal(
   getOrg: (orgId: string) => Promise<Org | undefined>,
   joinerOrgId: string | null,
   roomOrgIds: readonly string[],
-  creatorHasOrg: boolean,
+  roomHasOrgless: boolean,
 ): Promise<string | null> {
   const others = roomOrgIds.filter((id) => id !== joinerOrgId);
   const mine = joinerOrgId === null ? null : (await getOrg(joinerOrgId))?.policy.allowedCounterpartyOrgs ?? null;
   if (mine !== null) {
-    if (!creatorHasOrg) return "your org's policy does not allow rooms with a creator outside any org.";
+    if (roomHasOrgless) return "your org's policy does not allow rooms with a member outside any org.";
     for (const id of others) if (!admits(mine, id)) return `your org's policy does not allow rooms with org "${id}".`;
   }
   for (const id of others) {

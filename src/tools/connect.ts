@@ -82,7 +82,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
       // Both sides' counterparty rules (ADR 0031), read again at confirm.
-      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, session.orgId !== null);
+      const barred = await joinRefusal((id) => s.getOrg(id), identity.orgId, session.orgs, session.orgId === null || session.members.some((m) => m.orgId === null));
       if (barred) return fail(barred);
       // Seated, not active: a room held full by a session that died is
       // previewable rather than refused here and at every retry for good

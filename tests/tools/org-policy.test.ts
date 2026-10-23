@@ -76,7 +76,15 @@ describe("allowed_counterparty_orgs", () => {
     const inC = (await start(await h.connectAs(who("org_c")))).data as { session_id: string; join_code: string };
     expect((await join(await h.connectAs(who("org_a", "member", 2)), inC.join_code)).text).toBe('Error: your org\'s policy does not allow rooms with org "org_c".');
     const noOrg = (await start(await h.connectAs(who(null, "member", 2)))).data as { session_id: string; join_code: string };
-    expect((await join(await h.connectAs(who("org_a", "member", 3)), noOrg.join_code)).text).toBe("Error: your org's policy does not allow rooms with a creator outside any org.");
+    expect((await join(await h.connectAs(who("org_a", "member", 3)), noOrg.join_code)).text).toBe("Error: your org's policy does not allow rooms with a member outside any org.");
+  });
+
+  it("counts a member outside any org as outside every list, creator or not", async () => {
+    await h.store.createOrg(org("org_a", { allowedCounterpartyOrgs: ["org_b"] }), grant("org_a"), by);
+    await h.store.createOrg(org("org_b"), grant("org_b"), by);
+    const inB = (await start(await h.connectAs(who("org_b")))).data as { session_id: string; join_code: string };
+    expect((await join(await h.connectAs(who(null)), inB.join_code)).isError).toBe(false);
+    expect((await join(await h.connectAs(who("org_a")), inB.join_code)).text).toBe("Error: your org's policy does not allow rooms with a member outside any org.");
   });
 
   it("is read again at confirm, so a policy tightened between preview and seat refuses the seat", async () => {

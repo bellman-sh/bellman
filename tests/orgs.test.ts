@@ -169,20 +169,20 @@ describe("joinRefusal", () => {
   };
   const getOrg = async (id: string) => orgs[id];
   it("allows a room of open orgs, and one the joiner's org lists", async () => {
-    expect(await joinRefusal(getOrg, "org_b", ["org_open"], true)).toBeNull();
-    expect(await joinRefusal(getOrg, "org_b_only", ["org_b"], true)).toBeNull();
-    expect(await joinRefusal(getOrg, null, ["org_open"], true)).toBeNull();
-    expect(await joinRefusal(getOrg, "org_none", ["org_none"], true)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_b", ["org_open"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_b_only", ["org_b"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, null, ["org_open"], false)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_none", ["org_none"], false)).toBeNull();
   });
-  it("refuses from the joiner's side, naming the room's org, a no-org creator included", async () => {
-    expect(await joinRefusal(getOrg, "org_b_only", ["org_open"], true)).toBe('your org\'s policy does not allow rooms with org "org_open".');
-    expect(await joinRefusal(getOrg, "org_none", [], false)).toBe("your org's policy does not allow rooms with a creator outside any org.");
+  it("refuses from the joiner's side, naming the room's org, a a member outside any org included", async () => {
+    expect(await joinRefusal(getOrg, "org_b_only", ["org_open"], false)).toBe('your org\'s policy does not allow rooms with org "org_open".');
+    expect(await joinRefusal(getOrg, "org_none", [], true)).toBe("your org's policy does not allow rooms with a member outside any org.");
   });
   it("refuses from the room's side, naming the org whose rule refused", async () => {
-    expect(await joinRefusal(getOrg, "org_open", ["org_b_only"], true)).toBe('org "org_b_only"\'s policy does not allow members of your org in its rooms.');
-    expect(await joinRefusal(getOrg, null, ["org_open", "org_none"], true)).toBe('org "org_none"\'s policy does not allow members of your org in its rooms.');
+    expect(await joinRefusal(getOrg, "org_open", ["org_b_only"], false)).toBe('org "org_b_only"\'s policy does not allow members of your org in its rooms.');
+    expect(await joinRefusal(getOrg, null, ["org_open", "org_none"], false)).toBe('org "org_none"\'s policy does not allow members of your org in its rooms.');
   });
   it("reads a room org that has no record as open", async () => {
-    expect(await joinRefusal(getOrg, "org_open", ["org_string"], true)).toBeNull();
+    expect(await joinRefusal(getOrg, "org_open", ["org_string"], false)).toBeNull();
   });
 });

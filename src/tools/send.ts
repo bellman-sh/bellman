@@ -7,13 +7,52 @@ import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb, verbsOfRole } from "../roles.js";
-import { FROZEN, NO_ANSWERER, activeMembers, admitSend, audit, checkProposal, findMember, touchMember, writeSurface } from "../rooms.js";
+import {
+  FROZEN, NO_ANSWERER, activeMembers, admitSend, audit, checkProposal, findMember, resolveSurfaceWrite, surfaceAuditDetail,
+  touchMember, writeSurface,
+} from "../rooms.js";
 import { isProposalPayload } from "../action-state.js";
 import { isTopicRoom } from "../manifest.js";
-import type { AppendExtras, BellmanStore, EventWrite } from "../store.js";
+import { readProposal } from "../proposal.js";
+import type { StoredSession } from "../stored-session.js";
+import type { AppendExtras, BellmanStore, EventWrite, ProposalApproval } from "../store.js";
+import type { SurfaceWrite } from "../surface.js";
 import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 import { SEND_LIMIT, STRANGER_SEND_LIMIT } from "../send-limit.js";
+
+/**
+ * The proposal an answer approves (topic rooms plan, R1): the request's payload read as one, when the answer is
+ * `approved: true` and the room is a topic room. Null for a decline, for any answer in a room that is not a topic
+ * room, and for a request that is not a proposal: each is an ordinary answer, and nothing is applied.
+ */
+function approvedProposal(
+  session: StoredSession,
+  request: SessionEvent,
+  payload: Record<string, unknown>,
+): { requestCursor: number; item: unknown; base: number } | null {
+  if (payload.approved !== true || !isTopicRoom(session.manifest)) return null;
+  const read = readProposal(request.payload);
+  return read.ok ? { requestCursor: request.cursor, item: read.item, base: read.base } : null;
+}
+
+/** The refusal of a second answer, said once for the tool's own look at the log and for the store's `answered` outcome, so the two cannot read differently. */
+const alreadyAnswered = (refId: string, by: string): string =>
+  `action_request ${refId} was already answered by ${by}. The first answer is the one that counts, so this one would be ignored.`;
+
+/**
+ * An approval the card's key has moved past (plan R16): the refusal names the cursor of the change and what to do next,
+ * and carries it as `structuredContent`, so a client that acts on it need not read the sentence. Nothing was written.
+ */
+function staleApproval(key: string, cursor: number, base: number): ToolResult {
+  return {
+    ...fail(
+      `stale: "${key}" changed at cursor ${cursor}, after cursor ${base}, which this proposal was written against. ` +
+      "Nothing was written and the proposal is still open. Decline it (approved: false); its proposer can read the surface again and propose again."
+    ),
+    structuredContent: { error: "stale", cursor },
+  };
+}
 
 export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
   server.registerTool(
@@ -169,6 +208,10 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           if (!checked.ok) return refusal(checked);
         }
       }
+      // What the checks of an answer learn for the approval below: the proposal it approves, if it approves one, and
+      // whether it is the retry of an approval already given.
+      let proposal: ReturnType<typeof approvedProposal> = null;
+      let retrying = false;
       if (type === "action_response") {
         if (!ref_id) return fail("action_response requires ref_id (the cursor id of the action_request).");
         // One key, not the whole history (#25). String-compared, not numeric:
@@ -181,6 +224,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           return fail(`no action_request with cursor id ${ref_id}.`);
         }
         if (req.fromMemberId === member_id) return fail("you cannot respond to your own action_request.");
+        proposal = approvedProposal(session, req, payload);
 
         // First answer wins, and it has to win HERE and not only in the
         // derivation. `action-state.ts` already ignores a second response, so
@@ -203,9 +247,13 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         const answered = (await s.eventsAfter(session_id, req.cursor))
           .find((e) => e.type === "action_response" && e.refId === ref_id);
         if (answered) {
-          return fail(
-            `action_request ${ref_id} was already answered by ${answered.fromLabel}. The first answer is the one that counts, so this one would be ignored.`
-          );
+          // The one answer this lets through is a keyed retry of an approval (plan R21). Its own first response is
+          // what the check finds, and refusing on that would answer every retry with "already answered by you"
+          // when the key is there to say it is the same send. The store reads the key before anything else, so it
+          // replays the response the key names and refuses a key used for another answer; with no such key it finds
+          // the first answer itself and refuses as answered. Every other answer keeps this check as its only one.
+          retrying = idempotency_key !== undefined && answered.fromMemberId === member_id && proposal !== null;
+          if (!retrying) return fail(alreadyAnswered(ref_id, answered.fromLabel));
         }
       }
       // Validated here so an invalid brief never appends an event; applied
@@ -219,6 +267,8 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
         updatedBrief = parsed.data as Brief;
       }
+      // What an approval hands the store, set below.
+      let approval: ProposalApproval | undefined;
       // Validated for the same reason, and refused before the append: a payload the
       // shape rejects must leave neither an event nor a stamp behind.
       //
@@ -230,6 +280,20 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         const parsed = ActionResponseShape.safeParse(payload);
         if (!parsed.success) {
           return fail(`action_response payload must be { approved: boolean, result?: string }: ${parsed.error.issues[0]?.message}`);
+        }
+        // An approval (topic rooms spec, D2), built here: after every check above and ahead of the minute's count, so
+        // a card that cannot be written is refused with the log and the count as they were (plan R14).
+        // `write` is what the store applies. It is null for a seat without `write_surface`, whose answer the store
+        // records and applies nothing (R13), and for a retry, which settles nothing again because the store answers
+        // it from its key, however the room has changed since (R21).
+        if (proposal !== null) {
+          let write: SurfaceWrite | null = null;
+          if (!retrying && denyVerb(session, me, "write_surface") === null) {
+            const resolved = await resolveSurfaceWrite(s, blobs, session_id, proposal.item);
+            if (!resolved.ok) return refusal(resolved);
+            write = resolved.value.write;
+          }
+          approval = { requestCursor: proposal.requestCursor, base: proposal.base, write };
         }
       }
       if (type === "progress") {
@@ -282,9 +346,34 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         : type === "action_request" ? { stampActionRequest: true }
         : undefined;
 
+      // Said by the keyed append and by the keyed approval alike, so the two cannot come to read differently.
+      const keyReused = () => fail(
+        `idempotency_key "${idempotency_key}" was already used for a different message. ` +
+        `Reuse a key only to retry the same send; pick a new one for new content.`
+      );
+
       let event: SessionEvent;
+      // The card an approval wrote: the audit row and the result both name it.
+      let written: { write: SurfaceWrite; cursor: number; approved: number } | null = null;
       let replayed = false;
-      if (idempotency_key) {
+      if (approval) {
+        // One call writes the response and the card, or neither (plan R12). Four of its outcomes refuse and write
+        // nothing, and the other two read as an ordinary send's do. A seat that cannot apply is not a refusal: its
+        // response is recorded alone and `written` stays null.
+        const outcome = await s.approveProposal(session_id, draft, idempotency_key ?? null, approval);
+        if (outcome.outcome === "stale") {
+          // Decided only for a write, so there is a card to name.
+          return staleApproval(approval.write!.key, outcome.cursor, approval.base);
+        }
+        if (outcome.outcome === "answered") return fail(alreadyAnswered(String(approval.requestCursor), outcome.by));
+        if (outcome.outcome === "conflict") return keyReused();
+        if (outcome.outcome === "frozen") return fail(FROZEN);
+        event = outcome.event;
+        replayed = outcome.outcome === "replayed";
+        if (outcome.outcome === "appended" && outcome.written !== null && approval.write !== null) {
+          written = { write: approval.write, cursor: outcome.written.cursor, approved: approval.requestCursor };
+        }
+      } else if (idempotency_key) {
         // No PayloadTooDeepError catch here any more. `appendEventOnce`
         // fingerprints, `canonical` throws that on a payload past the bound,
         // and this used to translate it — which is how the bound came to be
@@ -293,12 +382,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         // walks to the same bound, so this branch can no longer see one.
         const write: EventWrite =
           await s.appendEventOnce(session_id, draft, idempotency_key, extras);
-        if (write.outcome === "conflict") {
-          return fail(
-            `idempotency_key "${idempotency_key}" was already used for a different message. ` +
-            `Reuse a key only to retry the same send; pick a new one for new content.`
-          );
-        }
+        if (write.outcome === "conflict") return keyReused();
         if (write.outcome === "frozen") return fail(FROZEN);
         event = write.event;
         replayed = write.outcome === "replayed";
@@ -320,6 +404,12 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           chars: serialized.length,
           ...(ref_id ? { ref_id } : {}),
         });
+        // The card an approval wrote files the row a maintainer's own write would, under the approver, and names the
+        // proposal it came from (plan R18). The org's trail then shows who put the words on the surface, and on
+        // whose word.
+        if (written !== null) {
+          await audit(s, session, identity, "sent_surface", { ...surfaceAuditDetail(written.write), approved: written.approved });
+        }
       }
 
       return ok({
@@ -348,6 +438,8 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         room_members: others.map((m) => m.label),
         cursor: event.cursor,
         ...(replayed ? { replayed: true } : {}),
+        // The card an approval wrote, at the cursor it was written at: the response's `cursor` is the one before it.
+        ...(written !== null ? { applied: { key: written.write.key, cursor: written.cursor } } : {}),
         note: type === "action_request"
           ? "The peer's HUMAN must approve this — expect an action_response event, possibly after a delay."
           : undefined,

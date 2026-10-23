@@ -99,7 +99,7 @@ const NOT_PUBLIC =
  * sentence says who can put it right.
  */
 export const NO_ANSWERER =
-  "no active member can answer a proposal: every seat that holds respond_actions has left. Ask the room's creator to seat a maintainer.";
+  "no other active member can answer a proposal: no seat but yours holds respond_actions. Ask the room's creator to seat a maintainer.";
 
 export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
@@ -958,6 +958,74 @@ export async function checkProposal(
 }
 
 /**
+ * The checks of a surface write that come before it counts as a send, for any payload (topic rooms plan, R14): the
+ * shape and each kind's rule (`normalizeSurfaceWrite`), the blob a file, image or html item names
+ * (`settleBlob`), the 64-item cap, and a connector's ends. The write it returns carries the object's size, type and
+ * name where a blob is named, and is what the append is handed.
+ *
+ * `writeSurface` calls it after its gate, and an approval calls it for the proposal's item, so a card a
+ * maintainer's human approves is held to the rule a card a maintainer writes is held to, in the same words and the
+ * same order. It appends nothing and spends no place under the send limit, so a refusal here leaves the log and the
+ * minute's count as they were.
+ *
+ * The rows are read once, and the caller's append is a separate step: the cap and a connector's ends are
+ * courtesy bounds, as `writeSurface` says.
+ */
+export async function resolveSurfaceWrite(
+  store: BellmanStore,
+  blobs: BlobStore,
+  sessionId: string,
+  payload: unknown,
+): Promise<RoomResult<{ write: SurfaceWrite }>> {
+  const normalized = normalizeSurfaceWrite(payload);
+  if (!normalized.ok) return refuse("invalid", normalized.reason);
+  let { write } = normalized;
+
+  // A blob-backed item carries the object's metadata, not the writer's: `settleBlob` reads it.
+  if (normalized.blobId !== null && write.item !== null) {
+    const settled = await settleBlob(blobs, sessionId, write, normalized.blobId);
+    if (!settled.ok) return settled;
+    write = settled.value;
+  }
+
+  const rows = await store.surfaceOf(sessionId);
+  const byKey = new Map(rows.map((r) => [r.key, r] as const));
+  if (write.item !== null) {
+    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
+      return refuse(
+        "conflict",
+        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
+      );
+    }
+    if (write.item.kind === "connector" && write.item.ends !== null) {
+      for (const end of [write.item.ends.from, write.item.ends.to]) {
+        const target = byKey.get(end);
+        if (!target) {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
+        }
+        if (target.kind === "connector") {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
+        }
+      }
+    }
+  }
+  return succeed({ write });
+}
+
+/**
+ * What a `sent_surface` audit row says about a write: the key, the kind, the body's length and the object's bytes,
+ * or that the write removed the key. One function for a direct write and an approved card, so the two rows read alike.
+ */
+export function surfaceAuditDetail(write: SurfaceWrite): Record<string, unknown> {
+  return write.item !== null
+    ? {
+        key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
+        ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
+      }
+    : { key: write.key, removed: true };
+}
+
+/**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
  * One operation for both transports — `bellman_send type: "surface"` and
@@ -994,38 +1062,9 @@ export async function writeSurface(
   if (!gate.ok) return gate;
   const session = gate.value;
 
-  const normalized = normalizeSurfaceWrite(payload);
-  if (!normalized.ok) return refuse("invalid", normalized.reason);
-  let { write } = normalized;
-
-  // A blob-backed item carries the object's metadata, not the writer's: `settleBlob` reads it.
-  if (normalized.blobId !== null && write.item !== null) {
-    const settled = await settleBlob(blobs, sessionId, write, normalized.blobId);
-    if (!settled.ok) return settled;
-    write = settled.value;
-  }
-
-  const rows = await store.surfaceOf(sessionId);
-  const byKey = new Map(rows.map((r) => [r.key, r] as const));
-  if (write.item !== null) {
-    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
-      return refuse(
-        "conflict",
-        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
-      );
-    }
-    if (write.item.kind === "connector" && write.item.ends !== null) {
-      for (const end of [write.item.ends.from, write.item.ends.to]) {
-        const target = byKey.get(end);
-        if (!target) {
-          return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
-        }
-        if (target.kind === "connector") {
-          return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
-        }
-      }
-    }
-  }
+  const resolved = await resolveSurfaceWrite(store, blobs, sessionId, payload);
+  if (!resolved.ok) return resolved;
+  const { write } = resolved.value;
 
   if (countSend) {
     const me = await findMember(store, session, memberId, actor);
@@ -1067,15 +1106,7 @@ export async function writeSurface(
 
   // Nothing below happens twice: a replay's original call did it.
   if (!replayed) {
-    await audit(
-      store, session, actor, "sent_surface",
-      write.item !== null
-        ? {
-            key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
-            ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
-          }
-        : { key: write.key, removed: true },
-    );
+    await audit(store, session, actor, "sent_surface", surfaceAuditDetail(write));
   }
 
   return succeed({

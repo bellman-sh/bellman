@@ -4,7 +4,7 @@
  * checks before one is sent (Task 4).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { joinWith, pairUp, topicRoom, type TopicRoom } from "../helpers/flows.js";
+import { card, joinWith, pairUp, propose, sync, topicRoom, type TopicRoom } from "../helpers/flows.js";
 import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
 import { manifestFixture } from "../helpers/fixtures.js";
 
@@ -12,18 +12,6 @@ let h: Harness;
 beforeEach(() => { h = new Harness(); });
 afterEach(async () => { vi.useRealTimers(); await h.close(); });
 
-/** A text card with the source D4 asks for. */
-const card = (over: Record<string, unknown> = {}) => ({
-  key: "tools", kind: "text", title: "Tools",
-  body: "A server exposes tools by name. See https://modelcontextprotocol.io/specification/server/tools", ...over,
-});
-const propose = (r: TopicRoom, over: Record<string, unknown> = {}) =>
-  r.contributor.call("bellman_send", {
-    session_id: r.sessionId, member_id: r.contributorId, type: "action_request",
-    payload: { kind: "surface_proposal", item: card(), base: 0, ...over },
-  });
-const sync = (peer: Peer, sessionId: string, memberId: string) =>
-  peer.call("bellman_sync", { session_id: sessionId, member_id: memberId, since_cursor: 0 });
 type Outstanding = { cursor: number; mine: boolean }[];
 
 describe("how long a proposal stays open (D3)", () => {
@@ -105,6 +93,10 @@ describe("how long a proposal stays open (D3)", () => {
   });
 });
 
+/** What a proposal is told when nobody but its sender could answer it, pinned whole: the sentence says who can put it right. */
+const NO_ANSWERER_SENTENCE =
+  "no other active member can answer a proposal: no seat but yours holds respond_actions. Ask the room's creator to seat a maintainer.";
+
 const eventCount = async (r: TopicRoom) => (await h.store.eventsAfter(r.sessionId, 0)).length;
 const say = (r: TopicRoom, text: string) =>
   r.contributor.call("bellman_send", { session_id: r.sessionId, member_id: r.contributorId, type: "message", payload: { text } });
@@ -143,7 +135,18 @@ describe("sending a proposal (D2 to D4)", () => {
     expect((await r.maintainer.call("bellman_leave", { session_id: r.sessionId, member_id: r.maintainerId })).isError).toBe(false);
     const out = await propose(r);
     expect(out.isError).toBe(true);
-    expect(out.text).toContain("no active member can answer a proposal");
+    expect(out.text).toContain(NO_ANSWERER_SENTENCE);
+  });
+
+  // The case "no seat but yours" is written for: the lone maintainer proposes, and a proposer cannot answer their own.
+  it("is refused to a lone maintainer, whose own seat is the only one that holds respond_actions", async () => {
+    const r = await topicRoom(h);
+    const out = await r.maintainer.call("bellman_send", {
+      session_id: r.sessionId, member_id: r.maintainerId, type: "action_request",
+      payload: { kind: "surface_proposal", item: card(), base: 0 },
+    });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain(NO_ANSWERER_SENTENCE);
   });
 
   // R6, directly: a contributor's default grants are read_context and receive_messages. Asked of every other

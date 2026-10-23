@@ -131,6 +131,23 @@ export async function joinWith(peer: Peer, code: string, capabilities: string[] 
   });
 }
 
+/** A text card with the source D4 asks for. */
+export const card = (over: Record<string, unknown> = {}) => ({
+  key: "tools", kind: "text", title: "Tools",
+  body: "A server exposes tools by name. See https://modelcontextprotocol.io/specification/server/tools", ...over,
+});
+
+/** The room's contributor proposes `card()` against surface cursor 0; `over` replaces any field of the payload. */
+export const propose = (r: TopicRoom, over: Record<string, unknown> = {}) =>
+  r.contributor.call("bellman_send", {
+    session_id: r.sessionId, member_id: r.contributorId, type: "action_request",
+    payload: { kind: "surface_proposal", item: card(), base: 0, ...over },
+  });
+
+/** One poll from the start of the log, as `peer` in `sessionId`. */
+export const sync = (peer: Peer, sessionId: string, memberId: string) =>
+  peer.call("bellman_sync", { session_id: sessionId, member_id: memberId, since_cursor: 0 });
+
 /** A room its creator just started, with nobody else in it: the creator holds its one seat. */
 export async function startRoom(peer: Peer, manifest: Record<string, unknown> = manifestFixture()) {
   const started = await peer.call("bellman_start", { manifest, brief: brief() });

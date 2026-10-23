@@ -1,8 +1,9 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
-  Org, OrgIdp, OrgPatch,
+  Org, OrgIdp, OrgInvite, OrgPatch,
 } from "./types.js";
+import { MAX_PENDING_INVITES } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1763,6 +1764,22 @@ export interface BellmanStore {
    */
   provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org">;
 
+  /**
+   * An org's offer of a seat (ADR 0027), kept apart from its grants, ONE operation: `no_org` for no
+   * record, `exists` when this org already invited the key (the first offer kept), `limit` at
+   * MAX_PENDING_INVITES, else both rows and `member_invited` in the org's stream. Takes no seat.
+   */
+  putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org">;
+  /** The org's pending invites, by key, at most `limit`. */
+  listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]>;
+  /** Every pending invite that names one of these keys, from any org: what a sign-in shows. In the keys' order, then by org. */
+  invitesFor(keys: string[]): Promise<OrgInvite[]>;
+  /**
+   * Drops one invite, both rows. `invite_withdrawn` is recorded when `audit` is given, which is the
+   * admin's withdrawal; the person's own answer passes null and files nothing in the org's stream.
+   */
+  deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing">;
+
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
@@ -1837,6 +1854,8 @@ export class MemoryStore implements BellmanStore {
   private idps = new Map<string, OrgIdp>();
   /** The one index a verified domain writes (D11): domain to org. */
   private domainIndex = new Map<string, string>();
+  /** Each org's pending invites (ADR 0027), org to key to invite: apart from `grants`, which no invite enters. */
+  private invites = new Map<string, Map<string, OrgInvite>>();
   private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
@@ -3263,6 +3282,33 @@ export class MemoryStore implements BellmanStore {
     this.grants.set(key, detach(grant));
     this.recordAudit(grantAuditEntries(undefined, grant, audit, now));
     return "written";
+  }
+
+  async putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    if (!this.orgs.has(invite.orgId)) return "no_org";
+    const pending = this.invites.get(invite.orgId) ?? new Map<string, OrgInvite>();
+    if (pending.has(invite.key)) return "exists";
+    if (pending.size >= MAX_PENDING_INVITES) return "limit";
+    pending.set(invite.key, detach(invite));
+    this.invites.set(invite.orgId, pending);
+    this.recordAudit([orgEventEntry(invite.orgId, "member_invited", { key: invite.key, role: invite.role }, audit, invite.invitedAt)]);
+    return "invited";
+  }
+
+  async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
+    // By key, as the Durable Objects store's listing of `io:<org>:` comes back.
+    return detach([...(this.invites.get(orgId)?.values() ?? [])].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).slice(0, limit));
+  }
+
+  async invitesFor(keys: string[]): Promise<OrgInvite[]> {
+    const orgIds = [...this.invites.keys()].sort();
+    return detach([...new Set(keys)].flatMap((key) => orgIds.flatMap((orgId) => this.invites.get(orgId)?.get(key) ?? [])));
+  }
+
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+    if (!this.invites.get(orgId)?.delete(key)) return "missing";
+    if (audit) this.recordAudit([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())]);
+    return "deleted";
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

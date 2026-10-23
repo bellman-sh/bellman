@@ -1,3 +1,4 @@
+import { domainOf } from "./oauth/dns.js";
 import { parseSsoKey, ssoUserId } from "./oauth/providers.js";
 import type { Org, Role } from "./types.js";
 
@@ -12,6 +13,23 @@ export const MAX_ORG_NAME_CHARS = 80;
 
 // ponytail: a ceiling on seats so a typo cannot store a number nothing counts up to; not a plan limit.
 export const MAX_SEATS = 100_000;
+
+// ponytail: pending invites an org holds at once, the bound the roster is read with, so `GET /org/members`
+// lists every one. An invite takes no seat, so without it an admin could fill the registry; raise it with paging.
+export const MAX_PENDING_INVITES = 200;
+
+/**
+ * Whether the org owns this key by its form (ADR 0027), so seating it takes effect without the
+ * person's step, as it did before invites: a subject of the org's own IdP, or an address under a
+ * domain the org has verified. Every other key is a person the org must invite.
+ */
+export function ownsByForm(org: Org, key: string): boolean {
+  const sso = parseSsoKey(key);
+  if (sso) return sso.orgId === org.orgId;
+  if (!key.startsWith("email:")) return false;
+  const domain = domainOf(key.slice("email:".length));
+  return domain !== null && org.domains.some((d) => d.domain === domain && d.verifiedAt !== null);
+}
 
 /** The name as stored: trimmed, 1 to MAX_ORG_NAME_CHARS characters; undefined for anything else. */
 export function parseOrgName(value: unknown): string | undefined {

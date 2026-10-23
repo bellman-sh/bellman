@@ -161,8 +161,14 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
   return [row("org_updated", { ...changed, ...intent.detail })];
 }
 
-/** What an org's IdP and domain changes record (SSO spec, D9, D11): one row each, under `org:<orgId>`, the org's own affair. */
-export type OrgEvent = "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released";
+/**
+ * What an org's IdP and domain changes record (SSO spec, D9, D11), and its admins' invites (ADR 0027): one
+ * row each, under `org:<orgId>`, the org's own affair. An invite's row names the key the admin typed and
+ * nothing of the person; a person's answer to an invite files no row here, and a Join is the grant's row.
+ */
+export type OrgEvent =
+  | "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released"
+  | "member_invited" | "invite_withdrawn";
 
 export function orgEventEntry(orgId: string, action: OrgEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
   return auditRow(orgId, [orgId], { at: now, sessionId: `org:${orgId}`, action, roomName: null, detail: { ...detail, ...intent.detail } },

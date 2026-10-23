@@ -83,3 +83,17 @@ export function staleIndexKeys(
 export function allKeysFor(grant: PlanGrant): string[] {
   return [grantKey(grant.key), orgIndexKey(grant.orgId, grant.key)];
 }
+
+/**
+ * An invite's two rows (ADR 0027), as a grant has two: `io:<org>:<key>` for the org's listing and
+ * its count, `iv:<key>:<org>` for the sign-in that looks up every org that invited a key. Neither
+ * prefix is a grant's, so no scan of `gr:` or `go:` reads one. The key segment of `iv:` is encoded
+ * by the rule above, so a key holding a colon cannot reach another key's range.
+ */
+export const orgInvitesPrefix = (orgId: string): string => `io:${segment(orgId)}:`;
+export const keyInvitesPrefix = (key: string): string => `iv:${segment(key)}:`;
+
+/** Both storage keys an invite occupies. Every delete path clears both. */
+export function inviteKeysFor(invite: { orgId: string; key: string }): string[] {
+  return [`${orgInvitesPrefix(invite.orgId)}${invite.key}`, `${keyInvitesPrefix(invite.key)}${segment(invite.orgId)}`];
+}

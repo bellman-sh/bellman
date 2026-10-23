@@ -1,6 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import { allKeysFor, domainKey, grantKey, idpKey, orgIndexKey, orgIndexPrefix, orgKey, staleIndexKeys } from "./grant-index.js";
+import {
+  allKeysFor, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix, orgInvitesPrefix, orgKey,
+  staleIndexKeys,
+} from "./grant-index.js";
+import { MAX_PENDING_INVITES } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry } from "./store.js";
@@ -8,7 +12,7 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
-  Org, OrgIdp, OrgPatch,
+  Org, OrgIdp, OrgInvite, OrgPatch,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -3731,6 +3735,61 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  // ------------------------------------------------- invites (ADR 0027)
+  // Under `io:` and `iv:`, apart from the grants: nothing that reads `gr:` or `go:` can take one for a seat.
+
+  async #putOrgInviteTxn(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!(await txn.get<Org>(orgKey(invite.orgId)))) return "no_org" as const;
+      const [byOrg, byKey] = inviteKeysFor(invite);
+      if (await txn.get<OrgInvite>(byOrg)) return "exists" as const;
+      const pending = await txn.list({ prefix: orgInvitesPrefix(invite.orgId), limit: MAX_PENDING_INVITES });
+      if (pending.size >= MAX_PENDING_INVITES) return "limit" as const;
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([
+        orgEventEntry(invite.orgId, "member_invited", { key: invite.key, role: invite.role }, audit, invite.invitedAt),
+      ]));
+      await txn.put<unknown>({ [byOrg]: invite, [byKey]: invite, ...rows });
+      return "invited" as const;
+    });
+  }
+
+  async putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    const outcome = await this.#putOrgInviteTxn(invite, audit);
+    if (outcome === "invited") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
+    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()];
+  }
+
+  /** One prefix read per key, each bounded as an org's listing is: a key many orgs invited cannot make a sign-in read without end. */
+  async invitesFor(keys: string[]): Promise<OrgInvite[]> {
+    const found: OrgInvite[] = [];
+    for (const key of new Set(keys)) {
+      found.push(...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values());
+    }
+    return found;
+  }
+
+  async #deleteOrgInviteTxn(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const rowKeys = inviteKeysFor({ orgId, key });
+      if (!(await txn.get<OrgInvite>(rowKeys[0]))) return "missing" as const;
+      await txn.delete(rowKeys);
+      if (audit) {
+        await txn.put<unknown>(await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())])));
+      }
+      return "deleted" as const;
+    });
+  }
+
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+    const outcome = await this.#deleteOrgInviteTxn(orgId, key, audit);
+    if (outcome === "deleted" && audit) await this.driver.deliverNow();
+    return outcome;
+  }
+
   /**
    * Remove both copies of a grant. Every delete path goes through here, and in
    * one transaction: half a delete leaves the grant listed but unresolvable,
@@ -5082,6 +5141,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async provisionSsoMember(orgId: string, key: string, now: number, audit: AuditIntent): Promise<"written" | "exists" | "full" | "no_org"> {
     return this.registry.provisionSsoMember(orgId, key, now, audit);
+  }
+
+  async putOrgInvite(invite: OrgInvite, audit: AuditIntent): Promise<"invited" | "exists" | "limit" | "no_org"> {
+    return this.registry.putOrgInvite(invite, audit);
+  }
+
+  async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
+    return this.registry.listOrgInvites(orgId, limit);
+  }
+
+  async invitesFor(keys: string[]): Promise<OrgInvite[]> {
+    return this.registry.invitesFor(keys);
+  }
+
+  async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent | null): Promise<"deleted" | "missing"> {
+    return this.registry.deleteOrgInvite(orgId, key, audit);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

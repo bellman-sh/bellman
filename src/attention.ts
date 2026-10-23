@@ -65,6 +65,10 @@ export const ATTENTION = {
    * sending more.
    */
   housekeeping: "interrupt",
+  /** An outside question waits on a seat's answer, so it interrupts like the other room-raised prompts. */
+  outside_question: "interrupt",
+  outside_notice: "interrupt",
+  outside_answer: "interrupt",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

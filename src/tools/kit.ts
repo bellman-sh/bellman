@@ -46,6 +46,8 @@ export const SEND_VERB = {
   surface: "write_surface",
   action_request: "request_actions",
   action_response: "respond_actions",
+  /** A seat's reply to an outside A2A caller's question. Its own verb: no built-in preset grants it. */
+  outside_answer: "answer",
 } as const satisfies Record<SendKind, Verb>;
 
 // ---------------------------------------------------------------------------

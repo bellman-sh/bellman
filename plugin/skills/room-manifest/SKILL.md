@@ -137,6 +137,7 @@ The set is closed. A role can hold any subset of these and nothing else:
 | `revoke` | revoking a join code |
 | `request_actions` | sending `action_request` events |
 | `respond_actions` | sending `action_response` events |
+| `answer` | `bellman_send` type `outside_answer` — a seat's reply to a question an outside A2A caller put to a public room. No built-in preset grants it |
 | `write_surface` | `bellman_send` type `surface` — writing or removing an item on the room's working surface, and uploading the bytes a `file`, `image` or blob-backed `html` item names (`POST /rooms/:id/blobs`; the bridge's `bellman_upload` does both) |
 
 Every member can always `bellman_sync` and `bellman_leave`, whatever their

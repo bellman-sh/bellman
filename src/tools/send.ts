@@ -71,6 +71,7 @@ Args:
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
+      "outside_answer" — a seat's reply to an outside A2A caller's question. Needs the answer verb, which no built-in preset grants. Not accepted yet.
       "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, blob?, shape? } or { key, remove: true }. { key, restore: <cursor> } re-applies the version of that key written at that cursor, with its author kept (needs write_surface).
                          Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp), html (a self-contained page: the page inline in body, or blob: { id } naming a blob stored as text/html (uploaded as for a file, or bellman_upload with kind: "html"), never both; the panel renders it only inside a sandboxed frame on another origin, where its inline script and style and data: images work and it gets no cookies, no parent, no navigation, no popups, no downloads, no forms and no network through anything the policy governs (fetch, sockets, beacons; WebRTC is outside it in Chromium, so a page naming a STUN or TURN server reaches that host) — inline any library it needs; the bytes are the artifact, whatever they claim to be), shape (shape: { form: rect, ellipse, diamond, arrow or line, color?: slate, blue, green, amber, red or violet, or a hex such as #3b82f6, flip?: true draws an arrow or a line from the bottom-left to the top-right }; placement { x, y, w, h } required; the label is title; no body). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
                          Needs the write_surface verb. Items replace by key; at most 64 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
@@ -112,6 +113,9 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           ...(out.value.replayed ? { replayed: true } : {}),
         });
       }
+
+      // Not usable yet: the handling of an outside answer arrives with the A2A door.
+      if (type === "outside_answer") return fail("outside_answer is not supported yet.");
 
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");

@@ -444,7 +444,7 @@ default_role: helper
 creator_role: lead
 ```
 
-Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `write_surface`.
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `write_surface`, `answer`.
 Every member can always sync and leave, and read the working surface.
 
 Verbs are enforced by the server. A call a seat's role does not permit is

@@ -13,9 +13,12 @@ import type { HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, Save
  *
  * `write_surface` (#129) gates `bellman_send type: "surface"`, the one write to
  * the room's working surface. Reading it is never gated, as reading never is.
+ *
+ * `answer` gates `bellman_send type: "outside_answer"`, a seat's reply to a question an outside A2A caller
+ * put to a public room. No built-in preset grants it: a creator adds it to the one role that speaks for the room.
  */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
+  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer",
 ] as const satisfies readonly Verb[];
 
 export const PRESET_NAMES = ["pair", "swarm", "review", "social", "topic"] as const satisfies readonly PresetName[];

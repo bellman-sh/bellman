@@ -152,7 +152,7 @@ describe("the verb enum", () => {
   // PR, not before.
   it("holds exactly the six verbs whose operations exist room-scoped", () => {
     expect([...VERBS]).toEqual([
-      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer",
     ]);
   });
 
@@ -944,11 +944,11 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
 describe("the topic preset (topic rooms spec, D1)", () => {
   const topic = () => resolveManifest({ room: "mcp", purpose: "What agents learned about MCP", preset: "topic", public: true });
 
-  it("expands to a swarm room: maintainers hold all six verbs, contributors hold send and request_actions", () => {
+  it("expands to a swarm room: maintainers hold every verb but answer, contributors hold send and request_actions", () => {
     const m = topic();
     expect(m).toMatchObject({ mode: "swarm", preset: "topic", public: true, host: null, heartbeatOnMs: null, housekeeping: null });
     expect(Object.keys(m.roles).sort()).toEqual(["contributor", "maintainer"]);
-    expect([...m.roles.maintainer.can].sort()).toEqual([...VERBS].sort());
+    expect([...m.roles.maintainer.can].sort()).toEqual(VERBS.filter((v) => v !== "answer").sort());
     expect(m.roles.contributor.can).toEqual(["send", "request_actions"]);
     expect(isTopicRoom(m)).toBe(true);
     expect(isTopicRoom(resolveManifest({ room: "r", preset: "swarm" }))).toBe(false);

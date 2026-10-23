@@ -370,12 +370,17 @@ describe("a public room read by its name (public names spec, D6)", () => {
     const res = (await read("/public/rooms"))!;
     expect(res.status).toBe(200);
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    // Each room's name and purpose as its own read gives them, envelope and member numbers included, for the directory at bellman.sh/r/.
+    const textOf = async (id: string) => (await bodyOf(await read(`/public/rooms/${id}`))).text;
     expect(await res.json()).toEqual({ rooms: [
-      { id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another" },
-      { id: PUB, name: "open-review", public_url: "https://bellman.sh/r/open-review" },
+      { id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another", text: await textOf("qs_other") },
+      { id: PUB, name: "open-review", public_url: "https://bellman.sh/r/open-review", text: await textOf(PUB) },
     ] });
+    expect(JSON.stringify(await textOf(PUB))).toContain("Read along");
     await store.unpublishSession(PUB, Date.now());
-    expect(await bodyOf(await read("/public/rooms"))).toEqual({ rooms: [{ id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another" }] });
+    expect(await bodyOf(await read("/public/rooms"))).toEqual({ rooms: [
+      { id: "qs_other", name: "another", public_url: "https://bellman.sh/r/another", text: await textOf("qs_other") },
+    ] });
   });
 
   it("reads the room, its surface and its log by its name as by its session id", async () => {

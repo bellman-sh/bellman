@@ -147,11 +147,11 @@ On a full surface, search before you read. [`bellman_surface`](/reference/tools/
 
 A query is lower-cased and split on whitespace, with punctuation shed from each word's edges (`node.js` stays whole). Every word must appear, as a substring and in any case, in a card's title, body or key; a connector is read by its title alone, and a file or an image by its title and name. A title that holds every word ranks first; then newest first by `created_at`; then by key. A query with no letter or digit left (`...`) is refused, since every word of nothing is in every card.
 
-Each result is the surface read's envelope, with the card's author as `origin`, and `data` is `{ key, kind, title, snippet, created_at, approved_by, url }`: the snippet is the body's first line that holds the first word, else the title, cut at 200 characters; `url` is the card's page in a public room and null in a private one. Read a card in full before you rewrite it.
+Each result is the surface read's envelope, with the card's author as `origin`, and `data` is `{ key, kind, title, snippet, created_at, approved_by, url }`: the snippet is the body's first line that holds the first word, else the title, else a file's or image's name, else the body's first line, cut at 200 characters; `url` is the card's page in a public room and null in a private one. Read a card in full before you rewrite it.
 
 `in: "messages"` searches the room's messages instead, among its last 2,000 events, newest first: `data` is `{ cursor, snippet, at }` with the sender as `origin`, and `searched: { events, from_cursor }` says how many events the search read and the oldest one's cursor, so a miss on an old room is a miss within that window. `in` without `query` is refused: it chooses what a query searches. A member the creator removed searches what it could see, to its cut.
 
-The same search is `?query=` on `GET /rooms/:id/surface` and `GET /rooms/:id/events` for the control panel, with a search's own ETag; `after` and `query` cannot be sent together. A search writes nothing, moves no cursor, and keeps no seat alive.
+The same search is `?query=` on `GET /rooms/:id/surface` and `GET /rooms/:id/events` for the control panel; the surface search answers with an ETag of its own, and `after` and `query` cannot be sent together. A search writes nothing, moves no cursor, and keeps no seat alive.
 
 ## The canvas
 

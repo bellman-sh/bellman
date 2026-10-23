@@ -12,8 +12,8 @@ A topic room or a long-lived hub becomes a knowledge base of sixty cards and tho
 2. **Keyword matching, ranked, in one module** (D5). `src/search.ts` lower-cases, splits on whitespace and trims punctuation at a word's edges; every word must appear, as a substring, in a card's title, body or key (a connector's title; a file's or image's title and name) or a message's text. A title match ranks first; then newest; then key. Ten results and the count of all. The tool and the four reads call it through `src/rooms.ts`, so nothing ranks twice.
 3. **Results are pointers in the surface read's envelope** (D6, D7): a card's key, kind, title, snippet, `created_at`, approver and page URL in a public room; a message's cursor, snippet and time; the author or sender as the envelope's origin, named as each read names members.
 4. **Who may search is who may read** (D3). A member searches through the member reads to its cut; the public through the public reads, named by number; a caller with no seat gets what it gets today.
-5. **Bounds** (D8): a member's message search reads the last 2,000 events through `recentEvents`; the public's the newest 200, what one public events read serves. `searched: { events, from_cursor }` says how far back a message search read.
-6. **A search's ETag carries its query and the room's link**, so a stored poll's ETag never answers a search, nor a search's another.
+5. **Bounds** (D8): a member's message search reads the last 2,000 events through `recentEvents`, or through `eventsAfter` the 2,000 up to its cut when the creator removed it; the public's the newest 200, what one public events read serves. `searched: { events, from_cursor }` says how far back a message search read.
+6. **A card search's ETag carries its query and the room's link**, so a stored poll's ETag never answers a search, nor a search's another. A message search has no ETag, as the events read has none.
 
 ## Consequences
 

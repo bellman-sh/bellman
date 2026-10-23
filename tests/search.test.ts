@@ -18,6 +18,10 @@ describe("a query (room search spec, section 2, D5)", () => {
     expect(queryWords("-- ... --")).toEqual([]);
   });
 
+  it("keeps a combining mark at a word's end: a vowel sign or an accent is part of the letter", () => {
+    expect(queryWords("\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} cafe\u{301}!")).toEqual(["\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947}", "cafe\u{301}"]);
+  });
+
   it("is 3 to 200 characters once trimmed, and must hold a word", () => {
     for (const q of ["ab", "  ab  ", "a".repeat(201)]) expect(checkQuery(q)).toEqual({ ok: false, reason: "query must be 3 to 200 characters" });
     expect(checkQuery("abc")).toEqual({ ok: true, words: ["abc"] });
@@ -80,8 +84,10 @@ describe("snippets (section 2, R7)", () => {
     expect(cards([row("a", { body: "one line with retry" })], "retry").results[0].snippet).toBe("one line with retry");
   });
 
-  it("is the title when the body does not hold the first word", () => {
+  it("is the title when the body does not hold the first word, trimmed, and a blank title is no title", () => {
     expect(cards([row("a", { title: "Retry", body: "nothing here" })], "retry").results[0].snippet).toBe("Retry");
+    expect(cards([row("a", { title: "  Retry  ", body: "nothing here" })], "retry").results[0].snippet).toBe("Retry");
+    expect(cards([row("retry", { title: "   ", body: "first line" })], "retry").results[0].snippet).toBe("first line");
   });
 
   it("cuts past 200 characters at the last space, or at 200, with an ellipsis", () => {
@@ -89,6 +95,10 @@ describe("snippets (section 2, R7)", () => {
     expect(cutAtWord("w".repeat(200))).toBe("w".repeat(200));
     expect(cutAtWord(`${"x".repeat(150)} ${"y".repeat(100)}`)).toBe(`${"x".repeat(150)}\u{2026}`);
     expect(cutAtWord("z".repeat(250))).toBe(`${"z".repeat(200)}\u{2026}`);
+    // A space at index 200 itself counts: the cut keeps the whole word before it.
+    expect(cutAtWord(`${"a".repeat(100)} ${"b".repeat(99)} ${"c".repeat(50)}`)).toBe(`${"a".repeat(100)} ${"b".repeat(99)}\u{2026}`);
+    // A surrogate pair across the cut is dropped whole, never split.
+    expect(cutAtWord(`${"x".repeat(199)}\u{1F600}${"y".repeat(50)}`)).toBe(`${"x".repeat(199)}\u{2026}`);
   });
 });
 

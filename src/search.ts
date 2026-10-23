@@ -23,7 +23,8 @@ export type SearchIn = (typeof SEARCH_IN)[number];
 export const QUERY_LENGTH_REFUSAL = "query must be 3 to 200 characters";
 export const QUERY_WORDLESS_REFUSAL = "query must hold a word of letters or digits";
 
-const EDGE_PUNCTUATION = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
+// A letter, a digit, or a combining mark (so a word's last letter keeps its vowel sign or accent).
+const EDGE_PUNCTUATION = /^[^\p{L}\p{M}\p{N}]+|[^\p{L}\p{M}\p{N}]+$/gu;
 
 /** The query's words: lower-cased, split on whitespace, punctuation shed at each word's edges and kept inside it. */
 export function queryWords(query: string): string[] {
@@ -43,12 +44,17 @@ export function checkQuery(query: string): { ok: true; words: string[] } | { ok:
   return { ok: true, words };
 }
 
-/** A line past SNIPPET_CHARS is cut at the last space before that point, or at the point when it has none, and ends in an ellipsis. */
+/**
+ * A line past SNIPPET_CHARS is cut at the last space at or before that index, or at the index when
+ * it has none (whole, so a surrogate pair is never split), and ends in an ellipsis.
+ */
 export function cutAtWord(line: string): string {
   if (line.length <= SNIPPET_CHARS) return line;
-  const head = line.slice(0, SNIPPET_CHARS);
-  const space = head.lastIndexOf(" ");
-  return `${space > 0 ? head.slice(0, space) : head}\u{2026}`;
+  const space = line.lastIndexOf(" ", SNIPPET_CHARS);
+  if (space > 0) return `${line.slice(0, space)}\u{2026}`;
+  const last = line.charCodeAt(SNIPPET_CHARS - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? SNIPPET_CHARS - 1 : SNIPPET_CHARS;
+  return `${line.slice(0, end)}\u{2026}`;
 }
 
 /** The fields a search reads, by kind: a connector its title; a file or an image its title and name; every other kind its title, body and key. A null field is no text. */
@@ -96,7 +102,7 @@ function cardSnippet(row: SurfaceRow, word: string): string | null {
   const body = named || row.kind === "connector" ? null : row.body;
   const candidates: (string | null)[] = [
     body === null ? null : lineHolding(body, word),
-    row.title,
+    row.title?.trim() || null,
     named ? row.blob?.name ?? null : null,
     body === null ? null : firstLine(body),
   ];

@@ -120,9 +120,11 @@ describe("bellman_surface with query (room search spec, section 1)", () => {
     await h.store.updateMember(p.sessionId, p.creatorMemberId, { lastSeenAt: old });
     const before = await h.store.getSession(p.sessionId);
     const tail = await h.store.recentEvents(p.sessionId, 1);
+    const audit = await h.store.auditForOrg("org_codenerd", 500);
     await search(p.creator, p.sessionId, { query: "retry" });
     await search(p.creator, p.sessionId, { query: "retry", in: "messages" });
     expect(await h.store.recentEvents(p.sessionId, 1)).toEqual(tail);
+    expect(await h.store.auditForOrg("org_codenerd", 500)).toEqual(audit);
     const after = (await h.store.getSession(p.sessionId))!;
     expect(surfaceCursor(after)).toBe(surfaceCursor(before!));
     expect(after.members.find((m) => m.memberId === p.creatorMemberId)!.lastSeenAt).toBe(old);

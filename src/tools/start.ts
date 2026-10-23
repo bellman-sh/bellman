@@ -6,7 +6,7 @@ import type { ToolResult } from "./kit.js";
 import { roomPreview } from "../projections.js";
 import { hostMember } from "../host.js";
 import type { ArrivingMember, Identity, NewSession, RoomManifest } from "../types.js";
-import { entitlementsFor } from "../auth.js";
+import { entitlementsFor, upgradeHint, type UpgradeLinks } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
@@ -17,7 +17,7 @@ import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 import { APP_UI_META } from "../ui/resource.js";
 
-export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean }): void {
+export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean; upgrade?: UpgradeLinks }): void {
   server.registerTool(
     "bellman_start",
     {
@@ -49,7 +49,7 @@ Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, pub
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
-Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "a public room requires..." (plan), "public_name needs a public room", "public name "...": use 3 to 40 lowercase letters...", "public name "..." is taken: choose another..." (nothing is created), "org_only sessions require..." (plan), "org_only was set but..." (no org), "hosted room limit reached: ... open" (your plan's hosted rooms are all open; one that closes frees its slot), "monthly session limit..." (quota).`,
+Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "a public room requires..." (plan), "public_name needs a public room", "public name "...": use 3 to 40 lowercase letters...", "public name "..." is taken: choose another..." (nothing is created), "org_only sessions require..." (plan), "org_only was set but..." (no org), "hosted room limit reached: ... open" (your plan's hosted rooms are all open; one that closes frees its slot), "monthly session limit..." (quota). A plan or quota refusal ends with "Upgrade to <plan>: <url>" when this server sells a plan that allows it: show your human that link.`,
       inputSchema: {
         manifest: ManifestShape,
         brief: BriefShape,
@@ -104,17 +104,18 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       if (manifest.host !== null && !features.hostedSeat) return fail("hosted seats are not available yet");
 
       const ent = entitlementsFor(identity);
+      const upgrade = (need: Parameters<typeof upgradeHint>[1]): string => upgradeHint(features.upgrade, need);
       // Before the mode check: a hosted room is always a swarm room, and on free the
       // swarm refusal would point at pro, which has no hosted seat either.
       if (manifest.host !== null && ent.hostedRooms === 0) {
-        return fail(`a hosted seat requires the max or team plan (you are on "${identity.plan}").`);
+        return fail(`a hosted seat requires the max or team plan (you are on "${identity.plan}").${upgrade((e) => e.hostedRooms > 0)}`);
       }
       if (!ent.modes.includes(manifest.mode)) {
-        return fail(`swarm mode requires the pro, max or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
+        return fail(`swarm mode requires the pro, max or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.${upgrade((e) => e.modes.includes(manifest.mode))}`);
       }
       // Read from the resolved manifest, so a cite's public and a saved preset's default meet it too.
       if (manifest.public && !ent.publicRooms) {
-        return fail(`a public room requires the pro, max or team plan (you are on "${identity.plan}"). Start it with public: false, or upgrade.`);
+        return fail(`a public room requires the pro, max or team plan (you are on "${identity.plan}"). Start it with public: false, or upgrade.${upgrade((e) => e.publicRooms)}`);
       }
       // The room's own, so an argument beside the manifest and never in it: a saved preset is
       // started many times, and a name is held by one room (public names spec, D4).
@@ -124,14 +125,14 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         if (!manifest.public) return fail("public_name needs a public room: add public: true, or leave public_name out.");
       }
       if (org_only && !ent.orgScoping) {
-        return fail(`org_only sessions require the team plan (you are on "${identity.plan}").`);
+        return fail(`org_only sessions require the team plan (you are on "${identity.plan}").${upgrade((e) => e.orgScoping)}`);
       }
       if (org_only && !identity.orgId) {
         return fail("org_only was set but your identity has no org.");
       }
       const used = await s.countCreatesThisMonth(identity.userId);
       if (used >= ent.monthlyCreates) {
-        return fail(`monthly session limit reached (${ent.monthlyCreates} on the "${identity.plan}" plan).`);
+        return fail(`monthly session limit reached (${ent.monthlyCreates} on the "${identity.plan}" plan).${upgrade((e) => e.monthlyCreates > ent.monthlyCreates)}`);
       }
 
       // The refusals that write come last. A name first: refused, it holds nothing, and claimed for a
@@ -151,7 +152,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         const slot = await s.reserveHostedRoom(identity.userId, sessionId, ent.hostedRooms);
         if (!slot.ok) {
           await giveBack();
-          return fail(`hosted room limit reached: ${slot.open} hosted rooms open, the most the "${identity.plan}" plan allows. A hosted room that closes frees its slot.`);
+          return fail(`hosted room limit reached: ${slot.open} hosted rooms open, the most the "${identity.plan}" plan allows. A hosted room that closes frees its slot.${upgrade((e) => e.hostedRooms > ent.hostedRooms)}`);
         }
       }
 

@@ -396,7 +396,7 @@ Stripe sells the plans. `BELLMAN_BILLING` in `wrangler.toml` is `off`, `shadow` 
 | --- | --- |
 | `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
 | `STRIPE_API_KEY` | A restricted key (`rk_…`) with **read** access to Subscriptions and nothing else. Stripe delivers events out of order and timestamps them only to the second, so the webhook reads each subscription's current state from Stripe instead of trusting the event. |
-| `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served, at `/upgrade/<name>`. |
+| `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served, at `/upgrade/<name>`. A plan refusal ends with the `/upgrade/` link of `pro_monthly` or `team_seat_monthly`, whichever is the cheapest plan that allows it, when that link is set. |
 
 Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted`, `.paused` and `.resumed`. A price sells the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` sells `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise.
 

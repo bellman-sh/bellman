@@ -101,7 +101,7 @@ export type PlanStore = Pick<
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "getOrg" | "createOrg" | "updateOrg" | "countOrgMembers"
-  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember"
+  | "getOrgIdp" | "orgForDomain" | "provisionSsoMember" | "scimUserByKey"
   | "countCreatesThisMonth"
   | "releaseHandleNamed" | "handleHolders" | "sessionsJoinedBy" | "membersOfUser"
   | "recordSignIn"
@@ -118,11 +118,17 @@ export const MAX_REPORTS_LISTED = 200;
 export type PlanSource = "operator" | "grant" | "default";
 
 /**
- * The refusal `require_sso` makes (SSO spec, D13): a GitHub or Google sign-in by someone the org
- * claims, named so the person knows which door to use. Thrown where plans resolve, so a token or a
- * panel session from before the switch stops at its next re-check.
+ * A sign-in an org has closed, thrown where plans resolve, so a token or a panel session from before the
+ * closing stops at its next re-check: `require_sso` (SSO spec, D13) or a deprovision (SCIM spec, D4). The
+ * places that catch one end the sign-in with its message; the SSO one adds which door to use.
  */
-export class SsoRequired extends Error {
+export class SignInRefused extends Error {}
+
+/**
+ * The refusal `require_sso` makes (SSO spec, D13): a GitHub or Google sign-in by someone the org
+ * claims, named so the person knows which door to use.
+ */
+export class SsoRequired extends SignInRefused {
   constructor(public readonly orgId: string, public readonly orgName: string) {
     super(`${orgName} requires single sign-on`);
     this.name = "SsoRequired";
@@ -138,7 +144,7 @@ export class SeatsFull extends Error {
 }
 
 /** A person the org's identity provider deprovisioned (SCIM spec, D4): no sign-in, and nothing minted. */
-export class AccessRemoved extends Error {
+export class AccessRemoved extends SignInRefused {
   constructor(public readonly orgName: string) {
     super(`${orgName} has removed your access: ask its admin`);
     this.name = "AccessRemoved";
@@ -151,8 +157,16 @@ export class AccessRemoved extends Error {
  * that org's owner, whose original provider is the break-glass. An SSO profile is exempt, since it
  * came through the door the switch points at; an operator override never reaches this.
  */
-async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SsoRequired | null> {
-  if (!plans || keys.some((key) => key.startsWith("sso:"))) return null;
+async function ssoRefusal(plans: PlanStore | undefined, identity: Identity, keys: string[]): Promise<SignInRefused | null> {
+  if (!plans) return null;
+  // A person the org's identity provider deprovisioned (SCIM spec, D4): one read per stable key, here so that a
+  // token refresh, a panel session's re-check and a hosted room's month turn all stop them, as the switch stops
+  // its people. Before the exemption below: the subject the IdP deprovisioned is an `sso:` key.
+  for (const key of grantKeys(keys)) {
+    const managed = await plans.scimUserByKey(key);
+    if (managed && !managed.active) return new AccessRemoved((await plans.getOrg(managed.orgId))?.name ?? managed.orgId);
+  }
+  if (keys.some((key) => key.startsWith("sso:"))) return null;
   const orgIds = new Set<string>();
   if (identity.orgId) orgIds.add(identity.orgId);
   for (const key of keys) {
@@ -327,8 +341,8 @@ export async function signedInPlan(
   try {
     return (await replanOnRefresh(stored, [key], config)).identity.plan;
   } catch (err) {
-    // An account `require_sso` has closed can no longer sign in, so its plan is as good as free.
-    if (err instanceof SsoRequired) return "free";
+    // An account `require_sso` or a deprovision has closed can no longer sign in, so its plan is as good as free.
+    if (err instanceof SignInRefused) return "free";
     throw err;
   }
 }
@@ -681,6 +695,9 @@ async function finishUpgrade(
   } catch (err) {
     if (err instanceof SsoRequired) {
       return html(`<h1>${escape(err.orgName)} requires single sign-on</h1><p>Nothing was charged. An organisation's plan is its own; ask its admin.</p>`, 403);
+    }
+    if (err instanceof AccessRemoved) {
+      return html(`<h1>Access removed</h1><p>${escape(err.message)}. Nothing was charged.</p>`, 403);
     }
     console.error(`${name} sign-in for upgrade failed:`, err);
     return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
@@ -1337,8 +1354,10 @@ export async function handleOAuth(
           current.source, keys
         );
       } catch (err) {
-        // Not put back: the account signs in through its organisation's IdP from now on (SSO spec, D13).
+        // Not put back: the account signs in through its organisation's IdP from now on (SSO spec, D13), or
+        // not at all (SCIM spec, D4).
         if (err instanceof SsoRequired) return oauthError("invalid_grant", `${err.message}: sign in again through it`);
+        if (err instanceof AccessRemoved) return oauthError("invalid_grant", err.message);
         console.error("could not complete a refresh:", err);
         await config.store.putRefresh(token, stored).catch(() => {});
         return oauthError("temporarily_unavailable", "could not complete the refresh — retry", 503);
@@ -1914,9 +1933,10 @@ async function sessionCaller(
   try {
     current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
   } catch (err) {
-    // The session ends here (SSO spec, D13): the person signs in again through their organisation's IdP.
-    if (err instanceof SsoRequired) {
-      await config.store.deleteSession(id).catch((e) => console.error("could not end a session require_sso closed:", e));
+    // The session ends here (SSO spec, D13; SCIM spec, D4): the person signs in again through their
+    // organisation's IdP, or not at all.
+    if (err instanceof SignInRefused) {
+      await config.store.deleteSession(id).catch((e) => console.error("could not end a session the org closed:", e));
       return null;
     }
     throw err;

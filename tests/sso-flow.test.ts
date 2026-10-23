@@ -288,6 +288,34 @@ describe("SCIM-provisioned members (SCIM spec, D4)", () => {
     expect(await plans.getGrant("sso:org_acme:00u1abc")).toBeUndefined();
     expect(await plans.countOrgMembers("org_acme")).toBe(1);
   });
+
+  it("stops a deactivated person's refresh and panel session at their next re-check, and admits them again once reactivated", async () => {
+    await plans.createScimUser(pushed(), scimIntent("org_acme"));
+    const { clientId, tokens } = await signInThroughSso();
+    expect(tokens).not.toBeNull();
+    const sid = "sid-scim";
+    const now = Date.now();
+    await config.store.putSession(sid, {
+      identity: { userId: ssoUserId("org_acme", "00u1abc"), orgId: "org_acme", plan: "team", role: "member", label: "ana@acme.test" },
+      plan_source: "grant", identity_keys: ["sso:org_acme:00u1abc", "email:ana@acme.test"], created_at: now, last_used_at: now,
+      replanned_at: now - ACCESS_TOKEN_TTL_SECONDS * 1000 - 1, expires_at: now + SESSION_TTL_MS,
+    });
+    await plans.updateScimUser("org_acme", "x1", { active: false }, now, scimIntent("org_acme"));
+
+    const refused = await refresh(clientId, tokens!.refresh_token);
+    const body = (await refused.json()) as { error: string; error_description: string };
+    expect([refused.status, body.error]).toEqual([400, "invalid_grant"]);
+    expect(body.error_description).toContain("removed your access");
+    expect((await refresh(clientId, tokens!.refresh_token)).status).toBe(400);
+    const session = await call("/auth/session", { headers: { cookie: `${COOKIE}=${sid}`, origin: PANEL } });
+    expect(session.status).toBe(401);
+    expect(await config.store.touchSession(sid, Date.now())).toBeUndefined();
+
+    await plans.updateScimUser("org_acme", "x1", { active: true }, Date.now(), scimIntent("org_acme"));
+    const { identity } = await signInThroughSso();
+    expect(identity).toMatchObject({ orgId: "org_acme", plan: "team", role: "member" });
+    expect(await plans.countOrgMembers("org_acme")).toBe(2);
+  });
 });
 
 describe("the panel's sign-in through single sign-on", () => {

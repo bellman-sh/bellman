@@ -1,6 +1,6 @@
-# ADR 00NN — The server places an item written without a placement
+# ADR 0030 — The server places an item written without a placement
 
-**Date:** 2026-10-23 · **Status:** accepted · **Spec:** `docs/superpowers/specs/2026-10-22-surface-placement-design.md` · **Plan:** `docs/superpowers/plans/2026-10-22-surface-placement.md`
+**Date:** 2026-10-23 · **Status:** accepted · **Amends:** ADR 0015, decision 1 · **Spec:** `docs/superpowers/specs/2026-10-22-surface-placement-design.md` · **Plan:** `docs/superpowers/plans/2026-10-22-surface-placement.md`
 
 ## Context
 
@@ -38,9 +38,11 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 3. **A placement given is stored as given; a replace that omits one keeps the stored one
    (R5, R6).** Keeping clear of a box that is there is the skill's rule, and the server places
    only what it was not told. A write that replaces an item and leaves out `placement` takes
-   the stored one rather than a new slot, even when a lower slot has freed since. A stored
-   `null` is not kept: that write is placed. On the wire `null` is absence, so nothing can
-   clear a placement afterwards.
+   the stored one rather than a new slot, even when a lower slot has freed since. That amends
+   ADR 0015's decision 1, "Writing a key replaces its item": a replace takes every field from
+   the write except a placement it leaves out, which stays. A stored `null` is not kept: that
+   write is placed. On the wire `null` is absence, so nothing can clear a placement
+   afterwards.
 4. **The event carries the row's placement, and a retry is judged by the caller's draft
    (R3).** The store appends the draft with its payload set to the placed item, so the log and
    the row agree and a viewer's replay lays the item out where the row is. The idempotency
@@ -52,9 +54,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
    and the dash draw a row with none at the next slot, counting only the rows with none, in key
    order, and ignoring every placed box. A search that read stored boxes alone, as the spec's
    text has it, would put the first new card on the first old card in every room that predates
-   this. `coveredBoxes` counts those rows as the viewers do, and leaves out the key being
-   written, because that row leaves the unplaced rows and the others close up behind it. Old
-   rows keep the viewers' grid; the server keeps clear of it.
+   this. `coveredBoxes` gives each of those rows one full cell, so k of them cover slots 0 to
+   k - 1 whatever order a viewer draws them in, and it sorts nothing. It leaves out the key
+   being written, because that row leaves the unplaced rows and the others close up behind
+   it. Old rows keep the viewers' grid; the server keeps clear of it.
 6. **The search ends at `MAX_SLOT_SEARCH` slots, 256 (R7).** That is a row of four slots for
    each of the surface's 64 items. The spec's 64 cells past the last holds only while each box
    covers one cell, and a placement's `w` and `h` have no upper bound: a box of 1e300 covers

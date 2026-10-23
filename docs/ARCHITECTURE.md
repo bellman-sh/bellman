@@ -953,7 +953,7 @@ so `bellman_sync` reports "the surface moved" off the record it already read.
 A member a creator removed (#113) is told a number derived from the items it is
 shown instead, because the record's could claim a change it never saw.
 
-An item that arrives with no placement is placed in the append that stores it (ADR 00NN).
+An item that arrives with no placement is placed in the append that stores it (ADR 0030).
 `withPlacement` (`src/surface.ts`) gives a `text`, `link`, `diagram`, `file`, `image` or `html`
 item the placement its key already holds, so replacing an item moves nothing, and otherwise the
 lowest slot of the viewers' grid (`GRID` and `gridSlot`: four columns of 320 by 200 cells, 40

@@ -22,6 +22,7 @@ import { domainVerified, isDomain, newDomainToken, verificationRecord } from "..
 import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
+import { randomId, sha256Base64url } from "../oauth/tokens.js";
 import { MAX_ORG_NAME_CHARS, orgView, parseOrgName, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, PlanGrant, Role } from "../types.js";
@@ -47,6 +48,8 @@ const IDP = "/org/idp";
 const DOMAINS = "/org/domains";
 const DOMAIN = /^\/org\/domains\/([^/]+)$/;
 const VERIFY = /^\/org\/domains\/([^/]+)\/verify$/;
+const SCIM = "/org/scim";
+const SCIM_TOKEN = "/org/scim/token";
 
 /** A member as the roster shows one (D2): the grant, with the user id its key names and whether it is the owner's. */
 export interface MemberView {
@@ -126,13 +129,15 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
     const member = MEMBER.exec(path);
     const verify = VERIFY.exec(path);
     const domain = verify ? null : DOMAIN.exec(path);
-    const known = path === ORG || path === MEMBERS || path === IDP || path === DOMAINS || member || domain || verify;
+    const known = path === ORG || path === MEMBERS || path === IDP || path === DOMAINS || path === SCIM || path === SCIM_TOKEN || member || domain || verify;
     if (!known) return problem(404, "not_found", "no such route", origin);
     const allow = path === ORG ? "GET, PATCH"
       : path === MEMBERS ? "GET, POST"
         : path === IDP ? "GET, PUT, DELETE"
           : path === DOMAINS || verify ? "POST"
-            : domain ? "DELETE" : "PATCH, DELETE";
+            : path === SCIM ? "GET"
+              : path === SCIM_TOKEN ? "POST, DELETE"
+                : domain ? "DELETE" : "PATCH, DELETE";
     if (!allow.split(", ").includes(request.method)) return methodNotAllowed(allow, origin);
 
     const who = await deps.caller(request);
@@ -171,6 +176,28 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       const updated = await deps.store.updateOrg(orgId, { name, requireSso }, intent);
       if (!updated) return problem(404, "no_org", "this org has no record yet; the operator creates one", origin);
       return json(200, orgView(updated, await deps.store.countOrgMembers(orgId), identity.role), origin);
+    }
+
+    // The org's SCIM token (SCIM spec, D1): what its admin pastes into Okta or Entra beside the base URL. Only its
+    // hash is stored, so it is shown once, here; issuing again replaces it, and the old one stops at the commit.
+    const baseUrl = `${new URL(request.url).origin}/scim/v2`;
+    if (path === SCIM) {
+      const token = await deps.store.scimTokenOf(orgId);
+      return json(200, {
+        base_url: baseUrl, token_set: token !== undefined, issued_at: token ? iso(token.issuedAt) : null, issued_by: token?.issuedBy ?? null,
+      }, origin);
+    }
+    if (path === SCIM_TOKEN) {
+      if (request.method === "DELETE") {
+        const outcome = await deps.store.revokeScimToken(orgId, intent);
+        if (outcome === "missing") return problem(404, "not_found", "this org has no SCIM token", origin);
+        return new Response(null, { status: 204, headers: corsHeaders(origin) });
+      }
+      const token = `bst_${randomId(32)}`;
+      const issuedAt = Date.now();
+      const outcome = await deps.store.issueScimToken(orgId, { tokenHash: await sha256Base64url(token), issuedAt, issuedBy: identity.userId }, intent);
+      if (outcome === "missing") return problem(404, "no_org", "this org has no record yet; the operator creates one", origin);
+      return json(201, { token, issued_at: iso(issuedAt), issued_by: identity.userId, base_url: baseUrl, replaced: outcome === "replaced" }, origin);
     }
 
     if (path === IDP) {
@@ -275,6 +302,14 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       // source and expiry. Read-then-write, since the owner's key is a stable fact of the record and
       // two admins seating one key at once can only agree.
       if (isOwner(body.key, org)) return problem(409, "owner", "the owner stays an admin and cannot be re-seated", origin);
+      // A person the IdP pushed and then deactivated or deleted comes back through the IdP (SCIM spec, D10): seated
+      // here, they would hold a seat the sign-in keeps refusing.
+      const managed = body.key.startsWith("email:")
+        ? await deps.store.scimUserByName(orgId, body.key.slice("email:".length).toLowerCase()) ?? await deps.store.scimUserByKey(`email:${body.key.slice("email:".length).toLowerCase()}`)
+        : await deps.store.scimUserByKey(body.key);
+      if (managed && managed.orgId === orgId) {
+        return problem(409, "managed", "this address is provisioned by your identity provider; assign them there", origin);
+      }
       const seated = await deps.store.getGrant(body.key);
       if (seated && seated.orgId === orgId) {
         return problem(409, "exists", "that key is already a member; change its role with PATCH /org/members/:key", origin);
@@ -302,6 +337,12 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
     const existing = await deps.store.getGrant(key);
     if (!existing || existing.orgId !== orgId) return problem(404, "not_found", "no such member in your org", origin);
     if (request.method === "DELETE") {
+      // A member the IdP pushed is the IdP's to remove (SCIM spec, D10): removed here, the next sync would seat
+      // them again, and the roster would read as members reappearing. Their role stays Bellman's to change.
+      const managed = await deps.store.scimUserByKey(key);
+      if (managed?.active && managed.orgId === orgId) {
+        return problem(409, "managed", "this member is provisioned by your identity provider; remove them there", origin);
+      }
       // Answered from what the delete removed, as /admin/grants is: a sign-in claiming the key in the gap is a 404, not a lie.
       const outcome = await deps.store.deleteGrantIfOwned(key, orgId, intent);
       if (outcome !== "deleted") return problem(404, "not_found", "no such member in your org", origin);

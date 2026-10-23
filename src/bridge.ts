@@ -26,10 +26,12 @@ import {
 import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
+import type { DoorDeclined, DoorEvent, DoorLog, DoorRooms, DoorSeat, DoorSurface } from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
+import { resultData } from "./result-data.js";
 import type { EventType } from "./types.js";
 import { compareVersions, VERSION } from "./version.js";
 
@@ -92,6 +94,8 @@ const UPDATE_STEP: Record<Install, string> = {
 };
 
 const MAX_WAIT_SECONDS = 25;
+/** How many of the events `deliver` saw the bridge remembers, for the door's `recent`. */
+export const RECENT_LIMIT = 50;
 /** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
 const START_TOOL = "bellman_start";
 /**
@@ -197,6 +201,11 @@ export interface BridgeOptions {
   pollWaitSeconds?: number;
   /** Who this bridge signed in as. Absent means a static BELLMAN_KEY. */
   whoami?: () => WhoAmI;
+  /**
+   * The path of this bridge's door (src/door.ts), for bellman_whoami to name, or null while it has none. Asked on
+   * every call, because the door opens after the bridge is built and may never open. Absent, the bridge has none.
+   */
+  door?: () => string | null;
   /**
    * Share one upstream connection per room with every other bridge on this machine, through a local bus (src/bus.ts,
    * src/bus-link.ts). Absent, every member is long-polled by this bridge on its own, as it was before the bus
@@ -314,7 +323,7 @@ const WHOAMI_TOOL: Tool = {
   title: "Who this bridge is signed in as",
   description: `The identity peers see when you join a Bellman room. Answered locally from the cached sign-in, with no round trip: it never connects to Bellman, so it is safe to ask before anything else.
 
-Returns: { source, label, plan, role, org_id } when source is "oauth" — this bridge signed in and can read who you are. For "env" (it was handed a BELLMAN_KEY, and cannot know whose) and "unknown" (it has no readable sign-in to report) the result is just { source, label: null }.`,
+Returns: { source, label, plan, role, org_id, door } when source is "oauth" — this bridge signed in and can read who you are. For "env" (it was handed a BELLMAN_KEY, and cannot know whose) and "unknown" (it has no readable sign-in to report) the result is just { source, label: null, door }. door is the path of the local socket this bridge serves to Claude Code's Bellman mod, or null when it has none: it is not for you to use.`,
   inputSchema: { type: "object", properties: {} },
   annotations: {
     readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
@@ -481,6 +490,11 @@ interface Watch {
   /** Highest cursor delivered to, or already seen by, the agent. */
   delivered: number;
   active: boolean;
+  /**
+   * Whether the long poll is failing and being retried: set where `watch` logs "sync failed", and cleared by the
+   * next poll the server answers.
+   */
+  retrying: boolean;
   /** Ends the bus's delivery for this member, while the bus is what delivers. Set only on the bus path. */
   release?: () => void;
 }
@@ -671,6 +685,8 @@ export function createBridge(opts: BridgeOptions) {
   let updateNoticed = false;
   const whoami = opts.whoami ?? ((): WhoAmI => ({ source: "env", label: null }));
   const watches = new Map<string, Watch>(); // keyed by member_id
+  /** The last RECENT_LIMIT events `deliver` saw, newest last. */
+  const recentEvents: PeerEvent[] = [];
   /**
    * Handles whose membership has ENDED, by leaving or by removal. Such a handle is
    * dead for good: rejoining mints a new member_id, so nothing can make this one
@@ -953,7 +969,7 @@ export function createBridge(opts: BridgeOptions) {
 
   function arm(sessionId: string, memberId: string, cursor: number): void {
     if (closed || !sessionId || !memberId || watches.has(memberId) || departed.has(memberId)) return;
-    const w: Watch = { sessionId, memberId, delivered: cursor, active: true };
+    const w: Watch = { sessionId, memberId, delivered: cursor, active: true, retrying: false };
     watches.set(memberId, w);
     persistMemberships();
     // The bus when there is one; the long poll when there is not, and for any member the bus cannot serve.
@@ -1069,11 +1085,14 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         log(`sync failed for ${w.memberId}: ${(err as Error).message}; retrying in ${backoff}ms`);
+        w.retrying = true;
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);
         continue;
       }
+      // The server answered, so the failure the backoff was for is over, whatever the answer says.
       backoff = 1000;
+      w.retrying = false;
       if (closed || !w.active) return;
 
       if (result.isError) {
@@ -1199,6 +1218,10 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   async function deliver(event: PeerEvent): Promise<void> {
+    // Before any delivery, and before channel delivery lets an ambient event go: the door reports what arrived,
+    // interrupting or not.
+    recentEvents.push(event);
+    if (recentEvents.length > RECENT_LIMIT) recentEvents.shift();
     if (queues) {
       // Ambient events are queued like any other. A queue is drained at the END
       // of a turn or when the agent asks, so it does not interrupt by
@@ -1253,7 +1276,9 @@ export function createBridge(opts: BridgeOptions) {
         text = "This bridge has no readable sign-in to report, so it cannot say which account peers will see. The server still resolves your identity on every call.";
         break;
     }
-    return { content: [{ type: "text", text }], structuredContent: { ...who } };
+    // The door is for the Claude Code mod, which finds this bridge's through here; the text a person is shown stays
+    // as it was.
+    return { content: [{ type: "text", text }], structuredContent: { ...who, door: opts.door?.() ?? null } };
   }
 
   /**
@@ -1443,6 +1468,142 @@ export function createBridge(opts: BridgeOptions) {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }
 
+  /** The seat the bridge holds in a room, for the door: the first, should a bridge ever watch two members of one room. */
+  function seatIn(sessionId: string): Watch | undefined {
+    return [...watches.values()].find((w) => w.sessionId === sessionId);
+  }
+
+  /**
+   * A room's log for the door, read with the credential this bridge already holds for bellman_upload: the mod has
+   * none of its own. Only a room this bridge watches is read, so the door cannot be made to spend the bearer on any
+   * other. The events come back addressed to the room's watched member, as `watch` would deliver them. A 401 is
+   * answered as `uploadAndPlace` answers one: the held connection is asked for something, so that its transport
+   * refreshes the sign-in, and the read is repeated once, and only if the bearer is no longer the one refused. The
+   * one difference is that no connection is made for it (see the call), because nobody asked for this read.
+   *
+   * It never rejects. The door awaits it with nothing to catch, so whatever throws after the 404 and the 503 (a bearer
+   * it cannot read, a server it cannot reach, a 200 it cannot read) is `upstream`, a 502.
+   */
+  async function readEvents(
+    sessionId: string,
+    after?: number,
+  ): Promise<{ status: number; body: DoorLog | { error: string } }> {
+    // The route answers for the bearer and not for a member, so which seat the events are addressed to is only a label.
+    const seat = seatIn(sessionId);
+    if (!seat) return { status: 404, body: { error: "not_watched" } };
+    const upload = opts.upload;
+    if (!upload) return { status: 503, body: { error: "no_credential" } };
+
+    try {
+      const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/events`, upload.serverUrl);
+      if (after !== undefined) target.searchParams.set("after", String(after));
+      const get = (bearer: string): Promise<Response> =>
+        (upload.fetchImpl ?? fetch)(target, { headers: { authorization: `Bearer ${bearer}` } });
+      const bearer = await upload.bearer();
+      let response = await get(bearer);
+      if (response.status === 401) {
+        // Through the connection the bridge holds and never a new one: remote() would make it, and on the signed-in
+        // path that can open a browser, for a read that comes from the door's poll and that nobody asked for. With
+        // none held the 401 is reported as it was, and the next Bellman tool call is what reconnects.
+        await live?.listTools().catch(() => undefined);
+        const fresh = await upload.bearer();
+        if (fresh !== bearer) {
+          await response.body?.cancel().catch(() => undefined);
+          response = await get(fresh);
+        }
+      }
+      if (response.status !== 200) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status: response.status, body: { error: "upstream" } };
+      }
+      const read = (await response.json()) as { events: WireEnvelope[]; cursor: number };
+      const member = { session_id: seat.sessionId, member_id: seat.memberId };
+      const events = read.events.map((env) => fromEnvelope(member, env));
+      return { status: 200, body: { events, cursor: read.cursor } };
+    } catch {
+      return { status: 502, body: { error: "upstream" } };
+    }
+  }
+
+  /**
+   * One Bellman tool call for the door, and its data (`resultData`): or else the reply the door gives. It goes through
+   * `live`, the connection the bridge holds, and never `remote()`, as `readEvents` refreshes a sign-in through `live` and
+   * for the same reason: `remote()` makes a connection, and on the signed-in path that can open a browser, for a read
+   * that comes from the door's poll and that nobody asked for. With none held (not made yet, or retired by a 401) the
+   * door says so, 503, and the next Bellman tool call is what reconnects.
+   *
+   * A 401 is refreshed by the connection's own transport, as it is for every tool call; one that is thrown here is one
+   * the refresh could not mend, and `retiring` has already dropped the connection, so it is reported as it was and
+   * there is nothing held to ask again. Any other throw is `upstream`, the server's refusal of the call is `refused`
+   * (422), and none of the server's words go to the door: a refusal can name a peer. It never rejects.
+   */
+  async function callLive(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ data: Record<string, unknown> } | { status: number; body: { error: string } }> {
+    const connection = live;
+    if (!connection) return { status: 503, body: { error: "not_connected" } };
+    try {
+      const result = await connection.callTool({ name, arguments: args });
+      if (result.isError) return { status: 422, body: { error: "refused" } };
+      const data = resultData(result);
+      return data === null ? { status: 502, body: { error: "upstream" } } : { data };
+    } catch (err) {
+      return { status: unauthorized(err) ? 401 : 502, body: { error: "upstream" } };
+    }
+  }
+
+  /**
+   * The door's room list: `bellman_rooms`, cut to the rooms this bridge holds a seat in, each as the server gave it. The
+   * account may hold seats the bridge does not (another machine's), and this bridge's door is not to speak for them.
+   * The seats are read after the server answers, so a seat that ended in the meantime is not listed. A read: it moves
+   * nobody's `lastSeenAt`. It never rejects.
+   */
+  async function readRooms(): Promise<{ status: number; body: DoorRooms | { error: string } }> {
+    const asked = await callLive("bellman_rooms", {});
+    if (!("data" in asked)) return asked;
+    const listed = asked.data.rooms;
+    if (!Array.isArray(listed)) return { status: 502, body: { error: "upstream" } };
+    const seated = new Set([...watches.values()].map((w) => w.sessionId));
+    return { status: 200, body: { rooms: listed.filter((room) => seated.has(room?.session_id)) } };
+  }
+
+  /**
+   * The door's canvas for a room: `bellman_surface`, as the server gave it. Only a room this bridge holds a seat in is
+   * asked for, so the door cannot be made to spend the connection on any other. The tool takes the room and no member,
+   * and it is not a liveness signal: unlike `bellman_sync`, a poll of it keeps no seat alive and reads no events. It
+   * never rejects.
+   */
+  async function readSurface(sessionId: string): Promise<{ status: number; body: DoorSurface | { error: string } }> {
+    if (!seatIn(sessionId)) return { status: 404, body: { error: "not_found" } };
+    const asked = await callLive("bellman_surface", { session_id: sessionId });
+    // ponytail: the server's shape, unchecked: the mod reads it with care, and a check here would copy the server's types.
+    return "data" in asked ? { status: 200, body: asked.data as unknown as DoorSurface } : asked;
+  }
+
+  /**
+   * The door's one write: the action request `refId` in a room this bridge holds a seat in is answered `approved: false`
+   * as that seat (the first, as `readEvents` has it), and nothing else is sent. The key names the request, so that a
+   * decline made twice, by two presses or by two panes, lands once if the second reaches the server's append
+   * (src/tools/send.ts); one made after the first has landed is refused by the server's own first-answer-wins check.
+   * `refId` is a cursor the door has checked. It never rejects.
+   */
+  async function decline(sessionId: string, refId: string): Promise<{ status: number; body: DoorDeclined | { error: string } }> {
+    const seat = seatIn(sessionId);
+    if (!seat) return { status: 404, body: { error: "not_found" } };
+    const asked = await callLive("bellman_send", {
+      session_id: sessionId,
+      member_id: seat.memberId,
+      type: "action_response",
+      ref_id: refId,
+      payload: { approved: false },
+      idempotency_key: `bellman-mod-decline-${refId}`,
+    });
+    if (!("data" in asked)) return asked;
+    const cursor = asked.data.cursor;
+    return typeof cursor === "number" ? { status: 200, body: { cursor } } : { status: 502, body: { error: "upstream" } };
+  }
+
   async function close(): Promise<void> {
     closed = true;
     for (const w of watches.values()) w.active = false;
@@ -1471,5 +1632,23 @@ export function createBridge(opts: BridgeOptions) {
       })),
     /** Which part this bridge plays on the local bus, for tests and diagnostics: undefined when it has none. */
     busRole: (): "coordinator" | "subscriber" | undefined => link?.role(),
+    /**
+     * The seats this bridge watches, for the door: each member in its room, and whether its long poll is failing and
+     * being retried.
+     * ponytail: a member on the bus shows `retrying` only once `onFallback` puts it back on polling, and a room
+     * socket degraded inside src/bus-link.ts is not reported; surface it from there if the door should say so.
+     */
+    seats: (): DoorSeat[] =>
+      [...watches.values()].map((w) => ({ session_id: w.sessionId, member_id: w.memberId, retrying: w.retrying })),
+    /** The last RECENT_LIMIT events `deliver` saw, newest last: ambient ones too, in every delivery. */
+    recent: (): DoorEvent[] => [...recentEvents],
+    /** A room's log read with this bridge's own credential, for the door's `/rooms/<id>/events`. */
+    readEvents,
+    /** The rooms this bridge holds a seat in, for the door's `/rooms`: asked of the server through the connection held. */
+    readRooms,
+    /** A room's canvas, for the door's `/rooms/<id>/surface`. */
+    readSurface,
+    /** A refusal of an action request, for the door's `/rooms/<id>/decline`: the one write the door makes. */
+    decline,
   };
 }

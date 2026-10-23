@@ -106,6 +106,56 @@ describe("writing an item", () => {
     expect((await h.store.auditForOrg(org, 50)).at(-1)!.detail).toEqual({ key: "plan", removed: true });
   });
 
+  // A surface key may carry a hyphen after its first character, which a role key may not (a role's `_` is a join
+  // code's `-`). Through every operation that takes a key: the write, the replace, a connector's ends, the removal,
+  // and the read that hands the key back.
+  it("takes a key with a hyphen for a write, a replace, a connector's ends and a removal", async () => {
+    const p = await pairUp(h);
+    const org = p.creator.identity.orgId!;
+    for (const item of [
+      plan({ key: "look-links", title: "Look links", body: "first" }),
+      { key: "design-notes", kind: "text", body: "notes" },
+      { key: "look-links-to-design-notes", kind: "connector", ends: { from: "look-links", to: "design-notes" }, title: "informs" },
+    ]) {
+      const out = await write(p, item);
+      expect(out.isError, out.text).toBe(false);
+    }
+    const replaced = await write(p, plan({ key: "look-links", title: "Look links", body: "revised" }));
+    expect(replaced.isError, replaced.text).toBe(false);
+    // Code-unit order, as every store sorts: a key is a prefix of the longer one it starts.
+    expect((await rows(p)).map((r) => [r.key, r.kind, r.body])).toEqual([
+      ["design-notes", "text", "notes"], ["look-links", "text", "revised"], ["look-links-to-design-notes", "connector", null],
+    ]);
+    expect((await rows(p)).at(-1)!.ends).toEqual({ from: "look-links", to: "design-notes" });
+
+    // Read as a member reads it and sent back as it was read: the key is the one that was written.
+    const read = await p.creator.call("bellman_surface", { session_id: p.sessionId });
+    expect(read.isError, read.text).toBe(false);
+    const asRead = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items.map((i) => i.data);
+    expect(asRead.map((i) => i.key)).toEqual(["design-notes", "look-links", "look-links-to-design-notes"]);
+    for (const data of asRead) {
+      const out = await write(p, withoutServerFields(data));
+      expect(out.isError, `${String(data.key)}: ${out.text}`).toBe(false);
+    }
+
+    for (const key of ["look-links-to-design-notes", "look-links"]) {
+      const removed = await write(p, { key, remove: true });
+      expect(removed.isError, removed.text).toBe(false);
+    }
+    expect((await rows(p)).map((r) => r.key)).toEqual(["design-notes"]);
+    expect((await h.store.auditForOrg(org, 50)).at(-1)!.detail).toEqual({ key: "look-links", removed: true });
+    expect((await h.store.eventsAfter(p.sessionId, 0)).at(-1)!.payload).toEqual({ key: "look-links", remove: true });
+  });
+
+  it("refuses a connector that names a hyphenated key which is not on the surface, by that key", async () => {
+    const p = await pairUp(h);
+    await write(p, plan({ key: "look-links" }));
+    const out = await write(p, { key: "c-1", kind: "connector", ends: { from: "look-links", to: "design-notes" } });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('connector "c-1" names "design-notes", which is not on the surface.');
+    expect((await rows(p)).map((r) => r.key)).toEqual(["look-links"]);
+  });
+
   it("round-trips a placement, and every kind", async () => {
     const p = await pairUp(h);
     const items = [
@@ -282,6 +332,30 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     await refused(p, plan({ title: "t".repeat(MAX_SURFACE_TITLE_CHARS + 1) }), "title: ");
     await refused(p, plan({ body: "b".repeat(MAX_SURFACE_BODY_CHARS + 1) }), "body: ");
     await refused(p, { key: "plan", remove: false }, "}: remove: ");
+  });
+
+  // The grammar is SurfaceKeyShape's: a letter first, then lowercase letters, digits, `_` and `-`, 31 characters at
+  // most. A key that breaks it is refused in the grammar's own words, as a write, as a removal and as a connector's
+  // end, and a refusal leaves no event behind.
+  it("refuses a key that starts with a hyphen, has a capital or is over the bound, in the grammar's words", async () => {
+    const p = await pairUp(h);
+    const grammar = "surface keys must match [a-z][a-z0-9_-]{0,30}";
+    for (const key of ["-plan", "-", "Look-links", "look-Links", "x".repeat(32), `a${"-".repeat(31)}`]) {
+      await refused(p, plan({ key }), grammar);
+      await refused(p, { key, remove: true }, grammar);
+    }
+    await refused(p, { key: "c-1", kind: "connector", ends: { from: "-a", to: "b-c" } }, grammar);
+    await refused(p, { key: "c-1", kind: "connector", ends: { from: "a-b", to: "Look-links" } }, grammar);
+    expect(await rows(p)).toEqual([]);
+  });
+
+  it("refuses the three reserved names as keys, in the words they have always had", async () => {
+    const p = await pairUp(h);
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      await refused(p, plan({ key }), "surface keys must not be one of: __proto__, constructor, prototype");
+      await refused(p, { key, remove: true }, "surface keys must not be one of: __proto__, constructor, prototype");
+    }
+    expect(await rows(p)).toEqual([]);
   });
 
   it("accepts the bounds at their edge", async () => {

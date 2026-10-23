@@ -43,7 +43,7 @@ Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever w
 
 | Field | What it holds |
 | --- | --- |
-| `key` | Required. A lowercase letter, then lowercase letters, digits or `_`, 31 characters at most. `__proto__`, `constructor` and `prototype` are refused. |
+| `key` | Required. A lowercase letter, then lowercase letters, digits, `_` or `-`, 31 characters at most, so `look-links` is a key. `__proto__`, `constructor` and `prototype` are refused. |
 | `kind` | Required. One of the eight kinds below. |
 | `title` | 1 to 120 characters. |
 | `body` | 1 to 8,000 characters, for the kinds that take one. |

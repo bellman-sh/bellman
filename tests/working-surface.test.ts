@@ -24,12 +24,20 @@ const event = (cursor: number): SessionEvent => ({
 });
 
 describe("surface keys", () => {
-  it.each(["plan", "a", "open_questions", "pr_123", "x".repeat(31)])("accepts %s", (key) => {
-    expect(SurfaceKeyShape.safeParse(key).success).toBe(true);
-  });
+  // A hyphen is allowed after the first character, and a surface key never goes into a join code, which is why a
+  // role key may not carry one: `renderJoinCode` prints a role's `_` as `-`.
+  it.each(["plan", "a", "open_questions", "pr_123", "look-links", "a-b", "plan-", "a--b", "x".repeat(31), `a${"-".repeat(30)}`])(
+    "accepts %s", (key) => {
+      expect(SurfaceKeyShape.safeParse(key).success).toBe(true);
+    },
+  );
 
   // Review Focus 3: case and whitespace. `Plan` must not shadow `plan`.
-  it.each(["", "Plan", "plan ", " plan", "1st", "a-b", "x".repeat(32), "__proto__", "constructor", "prototype"])(
+  it.each([
+    "", "Plan", "Look-links", "look-Links", "plan ", " plan", "1st", "-plan", "-", "_plan",
+    "x".repeat(32), `a${"-".repeat(31)}`, "look-links".padEnd(32, "-"),
+    "__proto__", "constructor", "prototype",
+  ])(
     "refuses %j", (key) => {
       expect(SurfaceKeyShape.safeParse(key).success).toBe(false);
     },
@@ -39,6 +47,15 @@ describe("surface keys", () => {
     const verdict = SurfaceKeyShape.safeParse("__proto__");
     expect(verdict.success).toBe(false);
     if (!verdict.success) expect(verdict.error.issues[0].message).toMatch(/^surface keys/);
+  });
+
+  it("states its own grammar, with the hyphen, and the reserved names in the words it always used", () => {
+    const messageOf = (key: string): string => {
+      const verdict = SurfaceKeyShape.safeParse(key);
+      return verdict.success ? "" : verdict.error.issues[0].message;
+    };
+    expect(messageOf("-plan")).toBe("surface keys must match [a-z][a-z0-9_-]{0,30}");
+    expect(messageOf("constructor")).toBe("surface keys must not be one of: __proto__, constructor, prototype");
   });
 });
 

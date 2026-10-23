@@ -58,10 +58,13 @@ participants. That shape, not a single document, is what this adopts.
 
 ### D1 — An item, not a document. Several, keyed.
 
-The surface is a set of items. Each has a `key` — the same slug grammar as a
-role key, `[a-z][a-z0-9_]{0,30}`, with the three prototype-reachable names
-refused — a `kind`, and the fields that kind needs. The key is the address:
-writing to a key that exists replaces that item.
+The surface is a set of items. Each has a `key` — the role-key grammar with `-`
+allowed after the first character, `[a-z][a-z0-9_-]{0,30}`, and the three
+prototype-reachable names refused — a `kind`, and the fields that kind needs.
+The key is the address: writing to a key that exists replaces that item. A role
+key has no `-`, because a join code prints a role's `_` as `-` and `a-b` and
+`a_b` would print one code; a surface key never goes into a code, and the agents
+that write one reach for kebab-case.
 
 One document was the scribe spec's shape, and #129 already doubted it. The
 nerve canvas is the evidence: what a room accumulates is a plan, a decision
@@ -383,8 +386,10 @@ hop: a surface write is one transaction in one object.
 ### Manifest (`src/manifest.ts`)
 
 `VERBS` gains `write_surface`. The three creator seats in `PRESETS` gain it.
-`RoleKeyShape`'s regex and reserved set become a `slugShape(noun)` factory so
-`SurfaceKeyShape` is the same grammar with its own error wording.
+`RoleKeyShape`'s regex and reserved set become a `slugShape(noun, { hyphens })`
+factory so `SurfaceKeyShape` is the same grammar with its own error wording, and
+with `-` allowed after the first character, which only a key that never goes
+into a join code may carry.
 
 ## The write path
 

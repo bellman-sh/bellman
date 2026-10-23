@@ -205,6 +205,10 @@ export function identityKeys(profile: ProviderProfile): string[] {
   // verified its domain (SSO spec, D10), which is how an admin's `email:` grant is claimed.
   if (profile.email && profile.provider === "sso") keys.push(`email:${profile.email}`);
   else if (profile.email) keys.push(`${profile.provider}:${profile.email}`, `email:${profile.email}`);
+  // And the address lowercased whole when the provider spelt it otherwise: a SCIM push seats the lowercased
+  // address (SCIM spec, D2), and a provider that reports capitals must still claim that seat.
+  const lower = profile.email?.toLowerCase();
+  if (lower && lower !== profile.email) keys.push(`email:${lower}`);
   return keys;
 }
 

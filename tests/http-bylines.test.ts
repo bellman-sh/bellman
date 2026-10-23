@@ -627,6 +627,16 @@ describe("the operator's /admin/handles routes", () => {
     expect((await holders(await bearer(OPERATOR, "default"), "POST")).status).toBe(405);
   });
 
+  // The control for this is the first list case: the same identity over a bearer token lists.
+  it("refuses a listed user id over a cookie, and lists no one", async () => {
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
+    const res = await holders({ cookie: `${COOKIE}=${sid}`, origin: PANEL });
+    expect([res.status, await res.json()]).toEqual([401, {
+      error: "invalid_token", error_description: "this endpoint requires a bearer token, not a browser session",
+    }]);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
   // The label is the holder's own seat's, and not the room's first. A seat that has left the room still names one: the
   // notice goes to everyone who held a handle, not only to those still in a room.
   it("labels each holder by its own seat, one who has left the room included", async () => {

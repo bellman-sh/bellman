@@ -6,8 +6,10 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  MAX_SURFACE_ITEMS, SurfaceKeyShape, applySurfaceWrite, createdAtOf, surfaceCursor,
+  GRID, MAX_SLOT_SEARCH, MAX_SURFACE_ITEMS, SurfaceKeyShape, applySurfaceWrite, createdAtOf, gridSlot, needsPlacement, withPlacement, surfaceCursor,
+  type SurfaceWrite,
 } from "../src/surface.js";
+import { GRID as VIEWER_GRID, gridSlot as viewerSlot } from "../ui/src/canvas-layout.js";
 import { surfaceIndex, surfaceItem } from "../src/projections.js";
 import type { SessionEvent, SurfaceItem, SurfaceRow } from "../src/types.js";
 import { session } from "./helpers/fixtures.js";
@@ -123,6 +125,130 @@ describe("surfaceCursor", () => {
 describe("the bounds", () => {
   it("cap items at 64", () => {
     expect(MAX_SURFACE_ITEMS).toBe(64);
+  });
+});
+
+/**
+ * The server places what arrives unplaced (surface placement spec D3): the lowest slot of the viewers'
+ * grid whose cell no row covers. The rule is pure, over the rows a store hands it, so it is tested here
+ * once, and the store contract holds both stores to applying it.
+ */
+describe("withPlacement", () => {
+  const SHAPE = { form: "rect", color: "slate", flip: false } as const;
+  const stored = (key: string, placement: SurfaceRow["placement"], over: Partial<SurfaceRow> = {}): SurfaceRow => ({
+    ...item({ key, placement }), cursor: 1, at: 1_700_000_000_000, byMemberId: "m_creator", byLabel: "jesse@codenerd", ...over,
+  });
+  /** A shape row, the kind whose box is the placement's own size. */
+  const box = (key: string, placement: SurfaceRow["placement"]) => stored(key, placement, { kind: "shape", shape: SHAPE });
+  /** Where a card written with no placement lands among `rows`. */
+  const landsAt = (rows: SurfaceRow[], key = "new") => withPlacement(rows, { key, item: item({ key }) }).item?.placement;
+  /** Where the next `n` cards land, each written after the one before. */
+  const fill = (rows: SurfaceRow[], n: number) => {
+    const all = [...rows];
+    for (let i = 0; i < n; i++) all.push(stored(`n${i}`, landsAt(all, `n${i}`) ?? null));
+    return all.slice(rows.length).map((r) => r.placement);
+  };
+
+  it("puts the first card at slot 0, fills a row of four left to right and starts the next row below", () => {
+    expect(landsAt([])).toEqual({ x: 0, y: 0 });
+    expect(fill([], 6)).toEqual([
+      { x: 0, y: 0 }, { x: 360, y: 0 }, { x: 720, y: 0 }, { x: 1080, y: 0 }, { x: 0, y: 240 }, { x: 360, y: 240 },
+    ]);
+  });
+
+  /** Review Focus 3: a box covers every cell it touches, and a cell it only touches at an edge is free. */
+  it("skips a slot a box covers: a card of w 720 covers two, one that only touches a cell covers none", () => {
+    expect(landsAt([stored("wide", { x: 0, y: 0, w: 720 })])).toEqual({ x: 720, y: 0 });
+    // In the 40-wide gap between slots 0 and 1, touching both cells: it covers neither.
+    expect(landsAt([stored("gap", { x: 320, y: 0, w: 40, h: 200 })])).toEqual({ x: 0, y: 0 });
+    // Half a cell off the grid, a 320 by 200 box at (160, 100) crosses slots 0, 1, 4 and 5.
+    expect(fill([stored("off", { x: 160, y: 100 })], 3)).toEqual([{ x: 720, y: 0 }, { x: 1080, y: 0 }, { x: 720, y: 240 }]);
+  });
+
+  /** Review Focus 3, again: a shape is a box like a card's, and a group's rect lies over the cells it groups. */
+  it("treats a shape's box as covering every cell under it", () => {
+    // A rect 360 wide and 680 tall lies over slots 0, 4 and 8, and at x = 360 only touches slot 1.
+    expect(fill([box("group", { x: 0, y: 0, w: 360, h: 680 })], 5)).toEqual([
+      { x: 360, y: 0 }, { x: 720, y: 0 }, { x: 1080, y: 0 }, { x: 360, y: 240 }, { x: 720, y: 240 },
+    ]);
+  });
+
+  it("gives a connector no slot, and a connector among the rows covers none", () => {
+    const connector = { key: "link", item: item({ key: "link", kind: "connector", ends: { from: "a", to: "b" } }) };
+    expect(withPlacement([], connector)).toBe(connector);
+    expect(landsAt([stored("link", null, { kind: "connector", ends: { from: "a", to: "b" } })])).toEqual({ x: 0, y: 0 });
+  });
+
+  /** Review Focus 3: a placement the writer gives is stored as given, over a box that is there. Keeping clear is the skill's rule, not the server's (R5). */
+  it("stores a placement the writer gives as given, even over a box that is there", () => {
+    const rows = [stored("a", { x: 0, y: 0 })];
+    const write = { key: "b", item: item({ key: "b", placement: { x: 0, y: 0 } }) };
+    expect(withPlacement(rows, write)).toBe(write);
+  });
+
+  it("returns a shape and a removal as they came", () => {
+    const writes: SurfaceWrite[] = [
+      { key: "g", item: item({ key: "g", kind: "shape", shape: SHAPE, placement: { x: 0, y: 0, w: 10, h: 10 } }) },
+      { key: "a", item: null },
+    ];
+    for (const w of writes) expect(withPlacement([stored("a", { x: 0, y: 0 })], w), w.key).toBe(w);
+  });
+
+  it("needs a placement only for a text, link, diagram, file, image or html item written with none", () => {
+    for (const kind of ["text", "link", "diagram", "file", "image", "html"] as const) {
+      expect(needsPlacement({ key: "k", item: item({ kind }) }), kind).toBe(true);
+    }
+    for (const kind of ["connector", "shape"] as const) expect(needsPlacement({ key: "k", item: item({ kind }) }), kind).toBe(false);
+    expect(needsPlacement({ key: "k", item: item({ placement: { x: 1, y: 2 } }) })).toBe(false);
+    expect(needsPlacement({ key: "k", item: null })).toBe(false);
+  });
+
+  /** Review Focus 2: replacing an item moves nothing. */
+  it("keeps the placement a key holds when a write replaces the item and leaves it out", () => {
+    const rows = [stored("a", { x: 360, y: 240, w: 720, h: 200 }), stored("b", { x: 0, y: 0 })];
+    const out = withPlacement(rows, { key: "a", item: item({ key: "a", body: "revised" }) });
+    expect(out.item).toMatchObject({ body: "revised", placement: { x: 360, y: 240, w: 720, h: 200 } });
+    expect(out.item?.placement, "a copy, never the stored row's own object").not.toBe(rows[0].placement);
+  });
+
+  /** Review Focus 1: every room that predates this holds rows with no placement, which the viewers still lay out. */
+  it("keeps clear of a row stored with no placement, which the viewers draw on the grid", () => {
+    // `a` and `c` have none, so the viewers draw them at slots 0 and 1; `b` sits at slot 2.
+    expect(landsAt([stored("a", null), stored("c", null), stored("b", { x: 720, y: 0 })])).toEqual({ x: 1080, y: 0 });
+  });
+
+  it("places a row stored with none where it leaves the rest, which close up behind it", () => {
+    // Written again, `a` is no longer among the unplaced rows, so the viewers draw `b` at slot 0.
+    expect(landsAt([stored("a", null), stored("b", null)], "a")).toEqual({ x: 360, y: 0 });
+  });
+
+  it("places a card after 64 occupied slots at slot 64", () => {
+    const full = fill([], MAX_SURFACE_ITEMS).map((p, i) => stored(`s${i}`, p));
+    expect(landsAt(full)).toEqual(gridSlot(MAX_SURFACE_ITEMS));
+  });
+
+  /** Review Focus 5: a box has no upper bound, and a search with no end would hang the room's object. */
+  it("leaves a card unplaced, and returns, when one box covers every slot", () => {
+    const write = { key: "new", item: item({ key: "new" }) };
+    expect(withPlacement([box("sky", { x: 0, y: 0, w: 1e300, h: 1e300 })], write)).toBe(write);
+  });
+
+  it("searches MAX_SLOT_SEARCH slots and no more", () => {
+    const across = GRID.cols * (GRID.w + GRID.gap);
+    const deep = (rows: number) => (rows - 1) * (GRID.h + GRID.gap) + GRID.h;
+    const lastRow = MAX_SLOT_SEARCH / GRID.cols - 1;
+    // Every row but the last of the search is covered: the card takes the last row's first slot.
+    expect(landsAt([box("sky", { x: 0, y: 0, w: across, h: deep(lastRow) })])).toEqual(gridSlot(MAX_SLOT_SEARCH - GRID.cols));
+    // Every row of it is covered: the slot after is free, past the search, and the card is left unplaced.
+    const write = { key: "new", item: item({ key: "new" }) };
+    expect(withPlacement([box("sky", { x: 0, y: 0, w: across, h: deep(lastRow + 1) })], write)).toBe(write);
+  });
+});
+
+describe("the viewers' grid", () => {
+  it("is the one the MCP App lays unplaced rows on; dash's src/lib/canvas.ts holds a third copy", () => {
+    expect(GRID).toEqual(VIEWER_GRID);
+    for (let i = 0; i < 3 * GRID.cols; i++) expect(gridSlot(i), `slot ${i}`).toEqual(viewerSlot(i));
   });
 });
 

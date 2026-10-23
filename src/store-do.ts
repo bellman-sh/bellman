@@ -53,7 +53,7 @@ import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } fr
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
-import { applySurfaceWrite } from "./surface.js";
+import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
 import { presetInNewWords } from "./presets.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
@@ -305,6 +305,32 @@ async function extraRows(
     puts.session = { ...s, members, lastActionRequestAt: stamp, surfaceCursor };
   }
   return { puts, deletes };
+}
+
+/**
+ * The append a surface write owes before its event is built (surface placement spec D3): a write that arrives
+ * without a placement is placed from the room's rows, and the event carries the placement the row will, so the
+ * log and the row agree. Everything else comes back untouched, and reads nothing.
+ *
+ * ponytail: one list of the room's `sf:` rows per write that needs a slot (a card written without a
+ * placement), in the append's own transaction so two such writes cannot take one slot. A write with a
+ * placement, a removal, a connector and a shape read nothing here; the dash's drag writes are all of those.
+ * A room is held to 64 rows by `writeSurface`, so the list is small; the upgrade is a row of the taken
+ * cells beside the surface cursor, if a room ever outgrows that.
+ *
+ * An idempotent replay never gets here: `appendEventOnce` returns the original event before it, and takes
+ * its fingerprint from the draft as the caller sent it, so a retry reads as a retry however the room has
+ * filled since.
+ */
+async function placedAppend(
+  txn: DurableObjectTransaction,
+  e: Omit<SessionEvent, "cursor" | "at">,
+  extras: AppendExtras,
+): Promise<{ e: Omit<SessionEvent, "cursor" | "at">; extras: AppendExtras }> {
+  if (extras.surface === undefined || !needsPlacement(extras.surface)) return { e, extras };
+  const rows = [...(await txn.list<SurfaceRow>({ prefix: SURFACE_PREFIX })).values()];
+  const surface = withPlacement(rows, extras.surface);
+  return surface === extras.surface ? { e, extras } : { e: { ...e, payload: surface.item }, extras: { ...extras, surface } };
 }
 
 /**
@@ -1945,8 +1971,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       members = s.members;
-      const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      const owed = await extraRows(txn, s, next, extras);
+      // After the frozen check, so a room that refuses the write reads nothing; before the event is built, so
+      // the event carries the placement the row takes.
+      const placed = await placedAppend(txn, e, extras);
+      const next: SessionEvent = { ...placed.e, cursor: await this.nextCursor(txn), at: Date.now() };
+      const owed = await extraRows(txn, s, next, placed.extras);
       const wake = await this.#replyWakeRows(txn, s, next);
       wakesHost = Object.keys(wake).length > 0;
       broughtForward = await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
@@ -2105,13 +2134,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
       if (s.frozenAt !== null) return { outcome: "frozen" };
 
-      const event: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
+      // After the replay branch and the frozen check, so neither reads the surface, and with `print` already
+      // taken from the draft as the caller sent it: a retry reads as a retry however the room has changed.
+      const placed = await placedAppend(txn, e, extras);
+      const event: SessionEvent = { ...placed.e, cursor: await this.nextCursor(txn), at: Date.now() };
       // The key row joins the event and the cursor in one put, for the reason
       // writeEvent gives carried one step further: committed separately, an
       // interruption leaves the event stored with no key naming it, and the
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
-      const owed = await extraRows(txn, s, event, extras);
+      const owed = await extraRows(txn, s, event, placed.extras);
       // Appended only: a replay's wake went out with the first attempt's event.
       const wake = await this.#replyWakeRows(txn, s, event);
       wakesHost = Object.keys(wake).length > 0;

@@ -20,7 +20,7 @@ import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
-import { surfaceCursor } from "../../src/surface.js";
+import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
@@ -2742,7 +2742,10 @@ export function describeStoreContract(
         const event = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
 
         expect(await store.surfaceOf(s.id)).toEqual([
-          { ...plan(), cursor: event.cursor, at: event.at, createdAt: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+          {
+            ...plan(), placement: { x: 0, y: 0 }, cursor: event.cursor, at: event.at, createdAt: event.at,
+            byMemberId: "m_creator", byLabel: "jesse@codenerd",
+          },
         ]);
         expect(await cursorOf(s.id)).toBe(event.cursor);
       });
@@ -2946,6 +2949,148 @@ export function describeStoreContract(
         expect(await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } })).toBeNull();
         expect(await store.surfaceOf(s.id)).toEqual([]);
         expect(await cursorOf(s.id)).toBe(0);
+      });
+
+      /**
+       * A card that arrives with no placement is placed in the append's own transaction, from the rows the
+       * room holds (surface placement spec D3), and the event carries the placement the row does. `withPlacement`
+       * in surface.ts is the rule and tests/working-surface.test.ts its cases; these hold both stores to
+       * applying it, and to doing so inside the append, where a retry and a second writer are decided.
+       */
+      describe("placing what arrives with no placement", () => {
+        const SHAPE = { form: "rect", color: "slate", flip: false } as const;
+        const card = (key: string, over: Partial<SurfaceItem> = {}): SurfaceItem => ({ ...plan(), key, ...over });
+        const put = (id: string, item: SurfaceItem) =>
+          store.appendEvent(id, wrote(item), { surface: { key: item.key, item } });
+        const placements = async (id: string) =>
+          Object.fromEntries((await store.surfaceOf(id)).map((r) => [r.key, r.placement]));
+        const room = async () => {
+          const s = session({});
+          await store.createSession(s);
+          return s.id;
+        };
+
+        it("places a card at slot 0 and the next at slot 1, in the row and in the event", async () => {
+          const id = await room();
+          await put(id, card("a"));
+          await put(id, card("b"));
+
+          expect(await placements(id)).toEqual({ a: { x: 0, y: 0 }, b: { x: 360, y: 0 } });
+          expect((await store.eventsAfter(id, 0)).map((e) => e.payload)).toEqual([
+            expect.objectContaining({ key: "a", placement: { x: 0, y: 0 } }),
+            expect.objectContaining({ key: "b", placement: { x: 360, y: 0 } }),
+          ]);
+        });
+
+        /** Review Focus 3: a card of w 720 covers two cells. */
+        it("skips the two slots a card of w 720 covers", async () => {
+          const id = await room();
+          await put(id, card("wide", { placement: { x: 0, y: 0, w: 720 } }));
+          await put(id, card("a"));
+          expect((await placements(id)).a).toEqual({ x: 720, y: 0 });
+        });
+
+        /** Review Focus 3: a shape's box covers the cells under it. */
+        it("skips the slots under a shape's box", async () => {
+          const id = await room();
+          await put(id, card("group", { kind: "shape", body: null, title: "Phase 1", shape: SHAPE, placement: { x: 0, y: 0, w: 360, h: 680 } }));
+          await put(id, card("a"));
+          await put(id, card("b"));
+          expect(await placements(id)).toMatchObject({ a: { x: 360, y: 0 }, b: { x: 720, y: 0 } });
+        });
+
+        it("gives a connector no slot, and it takes none", async () => {
+          const id = await room();
+          await put(id, card("a"));
+          await put(id, card("link", { kind: "connector", body: null, ends: { from: "a", to: "b" } }));
+          await put(id, card("b"));
+          expect(await placements(id)).toEqual({ a: { x: 0, y: 0 }, b: { x: 360, y: 0 }, link: null });
+        });
+
+        /** Review Focus 3: a placement the writer gives is stored as given, over a box that is there (R5). */
+        it("stores a placement as given, over a box that is there, and the next card avoids both", async () => {
+          const id = await room();
+          await put(id, card("a", { placement: { x: 0, y: 0 } }));
+          await put(id, card("b", { placement: { x: 0, y: 0 } }));
+          await put(id, card("c"));
+          expect(await placements(id)).toEqual({ a: { x: 0, y: 0 }, b: { x: 0, y: 0 }, c: { x: 360, y: 0 } });
+        });
+
+        /** Review Focus 2: replacing a card moves nothing, in the row or in the log, though a lower slot has freed since. */
+        it("keeps the stored placement when a write replaces a card and leaves it out", async () => {
+          const id = await room();
+          await put(id, card("x"));
+          await put(id, card("a"));
+          await store.appendEvent(id, { ...wrote(), payload: { key: "x", remove: true } }, { surface: { key: "x", item: null } });
+
+          const replaced = (await put(id, card("a", { body: "revised" })))!;
+
+          expect(await placements(id)).toEqual({ a: { x: 360, y: 0 } });
+          expect((await store.surfaceOf(id))[0]).toMatchObject({ body: "revised", cursor: replaced.cursor });
+          expect(replaced.payload).toMatchObject({ key: "a", body: "revised", placement: { x: 360, y: 0 } });
+        });
+
+        /**
+         * Review Focus 1. A shape is stored as it is handed, so shapes with no placement stand in for rows from
+         * before the server placed anything. The viewers draw old_a and old_c on slots 0 and 1, counting only the
+         * rows with none, and old_b sits on slot 2: a new card must not land on any of the three.
+         */
+        it("keeps clear of the rows stored with no placement, which the viewers draw on the grid", async () => {
+          const id = await room();
+          const old = (key: string, placement: SurfaceItem["placement"]) =>
+            card(key, { kind: "shape", body: null, shape: SHAPE, placement });
+          await put(id, old("old_a", null));
+          await put(id, old("old_b", { x: 720, y: 0, w: 320, h: 200 }));
+          await put(id, old("old_c", null));
+          await put(id, card("z"));
+          expect((await placements(id)).z).toEqual({ x: 1080, y: 0 });
+        });
+
+        /** Review Focus 5. */
+        it("places a card after 64 occupied slots at slot 64", async () => {
+          const id = await room();
+          for (let i = 0; i < MAX_SURFACE_ITEMS; i++) await put(id, card(`c${i}`));
+          await put(id, card("last"));
+          const placed = await placements(id);
+          expect(placed.c63).toEqual(gridSlot(63));
+          expect(placed.last).toEqual(gridSlot(MAX_SURFACE_ITEMS));
+        });
+
+        /** Review Focus 5: a box with no upper bound covers every slot, and the append still returns. */
+        it("leaves a card unplaced, and returns, when one box covers every slot the search tries", async () => {
+          const id = await room();
+          await put(id, card("sky", { kind: "shape", body: null, shape: SHAPE, placement: { x: 0, y: 0, w: 1e300, h: 1e300 } }));
+          const out = (await put(id, card("a")))!;
+          expect((await placements(id)).a).toBeNull();
+          expect(out.payload).toMatchObject({ key: "a", placement: null });
+        });
+
+        it("gives two writes that land together two slots", async () => {
+          const id = await room();
+          await Promise.all([put(id, card("a")), put(id, card("b"))]);
+          const placed = await placements(id);
+          expect([placed.a, placed.b]).toEqual(expect.arrayContaining([{ x: 0, y: 0 }, { x: 360, y: 0 }]));
+        });
+
+        /**
+         * Review Focus 4. The retry's fingerprint is its draft's, which carries no placement, so a retry
+         * reads as a retry however the room has filled or emptied since, and the replay takes no slot.
+         */
+        it("places once: a retry of the same write replays whatever has landed since", async () => {
+          const id = await room();
+          const first = await store.appendEventOnce(id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } });
+          if (first.outcome !== "appended") throw new Error(`first write said ${first.outcome}`);
+          expect(first.event.payload).toMatchObject({ key: "plan", placement: { x: 0, y: 0 } });
+          // The card is removed and another takes its slot, so a retry that placed itself again would pick slot 1.
+          await store.appendEvent(id, wrote(null), { surface: { key: "plan", item: null } });
+          await put(id, card("c"));
+
+          const retry = await store.appendEventOnce(id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } });
+
+          if (retry.outcome !== "replayed") throw new Error(`the retry said ${retry.outcome}`);
+          expect(retry.event).toEqual(first.event);
+          expect(await placements(id), "the removed card stays removed, and c keeps slot 0").toEqual({ c: { x: 0, y: 0 } });
+        });
       });
     });
 

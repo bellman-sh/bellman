@@ -5,7 +5,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { startRoom } from "../helpers/flows.js";
 import { HOST_MEMBER_ID } from "../../src/host.js";
 import type { Identity, SavedPreset } from "../../src/types.js";
 
@@ -145,6 +146,14 @@ describe("bellman_start citing a saved preset", () => {
     const doc = tools.find((t) => t.name === "bellman_start")!.description!;
     expect(doc).toContain('preset: "pair" | "swarm" | "review" | "social" | "topic"');
     expect(doc).toContain("the swarm, social and topic presets make swarm rooms.");
+  });
+
+  // Topic rooms spec, D6 and R4: a topic room opens as a page; every other preset as its canvas.
+  it("starts a topic room opening as a page, and every other preset opening as its canvas", async () => {
+    for (const [preset, view] of [["topic", "page"], ["swarm", "canvas"], ["pair", "canvas"]] as const) {
+      const { sessionId } = await startRoom(jesse, manifestFixture({ preset, public: true }));
+      expect((await h.store.getSession(sessionId))!.publicView, preset).toBe(view);
+    }
   });
 
   /**

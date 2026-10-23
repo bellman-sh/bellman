@@ -10,6 +10,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, type RoomRouteDeps } from "../src/http/rooms.js";
+import { resolveManifest } from "../src/manifest.js";
 import { storedMember } from "../src/projections.js";
 import { MemoryStore } from "../src/store.js";
 import type { EventType, Member, Session } from "../src/types.js";
@@ -74,7 +75,7 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text", "view"]);
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "preset", "status", "text", "view"]);
     expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", view: "canvas", by: null });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
@@ -85,6 +86,17 @@ describe("GET /public/rooms/:id", () => {
     expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("canvas");
     await store.setPublicView(PUB, "page");
     expect((await bodyOf(await read(`/public/rooms/${PUB}`))).view).toBe("page");
+  });
+
+  // Topic rooms spec, R4 and R5.
+  it("names the room's preset, null for a room that cites none, and a topic room opens as a page", async () => {
+    expect((await bodyOf(await read(`/public/rooms/${PUB}`))).preset).toBe("pair");
+    await store.createSession(publicRoom({
+      id: "qs_topic", manifest: roomManifest({ ...resolveManifest({ room: "mcp", preset: "topic", public: true }) }), publicView: "page",
+    }));
+    expect(await bodyOf(await read("/public/rooms/qs_topic"))).toMatchObject({ preset: "topic", view: "page", mode: "swarm" });
+    await store.createSession(publicRoom({ id: "qs_authored", manifest: roomManifest({ public: true, preset: null }) }));
+    expect((await bodyOf(await read("/public/rooms/qs_authored"))).preset).toBeNull();
   });
 
   it("answers a private, an unpublished, an unknown and a purged room, and their sub-routes, with one 404", async () => {

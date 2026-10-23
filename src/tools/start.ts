@@ -8,7 +8,7 @@ import { hostMember } from "../host.js";
 import type { ArrivingMember, Identity, NewSession, RoomManifest } from "../types.js";
 import { entitlementsFor } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
-import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
+import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, isTopicRoom, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { claimName, publicNameRefusal } from "../public-names.js";
 import { audit } from "../rooms.js";
@@ -203,8 +203,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         unpublishedAt: null,
         // The name claimed above, if any (public names spec, D4): the record is what holds it.
         publicName: public_name ?? null,
-        // A room opens on its canvas until its creator chooses the page (room pages spec, D3).
-        publicView: "canvas",
+        // A room opens on its canvas until its creator chooses the page (room pages spec, D3). A topic room opens as a
+        // page (topic rooms spec, D6 and R4); its creator keeps PUT /rooms/:id/view.
+        publicView: isTopicRoom(manifest) ? "page" : "canvas",
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

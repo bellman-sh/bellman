@@ -1,6 +1,6 @@
 # ADR 0011 — Public rooms are read without sign-in and name members by number
 
-**Date:** 2026-10-09 · **Status:** accepted · **Recorded:** 2026-10-09 · **Spec:** `docs/superpowers/specs/2026-10-09-public-rooms-design.md`
+**Date:** 2026-10-09 · **Status:** accepted; decision 3 amended by ADR 0026 · **Recorded:** 2026-10-09 · **Spec:** `docs/superpowers/specs/2026-10-09-public-rooms-design.md`
 
 ## Context
 

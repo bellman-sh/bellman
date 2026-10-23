@@ -3993,6 +3993,15 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.get<string>(`hn:${handle}`);
   }
 
+  /**
+   * `BellmanStore.handleHolders`: one list of the `uh:` rows, the user id being all of the key past the prefix, so an id
+   * that holds a colon is read whole. Storage lists keys in ascending order, which is the user id order the method promises.
+   */
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    const rows = await this.ctx.storage.list<string>({ prefix: "uh:" });
+    return [...rows].map(([key, handle]) => ({ userId: key.slice("uh:".length), handle }));
+  }
+
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
     return this.ctx.storage.transaction(async (txn) => {
       const holder = await txn.get<string>(`hn:${handle}`);
@@ -4936,6 +4945,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async userOfHandle(handle: string): Promise<string | undefined> {
     return this.registry.userOfHandle(handle);
+  }
+
+  async handleHolders(): Promise<{ userId: string; handle: string }[]> {
+    return this.registry.handleHolders();
   }
 
   async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {

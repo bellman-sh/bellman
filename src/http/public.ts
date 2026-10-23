@@ -173,6 +173,9 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       status: sessionStatus(session),
       closed_at: retentionOf(session).closed_at,
       mode: session.manifest.mode,
+      // The room's one link: its name's while it holds one, its id's otherwise, whichever the read went by.
+      // The dash's Worker writes it as the page's canonical link and og:url.
+      public_url: publicRoomUrl(session),
       text: untrusted(
         { memberId: creator.memberId, label: creator.label },
         { room: session.manifest.room, purpose: session.manifest.purpose },

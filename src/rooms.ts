@@ -29,9 +29,11 @@ import {
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
-import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
+import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
+import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
+import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -89,6 +91,15 @@ export const FROZEN =
 const NOT_PUBLIC =
   "this room is not public, so it cannot hold a permanent code: a link that never expires belongs only to a room " +
   "anyone can already read. Omit permanent for a code that expires in 15 minutes.";
+
+/**
+ * A proposal sent into a topic room where no active seat can answer it (topic rooms plan, R6). Its audience is the
+ * seats that hold `respond_actions`, and a proposer cannot answer their own, so with none of them here it would
+ * sit open for its seven days and hold the proposer's place under the cap. It is refused when sent, and the
+ * sentence says who can put it right.
+ */
+export const NO_ANSWERER =
+  "no active member can answer a proposal: every seat that holds respond_actions has left. Ask the room's creator to seat a maintainer.";
 
 export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
@@ -843,6 +854,110 @@ function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
 }
 
 /**
+ * The blob a write names, settled against the room's object and the kind's type rule: the write with the
+ * object's size, type and name filled in, or the refusal (topic rooms plan, R14). A write that names no blob
+ * settles as itself.
+ *
+ * A blob-backed item carries the object's metadata, not the writer's (#183, D5): the writer named an id, and
+ * what readers get is what the bucket holds under this room's prefix. `head` resolves nothing from another
+ * room (D1), so a foreign id is "no blob" here too. The image and html checks are on the STORED type, which D6
+ * already decided at upload.
+ *
+ * `writeSurface` called these steps inline. They are one function now so that a card a contributor proposes is
+ * held to the rule a card a maintainer writes is held to, by the same words in the same order.
+ */
+export async function settleBlob(
+  blobs: BlobStore,
+  sessionId: string,
+  write: SurfaceWrite,
+  blobId: string,
+): Promise<RoomResult<SurfaceWrite>> {
+  if (write.item === null) return succeed(write);
+  const meta = await blobs.head(sessionId, blobId);
+  if (!meta) {
+    return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${blobId} has been uploaded to this room.`);
+  }
+  if (write.item.kind === "image" && !isImageType(meta.type)) {
+    return refuse(
+      "invalid",
+      `surface image "${write.key}": blob ${blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
+    );
+  }
+  // normalizeMediaType drops parameters and lower-cases, so text/html; charset=utf-8 places; a type it cannot
+  // read comes back as an octet-stream, which is no more text/html than the original was.
+  if (write.item.kind === "html" && normalizeMediaType(meta.type) !== "text/html") {
+    return refuse(
+      "invalid",
+      `surface html "${write.key}": blob ${blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,
+    );
+  }
+  return succeed({
+    key: write.key,
+    item: { ...write.item, blob: { id: blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
+  });
+}
+
+/**
+ * Whether `me` may send this proposal now (topic rooms plan, R7): its shape, its item, its source, its base,
+ * its blob and the cap of three open ones. The first refusal is the answer, in that order, so a proposal that
+ * is malformed is told so before it is told about the cap.
+ *
+ * It appends nothing and counts nothing against the send limit. `bellman_send` asks for the minute's place
+ * after this returns (`admitSend`), so a proposal refused here spends none.
+ *
+ * The item is read here as text and structure only. When a maintainer approves the proposal it is normalised
+ * again and settled again, since what the room holds by then may differ: a proposal is never applied on trust.
+ *
+ * The cap is read before the append, as the 64-item cap in `writeSurface` is, so two proposals landing together
+ * can make a fourth (R11). It is a courtesy bound and is checked here and in no store.
+ *
+ * ponytail: the cap reads the log back across a proposal's seven days for every proposal sent, the window
+ * `bellman_sync` reads for `outstanding`. Proposing is human-paced; a stored count of a member's open
+ * proposals is the upgrade if it ever is not.
+ */
+export async function checkProposal(
+  store: BellmanStore,
+  blobs: BlobStore,
+  session: StoredSession,
+  me: Member,
+  payload: unknown,
+  now: number = Date.now(),
+): Promise<RoomResult<null>> {
+  const read = readProposal(payload);
+  if (!read.ok) return refuse("invalid", read.reason);
+
+  const normalized = normalizeSurfaceWrite(read.item);
+  if (!normalized.ok) return refuse("invalid", `surface_proposal item: ${normalized.reason}`);
+
+  const unsourced = sourceRefusal(normalized.write);
+  if (unsourced !== null) return refuse("invalid", `surface_proposal "${normalized.write.key}": ${unsourced}`);
+
+  // A base from the future means nothing: it names a surface cursor the room has not reached.
+  const cursor = surfaceCursor(session);
+  if (read.base > cursor) {
+    return refuse(
+      "invalid",
+      `surface_proposal base ${read.base} is ahead of the room's surface cursor ${cursor}: base is the surface_cursor you read`,
+    );
+  }
+
+  if (normalized.blobId !== null) {
+    const settled = await settleBlob(blobs, session.id, normalized.write, normalized.blobId);
+    if (!settled.ok) return settled;
+  }
+
+  const open = openProposalsOf(await requestWindow(store, session.id, now - PROPOSAL_TTL_MS), me.memberId, now);
+  if (open >= MAX_OPEN_PROPOSALS) {
+    return refuse(
+      "conflict",
+      `you already hold ${MAX_OPEN_PROPOSALS} open proposals, the most a member may hold in a topic room. ` +
+        "A maintainer answering one, or its seven days passing, makes room for another.",
+    );
+  }
+  return succeed(null);
+}
+
+/**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
  * One operation for both transports — `bellman_send type: "surface"` and
@@ -883,34 +998,11 @@ export async function writeSurface(
   if (!normalized.ok) return refuse("invalid", normalized.reason);
   let { write } = normalized;
 
-  // A blob-backed item carries the object's metadata, not the writer's (#183,
-  // D5): the writer named an id, and what readers get is what the bucket holds
-  // under this room's prefix. `head` resolves nothing from another room (D1),
-  // so a foreign id is "no blob" here too. The image and html checks are on the
-  // STORED type, which D6 already decided at upload.
+  // A blob-backed item carries the object's metadata, not the writer's: `settleBlob` reads it.
   if (normalized.blobId !== null && write.item !== null) {
-    const meta = await blobs.head(sessionId, normalized.blobId);
-    if (!meta) {
-      return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${normalized.blobId} has been uploaded to this room.`);
-    }
-    if (write.item.kind === "image" && !isImageType(meta.type)) {
-      return refuse(
-        "invalid",
-        `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
-      );
-    }
-    // normalizeMediaType drops parameters and lower-cases, so text/html; charset=utf-8 places; a type it cannot
-    // read comes back as an octet-stream, which is no more text/html than the original was.
-    if (write.item.kind === "html" && normalizeMediaType(meta.type) !== "text/html") {
-      return refuse(
-        "invalid",
-        `surface html "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,
-      );
-    }
-    write = {
-      key: write.key,
-      item: { ...write.item, blob: { id: normalized.blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
-    };
+    const settled = await settleBlob(blobs, sessionId, write, normalized.blobId);
+    if (!settled.ok) return settled;
+    write = settled.value;
   }
 
   const rows = await store.surfaceOf(sessionId);

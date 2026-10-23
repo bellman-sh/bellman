@@ -6,8 +6,10 @@ import {
 import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
-import { denyVerb } from "../roles.js";
-import { FROZEN, activeMembers, admitSend, audit, findMember, touchMember, writeSurface } from "../rooms.js";
+import { denyVerb, verbsOfRole } from "../roles.js";
+import { FROZEN, NO_ANSWERER, activeMembers, admitSend, audit, checkProposal, findMember, touchMember, writeSurface } from "../rooms.js";
+import { isProposalPayload } from "../action-state.js";
+import { isTopicRoom } from "../manifest.js";
 import type { AppendExtras, BellmanStore, EventWrite } from "../store.js";
 import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
@@ -146,9 +148,25 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         }
       }
       if (type === "action_request") {
-        const refusing = others.filter((m) => !m.capabilities.includes("request_actions"));
+        // A proposal in a topic room is addressed to the seats that can answer it, not to every other member
+        // (topic rooms plan, R6). Asking each of them for the `request_actions` grant would let one contributor
+        // who granted nothing, which is a contributor's default, refuse every proposal in a public room. A
+        // maintainer's agent has to grant it, and the refusal names the maintainer who did not. A request that
+        // is not a proposal, or any request in a room that is not a topic room, keeps the rule it always had.
+        const proposing = isTopicRoom(session.manifest) && isProposalPayload(payload);
+        const audience = proposing
+          ? others.filter((m) => verbsOfRole(session.manifest, m.roomRole).includes("respond_actions"))
+          : others;
+        if (proposing && audience.length === 0) return fail(NO_ANSWERER);
+        const refusing = audience.filter((m) => !m.capabilities.includes("request_actions"));
         if (refusing.length > 0) {
           return fail(`action_request blocked: ${refusing.map((m) => m.label).join(", ")} did not grant request_actions.`);
+        }
+        // The proposal's own checks sit before the minute's count below, so a proposal refused for its shape,
+        // its source, its base, its blob or the cap spends no place under the send limit.
+        if (proposing) {
+          const checked = await checkProposal(s, blobs, session, me, payload);
+          if (!checked.ok) return refusal(checked);
         }
       }
       if (type === "action_response") {

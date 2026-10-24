@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import type { RoomCaller } from "../src/http/rooms.js";
-import { MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
+import { MAX_ACCOUNTS_ANSWERED, MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, PlanGrant } from "../src/types.js";
 import { DEV_KEY } from "./helpers/harness.js";
@@ -331,5 +331,41 @@ describe("GET /operator/stats", () => {
     const res = await call(DEV_KEY.jesse);
     expect(res!.status).toBe(500);
     expect(await bodyOf(res)).toMatchObject({ error: "internal" });
+  });
+});
+
+// The accounts pane on dash.bellman.sh/stats: the people who have signed in, for the operator alone, read by the
+// panel's session as the counts are. Rows, which /operator/stats is built never to answer (#259), so a route of its own.
+describe("GET /operator/accounts", () => {
+  it("lists accounts by first sign-in with the total, to an operator's session and bearer token alike", async () => {
+    await store.recordSignIn("u_google_2", Date.UTC(2026, 9, 3));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1));
+    const want = {
+      total: 2,
+      accounts: [
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-01T00:00:00.000Z" },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z" },
+      ],
+    };
+    const viaCookie = await call(null, "/operator/accounts", { cookie: DEV_KEY.jesse, origin: PANEL });
+    expect([viaCookie!.status, await bodyOf(viaCookie), viaCookie!.headers.get("access-control-allow-origin")]).toEqual([200, want, PANEL]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/operator/accounts/"))).toEqual(want);
+  });
+
+  it("lists at most MAX_ACCOUNTS_ANSWERED, and tells nobody else anything, the method included", async () => {
+    for (let i = 0; i < MAX_ACCOUNTS_ANSWERED + 2; i++) await store.recordSignIn(`u_github_${i}`, i);
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/operator/accounts"));
+    expect([body.total, (body.accounts as unknown[]).length]).toEqual([MAX_ACCOUNTS_ANSWERED + 2, MAX_ACCOUNTS_ANSWERED]);
+    expect((await call(null, "/operator/accounts"))!.status).toBe(401);
+    expect((await call(DEV_KEY.peer, "/operator/accounts"))!.status).toBe(403);
+    expect((await call(DEV_KEY.peer, "/operator/accounts", { method: "POST" }))!.status).toBe(403);
+    deps = { ...deps, operators: new Set() };
+    expect((await call(DEV_KEY.jesse, "/operator/accounts"))!.status).toBe(403);
+  });
+
+  it("takes GET alone, and carries on for a path below it", async () => {
+    const res = await call(DEV_KEY.jesse, "/operator/accounts", { method: "DELETE" });
+    expect([res!.status, res!.headers.get("allow")]).toEqual([405, "GET"]);
+    expect(await call(DEV_KEY.jesse, "/operator/accounts/u_github_9")).toBeUndefined();
   });
 });

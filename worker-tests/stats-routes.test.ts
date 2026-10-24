@@ -73,4 +73,16 @@ describe("the operator stats through the Worker", () => {
     // The list is read through the OAuth config, so a deploy with no OAuth has no operators, whatever the secret says.
     expect((await getStats(envWith({ BELLMAN_TOKEN_SECRET: undefined, BELLMAN_OPERATORS: "u_jesse" }))).status).toBe(403);
   });
+
+  // The stats page's accounts pane, wired through the Worker to the registry: the Durable Objects list, not a stub.
+  it("answers /operator/accounts on the same gate, listing the registry's sign-in records", async () => {
+    await seed();
+    const operator = envWith({ BELLMAN_OPERATORS: "u_jesse" });
+    const res = await getStats(operator, "/operator/accounts");
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await res.json() as { total: number; accounts: { user_id: string }[] };
+    expect([body.total, body.accounts.length]).toEqual([3, 3]);
+    expect((await getStats(operator, "/operator/accounts", {})).status).toBe(401);
+    expect((await getStats(envWith({ BELLMAN_OPERATORS: "u_someone_else" }), "/operator/accounts")).status).toBe(403);
+  });
 });

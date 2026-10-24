@@ -53,12 +53,22 @@ export interface PlatformStats {
 export const MAX_GRANTS_COUNTED = 1000;
 
 const PATH = "/operator/stats";
+/**
+ * The accounts pane on the panel's stats page: who has signed in, first sign-in first, each an id and two dates.
+ * Rows, which `/operator/stats` is built never to answer (#259 asked that a panel needing rows start a separate
+ * console; the owner asked for the pane on the dash instead, 2026-10-24). So a path of its own, on the same gate,
+ * and the counts' type stays scalars only. Read-only: a route that writes stays on `/admin/*` behind a bearer token.
+ */
+const ACCOUNTS_PATH = "/operator/accounts";
+
+// ponytail: the first 500 by first sign-in and no paging, a table on one page; `total` says when there are more.
+export const MAX_ACCOUNTS_ANSWERED = 500;
 
 /** `undefined` for any other path, so the server carries on. */
 export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promise<Response | undefined> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");
-  if (path !== PATH) return undefined;
+  if (path !== PATH && path !== ACCOUNTS_PATH) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   // Before the caller is read: a browser sends no credential on a preflight.
   if (request.method === "OPTIONS") return preflightResponse(origin);
@@ -80,6 +90,18 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
       return problem(403, "not_available", "this account has no platform stats", origin);
     }
     if (request.method !== "GET") return methodNotAllowed("GET", origin);
+
+    if (path === ACCOUNTS_PATH) {
+      const [total, users] = await Promise.all([deps.store.countUsers(), deps.store.listUsers(MAX_ACCOUNTS_ANSWERED)]);
+      return json(200, {
+        total,
+        accounts: users.map((u) => ({
+          user_id: u.userId,
+          first_seen_at: new Date(u.firstSeenAt).toISOString(),
+          last_seen_at: new Date(u.lastSeenAt).toISOString(),
+        })),
+      }, origin);
+    }
 
     // No second argument: listGrants(limit, null) filters to the grants with no
     // org, and undefined is what asks for every org's. Both stores drop a

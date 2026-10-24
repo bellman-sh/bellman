@@ -411,7 +411,8 @@ export default {
     // `overrides` (BELLMAN_USERS outranks a grant) and `honourPurchases` (a purchase grant counts only
     // with applyPlans), off the same OAuth config. The route requires all three keys; it cannot check the
     // values, so worker-tests/stats-routes.test.ts reads the count through each.
-    if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
+    // `/operator/accounts`, the stats page's accounts pane, takes the same gate and guard.
+    if (/^\/operator\/(stats|accounts)\/?$/.test(url.pathname)) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await statsRoutes(request, {

@@ -265,8 +265,10 @@ signature with it, for an account deletion or an abusive name. They sit beside
 an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes them, and with the list
 unset or empty nobody does. `GET /admin/accounts` takes the same gate and lists
-who has signed in, first sign-in first, each as a user id and two dates: the
-registry's `us:` records hold nothing more, and it reads no room for a label.
+who has signed in, first sign-in first, each as a user id and two dates: a
+sign-in record holds nothing more, and it reads no room for a label. In the
+registry those records share `us:` with the count and the created-room index,
+so it keeps only rows whose key is `us:` and the record's own id.
 It is the one route that answers rows of accounts, which `/operator/stats` was
 built never to do (#259); where such reads live next is #61's question.
 

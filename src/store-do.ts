@@ -5347,10 +5347,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
   }
 
-  /** `BellmanStore.listUsers`: every `us:u_` record (so not `us:count`), sorted here and cut to `limit`. */
+  /**
+   * `BellmanStore.listUsers`. Three kinds of row share `us:`: the sign-in records, `us:count`, and the created-room
+   * index (`us:<userId>:<sessionId>`, a number; `indexSession`). A sign-in record is the object whose key is
+   * `userKey` of its own id, so that is what is kept, whatever the id's shape: `countUsers` counts every one.
+   *
+   * ponytail: the list walks the room index too, one row per room ever created; give sign-in records a prefix of
+   * their own when that index is large.
+   */
   async listUsers(limit: number): Promise<UserRecord[]> {
-    const rows = await this.ctx.storage.list<UserRecord>({ prefix: userKey("u_") });
-    return firstSignInFirst([...rows.values()]).slice(0, limit);
+    const rows = await this.ctx.storage.list<unknown>({ prefix: "us:" });
+    const records = [...rows].flatMap(([key, value]) => {
+      const r = value as Partial<UserRecord> | null;
+      return typeof r === "object" && r !== null && typeof r.userId === "string" && key === userKey(r.userId)
+        && typeof r.firstSeenAt === "number" && typeof r.lastSeenAt === "number"
+        ? [{ userId: r.userId, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt }]
+        : [];
+    });
+    return firstSignInFirst(records).slice(0, limit);
   }
 
   /**

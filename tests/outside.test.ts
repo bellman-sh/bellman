@@ -208,6 +208,20 @@ describe("asking a public room", () => {
     expect((await questions()).map((e) => e.fromLabel)).toEqual(["visitor 1", "ada", "visitor 2", "visitor 1"]);
   });
 
+  it("a follow-up keeps the task's origin when the asker has since claimed a handle", async () => {
+    const first = await ask(caller(1));
+    if (!first.ok) throw new Error("refused");
+    await store.appendEvent(PUB, { type: "message", fromMemberId: "system", fromUserId: "system", fromLabel: "x", payload: {}, refId: null }, {
+      outsideTask: { ...first.task, state: "TASK_STATE_INPUT_REQUIRED" },
+    });
+    await store.claimHandle("u_out1", "ada");
+
+    const r = await ask(caller(1), "more", { taskId: first.task.id });
+
+    expect(r.ok && r.task.origin).toBe("visitor 1");
+    expect((await questions()).map((e) => e.fromLabel)).toEqual(["visitor 1", "visitor 1"]);
+  });
+
   it("simultaneous asks from one account stop at the cap, share one context, and do not skip a visitor number", async () => {
     const same = await Promise.all([1, 2, 3, 4, 5].map((n) => ask(caller(1), `q${n}`)));
     const others = await Promise.all([2, 3].map((n) => ask(caller(n), "hi")));

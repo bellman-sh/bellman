@@ -109,7 +109,7 @@ export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "un
   return {
     ok: true, task, issued, seatDay: seat ? { day: today, count: spent + 1 } : null,
     standing: known && visitor === known.visitor ? null : { userId: req.callerUserId, contextId, visitor },
-    event: { type: "outside_question", fromMemberId: "system", fromUserId: "system", fromLabel: origin, payload: { taskId: task.id, text: req.text }, refId: null },
+    event: { type: "outside_question", fromMemberId: "system", fromUserId: "system", fromLabel: task.origin, payload: { taskId: task.id, text: req.text }, refId: null },
   };
 }
 

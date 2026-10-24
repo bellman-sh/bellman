@@ -23,8 +23,9 @@ const oauthEnv = { ...env, BELLMAN_TOKEN_SECRET: SECRET } as unknown as Paramete
 const store = () => new DurableObjectStore(env as never);
 
 const person = (userId: string): Identity => ({ userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` });
-const tokenFor = (userId: string) => signJwt(
-  { iss: ORIGIN, sub: userId, aud: canonicalResource(`${ORIGIN}/mcp`), bellman: person(userId), plan_source: "default" },
+/** An access token minted for `/a2a`, the resource this endpoint is (Task 9), unless another is named. */
+const tokenFor = (userId: string, resource = "/a2a") => signJwt(
+  { iss: ORIGIN, sub: userId, aud: canonicalResource(`${ORIGIN}${resource}`), bellman: person(userId), plan_source: "default" },
   SECRET, ACCESS_TOKEN_TTL_SECONDS,
 );
 
@@ -93,8 +94,56 @@ describe("/a2a", () => {
     await seedPublic();
     const res = await rpc(null, "SendMessage", ask(NAME));
     expect(res.status).toBe(401);
-    expect(res.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
+    expect(res.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/a2a"`);
+    // A plain HTTP 401, not a JSON-RPC error: -32001 is TaskNotFound to an A2A client.
+    expect(res.headers.get("content-type")).not.toContain("json");
     expect(await questionsIn(ROOM)).toEqual([]);
+  });
+
+  it("an …/mcp token is refused at /a2a", async () => {
+    await seedPublic();
+    const res = await post(
+      { jsonrpc: "2.0", id: 1, method: "SendMessage", params: ask(NAME) }, null,
+      { "a2a-version": "1.0", authorization: `Bearer ${await tokenFor("u_alice", "/mcp")}` },
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/a2a"`);
+    expect(await questionsIn(ROOM)).toEqual([]);
+  });
+
+  it("an …/a2a token is refused at /mcp, where an …/mcp token is still taken", async () => {
+    const mcp = async (resource: string) => worker.fetch(new Request(`${ORIGIN}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json", accept: "application/json, text/event-stream",
+        authorization: `Bearer ${await tokenFor("u_alice", resource)}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+      }),
+    }), oauthEnv, ctx);
+    const refused = await mcp("/a2a");
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
+    expect((await mcp("/mcp")).status).toBe(200);
+  });
+
+  it("a bearer key works at /a2a", async () => {
+    await seedPublic();
+    const res = await post({ jsonrpc: "2.0", id: 1, method: "ListTasks", params: { tenant: NAME } }, null,
+      { "a2a-version": "1.0", authorization: "Bearer qk_ws_test" });
+    expect(res.status).toBe(200);
+    expect((await json(res)).result).toMatchObject({ tasks: [], totalSize: 0 });
+  });
+
+  it("the Worker's protected-resource metadata names /a2a at its own path and /mcp at the bare one", async () => {
+    const resourceAt = async (path: string) =>
+      ((await (await worker.fetch(new Request(`${ORIGIN}/.well-known/oauth-protected-resource${path}`), oauthEnv, ctx)).json()) as
+        { resource: string }).resource;
+    expect(await resourceAt("/a2a")).toBe(`${ORIGIN}/a2a`);
+    expect(await resourceAt("")).toBe(`${ORIGIN}/mcp`);
+    expect(await resourceAt("/mcp")).toBe(`${ORIGIN}/mcp`);
   });
 
   it("SendMessage with returnImmediately returns a WORKING task with id and contextId", async () => {

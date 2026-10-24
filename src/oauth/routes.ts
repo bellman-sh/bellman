@@ -37,14 +37,19 @@ import {
  * Bellman is both the authorization server and the resource server, which is
  * allowed and keeps the deployment to one Worker. The two roles are still kept
  * honest about each other: a token is minted for exactly one resource URI, and
- * /mcp refuses anything whose audience is not itself.
+ * /mcp and /a2a each refuse anything whose audience is not itself.
  */
 
 export interface OAuthConfig {
   /** Origin of this server, e.g. https://mcp.bellman.sh */
   issuer: string;
-  /** Canonical URI tokens are minted for, e.g. https://mcp.bellman.sh/mcp */
+  /** Canonical URI tokens are minted for when the client names none, e.g. https://mcp.bellman.sh/mcp */
   resource: string;
+  /**
+   * Every canonical resource a token may be minted for, `resource` among them, e.g. …/mcp and …/a2a (ADR 0033).
+   * Absent means `resource` alone.
+   */
+  resources?: string[];
   secret: string;
   /** What seals an org's IdP client secret (SSO spec, D14): BELLMAN_SEAL_SECRET, or else `secret`. */
   sealSecret?: string;
@@ -1085,9 +1090,13 @@ export async function handleOAuth(
   }
 
   // ------------------------------------------------------------- discovery
-  if (method === "GET" && path.startsWith("/.well-known/oauth-protected-resource")) {
+  // RFC 9728 section 3.1: a resource's metadata is at this prefix plus its path, so /a2a's is under /a2a. The bare
+  // path and every other suffix name /mcp, as they did before /a2a was a resource.
+  if (method === "GET" && path.startsWith(PROTECTED_RESOURCE_PATH)) {
+    const suffix = path.slice(PROTECTED_RESOURCE_PATH.length);
+    const named = suffix.startsWith("/") ? canonicalResource(`${config.issuer}${suffix}`) : "";
     return json({
-      resource: config.resource,
+      resource: resourcesOf(config).includes(named) ? named : config.resource,
       authorization_servers: [config.issuer],
       bearer_methods_supported: ["header"],
       scopes_supported: [SCOPE],
@@ -1198,16 +1207,18 @@ export async function handleOAuth(
     const challenge = q.get("code_challenge") ?? "";
     if (challenge.length < 43) return back("invalid_request", "code_challenge is required");
 
+    // The token's audience is the resource named, or /mcp when none is (RFC 8707).
     const requested = q.get("resource");
-    if (requested && canonicalResource(requested) !== config.resource) {
-      return back("invalid_target", `this server only issues tokens for ${config.resource}`);
+    const resource = requested ? canonicalResource(requested) : config.resource;
+    if (!resourcesOf(config).includes(resource)) {
+      return back("invalid_target", `this server only issues tokens for ${resourcesOf(config).join(" and ")}`);
     }
 
     const pending: AuthorizeRequest = {
       client_id: clientId,
       redirect_uri: redirectUri,
       code_challenge: challenge,
-      resource: config.resource,
+      resource,
       state: q.get("state") ?? undefined,
     };
     const stateToken = await signJwt(
@@ -1584,12 +1595,22 @@ export async function handleOAuth(
     }
 
     if (grant === "refresh_token") {
+      // Canonicalized before the token is taken, so a resource that does not parse costs the client nothing.
+      const requested = form.get("resource");
+      const resource = requested ? canonicalResource(requested) : undefined;
       const token = form.get("refresh_token") ?? "";
       const stored = token ? await config.store.takeRefresh(token) : undefined;
       if (!stored) return oauthError("invalid_grant", "refresh token is invalid, used, or expired");
       const clientId = form.get("client_id");
       if (clientId && stored.client_id !== clientId) {
         return oauthError("invalid_grant", "refresh token was issued to another client");
+      }
+      // A refresh keeps the audience it was granted (RFC 8707 section 2.2 lets it narrow, and there is nothing
+      // narrower than one resource): naming another is refused, and naming none keeps it. The token goes back,
+      // as on the failures below: it is the one the caller just presented.
+      if (resource && resource !== stored.resource) {
+        await config.store.putRefresh(token, stored).catch(() => {});
+        return oauthError("invalid_target", "a refresh keeps the resource it was granted for");
       }
       const keys = storedIdentityKeys(stored);
       if (!keys) {
@@ -2269,22 +2290,30 @@ async function issueTokens(
   });
 }
 
-/** Resolve an access token presented to /mcp. Audience is checked here. */
+/**
+ * Resolve an access token presented to a resource: /mcp's unless another canonical resource is named. Audience is
+ * checked here, so a token minted for one resource is refused at the other.
+ */
 export async function identityFromAccessToken(
   token: string,
-  config: Pick<OAuthConfig, "issuer" | "resource" | "secret">
+  config: Pick<OAuthConfig, "issuer" | "resource" | "secret">,
+  audience = config.resource
 ): Promise<Identity | null> {
-  const claims = await verifyJwt(token, config.secret, {
-    issuer: config.issuer,
-    audience: config.resource,
-  });
+  const claims = await verifyJwt(token, config.secret, { issuer: config.issuer, audience });
   return (claims?.bellman as Identity | undefined) ?? null;
 }
 
-/** RFC 9728: a 401 points the client at the metadata that starts the dance. */
-export function unauthorizedHeaders(config: Pick<OAuthConfig, "issuer">): Record<string, string> {
+const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
+
+const resourcesOf = (config: Pick<OAuthConfig, "resource" | "resources">) => config.resources ?? [config.resource];
+
+/**
+ * RFC 9728: a 401 points the client at the metadata that starts the dance. /mcp's is the bare path, as it has always
+ * been; /a2a's is its own (section 3.1).
+ */
+export function unauthorizedHeaders(config: Pick<OAuthConfig, "issuer">, resource: "/mcp" | "/a2a" = "/mcp"): Record<string, string> {
   return {
     "www-authenticate":
-      `Bearer resource_metadata="${config.issuer}/.well-known/oauth-protected-resource"`,
+      `Bearer resource_metadata="${config.issuer}${PROTECTED_RESOURCE_PATH}${resource === "/a2a" ? "/a2a" : ""}"`,
   };
 }

@@ -7,8 +7,8 @@
  * grammar. Nothing here is stored. A frame's number is its rank among the frames on every call, and a card's
  * frame is decided by where its centre sits on every call.
  */
-import { GRID, SurfaceKeyShape, createdAtOf } from "./surface.js";
-import type { SurfaceRow } from "./types.js";
+import { GRID, SurfaceKeyShape, coveredBoxes, createdAtOf, overlaps, withPlacement, type Box, type SurfaceWrite } from "./surface.js";
+import type { SurfaceItem, SurfaceRow } from "./types.js";
 
 /** At most this many frames on one surface (D2). */
 export const MAX_FRAMES = 100;
@@ -294,4 +294,91 @@ export function readWindow(
       ...(slots === undefined ? {} : { slots }),
     },
   };
+}
+
+/** What a store says when a frame-shaped write reaches a path that cannot place it among frames. */
+export const FRAME_WRITE_PATH = "a frame write, or a write into a frame, goes through appendSurface";
+
+/** A write the room must place among frames: a frame itself, or a card that names the frame it goes in. */
+export const isFrameWrite = (write: SurfaceWrite): boolean => write.item?.kind === "frame" || write.frame !== undefined;
+
+/**
+ * Slot `index` inside `frame` (R5): left to right and then down, the grid's cells inset by its gap on every
+ * side. Null past the last slot, and for a frame too small to hold one card.
+ */
+export function frameSlot(frame: Box, index: number): { x: number; y: number } | null {
+  const cols = Math.floor((frame.w - GRID.gap) / (GRID.w + GRID.gap));
+  const rows = Math.floor((frame.h - GRID.gap) / (GRID.h + GRID.gap));
+  if (index < 0 || index >= cols * rows) return null;
+  return {
+    x: frame.x + GRID.gap + (index % cols) * (GRID.w + GRID.gap),
+    y: frame.y + GRID.gap + Math.floor(index / cols) * (GRID.h + GRID.gap),
+  };
+}
+
+export type Placed = { ok: true; write: SurfaceWrite; carried: SurfaceWrite[] } | { ok: false; reason: string };
+
+/** The row as the item that wrote it: the authorship the store stamps stays off, so the store keeps the row's own. */
+function itemOf(r: SurfaceRow, placement: NonNullable<SurfaceRow["placement"]>): SurfaceItem {
+  const { cursor: _c, at: _a, createdAt: _t, byMemberId: _m, byLabel: _l, approvedBy: _p, ...item } = r;
+  return { ...item, placement };
+}
+
+/**
+ * The write as the room stores it, with the writes it carries (R4, R7, R8). A frame may not overlap another
+ * (edges may touch); a locked frame that moves carries the cards whose centre it held by the corner's change;
+ * a card naming frame N goes in that frame's first free slot, or stays where it already sits inside it. Any
+ * other write is `withPlacement`'s. The answer's write never carries `frame`.
+ */
+export function placeSurfaceWrite(rows: readonly SurfaceRow[], write: SurfaceWrite): Placed {
+  const { item } = write;
+  if (!isFrameWrite(write) || item === null) return { ok: true, write: withPlacement(rows, { key: write.key, item }), carried: [] };
+  const frames = rankFrames(rows);
+
+  if (item.kind === "frame") {
+    const to = item.placement;
+    if (to === null) return { ok: true, write: { key: write.key, item }, carried: [] };
+    const mine: Box = { x: to.x, y: to.y, w: to.w ?? GRID.w, h: to.h ?? GRID.h };
+    const hit = frames.findIndex((f) => f.key !== write.key && overlaps(mine, frameRect(f)));
+    if (hit >= 0) {
+      return { ok: false, reason: `surface frame "${write.key}" would overlap frame ${hit + 1} ("${frames[hit].key}"): frames may touch but not overlap` };
+    }
+    const was = frames.find((f) => f.key === write.key);
+    const dx = to.x - (was?.placement?.x ?? to.x);
+    const dy = to.y - (was?.placement?.y ?? to.y);
+    const carried: SurfaceWrite[] = [];
+    if (was !== undefined && item.locked !== false && (dx !== 0 || dy !== 0)) {
+      const number = frames.indexOf(was) + 1;
+      const { of } = membership(rows);
+      for (const r of rows) {
+        if (r.kind === "frame" || r.placement === null || of.get(r.key) !== number) continue;
+        carried.push({ key: r.key, item: itemOf(r, { ...r.placement, x: r.placement.x + dx, y: r.placement.y + dy }) });
+      }
+      carried.sort((a, b) => cmp(a.key, b.key));
+    }
+    return { ok: true, write: { key: write.key, item }, carried };
+  }
+
+  const n = write.frame!;
+  const label = `surface ${item.kind} "${write.key}": `;
+  if (n > frames.length) return { ok: false, reason: label + noSuchFrame(n, frames.length) };
+  const stored = rows.find((r) => r.key === write.key);
+  if (stored?.placement && membership(rows).of.get(write.key) === n) {
+    return { ok: true, write: { key: write.key, item: { ...item, placement: { ...stored.placement } } }, carried: [] };
+  }
+  const target = frames[n - 1];
+  const covered = coveredBoxes(rows.filter((r) => r.kind !== "frame"), write.key);
+  const box = frameRect(target);
+  for (let i = 0; ; i++) {
+    const at = frameSlot(box, i);
+    if (at === null) {
+      return {
+        ok: false,
+        reason: `${label}frame ${n} ("${target.key}") has no free slot for a ${GRID.w} by ${GRID.h} card: place it with placement { x, y }, or make the frame larger`,
+      };
+    }
+    if (!covered.some((b) => overlaps(b, { ...at, w: GRID.w, h: GRID.h }))) {
+      return { ok: true, write: { key: write.key, item: { ...item, placement: at } }, carried: [] };
+    }
+  }
 }

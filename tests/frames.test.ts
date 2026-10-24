@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   NEXT_ALONE, NEXT_FRAME_GONE, NEXT_REFUSAL, SURFACE_PAGE, WINDOW_REFUSAL_HTTP, WINDOW_REFUSAL_TOOL,
-  frameEntries, frameNumbers, noSuchFrame, parseWindow, readWindow, windowName,
+  frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName,
 } from "../src/frames.js";
 import type { SurfaceRow } from "../src/types.js";
 
@@ -134,5 +134,66 @@ describe("the windows (D5)", () => {
     expect(readWindow(rows, { next: "not-a-token" })).toEqual({ ok: false, reason: NEXT_REFUSAL });
     expect(readWindow(rows, { next: btoa(JSON.stringify(["frame", 5])) })).toEqual({ ok: false, reason: NEXT_REFUSAL });
     expect(readWindow(rows, { window: { kind: "newest" }, next: "x" })).toEqual({ ok: false, reason: NEXT_ALONE });
+  });
+});
+
+describe("placing a write among frames (D2)", () => {
+  const card = (key: string, over: Record<string, unknown> = {}) =>
+    ({ key, item: { key, kind: "text" as const, title: null, body: "x", ends: null, placement: null, blob: null, shape: null, ...over } });
+  const asFrame = (key: string, placement: { x: number; y: number; w: number; h: number }, locked = true) =>
+    ({ key, item: { key, kind: "frame" as const, title: key.toUpperCase(), body: null, ends: null, placement, blob: null, shape: null, locked } });
+  const placed = (rows: SurfaceRow[], write: Parameters<typeof placeSurfaceWrite>[1]) => {
+    const out = placeSurfaceWrite(rows, write);
+    if (!out.ok) throw new Error(out.reason);
+    return out;
+  };
+  const box = { x: 1000, y: 0, w: 1480, h: 520 };
+
+  it("lays four by two slots inside a frame 1,480 by 520, inset by the grid's gap", () => {
+    expect([frameSlot(box, 0), frameSlot(box, 3), frameSlot(box, 4), frameSlot(box, 8)])
+      .toEqual([{ x: 1040, y: 40 }, { x: 2120, y: 40 }, { x: 1040, y: 280 }, null]);
+    expect(frameSlot({ x: 0, y: 0, w: 300, h: 900 }, 0)).toBeNull();
+  });
+
+  it("puts a card naming frame N in its first free slot, and keeps one already inside it where it is", () => {
+    const rows = [frame("f", box, 1), row("taken", at(1040, 40)), row("inside", at(1400, 280))];
+    expect(placed(rows, { ...card("new"), frame: 1 }).write).toEqual({ key: "new", item: { ...card("new").item, placement: { x: 1400, y: 40 } } });
+    expect(placed(rows, { ...card("inside"), frame: 1 }).write.item!.placement).toEqual({ x: 1400, y: 280 });
+  });
+
+  it("refuses a card for a frame that does not exist or has no free slot, naming the frame", () => {
+    const rows = [frame("tiny", { x: 0, y: 0, w: 300, h: 300 }, 1)];
+    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 2 })).toEqual({ ok: false, reason: 'surface text "a": frame 2 does not exist: this room has 1 frame' });
+    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 1 })).toEqual({
+      ok: false, reason: 'surface text "a": frame 1 ("tiny") has no free slot for a 320 by 200 card: place it with placement { x, y }, or make the frame larger',
+    });
+  });
+
+  it("refuses a frame that would overlap another, naming it, and lets edges touch and a frame move over itself", () => {
+    const rows = [frame("a", { x: 0, y: 0, w: 1000, h: 1000 }, 1)];
+    expect(placeSurfaceWrite(rows, asFrame("b", { x: 999, y: 0, w: 500, h: 500 }))).toEqual({
+      ok: false, reason: 'surface frame "b" would overlap frame 1 ("a"): frames may touch but not overlap',
+    });
+    expect(placed(rows, asFrame("b", { x: 1000, y: 0, w: 500, h: 500 })).carried).toEqual([]);
+    expect(placed(rows, asFrame("a", { x: 100, y: 100, w: 1000, h: 1000 })).write.key).toBe("a");
+  });
+
+  it("moves a locked frame's cards by its corner's change, and nothing else", () => {
+    const rows = [frame("f", { x: 0, y: 0, w: 1000, h: 1000 }, 1), row("in", at(40, 40)), row("out", at(3000, 0)), row("none")];
+    const out = placed(rows, asFrame("f", { x: 500, y: 100, w: 1000, h: 1000 }));
+    expect(out.carried.map((w) => [w.key, w.item!.placement])).toEqual([["in", { x: 540, y: 140 }]]);
+    expect(out.carried[0].item).toEqual({ key: "in", kind: "text", title: null, body: "b", ends: null, placement: { x: 540, y: 140 }, blob: null, shape: null });
+  });
+
+  it("moves an unlocked frame alone, and a resize that keeps the corner carries nothing", () => {
+    const rows = [frame("f", { x: 0, y: 0, w: 1000, h: 1000 }, 1), row("in", at(40, 40))];
+    expect(placed(rows, asFrame("f", { x: 500, y: 0, w: 1000, h: 1000 }, false)).carried).toEqual([]);
+    expect(placed(rows, asFrame("f", { x: 0, y: 0, w: 200, h: 200 })).carried).toEqual([]);
+  });
+
+  it("places a card with neither frame nor placement clear of every frame", () => {
+    const rows = [frame("f", { x: 0, y: 0, w: 1480, h: 520 }, 1)];
+    // Slot rows at y 0, 240 and 480 meet the frame; y 720 is the first clear row.
+    expect(placed(rows, card("a")).write.item!.placement).toEqual({ x: 0, y: 720 });
   });
 });

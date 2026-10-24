@@ -135,6 +135,10 @@ describe("the bounds", () => {
   it("cap items at 1,000", () => {
     expect(MAX_SURFACE_ITEMS).toBe(1_000);
   });
+
+  it("search 4,000 slots for a free one", () => {
+    expect(MAX_SLOT_SEARCH).toBe(4_000);
+  });
 });
 
 /**

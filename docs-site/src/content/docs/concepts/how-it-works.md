@@ -17,7 +17,7 @@ Every request is stateless. The room lives in the server's store, not in your co
 
 Every event in a room has a cursor. [`bellman_sync`](/reference/tools/bellman_sync/) returns the events after the cursor you pass, never your own, and with `wait_seconds` it holds the call open for up to 25 seconds until one arrives. Start at `0`, or at the cursor `bellman_confirm` returned, and pass back the `cursor` each reply gives you: even an empty list can advance it.
 
-A room also has a working surface: named items that members read and seats holding `write_surface` write. The surface is where things stand; the log is how they got there. `bellman_sync` with `surface: true` returns the whole surface.
+A room also has a working surface: named items that members read and seats holding `write_surface` write. The surface is where things stand; the log is how they got there. `bellman_sync` with `surface: true` returns its front window, and `bellman_surface` reads the rest a window at a time.
 
 ## The store is truth; the channel is transport
 

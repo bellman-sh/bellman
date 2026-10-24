@@ -34,7 +34,7 @@ import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
-import { MAX_FRAMES, frameNumbers, type FrameEntry, type Window } from "./frames.js";
+import { MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -392,15 +392,31 @@ export async function surfaceAt(
   return { cursor, rows: visible };
 }
 
-/** One window of the surface as a member reads it (surface frames spec, D5): the page's rows in envelopes, every frame, and where to go on. */
+/**
+ * One window of the surface as a member reads it (surface frames spec, D5): the page's rows in envelopes, every
+ * frame in its writer's envelope, and where to go on. `window` is `"all"` on the HTTP read with no window, which
+ * holds every row (`readWholeSurface`).
+ */
 export type SurfaceBlock = {
   cursor: number;
   items: ReturnType<typeof surfaceItem>[];
-  frames: FrameEntry[];
+  frames: FrameEnvelope[];
   window: string;
   next: string | null;
   slots?: Record<string, { x: number; y: number }>;
 };
+
+/**
+ * Every row a member may see, under `cut`, as one block: the HTTP surface read asked for no window, which is what
+ * today's dash reads, so after the deploy it still sees the whole canvas and not frame 1 alone.
+ *
+ * ponytail: the transitional path. It moves every row across RPC, as the read before frames did; the dash's
+ * windowed reads (surface frames, Part 2) remove it, and the no-argument read then answers the front window.
+ */
+export async function readWholeSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
+  const { cursor, rows } = await surfaceAt(store, session, cut);
+  return { cursor, items: rows.map(surfaceItem), frames: frameEnvelopes(rows), window: "all", next: null };
+}
 
 /**
  * A window of the surface under `cut`, as `surfaceAt` would cut it. The store pages it where the rows are
@@ -1008,7 +1024,7 @@ export async function settleBlob(
  * The item is read here as text and structure only. When a maintainer approves the proposal it is normalised
  * again and settled again, since what the room holds by then may differ: a proposal is never applied on trust.
  *
- * The cap is read before the append, as the 64-item cap in `writeSurface` is, so two proposals landing together
+ * The cap is read before the append, as the 1,000-item cap in `writeSurface` is, so two proposals landing together
  * can make a fourth (R11). It is a courtesy bound and is checked here and in no store.
  *
  * ponytail: the cap reads the log back across a proposal's seven days for every proposal sent, the window
@@ -1060,16 +1076,16 @@ export async function checkProposal(
 /**
  * The checks of a surface write that come before it counts as a send, for any payload (topic rooms plan, R14): the
  * shape and each kind's rule (`normalizeSurfaceWrite`), the blob a file, image or html item names
- * (`settleBlob`), the 64-item cap, and a connector's ends. The write it returns carries the object's size, type and
- * name where a blob is named, and is what the append is handed.
+ * (`settleBlob`), the 1,000-item cap, the 100-frame cap, and a connector's ends. The write it returns carries the
+ * object's size, type and name where a blob is named, and is what the append is handed.
  *
  * `writeSurface` calls it after its gate, and an approval calls it for the proposal's item, so a card a
  * maintainer's human approves is held to the rule a card a maintainer writes is held to, in the same words and the
  * same order. It appends nothing and spends no place under the send limit, so a refusal here leaves the log and the
  * minute's count as they were.
  *
- * The rows are read once, and the caller's append is a separate step: the cap and a connector's ends are
- * courtesy bounds, as `writeSurface` says.
+ * The room is read once, through `surfaceFacts` (the counts and the rows of the keys the write names), and the
+ * caller's append is a separate step: the caps and a connector's ends are courtesy bounds, as `writeSurface` says.
  */
 export async function resolveSurfaceWrite(
   store: BellmanStore,
@@ -1088,10 +1104,12 @@ export async function resolveSurfaceWrite(
     write = settled.value;
   }
 
-  const rows = await store.surfaceOf(sessionId);
-  const byKey = new Map(rows.map((r) => [r.key, r] as const));
+  // The counts and the rows this write names, from where the rows are: never every row across RPC.
+  const ends = write.item?.kind === "connector" && write.item.ends !== null ? [write.item.ends.from, write.item.ends.to] : [];
+  const facts = await store.surfaceFacts(sessionId, [write.key, ...ends]);
+  const byKey = new Map(facts.rows.map((r) => [r.key, r] as const));
   if (write.item !== null) {
-    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
+    if (!byKey.has(write.key) && facts.count >= MAX_SURFACE_ITEMS) {
       return refuse(
         "conflict",
         // "1,000", written out: the tests pin the wording and a locale must not move it.
@@ -1100,8 +1118,7 @@ export async function resolveSurfaceWrite(
     }
     // A frame key already on the surface is a rewrite and passes; a key that is not a frame yet is a new frame.
     if (
-      write.item.kind === "frame" && byKey.get(write.key)?.kind !== "frame" &&
-      rows.filter((r) => r.kind === "frame").length >= MAX_FRAMES
+      write.item.kind === "frame" && byKey.get(write.key)?.kind !== "frame" && facts.frames >= MAX_FRAMES
     ) {
       return refuse(
         "conflict",
@@ -1196,9 +1213,6 @@ async function restoreVersion(
   });
 }
 
-/** The refusal `placeSurfaceWrite` gives a card naming a frame that is not there (`noSuchFrame`); the others are conflicts. */
-const MISSING_FRAME = / frame \d+ does not exist: this room has /;
-
 /**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
@@ -1207,14 +1221,14 @@ const MISSING_FRAME = / frame \d+ does not exist: this room has /;
  * exists: a second transport re-typing the sequence is a second chance to skip
  * the verb guard or the audit row. The order is the write path the spec gives:
  * the seat's guards (`gateSeat`, which also touches the caller), the payload's
- * shape and each kind's rule, the blob a file, image or html item names, the rows for the
- * cap and a connector's ends, the append with the row riding it, the audit row.
+ * shape and each kind's rule, the blob a file, image or html item names, the room's facts for the
+ * caps and a connector's ends, the append with the row riding it, the audit row.
  *
- * The rows are read once and then the append happens, which is a
- * read-then-write with the window open: two writers can both add a 64th item,
+ * The facts are read once and then the append happens, which is a
+ * read-then-write with the window open: two writers can both add a 1,000th item,
  * and a connector can name a key removed a millisecond earlier. Both are
- * courtesy bounds — a 65th row costs nothing and a dangling connector is a
- * state the spec declares a reader handles — so neither moves into the store.
+ * courtesy bounds: a 1,001st row costs nothing and a dangling connector is a
+ * state the spec declares a reader handles, so neither moves into the store.
  * The 100-frame cap is read with the item cap and is the same kind of bound.
  * The verb guard, the frozen guard and the row's write are not courtesies, and
  * each is where it has to be. Neither is the placement among frames: the append
@@ -1296,9 +1310,8 @@ export async function writeSurface(
     );
   }
   if (appended.outcome === "frozen") return refuse("frozen", FROZEN);
-  // A missing frame is the writer's mistake (`invalid`); an overlap and a frame with no free slot are the room's
-  // state meeting the write (`conflict`).
-  if (appended.outcome === "refused") return refuse(MISSING_FRAME.test(appended.reason) ? "invalid" : "conflict", appended.reason);
+  // The store names the kind (`Placed`, frames.ts): a missing frame is `invalid`, the rest `conflict`.
+  if (appended.outcome === "refused") return refuse(appended.kind, appended.reason);
   const event = appended.event;
   const replayed = appended.outcome === "replayed";
 

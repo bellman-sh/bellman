@@ -169,7 +169,12 @@ const seed = async (p: PairedSession, n: number) => {
 
 describe("bellman_surface reads a window (surface frames spec, D5)", () => {
   const read = (p: PairedSession, args: Record<string, unknown> = {}) => p.joiner.call("bellman_surface", { session_id: p.sessionId, ...args });
-  const surfaceOf = (out: { data: Record<string, unknown> }) => out.data.surface as { items: { data: { key: string } }[]; frames: { number: number; key: string; title: string; count: number }[]; window: string; next: string | null };
+  const surfaceOf = (out: { data: Record<string, unknown> }) => out.data.surface as {
+    items: { data: { key: string } }[];
+    frames: { trust: string; origin: { memberId: string; label: string }; data: { number: number; key: string; title: string; count: number } }[];
+    window: string;
+    next: string | null;
+  };
 
   // Review Focus 5.
   it("answers a small room with no frames whole, as today, with frames [], window newest and next null", async () => {
@@ -189,7 +194,10 @@ describe("bellman_surface reads a window (surface frames spec, D5)", () => {
     await write(p, { key: "loose", kind: "text", body: "y" });
     const s = surfaceOf(await read(p));
     expect([s.window, s.items.map((i) => i.data.key)]).toEqual(["frame:1", ["a"]]);
-    expect(s.frames).toEqual([expect.objectContaining({ number: 1, key: "intro", title: "Start here", locked: true, count: 1 })]);
+    expect(s.frames).toEqual([{
+      trust: "untrusted", origin: { memberId: p.creatorMemberId, label: expect.any(String) },
+      data: { number: 1, key: "intro", title: "Start here", placement: { x: 0, y: 0, w: 1480, h: 520 }, locked: true, count: 1 },
+    }]);
     expect(surfaceOf(await read(p, { window: "unframed" })).items.map((i) => i.data.key)).toEqual(["loose"]);
   });
 
@@ -224,7 +232,7 @@ describe("bellman_surface reads a window (surface frames spec, D5)", () => {
     expect((await p.creator.call("bellman_evict", { session_id: p.sessionId, member_id: p.joinerMemberId })).isError).toBe(false);
     await write(p, { key: "a", kind: "frame", title: "A, renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } });
     const s = surfaceOf(await read(p));
-    expect([s.window, s.frames.map((f) => [f.number, f.key])]).toEqual(["frame:1", [[1, "b"]]]);
+    expect([s.window, s.frames.map((f) => [f.data.number, f.data.key])]).toEqual(["frame:1", [[1, "b"]]]);
   });
 
   it("gives bellman_sync surface: true the front window, frames and all", async () => {
@@ -248,6 +256,16 @@ describe("bellman_surface reads a window (surface frames spec, D5)", () => {
     const confirmed = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
     expect(confirmed.isError, confirmed.text).toBe(false);
     const s = surfaceOf(confirmed);
-    expect([s.window, s.frames.map((f) => f.key), s.next]).toEqual(["frame:1", ["intro"], null]);
+    expect([s.window, s.frames.map((f) => f.data.key), s.next]).toEqual(["frame:1", ["intro"], null]);
+  });
+
+  it("refuses a card written into a frame under that frame's own key, and the frame stays", async () => {
+    const p = await pairUp(h);
+    await write(p, { key: "f1", kind: "frame", title: "Start here", placement: { x: 0, y: 0, w: 1480, h: 520 } });
+    const out = await write(p, { key: "f1", kind: "text", body: "x", frame: 1 });
+    expect([out.isError, out.text]).toEqual([
+      true, 'Error: surface text "f1": a frame cannot be written into a frame: write it with its own placement',
+    ]);
+    expect(surfaceOf(await read(p)).frames.map((f) => [f.data.key, f.data.title])).toEqual([["f1", "Start here"]]);
   });
 });

@@ -1083,9 +1083,11 @@ rectangle; a card belongs to the frame holding its centre, and a frame's number 
 `createdAt`, computed on every read and never stored. `BellmanStore.surfaceWindow` cuts the room's rows
 inside its object (`src/frames.ts` ranks, places and pages them, runtime-free, for both stores) and
 returns one page of at most 64 items with `frames[]`, the window it answered and `next`, a keyset
-position, so a read crosses RPC with one page and not a thousand rows. A read with no window is the
-front: frame 1 when the room has frames, else the newest items. `appendSurface` is the store operation
-every surface write goes through: in the append's own transaction it lists the rows, refuses a frame
+position, so a read crosses RPC with one page and not a thousand rows. A tool read with no window is the
+front: frame 1 when the room has frames, else the newest items; the HTTP read with no window still
+returns every row (`readWholeSurface`) until the dash pages. `appendSurface` is the store operation
+every surface write goes through: in the append's own transaction it lists the rows when the write is
+placed among them (a frame, a card naming a frame, a card with no placement), refuses a frame
 that would overlap another, places a card sent with `frame: <n>` in that frame's first free slot, and,
 for a locked frame that moved, writes the carried cards with their placements moved. `appendEvent`
 keeps `extras.surface` for every other write and throws for a frame-shaped one, so no path places a
@@ -2303,17 +2305,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,748** | every request, whether or not you are in a room |
+| Tool definitions | **~10,785** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~862 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~876 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-24 for surface frames, by the method below: 353 tokens over the 10,395
-that trunk (`e1213c2f`) measures, in `bellman_surface` (603 to 862), `bellman_send` (1,737 to
-1,803), `bellman_sync` (770 to 782), `bellman_confirm` (893 to 899) and `bellman_connect` (799 to
-809): windows, frames and next. No tool was added. That is 10,748. The 10,168 the row held
+Re-measured on 2026-10-24 for surface frames, by the method below: 390 tokens over the 10,395
+that trunk (`e1213c2f`) measures, in `bellman_surface` (603 to 876), `bellman_send` (1,737 to
+1,803), `bellman_sync` (770 to 791), `bellman_confirm` (893 to 913) and `bellman_connect` (799 to
+809): windows, frames in their envelopes, and next. No tool was added. That is 10,785. The 10,168 the row held
 predates the merges that brought trunk to 10,395; the 227 between are theirs, not this
 branch's.
 

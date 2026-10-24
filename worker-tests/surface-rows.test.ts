@@ -77,10 +77,15 @@ it("moves a locked frame holding 900 cards in one append: 900 carried events, ev
     await store.appendEvent(id, { ...by, payload: card }, { surface: { key: card.key, item: card } });
   }
   const before = new Map((await store.surfaceOf(id)).map((r) => [r.key, r.placement!]));
+  // A long poll waiting from before the move: one wake after the transaction hands it every event the move wrote.
+  const from = (await store.recentEvents(id, 1))[0].cursor;
+  const poll = store.waitForEvents(id, from, 30_000);
+  await new Promise((r) => setTimeout(r, 50));
 
   const out = await store.appendSurface(id, { ...by, payload: frame(5000) }, { surface: { key: "f", item: frame(5000) } }, null);
 
   if (out.outcome !== "appended") throw new Error(`the move said ${out.outcome}`);
+  expect((await poll).map((e) => e.cursor), "the poll's one wake").toEqual(Array.from({ length: 901 }, (_, i) => from + 1 + i));
   expect(out.carried).toHaveLength(900);
   expect(out.carried.map((e) => e.cursor - out.event.cursor)).toEqual(Array.from({ length: 900 }, (_, i) => i + 1));
   expect(await store.eventsAfter(id, out.event.cursor - 1)).toHaveLength(901);

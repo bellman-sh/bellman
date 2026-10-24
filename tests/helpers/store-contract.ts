@@ -23,7 +23,7 @@ import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
-import { SURFACE_PAGE } from "../../src/frames.js";
+import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/frames.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
@@ -3175,7 +3175,7 @@ export function describeStoreContract(
           await put(id, frameItem("one", { x: 0, y: 0, w: 1000, h: 1000 }));
           const tail = await store.recentEvents(id, 1);
           expect(await put(id, frameItem("two", { x: 500, y: 0, w: 1000, h: 1000 }), "k2")).toEqual({
-            outcome: "refused", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+            outcome: "refused", kind: "conflict", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
           });
           expect(await store.recentEvents(id, 1)).toEqual(tail);
           expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["one"]);
@@ -3198,7 +3198,20 @@ export function describeStoreContract(
           await put(id, frameItem("f", { x: 1000, y: 0, w: 1480, h: 520 }));
           await put(id, item("a"), null, 1);
           expect((await store.surfaceOf(id)).find((r) => r.key === "a")!.placement).toEqual({ x: 1040, y: 40 });
-          expect(await put(id, item("b"), null, 2)).toEqual({ outcome: "refused", reason: 'surface text "b": frame 2 does not exist: this room has 1 frame' });
+          expect(await put(id, item("b"), null, 2)).toEqual({
+            outcome: "refused", kind: "invalid", reason: 'surface text "b": frame 2 does not exist: this room has 1 frame',
+          });
+        });
+
+        // `frame` rides the write and not the item, so the key's fingerprint folds it in.
+        it("answers conflict for a key retried with another frame number, and replays the same frame", async () => {
+          const id = await room();
+          await put(id, frameItem("f1", { x: 0, y: 0, w: 1000, h: 1000 }));
+          await put(id, frameItem("f2", { x: 2000, y: 0, w: 1000, h: 1000 }));
+          const first = await put(id, item("c"), "k", 1);
+          expect(first.outcome).toBe("appended");
+          expect(await put(id, item("c"), "k", 1)).toEqual({ outcome: "replayed", event: (first as { event: SessionEvent }).event });
+          expect(await put(id, item("c"), "k", 2)).toEqual({ outcome: "conflict" });
         });
 
         it("moves a locked frame and its cards in one append, one event per row at consecutive cursors", async () => {
@@ -3262,7 +3275,13 @@ export function describeStoreContract(
           await put(id, item("out", { x: 5000, y: 0 }));
           const read = await store.surfaceWindow(id, {}, {});
           expect(keys(read)).toEqual(["in"]);
-          expect(read).toMatchObject({ ok: true, cursor: await cursorOf(id), page: { window: "frame:1", next: null, frames: [{ number: 1, key: "f", count: 1 }] } });
+          expect(read).toMatchObject({
+            ok: true, cursor: await cursorOf(id),
+            page: {
+              window: "frame:1", next: null,
+              frames: [{ trust: "untrusted", origin: { memberId: "m_creator", label: "jesse@codenerd" }, data: { number: 1, key: "f", title: "F", count: 1 } }],
+            },
+          });
           expect(keys(await store.surfaceWindow("qs_nobody", {}, {}))).toEqual([]);
         });
 
@@ -3284,14 +3303,67 @@ export function describeStoreContract(
           const cut = (b as Extract<SurfaceAppend, { outcome: "appended" }>).event.cursor;
           await put(id, item("a", { x: 0, y: 0, w: 1000, h: 1000 }, { kind: "frame", title: "A, renamed", body: null, locked: true }));
           const read = await store.surfaceWindow(id, {}, { cut });
-          expect(read).toMatchObject({ ok: true, cursor: cut, page: { window: "frame:1", frames: [{ number: 1, key: "b" }] } });
-          expect(await store.surfaceWindow(id, {}, {})).toMatchObject({ ok: true, page: { frames: [{ key: "a" }, { key: "b" }] } });
+          expect(read).toMatchObject({ ok: true, cursor: cut, page: { window: "frame:1", frames: [{ data: { number: 1, key: "b" } }] } });
+          expect(await store.surfaceWindow(id, {}, {})).toMatchObject({ ok: true, page: { frames: [{ data: { key: "a" } }, { data: { key: "b" } }] } });
         });
 
         it("refuses what readWindow refuses", async () => {
           const id = await room();
           expect(await store.surfaceWindow(id, { window: { kind: "frame", frame: 1 } }, {})).toEqual({ ok: false, reason: "frame 1 does not exist: this room has no frames" });
-          expect(await store.surfaceWindow(id, { next: "abc" }, {})).toMatchObject({ ok: false });
+          expect(await store.surfaceWindow(id, { next: "abc" }, {})).toEqual({ ok: false, reason: NEXT_REFUSAL });
+        });
+
+        // A frame's position is kept from its corner, so a locked move between pages leaves the paging where it was.
+        it("pages a frame on after a locked move of that frame: page 2 holds the rest and nothing from page 1", async () => {
+          const id = await room();
+          const box = (x: number) => item("f", { x, y: 0, w: 3000, h: 3000 }, { kind: "frame", title: "F", body: null, locked: true });
+          await put(id, box(0));
+          for (let i = 0; i < 70; i++) await put(id, item(`c${String(i).padStart(2, "0")}`, { x: (i % 10) * 290, y: Math.floor(i / 10) * 290 }));
+          const first = await store.surfaceWindow(id, { window: { kind: "frame", frame: 1 } }, {});
+          if (!first.ok) throw new Error(first.reason);
+          expect(first.page.items).toHaveLength(SURFACE_PAGE);
+          await put(id, box(5000));
+          const second = await store.surfaceWindow(id, { next: first.page.next! }, {});
+          if (!second.ok) throw new Error(second.reason);
+          expect(second.page).toMatchObject({ window: "frame:1", next: null });
+          const seen = new Set(first.page.items.map((r) => r.key));
+          expect(second.page.items).toHaveLength(70 - SURFACE_PAGE);
+          expect(second.page.items.filter((r) => seen.has(r.key))).toEqual([]);
+        });
+      });
+
+      // The facts a write is checked against, and the one a public blob read asks, without every row crossing RPC.
+      describe("surfaceFacts and surfaceNamesBlob", () => {
+        const item = (key: string, over: Partial<SurfaceItem> = {}): SurfaceItem =>
+          ({ key, kind: "text", title: null, body: "x", ends: null, placement: null, blob: null, shape: null, ...over });
+        const put = (id: string, i: SurfaceItem) => store.appendSurface(id, wrote(i), { surface: { key: i.key, item: i } }, null);
+        const remove = (id: string, key: string) =>
+          store.appendSurface(id, { ...wrote(item(key)), payload: { key, remove: true } }, { surface: { key, item: null } }, null);
+        const room = async () => { const s = session({}); await store.createSession(s); return s.id; };
+        const BLOB = "0123456789abcdef0123456789abcdef";
+
+        it("counts the rows and the frames, and returns the stored rows for the keys asked and no others", async () => {
+          const id = await room();
+          await put(id, item("f", { kind: "frame", title: "F", body: null, placement: { x: 0, y: 0, w: 1000, h: 1000 }, locked: true }));
+          await put(id, item("a", { placement: { x: 40, y: 40 } }));
+          await put(id, item("b", { placement: { x: 400, y: 40 } }));
+          expect(await store.surfaceFacts(id, ["a", "f", "nope"])).toEqual({
+            count: 3, frames: 1, rows: (await store.surfaceOf(id)).filter((r) => r.key === "a" || r.key === "f"),
+          });
+          await remove(id, "b");
+          await remove(id, "f");
+          expect(await store.surfaceFacts(id, ["b"])).toEqual({ count: 1, frames: 0, rows: [] });
+          expect(await store.surfaceFacts("qs_nobody", ["a"])).toEqual({ count: 0, frames: 0, rows: [] });
+        });
+
+        it("says whether an item on the surface names a blob: true while it does, false once it is gone and for an unknown id", async () => {
+          const id = await room();
+          await put(id, item("doc", { kind: "file", body: null, blob: { id: BLOB, bytes: 3, type: "text/plain", name: "a.txt" } }));
+          expect(await store.surfaceNamesBlob(id, BLOB)).toBe(true);
+          expect(await store.surfaceNamesBlob(id, "f".repeat(32))).toBe(false);
+          await remove(id, "doc");
+          expect(await store.surfaceNamesBlob(id, BLOB)).toBe(false);
+          expect(await store.surfaceNamesBlob("qs_nobody", BLOB)).toBe(false);
         });
       });
     });
@@ -3524,7 +3596,7 @@ export function describeStoreContract(
           const request = (await proposed(id, frame("two", 500), base))!;
           const before = await events(id);
           expect(await approve(id, request, { base, write: { key: "two", item: frame("two", 500) } })).toEqual({
-            outcome: "refused", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+            outcome: "refused", kind: "conflict", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
           });
           expect(await events(id)).toEqual(before);
           expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["one"]);

@@ -136,7 +136,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
       const front = await s.surfaceWindow(session.id, {}, {});
       if (!front.ok) throw new Error(`the front of the surface was refused: ${front.reason}`);
       const index = surfaceIndex(front.page.items);
-      const frames = front.page.frames.map(({ number, key, count }) => ({ number, key, count }));
+      const frames = front.page.frames.map(({ data: { number, key, count } }) => ({ number, key, count }));
 
       return ok(
         {

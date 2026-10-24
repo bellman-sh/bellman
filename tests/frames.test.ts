@@ -87,7 +87,7 @@ describe("the windows (D5)", () => {
       row("out", { ...at(4000, 0), createdAt: 4 }), row("none", { createdAt: 6 })];
     expect(keys(page(rows, { window: { kind: "unframed" } }))).toEqual(["none", "out"]);
     expect(keys(page(rows, { window: { kind: "newest" } }))).toEqual(["none", "in", "out"]);
-    expect(page(rows, { window: { kind: "newest" } }).frames.map((f) => f.key)).toEqual(["f"]);
+    expect(page(rows, { window: { kind: "newest" } }).frames.map((f) => f.data.key)).toEqual(["f"]);
   });
 
   it("pages at 64 and continues from the position, though a newer item lands between the reads", () => {
@@ -163,16 +163,32 @@ describe("placing a write among frames (D2)", () => {
 
   it("refuses a card for a frame that does not exist or has no free slot, naming the frame", () => {
     const rows = [frame("tiny", { x: 0, y: 0, w: 300, h: 300 }, 1)];
-    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 2 })).toEqual({ ok: false, reason: 'surface text "a": frame 2 does not exist: this room has 1 frame' });
-    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 1 })).toEqual({
-      ok: false, reason: 'surface text "a": frame 1 ("tiny") has no free slot for a 320 by 200 card: place it with placement { x, y }, or make the frame larger',
+    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 2 })).toEqual({
+      ok: false, kind: "invalid", reason: 'surface text "a": frame 2 does not exist: this room has 1 frame',
     });
+    expect(placeSurfaceWrite(rows, { ...card("a"), frame: 1 })).toEqual({
+      ok: false, kind: "conflict",
+      reason: 'surface text "a": frame 1 ("tiny") has no free slot for a 320 by 200 card: place it with placement { x, y }, or make the frame larger',
+    });
+  });
+
+  it("refuses a card written into a frame under a frame's own key, and leaves the frame as it was", () => {
+    const rows = [frame("f1", box, 1), row("inside", at(1040, 40))];
+    expect(placeSurfaceWrite(rows, { ...card("f1"), frame: 1 })).toEqual({
+      ok: false, kind: "conflict", reason: 'surface text "f1": a frame cannot be written into a frame: write it with its own placement',
+    });
+  });
+
+  it("carries a frame's cards on a move written with no locked at all", () => {
+    const rows = [frame("f", { x: 0, y: 0, w: 1000, h: 1000 }, 1), row("in", at(40, 40))];
+    const { locked: _locked, ...bare } = asFrame("f", { x: 500, y: 0, w: 1000, h: 1000 }).item;
+    expect(placed(rows, { key: "f", item: bare }).carried.map((w) => [w.key, w.item!.placement])).toEqual([["in", { x: 540, y: 40 }]]);
   });
 
   it("refuses a frame that would overlap another, naming it, and lets edges touch and a frame move over itself", () => {
     const rows = [frame("a", { x: 0, y: 0, w: 1000, h: 1000 }, 1)];
     expect(placeSurfaceWrite(rows, asFrame("b", { x: 999, y: 0, w: 500, h: 500 }))).toEqual({
-      ok: false, reason: 'surface frame "b" would overlap frame 1 ("a"): frames may touch but not overlap',
+      ok: false, kind: "conflict", reason: 'surface frame "b" would overlap frame 1 ("a"): frames may touch but not overlap',
     });
     expect(placed(rows, asFrame("b", { x: 1000, y: 0, w: 500, h: 500 })).carried).toEqual([]);
     expect(placed(rows, asFrame("a", { x: 100, y: 100, w: 1000, h: 1000 })).write.key).toBe("a");

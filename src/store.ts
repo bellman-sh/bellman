@@ -821,15 +821,53 @@ export type ApprovalWrite =
   | { outcome: "answered"; by: string }
   | { outcome: "conflict" }
   | { outcome: "frozen" }
-  | { outcome: "refused"; reason: string };
+  | { outcome: "refused"; kind: "conflict" | "invalid"; reason: string };
 
-/** What `appendSurface` did: `appendEventOnce`'s outcomes, the events a locked move carried, and a refusal. */
+/**
+ * What `appendSurface` did: `appendEventOnce`'s outcomes, the events a locked move carried, and a refusal, which
+ * carries the kind `placeSurfaceWrite` gave it so a caller maps it without reading its words.
+ */
 export type SurfaceAppend =
   | { outcome: "appended"; event: SessionEvent; carried: SessionEvent[] }
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "conflict" }
   | { outcome: "frozen" }
-  | { outcome: "refused"; reason: string };
+  | { outcome: "refused"; kind: "conflict" | "invalid"; reason: string };
+
+/**
+ * The fingerprint a keyed surface write is recorded under: the event's, with the write's `frame` folded into the
+ * payload when it has one. `frame` rides the write and never the item, so without it a key retried with another
+ * frame number would read as the same send and replay.
+ */
+export const surfacePrint = (e: EventBody, write: SurfaceWrite): string =>
+  fingerprint(write.frame === undefined ? e : { ...e, payload: { ...(e.payload as object), frame: write.frame } });
+
+/**
+ * The rows `placeSurfaceWrite` needs listed for `write`, or none: only a frame write, a card naming a frame and a
+ * card with no placement are placed among the rows. Anything else is stored as written.
+ */
+export const placesAmongRows = (write: SurfaceWrite): boolean => isFrameWrite(write) || needsPlacement(write);
+
+/** The facts `resolveSurfaceWrite` checks a write against (`BellmanStore.surfaceFacts`). */
+export interface SurfaceFacts {
+  count: number;
+  frames: number;
+  rows: SurfaceRow[];
+}
+
+/** `surfaceFacts` over rows a store holds: the counts, and the rows of the keys asked, in key order. */
+export function surfaceFactsOf(rows: Iterable<SurfaceRow>, keys: readonly string[]): SurfaceFacts {
+  const asked = new Set(keys);
+  let count = 0;
+  let frames = 0;
+  const named: SurfaceRow[] = [];
+  for (const r of rows) {
+    count++;
+    if (r.kind === "frame") frames++;
+    if (asked.has(r.key)) named.push(r);
+  }
+  return { count, frames, rows: named.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) };
+}
 
 /**
  * The `surface` event a locked move owes each card it carries (lead ruling L2): the mover's, with no `refId`, its payload
@@ -1640,8 +1678,10 @@ export interface BellmanStore {
    * Append a surface write placed among the room's frames (surface frames spec, D2): the path of every surface
    * write. It is `appendEventOnce` when `key` is a string and `appendEvent` when it is null, with three
    * differences. The placement step is `placeSurfaceWrite` (frames.ts) over the rows listed in the same operation,
-   * so two writes that meet are placed one after the other. A refusal (an overlap, a missing or full frame)
-   * answers `refused` with the reason and writes nothing, not even the key's record, so a retry runs again. And
+   * so two writes that meet are placed one after the other; the rows are listed only for a write placed among
+   * them (`placesAmongRows`), and any other write is stored as written. A refusal (an overlap, a missing or full
+   * frame, a frame written into a frame) answers `refused` with its kind and reason and writes nothing, not even
+   * the key's record, so a retry runs again. The key's fingerprint is `surfacePrint`'s, which sees `frame`. And
    * the cards a locked frame's move carries are appended as `surface` events at the cursors after `e`'s, one per
    * row in key order, each authored by the mover; each row keeps its writer, `createdAt` and approver, and only
    * its placement changes (lead ruling L2).
@@ -1740,6 +1780,18 @@ export interface BellmanStore {
    * method and not N `eventAt` reads from a handler.
    */
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
+  /**
+   * What a write is checked against before it counts as a send (`resolveSurfaceWrite`): how many rows and how many
+   * frame rows the room holds, and the stored rows of `keys` alone (the write's key and a connector's ends), in key
+   * order, a key with no row left out. Computed where the rows are, so a write never moves every row across RPC.
+   * An unknown session answers zero and none.
+   */
+  surfaceFacts(sessionId: string, keys: readonly string[]): Promise<SurfaceFacts>;
+  /**
+   * Whether an item on the surface names blob `blobId`: the public blob route's rule (public rooms spec, D3), that
+   * a blob uploaded and never placed, or one whose item went, stays the members'. Read where the rows are.
+   */
+  surfaceNamesBlob(sessionId: string, blobId: string): Promise<boolean>;
   /**
    * One page of a window of the surface (surface frames spec, D5; lead ruling L1): `readWindow` over the rows
    * a member may see, run where the rows are, so a read carries at most `SURFACE_PAGE` items across RPC and
@@ -3242,7 +3294,7 @@ export class MemoryStore implements BellmanStore {
     // Synchronous from the key check to the last row, for appendEventOnce's reason, and so the rows placement
     // reads are the rows the write lands among: of two frames that meet, the second reads the first.
     const storageKey = key === null ? null : idempotencyKey(e.fromMemberId, key);
-    const print = fingerprint(e);
+    const print = surfacePrint(e, extras.surface);
     const seen = this.keys.get(sessionId);
     const record = storageKey === null ? undefined : seen?.get(storageKey);
     if (record) {
@@ -3253,9 +3305,8 @@ export class MemoryStore implements BellmanStore {
     }
     if (s.frozenAt !== null) return { outcome: "frozen" };
 
-    const rows = this.surfaces.get(sessionId) ?? new Map<string, SurfaceRow>();
-    const placed = placeSurfaceWrite([...rows.values()], extras.surface);
-    if (!placed.ok) return { outcome: "refused", reason: placed.reason };
+    const placed = this.placedAmongRows(sessionId, extras.surface);
+    if (!placed.ok) return { outcome: "refused", kind: placed.kind, reason: placed.reason };
     const { event, carried } = this.surfaceNow(s, placedEvent(e, extras.surface, placed), placed, extras.approvedBy, Date.now());
     if (storageKey !== null) {
       const map = seen ?? new Map<string, IdempotencyRecord>();
@@ -3263,6 +3314,12 @@ export class MemoryStore implements BellmanStore {
       this.keys.set(sessionId, map);
     }
     return { outcome: "appended", event: detach(event), carried: carried.map(detach) };
+  }
+
+  /** `placeSurfaceWrite` over the room's rows, listed only when the write is placed among them (`placesAmongRows`). */
+  private placedAmongRows(sessionId: string, write: SurfaceWrite): Placed {
+    if (!placesAmongRows(write)) return { ok: true, write, carried: [] };
+    return placeSurfaceWrite([...(this.surfaces.get(sessionId)?.values() ?? [])], write);
   }
 
   /**
@@ -3337,8 +3394,8 @@ export class MemoryStore implements BellmanStore {
     if (decided.kind === "stale") return { outcome: "stale", cursor: decided.cursor };
 
     // The card is placed among the frames before anything is appended, so a refusal writes neither event.
-    const placed = decided.kind === "apply" && write !== null ? placeSurfaceWrite([...(this.surfaces.get(sessionId)?.values() ?? [])], write) : null;
-    if (placed !== null && !placed.ok) return { outcome: "refused", reason: placed.reason };
+    const placed = decided.kind === "apply" && write !== null ? this.placedAmongRows(sessionId, write) : null;
+    if (placed !== null && !placed.ok) return { outcome: "refused", kind: placed.kind, reason: placed.reason };
 
     // One clock for every event, as the Durable Objects store stamps them. An `action_response` is never a reply
     // to the host (`isReplyToHost` reads a message or a progress event), so no event here wakes it.
@@ -3420,6 +3477,15 @@ export class MemoryStore implements BellmanStore {
     if (!rows) return [];
     const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return detach(sorted);
+  }
+
+  async surfaceFacts(sessionId: string, keys: readonly string[]): Promise<SurfaceFacts> {
+    return detach(surfaceFactsOf(this.surfaces.get(sessionId)?.values() ?? [], keys));
+  }
+
+  async surfaceNamesBlob(sessionId: string, blobId: string): Promise<boolean> {
+    for (const r of this.surfaces.get(sessionId)?.values() ?? []) if (r.blob?.id === blobId) return true;
+    return false;
   }
 
   async surfaceWindow(

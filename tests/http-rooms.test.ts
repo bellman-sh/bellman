@@ -549,7 +549,15 @@ describe("GET /rooms/:id/surface", () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
     expect(res.status).toBe(200);
     expect(res.headers.get("etag")).toBe('"0"');
-    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [], frames: [], window: "newest", next: null });
+    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [], frames: [], window: "all", next: null });
+  });
+
+  // The read today's dash makes, with no window: every row, until the dash pages (surface frames, Part 2).
+  it("answers every row of a room of 70 items with no window asked, as window all and no next, under the plain tag", async () => {
+    const cursor = await seedCards(70);
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
+    const body = await bodyOf(res) as { items: unknown[]; window: string; next: string | null };
+    expect([body.items.length, body.window, body.next, res.headers.get("etag")]).toEqual([70, "all", null, `"${cursor}"`]);
   });
 
   it("stops a removed member at its cut, and derives the cursor from what it is shown", async () => {
@@ -651,6 +659,18 @@ const del = (key: string | null, itemKey: string, over: CallOptions & { member?:
   return call(key, `/rooms/${ROOM}/surface/${itemKey}${q}`, { method: "DELETE", ...over });
 };
 
+/** `n` placed text cards written straight to the store; answers the last cursor. */
+async function seedCards(n: number): Promise<number> {
+  let cursor = 0;
+  for (let i = 0; i < n; i++) {
+    const item = { key: `c${String(i).padStart(2, "0")}`, kind: "text" as const, title: null, body: "x", ends: null, placement: { x: i * 400, y: 0 }, blob: null, shape: null };
+    const e = await store.appendEvent(ROOM, { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: item.key, item } });
+    cursor = e!.cursor;
+  }
+  return cursor;
+}
+
 /** The surface as the tool reads it, for the agreement tests. */
 async function surfaceThroughTool(key: string, memberId: string) {
   const h = new Harness(store, blobs);
@@ -689,6 +709,24 @@ describe("GET /rooms/:id/surface?window= (surface frames spec, D5)", () => {
     expect((await ask("", newest))!.status).toBe(200);
     expect((await ask("?window=unframed", newest))!.status).toBe(200);
     expect((await ask("?window=newest", newest))!.status).toBe(304);
+  });
+
+  it("still pages a window of 70 items with next", async () => {
+    await seedCards(70);
+    const first = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?window=newest`)) as { items: unknown[]; next: string | null };
+    expect(first.items).toHaveLength(64);
+    const second = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?next=${encodeURIComponent(first.next!)}`)) as { items: unknown[]; next: string | null };
+    expect([second.items.length, second.next]).toEqual([6, null]);
+  });
+
+  // A removed member's tag is the cursor of what it is shown, checked after the read: 304 for that window's tag alone.
+  it("answers a removed member's windowed read 304 for its own tag and 200 for another window's", async () => {
+    const first = await placeThroughTool("a", { kind: "text", body: "before" });
+    await evictThroughTool("m_peer");
+    await placeThroughTool("b", { kind: "text", body: "after" });
+    const ask = (q: string, t: string) => call(DEV_KEY.peer, `/rooms/${ROOM}/surface${q}`, { headers: { "if-none-match": t } });
+    expect((await ask("?window=newest", windowTag(first.cursor, "newest", "")))!.status).toBe(304);
+    expect((await ask("?window=unframed", windowTag(first.cursor, "newest", "")))!.status).toBe(200);
   });
 
   it("reads a region with the slots of its unplaced rows, and one key", async () => {

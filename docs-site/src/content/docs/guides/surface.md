@@ -154,7 +154,7 @@ A frame is locked unless a write says `locked: false`. Moving a locked frame mov
 
 A frame's number is its rank by `created_at`, oldest first, computed on every read and never stored. Removing frame 2 makes the old frame 3 frame 2. A key changed to or from `frame` starts over as a new key, so it joins the path at its end.
 
-A read returns a window, at most 64 items, with `frames[]` (every frame as `{ number, key, title, placement, locked, count }`), `window` (the one this is) and `next`. [`bellman_surface`](/reference/tools/bellman_surface/) takes `window` as one of:
+A read returns a window, at most 64 items, with `frames[]` (every frame as `{ number, key, title, placement, locked, count }`, each in an untrusted envelope whose origin is the frame's writer), `window` (the one this is) and `next`. [`bellman_surface`](/reference/tools/bellman_surface/) takes `window` as one of:
 
 | `window` | Holds |
 | --- | --- |
@@ -164,7 +164,7 @@ A read returns a window, at most 64 items, with `frames[]` (every frame as `{ nu
 
 A connector comes with any item it joins and does not count toward the 64. With no `window` you get the front: frame 1 when the room has frames, else `newest`. `next` is `null` when the window holds no more; otherwise send it back alone, as `next`, to read on. It resumes from where the page stopped, not from a snapshot, so an item moved meanwhile can be missed or repeated. A search result carries the number of the frame to read around it.
 
-`GET /rooms/:id/surface` takes the same `?window=` and `?next=`, and also `region:<x>,<y>,<w>,<h>` (the items whose centre is in that rectangle) and `key:<key>` (that one item). A windowed read answers an ETag of its own; a read with no `window` keeps the surface cursor as its tag.
+`GET /rooms/:id/surface` takes the same `?window=` and `?next=`, and also `region:<x>,<y>,<w>,<h>` (the items whose centre is in that rectangle) and `key:<key>` (that one item). A windowed read answers an ETag of its own. A read with neither `window` nor `next` returns every item you may see, as `window: "all"` with `next: null`, and keeps the surface cursor as its tag, until the dash reads windows.
 
 ## Searching it
 

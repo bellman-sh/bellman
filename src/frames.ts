@@ -129,6 +129,24 @@ export function frameEntries(rows: readonly SurfaceRow[]): FrameEntry[] {
   }));
 }
 
+/**
+ * A frame entry as every read carries it: inside the untrusted envelope of the member who wrote the frame row,
+ * the shape `untrusted` in projections.ts builds and `surfaceItem` wraps an item in. A title is a peer's prose.
+ */
+export interface FrameEnvelope {
+  trust: "untrusted";
+  origin: { memberId: string; label: string };
+  data: FrameEntry;
+}
+
+/** `frameEntries`, each in its frame row's writer's envelope. */
+export function frameEnvelopes(rows: readonly SurfaceRow[]): FrameEnvelope[] {
+  const frames = rankFrames(rows);
+  return frameEntries(rows).map((data, i) => ({
+    trust: "untrusted", origin: { memberId: frames[i].byMemberId, label: frames[i].byLabel }, data,
+  }));
+}
+
 /** Every key's frame number; a frame is its own number (R18), a row in no frame null. */
 export function frameNumbers(rows: readonly SurfaceRow[]): Map<string, number | null> {
   return membership(rows).of;
@@ -147,7 +165,7 @@ export interface WindowPage {
   window: string;
   items: SurfaceRow[];
   next: string | null;
-  frames: FrameEntry[];
+  frames: FrameEnvelope[];
   /** A region's alone: the slot of each row on the page that has no placement. */
   slots?: Record<string, { x: number; y: number }>;
 }
@@ -224,7 +242,7 @@ export function readWindow(
 ): { ok: true; page: WindowPage } | { ok: false; reason: string } {
   if (asked.window !== undefined && asked.next !== undefined) return { ok: false, reason: NEXT_ALONE };
   const { frames, of } = membership(rows);
-  const entries = frameEntries(rows);
+  const entries = frameEnvelopes(rows);
 
   let window: Window;
   let from: Pos | null = null;
@@ -252,8 +270,12 @@ export function readWindow(
     }
     case "frame": {
       if (window.frame > frames.length) return { ok: false, reason: noSuchFrame(window.frame, frames.length) };
+      const corner = frameRect(frames[window.frame - 1]);
       frameKey = frames[window.frame - 1].key;
-      all = byCanvas(rows.filter((r) => ranked(r) && of.get(r.key) === window.frame), (r) => r.placement!);
+      // From the frame's corner, so a locked move between two pages leaves the token's position where it was.
+      all = byCanvas(rows.filter((r) => ranked(r) && of.get(r.key) === window.frame), (r) => ({
+        x: r.placement!.x - corner.x, y: r.placement!.y - corner.y,
+      }));
       break;
     }
     case "unframed": all = byAge(rows.filter((r) => ranked(r) && of.get(r.key) === null)); break;
@@ -316,7 +338,13 @@ export function frameSlot(frame: Box, index: number): { x: number; y: number } |
   };
 }
 
-export type Placed = { ok: true; write: SurfaceWrite; carried: SurfaceWrite[] } | { ok: false; reason: string };
+/**
+ * A refusal carries its kind: `invalid` for a frame that does not exist, which is the writer's mistake; `conflict`
+ * for an overlap, a full frame and a frame written into a frame, which are the room's state meeting the write.
+ */
+export type Placed =
+  | { ok: true; write: SurfaceWrite; carried: SurfaceWrite[] }
+  | { ok: false; kind: "conflict" | "invalid"; reason: string };
 
 /** The row as the item that wrote it: the authorship the store stamps stays off, so the store keeps the row's own. */
 function itemOf(r: SurfaceRow, placement: NonNullable<SurfaceRow["placement"]>): SurfaceItem {
@@ -341,7 +369,10 @@ export function placeSurfaceWrite(rows: readonly SurfaceRow[], write: SurfaceWri
     const mine: Box = { x: to.x, y: to.y, w: to.w ?? GRID.w, h: to.h ?? GRID.h };
     const hit = frames.findIndex((f) => f.key !== write.key && overlaps(mine, frameRect(f)));
     if (hit >= 0) {
-      return { ok: false, reason: `surface frame "${write.key}" would overlap frame ${hit + 1} ("${frames[hit].key}"): frames may touch but not overlap` };
+      return {
+        ok: false, kind: "conflict",
+        reason: `surface frame "${write.key}" would overlap frame ${hit + 1} ("${frames[hit].key}"): frames may touch but not overlap`,
+      };
     }
     const was = frames.find((f) => f.key === write.key);
     const dx = to.x - (was?.placement?.x ?? to.x);
@@ -361,8 +392,12 @@ export function placeSurfaceWrite(rows: readonly SurfaceRow[], write: SurfaceWri
 
   const n = write.frame!;
   const label = `surface ${item.kind} "${write.key}": `;
-  if (n > frames.length) return { ok: false, reason: label + noSuchFrame(n, frames.length) };
+  if (n > frames.length) return { ok: false, kind: "invalid", reason: label + noSuchFrame(n, frames.length) };
   const stored = rows.find((r) => r.key === write.key);
+  // A frame is its own frame (R18), so the branch below would keep its rectangle on a card and the frame would go.
+  if (stored?.kind === "frame") {
+    return { ok: false, kind: "conflict", reason: `${label}a frame cannot be written into a frame: write it with its own placement` };
+  }
   if (stored?.placement && membership(rows).of.get(write.key) === n) {
     return { ok: true, write: { key: write.key, item: { ...item, placement: { ...stored.placement } } }, carried: [] };
   }
@@ -373,7 +408,7 @@ export function placeSurfaceWrite(rows: readonly SurfaceRow[], write: SurfaceWri
     const at = frameSlot(box, i);
     if (at === null) {
       return {
-        ok: false,
+        ok: false, kind: "conflict",
         reason: `${label}frame ${n} ("${target.key}") has no free slot for a ${GRID.w} by ${GRID.h} card: place it with placement { x, y }, or make the frame larger`,
       };
     }

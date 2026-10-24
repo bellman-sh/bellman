@@ -35,7 +35,7 @@ import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
-import { isPublic, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
+import { isPublic, readSurfaceWindow, readWholeSurface, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import type { BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
@@ -175,7 +175,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
     if (blobId !== undefined) {
       // Only a blob an item on the surface names: one uploaded and never placed, or one whose
       // item went, stays the members' (D3).
-      const named = isBlobId(blobId) && (await deps.store.surfaceOf(id)).some((r) => r.blob?.id === blobId);
+      const named = isBlobId(blobId) && (await deps.store.surfaceNamesBlob(id, blobId));
       if (!named) return notFound("no such blob");
       const got = await deps.blobs.get(id, blobId, request.headers.get("if-none-match") ?? undefined);
       return got === null ? notFound("no such blob") : blobResponse(got, OPEN);
@@ -203,7 +203,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       if (words !== undefined) {
         block = await searchSurface(deps.store, session, words).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
       } else if (ask.asked === null) {
-        block = await readSurface(deps.store, session).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
+        block = await readWholeSurface(deps.store, session).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
       } else {
         const read = await readSurfaceWindow(deps.store, session, ask.asked);
         if (!read.ok) return answer(400, { error: "invalid_request", error_description: read.reason });

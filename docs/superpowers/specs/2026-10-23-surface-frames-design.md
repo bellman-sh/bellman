@@ -1,6 +1,6 @@
 # Surface frames, and a surface of 1,000 items: design
 
-**Date:** 2026-10-23 · **Status:** for review · **Issue:** bellman-sh/bellman#318 · **Folds in:** bellman-sh/dash#71 (Page view pagination)
+**Date:** 2026-10-23 · **Status:** approved 2026-10-23 · **Issue:** bellman-sh/bellman#318 · **Folds in:** bellman-sh/dash#71 (Page view pagination)
 
 ## Intent
 

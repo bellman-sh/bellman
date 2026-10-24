@@ -577,6 +577,12 @@ export interface UserRecord {
   userId: string;
   firstSeenAt: number;
   lastSeenAt: number;
+  /**
+   * The GitHub login from the latest sign-in through GitHub, for the operator's account list. Public on GitHub, and
+   * renameable there, so it is what the person was called at that sign-in. Never set by another provider's sign-in, and
+   * absent for a record whose GitHub sign-ins all came before it was kept (2026-10-24).
+   */
+  githubLogin?: string;
 }
 
 export interface Entitlements {

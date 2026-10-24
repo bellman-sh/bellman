@@ -1910,8 +1910,12 @@ export interface BellmanStore {
    *
    * The provider is not stored: userId is u_<provider>_<subject>, so it is
    * already in there.
+   *
+   * `githubLogin`, given on a sign-in through GitHub, replaces the one kept: a
+   * login can be renamed, so the record holds the latest. Left out, the kept one
+   * stays, so a sign-in through another provider does not erase it.
    */
-  recordSignIn(userId: string, now: number): Promise<void>;
+  recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void>;
   /** How many people have ever signed in. */
   countUsers(): Promise<number>;
   /**
@@ -3681,9 +3685,10 @@ export class MemoryStore implements BellmanStore {
     this.recordMonth(this.creates, userId);
   }
 
-  async recordSignIn(userId: string, now: number): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void> {
     const seen = this.users.get(userId);
-    this.users.set(userId, { userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now });
+    const login = githubLogin ?? seen?.githubLogin;
+    this.users.set(userId, { userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now, ...(login === undefined ? {} : { githubLogin: login }) });
   }
 
   async countUsers(): Promise<number> {

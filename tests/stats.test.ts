@@ -342,12 +342,12 @@ describe("GET /operator/stats", () => {
 describe("GET /operator/accounts", () => {
   it("lists accounts by first sign-in with the total, to an operator's session and bearer token alike", async () => {
     await store.recordSignIn("u_google_2", Date.UTC(2026, 9, 3));
-    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1), "octo");
     const want = {
       total: 2,
       accounts: [
-        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-01T00:00:00.000Z" },
-        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z" },
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-01T00:00:00.000Z", github_login: "octo" },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z", github_login: null },
       ],
     };
     const viaCookie = await call(null, "/operator/accounts", { cookie: DEV_KEY.jesse, origin: PANEL });

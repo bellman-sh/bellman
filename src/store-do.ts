@@ -5331,14 +5331,16 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * came to report 2 for one registration (#122): there were no users before
    * this landed, so 0 is the true starting point and there is nothing to seed.
    */
-  async recordSignIn(userId: string, now: number): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const seen = await txn.get<UserRecord>(userKey(userId));
       if (!seen) await txn.put(USER_COUNT, ((await txn.get<number>(USER_COUNT)) ?? 0) + 1);
+      const login = githubLogin ?? seen?.githubLogin;
       await txn.put(userKey(userId), {
         userId,
         firstSeenAt: seen?.firstSeenAt ?? now,
         lastSeenAt: now,
+        ...(login === undefined ? {} : { githubLogin: login }),
       } satisfies UserRecord);
     });
   }
@@ -5361,7 +5363,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const r = value as Partial<UserRecord> | null;
       return typeof r === "object" && r !== null && typeof r.userId === "string" && key === userKey(r.userId)
         && typeof r.firstSeenAt === "number" && typeof r.lastSeenAt === "number"
-        ? [{ userId: r.userId, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt }]
+        ? [{
+            userId: r.userId, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt,
+            ...(typeof r.githubLogin === "string" ? { githubLogin: r.githubLogin } : {}),
+          }]
         : [];
     });
     return firstSignInFirst(records).slice(0, limit);
@@ -6510,8 +6515,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.bylineFor(userId, sessionId);
   }
 
-  async recordSignIn(userId: string, now: number): Promise<void> {
-    await this.registry.recordSignIn(userId, now);
+  async recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void> {
+    await this.registry.recordSignIn(userId, now, githubLogin);
   }
 
   async countUsers(): Promise<number> {

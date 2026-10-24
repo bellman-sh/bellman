@@ -247,7 +247,8 @@ export async function resolvePlan(
    * locked out.
    */
   try {
-    await config.plans?.recordSignIn(resolved.identity.userId, Date.now());
+    // GitHub's label is the login (src/oauth/providers.ts), kept for the operator's account list; no other provider's.
+    await config.plans?.recordSignIn(resolved.identity.userId, Date.now(), profile.provider === "github" ? profile.label : undefined);
   } catch (err) {
     console.error("recording the sign-in failed:", err);
   }
@@ -2220,6 +2221,7 @@ export async function handleOAuth(
         user_id: u.userId,
         first_seen_at: new Date(u.firstSeenAt).toISOString(),
         last_seen_at: new Date(u.lastSeenAt).toISOString(),
+        github_login: u.githubLogin ?? null,
       })),
     });
   }

@@ -80,18 +80,18 @@ describe("/admin/suspensions/:userId", () => {
 describe("/admin/accounts", () => {
   const seed = async () => {
     await store.recordSignIn("u_google_2", Date.UTC(2026, 9, 3));
-    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1), "octo");
     await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 20));
   };
 
-  it("lists accounts by first sign-in, with the total, an id and two dates each and nothing else", async () => {
+  it("lists accounts by first sign-in, with the total, an id, two dates and a GitHub login each and nothing else", async () => {
     await seed();
     const res = await send("GET", "/admin/accounts", await bearer(OPERATOR));
     expect([res.status, await res.json()]).toEqual([200, {
       total: 2,
       accounts: [
-        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-20T00:00:00.000Z" },
-        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z" },
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-20T00:00:00.000Z", github_login: "octo" },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z", github_login: null },
       ],
     }]);
     const one = await (await send("GET", "/admin/accounts?limit=1", await bearer(OPERATOR))).json() as { total: number; accounts: unknown[] };

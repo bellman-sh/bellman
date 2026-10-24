@@ -8286,6 +8286,17 @@ export function describeStoreContract(
           expect(await store.countUsers()).toBe(1);
         });
 
+        // A GitHub login is renameable, so the latest one given stands; a sign-in that gives none keeps it.
+        it("keeps the GitHub login a sign-in gives, replaces it with a later one, and keeps it through a sign-in with none", async () => {
+          await store.recordSignIn("u_github_9", 1_000, "octo");
+          await store.recordSignIn("u_github_9", 2_000);
+          expect((await store.listUsers(1))[0]).toEqual({ userId: "u_github_9", firstSeenAt: 1_000, lastSeenAt: 2_000, githubLogin: "octo" });
+          await store.recordSignIn("u_github_9", 3_000, "octocat");
+          expect((await store.listUsers(1))[0]?.githubLogin).toBe("octocat");
+          await store.recordSignIn("u_google_2", 4_000);
+          expect((await store.listUsers(2))[1], "no login is no key").toEqual({ userId: "u_google_2", firstSeenAt: 4_000, lastSeenAt: 4_000 });
+        });
+
         // The operator's GET /admin/accounts. Signed in out of order, so the order it answers in is first sign-in's.
         it("lists people by first sign-in, ties by id, a later sign-in moving only lastSeenAt, cut at the limit", async () => {
           expect(await store.listUsers(10)).toEqual([]);

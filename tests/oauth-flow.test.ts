@@ -532,6 +532,16 @@ describe("plan resolution", () => {
       expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
     });
 
+    // The operator's account list shows the GitHub login, so a GitHub sign-in keeps it; another provider's label is
+    // an address or a name, and stays out of the record.
+    it("keeps the GitHub login with the record, and no other provider's label", async () => {
+      await resolvePlan(PROFILE, config);
+      await resolvePlan({ provider: "google", subject: "g1", label: "someone@example.dev" }, config);
+
+      const records = await (config.plans as MemoryStore).listUsers(10);
+      expect(records.map((r) => [r.userId, r.githubLogin])).toEqual([["u_github_4242", "mcfearsome"], ["u_google_g1", undefined]]);
+    });
+
     it("records a sign-in that an operator override decided", async () => {
       config.overrides = { "github:4242": OVERRIDE };
 

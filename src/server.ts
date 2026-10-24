@@ -25,7 +25,7 @@ const SERVER_NAME = "bellman-mcp-server";
  * tests/bridge.test.ts pins it to the package: a release PR that bumps one and not the other fails there (#222).
  * A bridge compares it with its own to tell its user an update is out.
  */
-export const SERVER_VERSION = "0.5.0";
+export const SERVER_VERSION = "0.6.0";
 
 /**
  * One `McpServer` per request, bound to a caller identity.

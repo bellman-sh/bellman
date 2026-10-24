@@ -1,6 +1,6 @@
 {
   "name": "bellman-mod",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Bellman rooms in Claude Code's terminal: the room and its members at a glance, toasts, a room pane, a wake on a peer's message, and action requests only you can answer.",
   "author": {
     "name": "mcfearsome"

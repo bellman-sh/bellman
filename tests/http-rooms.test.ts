@@ -474,7 +474,7 @@ async function evictThroughTool(memberId: string) {
 }
 
 describe("GET /rooms/:id/surface", () => {
-  it("returns every item in an untrusted envelope, with the surface cursor as the ETag", async () => {
+  it("returns its item in an untrusted envelope, with the surface cursor as the ETag", async () => {
     const { cursor } = await placeThroughTool("plan", { kind: "text", body: "# Plan\nship it" });
     const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`, { headers: { origin: PANEL } }))!;
     expect(res.status).toBe(200);

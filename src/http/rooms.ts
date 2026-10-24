@@ -961,7 +961,7 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
  * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
  * gap from the `member_evicted` event in its slice, and this route reads no events.
  *
- * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
+ * An admin of an org in a *closed* room reads it uncut (#65, D4), whether it holds no
  * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
  * Its ETag is the record's cursor, as a member still in the room has.
  *
@@ -981,7 +981,7 @@ async function readSurfaceRoute(request: Request, url: URL, sessionId: string, o
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
   const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
-  // The admin's fallback (#65, D4): the whole surface of a closed room, with no cut. `cutFor` is not
+  // The admin's fallback (#65, D4): a closed room's surface, with no cut. `cutFor` is not
   // asked of an empty list, which would read as every handle removed and cut the read to nothing, nor
   // of an admin whose every handle was removed: the cut is a seat's, and this read is not one.
   const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);

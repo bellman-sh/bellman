@@ -98,7 +98,7 @@ The sink's state is one KV key `sink` in the object. The cursor write and the `d
 
 **A cross-org room's row** is in both orgs' streams (audit spec, D2), so both sinks receive their own copy; neither sees the other's.
 
-**What the endpoint is not checked for.** The URL must be `https:`. It is not resolved or range-checked: a Worker's `fetch` reaches public hosts, and a customer pointing their own stream at their own collector is the feature. A receiver that wants to be sure the sender is Bellman verifies the signature.
+**What the endpoint is not checked for.** The URL must be `https:` and carry no username or password: `fetch` refuses a credentialed URL, and the URL is written into audit rows the stream keeps. It is not resolved or range-checked: a Worker's `fetch` reaches public hosts, and a customer pointing their own stream at their own collector is the feature. A receiver that wants to be sure the sender is Bellman verifies the signature.
 
 ## D4. The conformance seam
 

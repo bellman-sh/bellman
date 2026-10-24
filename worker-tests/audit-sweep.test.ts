@@ -41,3 +41,15 @@ it("sweeps when the window is set, re-dates the sweep a day ahead, and disarms w
   expect(await alarm()).toBeNull();
   expect(await dueSweep()).toBeNull();
 });
+
+it("a sweep that fails part way leaves the next one armed a day ahead", async () => {
+  const s = store();
+  const old = Date.now() - 40 * 86_400_000;
+  await s.appendAudit({ at: old, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: {} });
+  // The sweep's second DELETE has no table to hit: the first sweep throws after the window is set.
+  await runInDurableObject(stub(), (_i: AuditDO, ctx) => { ctx.storage.sql.exec("DROP TABLE delivered"); });
+  const setAt = Date.now();
+  await s.setAuditRetention("org_a", 30, by);
+  await runDurableObjectAlarm(stub()).catch(() => undefined);
+  expect(await dueSweep()).toBeGreaterThanOrEqual(setAt + SWEEP_EVERY_MS);
+});

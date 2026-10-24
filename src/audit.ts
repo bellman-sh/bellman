@@ -97,9 +97,13 @@ export type AuditRecord = {
  * An entry as the table's columns, in AUDIT_COLUMNS order. A row from before D2 has no
  * `crossing`, and its five companions are stored null beside it, so it reads back as it was.
  */
+/** A lone surrogate becomes U+FFFD in SQLite's text columns; hash the value the row will hold. */
+const wellFormed = (v: string | number | null) =>
+  typeof v === "string" ? v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD") : v;
+
 export function recordOf(e: AuditEntry): (string | number | null)[] {
   const recorded = e.crossing !== undefined;
-  return [
+  return ([
     e.at, e.orgId, e.sessionId, e.action, e.actorUserId,
     recorded ? e.actorLabel ?? null : null,
     recorded ? e.actorOrgId ?? null : null,
@@ -108,7 +112,7 @@ export function recordOf(e: AuditEntry): (string | number | null)[] {
     e.crossing ?? null,
     recorded ? e.direction ?? null : null,
     JSON.stringify(e.detail ?? {}),
-  ];
+  ] as (string | number | null)[]).map(wellFormed);
 }
 
 /** A table row as an entry: with the six fields when it recorded a crossing, without them when it is from before (D4). */

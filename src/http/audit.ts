@@ -151,7 +151,7 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
       if (refusedLength) return refusedLength;
       const body: unknown = await request.json().catch(() => undefined);
       const url = sinkUrlOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).url : "invalid");
-      if (url === "invalid") return problem(400, "invalid_request", "url must be an https URL", origin);
+      if (url === "invalid") return problem(400, "invalid_request", "url must be an https URL without credentials", origin);
       return json(200, await deps.store.setAuditSink(orgId, url, intent), origin);
     }
     if (settings) {

@@ -130,7 +130,7 @@ A sweep runs once a day and deletes rows older than the window, oldest first, wr
 
 ### Streaming to a SIEM
 
-`PUT /audit/sink` with `{ "url": "https://..." }` points the stream at your collector and answers `200` with `{ sink, secret }`. The secret is shown in that response and never again; setting the sink a second time issues a new one and keeps the delivery cursor. The URL must be `https:`, or the route answers `400`. `DELETE /audit/sink` removes it (`204`, or `404` when there is none).
+`PUT /audit/sink` with `{ "url": "https://..." }` points the stream at your collector and answers `200` with `{ sink, secret }`. The secret is shown in that response and never again; setting the sink a second time issues a new one and keeps the delivery cursor. The URL must be `https:` and carry no credentials, or the route answers `400`. `DELETE /audit/sink` removes it (`204`, or `404` when there is none).
 
 Within a few seconds of a row landing, the server POSTs every undelivered row, in seq order, up to 100 per request:
 

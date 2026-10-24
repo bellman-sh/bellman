@@ -716,6 +716,21 @@ describe("the sink's deliveries", () => {
     expect((await store.auditSettings("org_a")).sink).toMatchObject({ status: "ok", delivered_through: 5, pending: 0 });
   });
 
+  it("pumpAuditSink on a dead sink posts nothing, keeps its status, and arms nothing", async () => {
+    const { store, posts } = rig(() => new Response(null, { status: 503 }));
+    await store.appendAudit(row(1));
+    await store.setAuditSink("org_a", url, by);
+    const t = Date.now() + SINK_DELAY_MS;
+    await store.sweep(t);
+    await store.sweep(t + SINK_DEAD_AFTER_MS);
+    expect(posts).toHaveLength(2);
+    await store.appendAudit(row(2));
+    expect(await store.pumpAuditSink("org_a", t + 2 * SINK_DEAD_AFTER_MS)).toMatchObject({ status: "dead", attempts: 2, last_error: "503", delivered_through: 0, pending: 4 });
+    expect(posts).toHaveLength(2);
+    await store.sweep(t + 3 * SINK_DEAD_AFTER_MS);
+    expect(posts).toHaveLength(2);
+  });
+
   it("drops the outcome of a post that finished after the sink was removed", async () => {
     let during: (() => Promise<unknown>) | null = null;
     const { store, posts } = rig(async () => { await during?.(); return new Response(null, { status: 200 }); });

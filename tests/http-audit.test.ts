@@ -357,7 +357,8 @@ describe("/audit/sink", () => {
   });
 
   it("refuses an http URL, a missing one, and a body that is not JSON", async () => {
-    expect(await said(await put("admin-a", JSON.stringify({ url: "http://siem.example.test/x" })))).toBe("url must be an https URL");
+    expect(await said(await put("admin-a", JSON.stringify({ url: "http://siem.example.test/x" })))).toBe("url must be an https URL without credentials");
+    expect(await said(await put("admin-a", JSON.stringify({ url: "https://u:p@siem.example.test/x" })))).toBe("url must be an https URL without credentials");
     expect((await put("admin-a", "{}"))!.status).toBe(400);
     expect((await put("admin-a", "nope"))!.status).toBe(400);
     expect((await store.auditSettings("org_a")).sink).toBeNull();

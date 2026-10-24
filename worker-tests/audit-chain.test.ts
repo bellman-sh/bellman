@@ -31,3 +31,10 @@ it("a deleted row breaks the chain at the row after it", async () => {
   await runInDurableObject(stub(), (_i: AuditDO, ctx) => { ctx.storage.sql.exec("DELETE FROM entries WHERE seq = 2"); });
   expect(await s.verifyAudit("org_a")).toMatchObject({ ok: false, broken_at: 3 });
 });
+
+it("a room name that is not well-formed UTF-16 still verifies: the row is hashed as SQLite stores it", async () => {
+  const s = store();
+  await s.appendAudit({ at: 1, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", actorLabel: "\ud800x", roomName: "\udc00y", parties: [], crossing: "internal", direction: "outbound", action: "sent_message", detail: {} });
+  await s.appendAudit({ at: 2, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: {} });
+  expect(await s.verifyAudit("org_a")).toMatchObject({ ok: true, checked: 2 });
+});

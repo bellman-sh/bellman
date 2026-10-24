@@ -5065,6 +5065,9 @@ export class AuditDO extends DurableObject {
     const settings = storage.kv.get<AuditRetention>("settings");
     if (!settings || settings.retentionDays === null) return 0;
     const cutoff = now - settings.retentionDays * 86_400_000;
+    // Armed before the first delete: the alarm disarmed `due:sweep` to call this, and a sweep that
+    // throws part way must not be the last one the org ever gets.
+    this.#arm("sweep", now + SWEEP_EVERY_MS);
     let through = 0, count = 0;
     for (;;) {
       const rows = storage.sql.exec<{ seq: number; at: number; hash: string | null }>("SELECT seq, at, hash FROM entries ORDER BY seq LIMIT ?", SWEEP_BATCH).toArray();
@@ -5079,7 +5082,6 @@ export class AuditDO extends DurableObject {
       if (plan.count < rows.length || rows.length < SWEEP_BATCH) break;
     }
     if (count > 0) await this.append(orgEventEntry(settings.orgId, "audit_swept", { through_seq: through, count }, SYSTEM_INTENT, now));
-    this.#arm("sweep", now + SWEEP_EVERY_MS);
     return count;
   }
 

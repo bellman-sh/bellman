@@ -5,7 +5,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore, type AuditDO } from "../src/store-do.js";
-import { SINK_DELAY_MS } from "../src/audit-sink.js";
+import { SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/audit-sink.js";
 import { backoffMs } from "../src/outbox.js";
 
 afterEach(async () => {
@@ -84,6 +84,28 @@ it("backs off after a refusal and keeps the cursor", async () => {
   expect(due).toBeGreaterThanOrEqual(before + backoffMs(1));
   expect(await alarm()).toBe(due);
   expect(await s.removeAuditSink("org_a", by)).toBe(true);
+  expect(await dueSink()).toBeNull();
+  expect(await alarm()).toBeNull();
+});
+
+it("a dead sink posts nothing when pumped, keeps its status, and arms nothing", async () => {
+  const posts = collector(503);
+  const s = store();
+  await s.setAuditSink("org_a", url, by);
+  await s.appendAudit({ at: Date.now(), orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: {} });
+  await fire();
+  const retry = (await dueSink())!;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(retry + SINK_DEAD_AFTER_MS);
+  await runDurableObjectAlarm(stub());
+  vi.useRealTimers();
+  expect(posts).toHaveLength(2);
+  expect((await s.auditSettings("org_a")).sink).toMatchObject({ status: "dead", attempts: 2 });
+  expect(await dueSink()).toBeNull();
+  await s.appendAudit({ at: Date.now(), orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: {} });
+  expect(await dueSink()).toBeNull();
+  expect(await s.pumpAuditSink("org_a", Date.now())).toMatchObject({ status: "dead", attempts: 2, last_error: "503", delivered_through: 0, pending: 4 });
+  expect(posts).toHaveLength(2);
   expect(await dueSink()).toBeNull();
   expect(await alarm()).toBeNull();
 });

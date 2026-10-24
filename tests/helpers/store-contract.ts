@@ -6080,7 +6080,7 @@ export function describeStoreContract(
       });
 
       it("setAuditSink stores the url as given", async () => {
-        const odd = "https://u:p@collector.example/in#frag";
+        const odd = "https://collector.example/in?k=v#frag";
         expect((await store.setAuditSink("org_a", odd, by)).sink.url).toBe(odd);
         expect((await store.auditSettings("org_a")).sink?.url).toBe(odd);
       });

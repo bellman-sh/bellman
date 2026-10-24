@@ -178,5 +178,9 @@ export function retentionDaysOf(value: unknown): number | null | "invalid" {
 
 export function sinkUrlOf(value: unknown): string | "invalid" {
   if (typeof value !== "string") return "invalid";
-  try { return new URL(value).protocol === "https:" ? value : "invalid"; } catch { return "invalid"; }
+  try {
+    const u = new URL(value);
+    // Credentials in the URL: fetch refuses them, and the URL lands in audit rows the stream keeps.
+    return u.protocol === "https:" && !u.username && !u.password ? value : "invalid";
+  } catch { return "invalid"; }
 }

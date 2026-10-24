@@ -136,7 +136,8 @@ describe("deliverBatch", () => {
 
 describe("sinkUrlOf", () => {
   it("passes an https url verbatim and refuses the rest", () => {
-    expect(sinkUrlOf("https://u:p@collector.example/in#frag")).toBe("https://u:p@collector.example/in#frag");
-    expect(["http://c.example", "ftp://c.example", "collector", 7, undefined].map(sinkUrlOf)).toEqual(["invalid", "invalid", "invalid", "invalid", "invalid"]);
+    expect(sinkUrlOf("https://collector.example/in?k=v#frag")).toBe("https://collector.example/in?k=v#frag");
+    // fetch cannot build a request from a URL with credentials: a sink that could never be posted to is refused up front.
+    expect(["http://c.example", "ftp://c.example", "https://u:p@c.example/in", "https://u@c.example/in", "collector", 7, undefined].map(sinkUrlOf)).toEqual(["invalid", "invalid", "invalid", "invalid", "invalid", "invalid", "invalid"]);
   });
 });

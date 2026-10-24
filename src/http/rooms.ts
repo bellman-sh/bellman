@@ -27,7 +27,11 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../o
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import {
+  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, roomLink, searchLog, searchSurface,
+  sessionStatus, writeSurface, type RoomFailure,
+} from "../rooms.js";
+import { checkQuery } from "../search.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -186,7 +190,7 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     const surface = SURFACE.exec(path);
     if (surface) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
-      return await readSurfaceRoute(request, surface[1], origin, deps);
+      return await readSurfaceRoute(request, url, surface[1], origin, deps);
     }
     const events = EVENTS.exec(path);
     if (events) {
@@ -823,6 +827,19 @@ async function writeHostInstructions(request: Request, sessionId: string, origin
 export const surfaceTag = (cursor: number): string => `"${cursor}"`;
 
 /**
+ * The validator for a card search (room search spec, R20): the surface cursor, the room's page
+ * link and the normalised words, so no two reads share a tag and a stored ETag answers only the
+ * read it came from. The link is in it because a result's `url` follows the room's name and
+ * whether it is public, which change without the cursor. `encodeURIComponent` leaves no `"` or
+ * `,`, so `etagMatches`' comma split reads the tag whole.
+ */
+export const searchTag = (cursor: number, link: string | null, words: readonly string[]): string =>
+  `"${cursor}:${encodeURIComponent(link ?? "")}:${encodeURIComponent(words.join(" "))}"`;
+
+/** A search reads the newest events, not a page past a cursor, so `after` has no meaning beside `query`. */
+export const AFTER_WITH_QUERY = "after and query cannot be used together: a search reads the newest events, not a page past a cursor";
+
+/**
  * Whether an If-None-Match header names `tag`. A list, a weak validator and `*`
  * all count; anything else is a miss, so a garbled header costs a body and
  * never a 500.
@@ -842,6 +859,9 @@ export const etagMatches = (header: string | null, tag: string): boolean =>
  * reader is the caller's account, an org admin's included (read_context spec, section 3): a brief its
  * author keeps is left out, and the author's own account reads it. A read and nothing else: it moves
  * no one's `lastSeenAt` and no bridge's cursor.
+ *
+ * With `?query=` it searches the messages in the caller's window instead (room search spec, section 1):
+ * `{ total, results, searched }` and no cursor, since a search is not a page of the log.
  */
 async function readEventsRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -858,6 +878,13 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   }
   const after = raw === null ? undefined : Number(raw);
   const cut = asAdmin ? undefined : cutFor(mine);
+  const query = url.searchParams.get("query");
+  if (query !== null) {
+    if (after !== undefined) return problem(400, "invalid_request", AFTER_WITH_QUERY, origin);
+    const checked = checkQuery(query);
+    if (!checked.ok) return problem(400, "invalid_request", checked.reason, origin);
+    return json(200, searchLog(await memberLog(deps.store, sessionId, cut), checked.words), origin);
+  }
   const within = (e: SessionEvent) => cut === undefined || e.cursor <= cut;
   let read: SessionEvent[];
   // Every read is bounded in the store (#208). `within` keeps a prefix of what it is handed, so a
@@ -893,8 +920,12 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
  * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
  * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
  * Its ETag is the record's cursor, as a member still in the room has.
+ *
+ * With `?query=` it searches the cards the caller would be shown instead (room search spec,
+ * section 1): `{ surface_cursor, total, results }`, with `searchTag` as its ETag by the same two
+ * paths, so a poll's tag and a search's never answer one another.
  */
-async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+async function readSurfaceRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
@@ -910,17 +941,24 @@ async function readSurfaceRoute(request: Request, sessionId: string, origin: str
   // The page reads the ETag off a cross-origin response, which CORS hides
   // unless the header is exposed by name; on the 304 as on the 200.
   const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag" };
+  const query = url.searchParams.get("query");
+  const checked = query === null ? undefined : checkQuery(query);
+  if (checked !== undefined && !checked.ok) return problem(400, "invalid_request", checked.reason, origin);
+  const words = checked?.ok ? checked.words : undefined;
+  const tag = (cursor: number) => (words === undefined ? surfaceTag(cursor) : searchTag(cursor, roomLink(session), words));
   const notModified = (cursor: number) =>
-    new Response(null, { status: 304, headers: { ...exposed, "cache-control": "no-store", etag: surfaceTag(cursor) } });
+    new Response(null, { status: 304, headers: { ...exposed, "cache-control": "no-store", etag: tag(cursor) } });
 
   const cut = asAdmin ? undefined : cutFor(mine);
-  if (cut === undefined && etagMatches(ifNoneMatch, surfaceTag(surfaceCursor(session)))) {
+  if (cut === undefined && etagMatches(ifNoneMatch, tag(surfaceCursor(session)))) {
     return notModified(surfaceCursor(session));
   }
-  const block = await readSurface(deps.store, session, cut);
-  if (cut !== undefined && etagMatches(ifNoneMatch, surfaceTag(block.cursor))) return notModified(block.cursor);
-  const res = json(200, { surface_cursor: block.cursor, items: block.items }, origin);
-  res.headers.set("etag", surfaceTag(block.cursor));
+  const block = words === undefined
+    ? await readSurface(deps.store, session, cut).then(({ cursor, items }) => ({ cursor, body: { surface_cursor: cursor, items } }))
+    : await searchSurface(deps.store, session, words, cut).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+  if (cut !== undefined && etagMatches(ifNoneMatch, tag(block.cursor))) return notModified(block.cursor);
+  const res = json(200, block.body, origin);
+  res.headers.set("etag", tag(block.cursor));
   res.headers.set("access-control-expose-headers", "etag");
   return res;
 }

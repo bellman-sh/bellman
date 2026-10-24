@@ -20,6 +20,12 @@ describe("pickScreen", () => {
     expect(pickScreen({})).toEqual({ kind: "none", text: "Nothing to show." });
   });
 
+  // Room search, R17: a search answer has no surface, so the App draws no canvas for it.
+  it("gives a search answer the none screen, with its text", () => {
+    const screen = pickScreen({ structuredContent: { query: "retry", in: "cards", total: 0, results: [] }, content: [{ type: "text", text: "{}" }] });
+    expect(screen).toEqual({ kind: "none", text: "{}" });
+  });
+
   it("renders the canvas for a surface result, and the join screen for a connect result that also carries a surface index", () => {
     expect(pickScreen({ structuredContent: surfaceFixture() })).toMatchObject({ kind: "canvas" });
     const connect = { ...connectFixture(), surface: { cursor: 3, items: [] } };

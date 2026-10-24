@@ -9,7 +9,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
-import { MAX_EVENTS_READ, roomRoutes, type RoomRouteDeps } from "../src/http/rooms.js";
+import { MAX_EVENTS_READ, roomRoutes, searchTag, type RoomRouteDeps } from "../src/http/rooms.js";
 import { resolveManifest } from "../src/manifest.js";
 import { storedMember } from "../src/projections.js";
 import { MemoryStore } from "../src/store.js";
@@ -230,6 +230,64 @@ describe("GET /public/rooms/:id/events", () => {
     const earliest = await events("?after=0");
     expect([earliest.events.length, text(earliest.events[0]), earliest.cursor]).toEqual([MAX_EVENTS_READ, "m0", earliest.events.at(-1)!.data.cursor]);
     expect((await read(`/public/rooms/${PUB}/events?after=-1`))!.status).toBe(400);
+  });
+});
+
+describe("the public reads with ?query= (room search spec, D3, D8)", () => {
+  const putCard = async (key: string, body: Record<string, unknown>) => {
+    const res = (await asCreator(`/rooms/${PUB}/surface/${key}?member_id=m_creator`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+  };
+
+  it("answers a card search to anyone, naming the author and approver by number, with the page's URL", async () => {
+    const item = { key: "plan", kind: "text" as const, title: "Retry plan", body: "we retry", ends: null, placement: null, blob: null, shape: null };
+    await store.appendEvent(
+      PUB,
+      { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: "plan", item }, approvedBy: { memberId: "m_peer", label: "peer@codenerd" } },
+    );
+    const res = (await read(`/public/rooms/${PUB}/surface?query=retry`))!;
+    expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([200, "*"]);
+    const body = (await res.json()) as { surface_cursor: number; results: { origin: { label: string }; data: Record<string, unknown> }[] };
+    expect(body.results[0].origin.label).toBe("member 1");
+    expect(body.results[0].data).toMatchObject({ approved_by: { member_id: "m_peer", label: "member 2" }, url: "https://bellman.sh/r/qs_public/plan" });
+    expect(JSON.stringify(body)).not.toContain("@codenerd");
+    expect(res.headers.get("etag")).toBe(searchTag(body.surface_cursor, "https://bellman.sh/r/qs_public", ["retry"]));
+  });
+
+  // Review Focus 5.
+  it("answers a stored poll's ETag with the search, and the search's own with 304", async () => {
+    await putCard("plan", { kind: "text", body: "retry" });
+    const plain = (await read(`/public/rooms/${PUB}/surface`))!.headers.get("etag")!;
+    const searched = (await read(`/public/rooms/${PUB}/surface?query=retry`))!.headers.get("etag")!;
+    expect((await read(`/public/rooms/${PUB}/surface?query=retry`, { "if-none-match": plain }))!.status).toBe(200);
+    expect((await read(`/public/rooms/${PUB}/surface`, { "if-none-match": searched }))!.status).toBe(200);
+    expect((await read(`/public/rooms/${PUB}/surface?query=retry`, { "if-none-match": searched }))!.status).toBe(304);
+  });
+
+  // Review Focus 3.
+  it("searches the newest 200 events and says so, naming the sender by number", async () => {
+    await say(peer(), "message", { text: "the old needle" });
+    for (let i = 0; i < MAX_EVENTS_READ; i++) await say(member(), "message", { text: `hay ${i}` });
+    const last = await say(member(), "message", { text: "a new needle" });
+    const out = await bodyOf(await read(`/public/rooms/${PUB}/events?query=needle`));
+    expect(Object.keys(out).sort()).toEqual(["results", "searched", "total"]);
+    expect(out).toMatchObject({ total: 1, searched: { events: MAX_EVENTS_READ, from_cursor: last.cursor - MAX_EVENTS_READ + 1 } });
+    expect((out.results as { origin: { label: string }; data: { snippet: string } }[])[0]).toMatchObject({ origin: { label: "member 1" }, data: { snippet: "a new needle" } });
+  });
+
+  it("refuses a bad query and after with query, and answers a room that is not public 404 first", async () => {
+    const refused = async (path: string, text: string) => {
+      const res = (await read(path))!;
+      expect([res.status, await bodyOf(res)]).toEqual([400, { error: "invalid_request", error_description: text }]);
+    };
+    await refused(`/public/rooms/${PUB}/surface?query=..`, "query must be 3 to 200 characters");
+    await refused(`/public/rooms/${PUB}/events?query=-- --`, "query must hold a word of letters or digits");
+    await refused(`/public/rooms/${PUB}/events?after=0&query=retry`, "after and query cannot be used together: a search reads the newest events, not a page past a cursor");
+    await store.createSession(session({ id: "qs_private", members: [member()] }));
+    expect(await bodyOf(await read("/public/rooms/qs_private/surface?query=ab"))).toEqual(NOT_PUBLIC);
   });
 });
 

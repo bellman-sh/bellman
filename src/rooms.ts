@@ -14,7 +14,7 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type Verb } from "./types.js";
+import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceRow, type Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
@@ -27,7 +27,8 @@ import {
   type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
-import { surfaceItem } from "./projections.js";
+import { cardResult, messageResult, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
+import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
@@ -375,17 +376,76 @@ export const cutAtFor = (handles: readonly Member[]): number | undefined =>
  * entitled to; it only ever understates, and a removed member's feed has
  * ended, so it compares the number with nothing.
  */
-export async function readSurface(
+export async function surfaceAt(
   store: BellmanStore,
   session: StoredSession,
   cut?: number,
-) {
+): Promise<{ cursor: number; rows: SurfaceRow[] }> {
   const rows = await store.surfaceOf(session.id);
   const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
   const cursor = cut === undefined
     ? surfaceCursor(session)
     : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
-  return { cursor, items: visible.map(surfaceItem) };
+  return { cursor, rows: visible };
+}
+
+/** The surface as a member reads it: `surfaceAt`'s rows, each in its untrusted envelope. */
+export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number) {
+  const { cursor, rows } = await surfaceAt(store, session, cut);
+  return { cursor, items: rows.map(surfaceItem) };
+}
+
+/** A public room's page link, or null for a private room (room search spec, R11). */
+export const roomLink = (s: StoredSession): string | null => (isPublic(s) ? publicRoomUrl(s) : null);
+
+/** A card's own page in a public room, `https://bellman.sh/r/<room>/<key>`; null in a private one. */
+export const cardUrl = (s: StoredSession, key: string): string | null => {
+  const link = roomLink(s);
+  return link === null ? null : `${link}/${key}`;
+};
+
+/**
+ * The cards of one room that hold every word (room search spec, section 2), as a member sees
+ * the surface under its cut, with the surface's cursor beside them for the read's ETag. The
+ * tool and both surface reads call this and nothing below it (R12).
+ */
+export async function searchSurface(
+  store: BellmanStore,
+  session: StoredSession,
+  words: readonly string[],
+  cut?: number,
+): Promise<{ cursor: number; total: number; results: CardResult[] }> {
+  const { cursor, rows } = await surfaceAt(store, session, cut);
+  const { total, results } = searchCards(rows, words);
+  return { cursor, total, results: results.map((hit) => cardResult(hit, cardUrl(session, hit.row.key))) };
+}
+
+/**
+ * The window of the log a member's message search reads (R13): the newest `MAX_MESSAGE_SCAN`
+ * events, or, for a member removed at `cut`, the `MAX_MESSAGE_SCAN` events up to the cut, the
+ * read `readEventsRoute` makes for the same member. Both methods are in both stores.
+ */
+export async function memberLog(store: BellmanStore, sessionId: string, cut?: number): Promise<SessionEvent[]> {
+  if (cut === undefined) return store.recentEvents(sessionId, MAX_MESSAGE_SCAN);
+  const events = await store.eventsAfter(sessionId, Math.max(0, cut - MAX_MESSAGE_SCAN), MAX_MESSAGE_SCAN);
+  return events.filter((e) => e.cursor <= cut);
+}
+
+/**
+ * The messages in a window of the log that hold every word, newest first, and how far the
+ * window reached (R15): `events` counts every event read, of every type, and `from_cursor`
+ * is the oldest one's, or null when the window was empty.
+ */
+export function searchLog(
+  events: readonly SessionEvent[],
+  words: readonly string[],
+): { total: number; results: MessageResult[]; searched: { events: number; from_cursor: number | null } } {
+  const { total, results } = searchMessages(events, words);
+  return {
+    total,
+    results: results.map(messageResult),
+    searched: { events: events.length, from_cursor: events.length === 0 ? null : events[0].cursor },
+  };
 }
 
 /**

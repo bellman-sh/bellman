@@ -10,7 +10,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { hostMember } from "../src/host.js";
 import {
-  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, searchTag, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
 import { resolveManifest } from "../src/manifest.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
@@ -1220,6 +1220,19 @@ describe("an org admin's read of a closed room (#65)", () => {
       expect(res.headers.get("etag")).toBe(`"${before}"`);
     });
 
+    // Room search, Review Focus 4: a removed member's message search ends at its cut.
+    it("keeps the cut on a message search while the room is open, and says the window ended there", async () => {
+      await removedRoom("qs_rm_search", removedAdmin(), false);
+      await store.appendEvent("qs_rm_search", {
+        type: "message", fromMemberId: "m_owner", fromUserId: "u_outsider", fromLabel: "outsider", payload: { text: "retry after" }, refId: null,
+      });
+      const cut = (await store.getMember("qs_rm_search", "m_admin"))!.removedAtCursor!;
+      const asRemoved = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_rm_search/events?query=retry"));
+      expect(asRemoved).toMatchObject({ total: 0, searched: { events: cut, from_cursor: 1 } });
+      const asOwner = await bodyOf(await call(DEV_KEY.outsider, "/rooms/qs_rm_search/events?query=retry"));
+      expect(asOwner).toMatchObject({ total: 1 });
+    });
+
     // The admin's read is for a person with no seat left: "every handle removed", not "a handle removed".
     it("serves an admin as the member when one of its handles is still in the room, though another was removed", async () => {
       await store.createSession(session({
@@ -1662,6 +1675,65 @@ describe("GET /rooms/:id/events", () => {
 
     const mine = await read(DEV_KEY.peer, `?after=${joined.cursor}`);
     expect(mine.events.map((e) => e.data.type)).toEqual(["brief_update"]);
+  });
+});
+
+describe("GET /rooms/:id/surface?query= and /events?query= (room search spec, section 1)", () => {
+  const put = async (key: string, body: Record<string, unknown>) => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/${key}?member_id=m_creator`, { method: "PUT", body }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+  };
+  const say = async (from: Member, text: string) =>
+    (await store.appendEvent(ROOM, { type: "message", fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload: { text }, refId: null }))!;
+
+  it("answers a card search in place of the items, with its own ETag", async () => {
+    await put("plan", { kind: "text", title: "Retry plan", body: "we retry" });
+    const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface?query=retry%20PLAN`, { headers: { origin: PANEL } }))!;
+    expect(res.status).toBe(200);
+    const body = await bodyOf(res) as { surface_cursor: number; total: number; results: { origin: { label: string }; data: Record<string, unknown> }[] };
+    expect(Object.keys(body).sort()).toEqual(["results", "surface_cursor", "total"]);
+    // The body holds the first word, "retry", so its line is the snippet, though the title holds both words.
+    expect(body.results[0]).toMatchObject({ trust: "untrusted", origin: { label: "jesse@codenerd" }, data: { key: "plan", snippet: "we retry", url: null } });
+    expect(res.headers.get("etag")).toBe(searchTag(body.surface_cursor, null, ["retry", "plan"]));
+    expect(res.headers.get("etag")).toBe(`"${body.surface_cursor}::retry%20plan"`);
+    expect(res.headers.get("access-control-expose-headers")).toBe("etag");
+  });
+
+  // Review Focus 5.
+  it("never lets one read's ETag answer another: a poll's, a search's, another query's", async () => {
+    await put("plan", { kind: "text", body: "retry" });
+    const plain = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!.headers.get("etag")!;
+    const searched = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?query=retry`))!.headers.get("etag")!;
+    const ask = (q: string, tag: string) => call(DEV_KEY.jesse, `/rooms/${ROOM}/surface${q}`, { headers: { "if-none-match": tag } });
+    expect((await ask("?query=retry", plain))!.status).toBe(200);
+    expect((await ask("", searched))!.status).toBe(200);
+    expect((await ask("?query=plan", searched))!.status).toBe(200);
+    expect((await ask("?query=retry", searched))!.status).toBe(304);
+    expect((await ask("?query=%20RETRY!", searched))!.status).toBe(304);
+  });
+
+  it("answers a message search in place of the events, with searched and no cursor", async () => {
+    await say(member(), "first retry");
+    const last = await say(peer(), "second retry");
+    const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/events?query=retry`));
+    expect(Object.keys(body).sort()).toEqual(["results", "searched", "total"]);
+    expect(body).toMatchObject({ total: 2, searched: { events: last.cursor, from_cursor: 1 } });
+    expect((body.results as { origin: { label: string } }[])[0].origin.label).toBe("peer@codenerd");
+  });
+
+  it("refuses a query out of bounds, one with no word, and after with query, naming the field", async () => {
+    const refused = async (q: string, text: string) => {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/${q}`))!;
+      expect([res.status, await bodyOf(res)]).toEqual([400, { error: "invalid_request", error_description: text }]);
+    };
+    await refused("surface?query=ab", "query must be 3 to 200 characters");
+    await refused("surface?query=", "query must be 3 to 200 characters");
+    await refused("events?query=...", "query must hold a word of letters or digits");
+    await refused("events?after=0&query=retry", "after and query cannot be used together: a search reads the newest events, not a page past a cursor");
+  });
+
+  it("answers a stranger 404 before it reads the query", async () => {
+    expect((await call(DEV_KEY.outsider, `/rooms/${ROOM}/events?query=ab`))!.status).toBe(404);
   });
 });
 

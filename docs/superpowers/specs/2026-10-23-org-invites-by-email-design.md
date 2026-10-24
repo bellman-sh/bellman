@@ -18,11 +18,12 @@ and an invite never lapses.
 `src/reports.ts` has `MailBinding`, the builder form of Cloudflare's `send_email` binding, and a
 mailer that logs and swallows a failed send. Invites take a binding of their own, `INVITE_EMAIL`,
 with no destination fixed (the reports' `SEND_EMAIL` reaches support@ alone), through a second
-mailer, `inviteMailer(binding, issuer)` in a new runtime-free module `src/invite-mail.ts`:
+mailer, `inviteMailer(binding)` in a new runtime-free module `src/invite-mail.ts`:
 
 ```ts
 export const INVITE_FROM = "invites@bellman.sh";
-export function inviteMail(org: Org, role: OrgRole, link: string, expiresAt: number): { subject: string; text: string };
+export function inviteMail(org: Org, invite: OrgInvite, link: string): { subject: string; text: string };
+export function isMailableAddress(address: string): boolean;
 export type InviteMailer = (to: string, org: Org, invite: OrgInvite, link: string) => Promise<boolean>;
 export function inviteMailer(binding: MailBinding | undefined): InviteMailer;
 ```
@@ -30,9 +31,11 @@ export function inviteMailer(binding: MailBinding | undefined): InviteMailer;
 The subject is `Join <org> on Bellman`; the text names the org and the role, carries the link
 on its own line, says when it expires, and says to ignore it if unexpected. The org's name is
 `drawnOrgName(org)` with any CR or LF removed, so an admin's text cannot reach a header. The
-mailer answers `true` when the binding accepted the message and `false` when there is no binding
-or the send threw; both are logged as the report mailer logs, naming the org and the key, never
-the address. The Node server (`src/app.ts`) passes no binding, as it does for reports.
+mailer answers `true` when the binding accepted the message and `false` when the address is not
+one plain address (`isMailableAddress`, also checked at the invite, 400), when there is no binding,
+or when the send threw. Each is logged in one line naming the org and the invite's `invitedAt`,
+never the key or the address; a failed send adds the binding's `code` alone, since its message may
+name the recipient. A failed request on `/org/members/<key>` logs its path as `/org/members/:key`. The Node server (`src/app.ts`) passes no binding, as it does for reports.
 
 What makes the binding send to any address: the sending domain onboarded to Cloudflare Email
 Service. Email Routing alone sends only to verified destinations (the reports' support@), and a
@@ -52,7 +55,8 @@ makes every link to it dead, and so does a resend (D4), which moves `invitedAt`;
 invite issued again is a new row that no earlier link opens.
 
 `GET /invite/<token>` (in `src/oauth/routes.ts`, beside `/auth/signin`) verifies the token,
-reads the invite (`invitesFor([key])` narrowed to the org) and the org, and shows one page:
+reads the invite (`invitesFor([key])` narrowed by `inviteNamedBy` to the org and `invitedAt` the
+claim names, and to a live one) and the org, and shows one page:
 the org's name (`drawnName`), the role, what joining means (the invites page's paragraph), and
 the provider buttons of `/auth/signin`, each starting a panel sign-in whose `SessionRequest`
 carries the token's verified claim, never the token: that state is sent to the provider. The page sets the sign-in nonce cookie as `/auth/signin` does. A token
@@ -62,8 +66,10 @@ again." No panel origin configured answers 503 as `/auth/signin` does.
 
 At the callback, `invitesHeld` reads `session.invite`: a token that verifies and names a live
 invite is added to the offers (first, before the keys' own), and the held sign-in carries
-`inviteKey`, the invite's key, so that Join and Decline and every redraw pass
-`[...grantKeys(identityKeys(profile)), inviteKey]` to the store. `acceptOrgInvite` is unchanged:
+`invite`, the verified `InviteClaim` `{ orgId, key, at }`. A Join of the claim's org, while its
+invite is still the one the claim names, passes `[...grantKeys(identityKeys(profile)), claim.key]`
+to the store; a Join of any other org passes the person's own keys alone, so one org's link never
+reaches another org's invite of the same address. `acceptOrgInvite` is unchanged:
 it finds the invite under that key and writes the grant on the subject key, so the person who
 clicked the link joins whatever their provider reported. A token that does not verify at the
 callback is ignored: the sign-in carries on as one without a link.
@@ -150,8 +156,8 @@ for a key that is not an address, and for an address the binding could not send 
   `"taken"` to a link accepted under a provider that reports no address.
 - An `email:` invite still applies at a sign-in whose provider reports the address, with no
   link: the link is a second way to the same row.
-- An org that requires SSO still answers `"sso"` at the Join; the link page for such an org says
-  to sign in through the organisation's single sign-on and shows no provider buttons.
+- An org that requires SSO still answers `"sso"` at the Join; the link page for such an org shows
+  only the work-email form, which signs in through the org's IdP, and no provider buttons.
 
 ## Out of scope
 

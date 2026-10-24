@@ -19,6 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
 import { MAX_REPORT_NOTE_CHARS, REPORTS_PER_DAY, REPORT_REASONS, type NewReport, type ReportMailer, type ReportTarget } from "./reports.js";
+import { questionTask } from "./outside.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
@@ -1327,6 +1328,8 @@ export function evictionRequest(
   };
 }
 
+const ONLY_CREATOR_EVICTS = "only the person who created this room can remove a member from it.";
+
 /**
  * The room's creator removes a member, and cuts what they read after it.
  *
@@ -1409,7 +1412,7 @@ export async function evictMember(
   // removeMember gets them. The creator never changes, so the two cannot disagree on
   // a real room; this check is what decides what a caller is told.
   if (session.createdBy !== actor.userId) {
-    return refuse("forbidden", "only the person who created this room can remove a member from it.");
+    return refuse("forbidden", ONLY_CREATOR_EVICTS);
   }
 
   // A direct lookup, NOT findMember: that helper requires the handle to belong
@@ -1443,7 +1446,7 @@ export async function evictMember(
   if (outcome.refused === "closed") return refuse("closed", "session is closed.");
   if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
   if (outcome.refused === "forbidden") {
-    return refuse("forbidden", "only the person who created this room can remove a member from it.");
+    return refuse("forbidden", ONLY_CREATOR_EVICTS);
   }
   if (outcome.refused !== null) return refuse("not_found", "session not found.");
 
@@ -1499,6 +1502,43 @@ export async function evictMember(
     alsoRemovedFrom,
   });
 }
+
+/**
+ * Ban the account behind an outside question, by the question's cursor. The asker holds no member_id, so the cursor
+ * is the creator's only handle on them. The ban is the one `evictMember` writes (same rows, same scopes, same
+ * authority) and is keyed by the account the question's task records; nothing here or in the result names that account
+ * or the label it signed in with, only the origin the room already shows. Open tasks the asker has stay open.
+ */
+export async function banAsker(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  questionCursor: number,
+  ban: BanScope,
+): Promise<RoomResult<{ origin: string; banned: BanScope }>> {
+  const session = await store.getSession(sessionId);
+  if (!session) return refuse("not_found", "session not found.");
+  if (session.createdBy !== actor.userId) return refuse("forbidden", ONLY_CREATOR_EVICTS);
+
+  const task = await questionTask(store, sessionId, questionCursor);
+  if (!task) return refuse("invalid", NO_OUTSIDE_QUESTION);
+
+  const outcome = await store.banAccount(sessionId, {
+    userId: task.callerUserId,
+    label: task.origin,
+    ban,
+    now: Date.now(),
+    byUserId: actor.userId,
+    audit: auditEntries(session, actor, "asker_banned", { question_cursor: questionCursor, origin: task.origin, ban }),
+  });
+  if (outcome.refused === "closed") return refuse("closed", "session is closed.");
+  if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
+  if (outcome.refused === "forbidden") return refuse("forbidden", ONLY_CREATOR_EVICTS);
+  if (outcome.refused !== null) return refuse("not_found", "session not found.");
+  return succeed({ origin: task.origin, banned: ban });
+}
+
+const NO_OUTSIDE_QUESTION = "no outside question at that cursor.";
 
 /** One refusal for a cursor that names no event and for one that names an event the caller may not read, so the two read alike. */
 const NO_MESSAGE_AT_CURSOR = "no message at that cursor.";
@@ -1588,7 +1628,8 @@ export async function fileRoomReport(
     const memberCut = cutFor(handles);
     const cut = isPublic(session) ? undefined : memberCut;
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
-    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
+    const asked = event?.type === "outside_question";
+    if (!event || !(asked || SEND_KINDS.some((kind) => kind === event.type))) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
     // And what read_context lets it read (D2, D3). In a public room, a caller with no member reading of it has the public page
     // and nothing else, and the page has no brief_update to show. Anyone else reads as their account: a brief_update its author
     // keeps is no event to any account but the author's, from the author's row as it stands, one who left included, and no row
@@ -1598,7 +1639,15 @@ export async function fileRoomReport(
       : readableEvent(event, await store.getMember(session.id, event.fromMemberId), actor.userId);
     if (!shown) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
     target = { kind: "message", cursor: event.cursor };
-    subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
+    if (asked) {
+      // A stranger's question has no member behind it: the subject is its origin, and the account the task
+      // records stays here for staff, as a member's does.
+      const task = await questionTask(store, session.id, event.cursor);
+      if (!task) return refuse("invalid", NO_MESSAGE_AT_CURSOR);
+      subject = { questionCursor: event.cursor, origin: task.origin, userId: task.callerUserId };
+    } else {
+      subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
+    }
   }
 
   const filed = await store.fileReport(

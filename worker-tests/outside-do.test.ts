@@ -6,6 +6,7 @@ import { it, expect, afterEach, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { answerQuestion, askRoom, cancelOutsideTask, OUTSIDE_TASK_TTL_MS, type AskRequest } from "../src/outside.js";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { banAsker } from "../src/rooms.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
@@ -222,4 +223,22 @@ it("closing the room ends its open tasks with the room's words", async () => {
   expect(await notices(store)).toEqual([{ taskId: asked.task.id, text: "The room closed." }]);
   await store.closeSession(ID);
   expect(await notices(store), "a second close ends nothing again").toHaveLength(1);
+});
+
+it("a creator's ban by question cursor keeps the asker out, in the room alone or in all the creator's rooms", async () => {
+  const store = new DurableObjectStore(env as never);
+  const creator = { userId: "u_jesse", orgId: null, plan: "free", role: "member", label: "jesse@codenerd" } as never;
+  await store.createSession(publicRoom());
+  const asked = await askRoom(store, ID, { userId: "u_1", label: "1@x" }, { text: "q" });
+  if (!asked.ok) throw new Error("refused");
+  const cursor = asked.task.questionCursors[0];
+
+  expect(await banAsker(store, { ...(creator as object), userId: "u_other" } as never, ID, cursor, "room")).toMatchObject({ ok: false, code: "forbidden" });
+  expect(await banAsker(store, creator, ID, cursor + 50, "room")).toMatchObject({ ok: false, code: "invalid" });
+  expect(await askRoom(store, ID, { userId: "u_1", label: "1@x" }, { text: "again" }), "nothing was banned yet").toMatchObject({ ok: true });
+
+  expect(await banAsker(store, creator, ID, cursor, "all")).toEqual({ ok: true, value: { origin: "visitor 1", banned: "all" } });
+  expect(await askRoom(store, ID, { userId: "u_1", label: "1@x" }, { text: "again" })).toEqual({ ok: false, error: "banned" });
+  expect((await store.roomBans(ID)).map((b) => b.userId)).toEqual(["u_1"]);
+  expect((await store.creatorBans("u_jesse")).map((b) => b.userId)).toEqual(["u_1"]);
 });

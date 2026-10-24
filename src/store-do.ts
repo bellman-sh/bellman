@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
-  ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome,
+  AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome,
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
@@ -2446,6 +2446,40 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async outsideTask(callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
     const task = await this.ctx.storage.get<OutsideTask>(`${OUTSIDE_TASK_PREFIX}${taskId}`);
     return task?.callerUserId === callerUserId ? task : undefined;
+  }
+
+  async outsideTaskById(taskId: string): Promise<OutsideTask | undefined> {
+    return this.ctx.storage.get<OutsideTask>(`${OUTSIDE_TASK_PREFIX}${taskId}`);
+  }
+
+  /** `removeMember`'s ban for an account that holds no member row: the same two rows, and for "all" the same queued registry write. */
+  async banAccount(req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }> {
+    const outcome = await this.ctx.storage.transaction<{ refused: RemovalOutcome["refused"]; queued: boolean }>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { refused: "not_found", queued: false };
+      if (s.closed) return { refused: "closed", queued: false };
+      if (s.frozenAt !== null) return { refused: "frozen", queued: false };
+      if (s.createdBy !== req.byUserId) return { refused: "forbidden", queued: false };
+      const banning: Ban | null = (await txn.get<string>(banUserKey(req.userId))) === undefined
+        ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now }
+        : null;
+      // Owed whenever asked for, as in `removeMember`: the registry cannot be read from here, and its write keeps the first.
+      const widening: CreatorBan | null = req.ban === "all"
+        ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now, sessionId: s.id }
+        : null;
+      const queue = [
+        ...(widening ? [creatorBanIntent(s.createdBy, widening)] : []),
+        ...(banning ? req.audit.filter((e) => e.orgId).map(auditIntent) : []),
+      ];
+      const rows = await this.driver.enqueue(txn, queue);
+      await putRows(txn, {
+        ...(banning ? { [banKey(banning.banId)]: banning, [banUserKey(banning.userId)]: banning.banId } : {}),
+        ...rows,
+      });
+      return { refused: null, queued: queue.length > 0 };
+    });
+    if (outcome.queued) await this.driver.deliverNow();
+    return { refused: outcome.refused };
   }
 
   /**
@@ -5596,6 +5630,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).removeMember(memberId, req);
   }
 
+  async banAccount(sessionId: string, req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }> {
+    return this.session(sessionId).banAccount(req);
+  }
+
   async roomBans(sessionId: string): Promise<Ban[]> {
     return this.session(sessionId).roomBans();
   }
@@ -5869,6 +5907,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
     return this.session(sessionId).outsideTask(callerUserId, taskId);
+  }
+
+  async outsideTaskById(sessionId: string, taskId: string): Promise<OutsideTask | undefined> {
+    return this.session(sessionId).outsideTaskById(taskId);
   }
 
   async outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]> {

@@ -579,6 +579,16 @@ export function clearSilence(s: StoredSession, now: number): Member[] {
 export type EventBody = Omit<SessionEvent, "cursor" | "at">;
 
 /** What a removal did, reported from inside the transaction that did it. */
+/** What `banAccount` is handed: the account and the label it was seen under, the scope, and who asks. */
+export interface AccountBanRequest {
+  userId: string;
+  label: string;
+  ban: BanScope;
+  now: number;
+  byUserId: string;
+  audit: readonly AuditEntry[];
+}
+
 export interface RemovalOutcome {
   refused: "not_found" | "closed" | "frozen" | "forbidden" | null;
   /** True only when THIS call recorded the member out. */
@@ -1657,6 +1667,14 @@ export interface BellmanStore {
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
   /** One outside task of this room, if `callerUserId` opened it. Another caller's, or none, answers undefined. */
   outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined>;
+  /** One outside task of this room by its id, whoever opened it: for the creator's moderation, which reads the account behind a question. */
+  outsideTaskById(sessionId: string, taskId: string): Promise<OutsideTask | undefined>;
+  /**
+   * Ban an account that is not a member, as `removeMember`'s `ban` bans one that is: the same `bu:`/`bn:` rows and, for "all",
+   * the creator-wide ban, in one operation, guarded as an eviction is (closed, frozen, `byUserId` the room's creator). One ban per
+   * account, so a repeat writes nothing new and files no second audit row. No event: a public room's log is public.
+   */
+  banAccount(sessionId: string, req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }>;
   /** This caller's tasks in this room, newest first. */
   outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]>;
   /**
@@ -3226,6 +3244,27 @@ export class MemoryStore implements BellmanStore {
   async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
     const task = this.outsideTasks.get(sessionId)?.get(taskId);
     return task?.callerUserId === callerUserId ? detach(task) : undefined;
+  }
+
+  async outsideTaskById(sessionId: string, taskId: string): Promise<OutsideTask | undefined> {
+    return detach(this.outsideTasks.get(sessionId)?.get(taskId));
+  }
+
+  async banAccount(sessionId: string, req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }> {
+    // No await from the reads to the writes, as removeMember has none.
+    const s = this.sessions.get(sessionId);
+    if (!s) return { refused: "not_found" };
+    if (s.closed) return { refused: "closed" };
+    if (s.frozenAt !== null) return { refused: "frozen" };
+    if (s.createdBy !== req.byUserId) return { refused: "forbidden" };
+    const banning = !this.isBanned(s.id, req.userId) ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now } : null;
+    const widening = req.ban === "all" && !this.bansCreatorWide(s.createdBy, req.userId)
+      ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now, sessionId: s.id }
+      : null;
+    if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
+    if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
+    if (banning) this.recordAudit(req.audit.filter((e) => e.orgId));
+    return { refused: null };
   }
 
   async outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]> {

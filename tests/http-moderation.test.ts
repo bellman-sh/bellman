@@ -7,6 +7,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { HOST_MEMBER_ID, HOST_USER_ID } from "../src/host.js";
 import { MAX_BAN_BYTES, MAX_REPORT_BYTES, moderationRoutes } from "../src/http/moderation.js";
 import type { RoomCaller } from "../src/http/rooms.js";
+import { askRoom } from "../src/outside.js";
 import { MemoryStore } from "../src/store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
@@ -87,6 +88,37 @@ describe("a room's bans", () => {
     expect(await store.roomBans(ROOM)).toEqual([]);
     const real = await call(null, `/rooms/${ROOM}/bans`, { method: "POST", cookie: DEV_KEY.jesse, origin: PANEL, body: { member_id: "m_peer", scope: "room" } });
     expect(real!.status, "the control: the panel's Origin bans").toBe(200);
+  });
+});
+
+describe("banning an outside asker by question cursor", () => {
+  const stranger = { userId: "u_out1", label: "out1@elsewhere" };
+  const asked = async () => {
+    const r = await askRoom(store, ROOM, stranger, { text: "hi" });
+    if (!r.ok) throw new Error(r.error);
+    return r.task.questionCursors[0];
+  };
+
+  it("bans the asker with the cursor and answers the origin alone", async () => {
+    const question_cursor = await asked();
+
+    const banned = await call(DEV_KEY.jesse, `/rooms/${ROOM}/bans`, { method: "POST", body: { question_cursor, scope: "room" } });
+
+    expect(await answer(banned)).toEqual([200, { origin: "visitor 1", banned: "room" }]);
+    expect(await askRoom(store, ROOM, stranger, { text: "again" })).toEqual({ ok: false, error: "banned" });
+    expect(JSON.stringify(await answer(await call(DEV_KEY.jesse, `/rooms/${ROOM}/bans`)))).not.toMatch(/u_out1|out1@elsewhere/);
+  });
+
+  it("refuses a body with both a member and a cursor, with neither, and a cursor that is no question; and a member who did not create the room", async () => {
+    const question_cursor = await asked();
+    const post = (as: string, body: unknown) => call(as, `/rooms/${ROOM}/bans`, { method: "POST", body });
+
+    for (const body of [{ member_id: "m_peer", question_cursor, scope: "room" }, { scope: "room" }, { question_cursor: "1", scope: "room" }, { question_cursor, scope: "x" }]) {
+      expect((await post(DEV_KEY.jesse, body))!.status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await post(DEV_KEY.jesse, { question_cursor: question_cursor + 50, scope: "room" }))!.status).toBe(400);
+    expect((await post(DEV_KEY.peer, { question_cursor, scope: "room" }))!.status).toBe(403);
+    expect(await askRoom(store, ROOM, stranger, { text: "still here" })).toMatchObject({ ok: true });
   });
 });
 

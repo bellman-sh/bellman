@@ -29,7 +29,7 @@
 import { banView, creatorBanView } from "../bans.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { creatorReportView, reportMailer, type ReportMailer } from "../reports.js";
-import { evictMember, fileRoomReport, handlesOf } from "../rooms.js";
+import { banAsker, evictMember, fileRoomReport, handlesOf } from "../rooms.js";
 import { STATUS, json, lengthRefusal, methodNotAllowed, problem, type RoomCaller, type RoomRouteDeps } from "./rooms.js";
 
 export type ModerationDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
@@ -154,9 +154,21 @@ async function banMember(request: Request, sessionId: string, origin: string | u
   if (tooLong) return tooLong;
 
   // A body that is not JSON, `null`, an array or a scalar has neither field, and is the one 400 below.
-  const { member_id, scope } = ((await request.json().catch(() => null)) ?? {}) as { member_id?: unknown; scope?: unknown };
-  if (typeof member_id !== "string") return problem(400, "invalid_request", "member_id must be a string", origin);
+  const { member_id, question_cursor, scope } = ((await request.json().catch(() => null)) ?? {}) as {
+    member_id?: unknown; question_cursor?: unknown; scope?: unknown;
+  };
+  if ((member_id === undefined) === (question_cursor === undefined)) {
+    return problem(400, "invalid_request", "send member_id or question_cursor, not both and not neither", origin);
+  }
   if (scope !== "room" && scope !== "all") return problem(400, "invalid_request", 'scope must be "room" or "all"', origin);
+  if (question_cursor !== undefined) {
+    if (typeof question_cursor !== "number" || !Number.isInteger(question_cursor) || question_cursor < 1) {
+      return problem(400, "invalid_request", "question_cursor must be a positive whole number", origin);
+    }
+    const b = await banAsker(deps.store, who.identity, sessionId, question_cursor, scope);
+    return b.ok ? json(200, b.value, origin) : problem(STATUS[b.code], b.code, b.reason, origin);
+  }
+  if (typeof member_id !== "string") return problem(400, "invalid_request", "member_id must be a string", origin);
 
   const r = await evictMember(deps.store, who.identity, sessionId, member_id, scope);
   if (!r.ok) return problem(STATUS[r.code], r.code, r.reason, origin);

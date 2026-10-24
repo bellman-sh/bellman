@@ -224,6 +224,13 @@ export async function answerQuestion(
   });
 }
 
+/** The task an `outside_question` at `cursor` opened, or undefined when that cursor is no outside question of this room. */
+export async function questionTask(store: BellmanStore, sessionId: string, cursor: number): Promise<OutsideTask | undefined> {
+  const asked = await store.eventAt(sessionId, cursor);
+  const taskId = asked?.type === "outside_question" ? (asked.payload as { taskId?: unknown }).taskId : undefined;
+  return typeof taskId === "string" ? store.outsideTaskById(sessionId, taskId) : undefined;
+}
+
 /** Why an open task ends, and the words the caller and the room are given for it. */
 export type EndReason = "canceled" | "expired" | "unpublished" | "closed";
 const ENDINGS: Record<EndReason, { state: "TASK_STATE_CANCELED" | "TASK_STATE_FAILED"; text: string }> = {

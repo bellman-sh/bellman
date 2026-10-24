@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -4001,14 +4001,14 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
-    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()];
+    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()].map(liftInvite);
   }
 
   /** One prefix read per key, each bounded as an org's listing is: a key many orgs invited cannot make a sign-in read without end. */
   async invitesFor(keys: string[]): Promise<OrgInvite[]> {
     const found: OrgInvite[] = [];
     for (const key of new Set(keys)) {
-      found.push(...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values());
+      found.push(...[...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values()].map(liftInvite));
     }
     return found;
   }
@@ -4029,6 +4029,36 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  async #renewOrgInviteTxn(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const [byOrg, byKey] = inviteKeysFor({ orgId, key });
+      const found = await txn.get<OrgInvite>(byOrg);
+      if (!found) return "missing" as const;
+      const renewed: OrgInvite = { ...found, invitedBy, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_resent", { key }, audit, now)]));
+      await txn.put<unknown>({ [byOrg]: renewed, [byKey]: renewed, ...rows });
+      return renewed;
+    });
+  }
+
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = `invmail:${orgId}`;
+      const day = inviteMailDay(now);
+      const row = await txn.get<{ day: number; spent: number }>(key);
+      const spent = row?.day === day ? row.spent : 0;
+      if (spent >= budget) return false;
+      await txn.put(key, { day, spent: spent + 1 });
+      return true;
+    });
+  }
+
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    const outcome = await this.#renewOrgInviteTxn(orgId, key, invitedBy, now, audit);
+    if (outcome !== "missing") await this.driver.deliverNow();
+    return outcome;
+  }
+
   /** The offer, the switch, every key's grant and the seats are read in the transaction that writes the grant (ADR 0027). */
   async #acceptOrgInviteTxn(
     orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
@@ -4038,7 +4068,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       if (!org) return "gone" as const;
       const unique = [...new Set([subjectKey, ...keys])];
       const inviteRows = unique.map((key) => inviteKeysFor({ orgId, key }));
-      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg)))).find((i) => i !== undefined);
+      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg))))
+        .find((i): i is OrgInvite => i !== undefined && inviteLive(liftInvite(i), now));
       const stored = await Promise.all(unique.map((key) => txn.get<PlanGrant>(grantKey(key))));
       const grants = stored.filter((g): g is PlanGrant => g !== undefined && !lapsed(g, now));
       // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
@@ -6028,6 +6059,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     return this.registry.deleteOrgInvite(orgId, key, audit);
+  }
+
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    return this.registry.renewOrgInvite(orgId, key, invitedBy, now, audit);
+  }
+
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    return this.registry.spendInviteMail(orgId, budget, now);
   }
 
   async acceptOrgInvite(

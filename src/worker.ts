@@ -12,6 +12,7 @@ import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { statsRoutes } from "./http/stats.js";
 import { reportMailer } from "./reports.js";
+import { inviteMailer } from "./invite-mail.js";
 import { buildServer } from "./server.js";
 import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
@@ -52,6 +53,12 @@ export interface WorkerEnv extends BellmanEnv {
    * Email Routing is not set up, a report is stored and the log says no email went.
    */
   SEND_EMAIL?: SendEmail;
+  /**
+   * The `send_email` binding an org's invite goes through (ADR 0036, D1). Its own, since SEND_EMAIL is bound to support@
+   * alone. It reaches any address once bellman.sh is onboarded to Email Service; until then a send fails, and the admin
+   * hands on the link the API answers.
+   */
+  INVITE_EMAIL?: SendEmail;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
   /**
@@ -232,6 +239,8 @@ export default {
     const blobs = new R2BlobStore(env.BLOBS);
     // What mails a filed report, for the `bellman_report` tool and the report route alike.
     const mailReport = reportMailer(env.SEND_EMAIL);
+    // What mails an org's invite (ADR 0036, D1), through a binding no destination restricts.
+    const mailInvite = inviteMailer(env.INVITE_EMAIL);
     const suspended = (userId: string) => suspensions.check(userId, () => store.isSuspended(userId));
 
     // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
@@ -351,6 +360,9 @@ export default {
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
         sealSecret: env.BELLMAN_SEAL_SECRET ?? env.BELLMAN_TOKEN_SECRET,
+        issuer: url.origin,
+        linkSecret: env.BELLMAN_TOKEN_SECRET,
+        mail: mailInvite,
       });
       if (handled) return handled;
     }

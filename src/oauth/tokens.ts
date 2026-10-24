@@ -102,10 +102,16 @@ export async function verifyJwt(
   if (parts.length !== 3) return null;
   const [header, payload, signature] = parts;
 
+  let signed: Uint8Array;
+  try {
+    signed = base64urlDecode(signature);
+  } catch {
+    return null; // not base64url: a forged or mangled token answers null like any other, never throws
+  }
   const ok = await crypto.subtle.verify(
     "HMAC",
     await hmacKey(secret, ["verify"]),
-    buffer(base64urlDecode(signature)),
+    buffer(signed),
     buffer(encoder.encode(`${header}.${payload}`))
   );
   if (!ok) return null;

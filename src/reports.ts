@@ -158,7 +158,7 @@ export function reportMailer(binding: MailBinding | undefined): ReportMailer {
  * whose email does not go is then diagnosed from this one line, with no stack to fetch. A thrown value with neither, a
  * string or `null` say, is named as it is. The report is not read here: the note is untrusted text and stays out of the log.
  */
-function whyNotSent(err: unknown): string {
+export function whyNotSent(err: unknown): string {
   const { code, message } = (err ?? {}) as { code?: unknown; message?: unknown };
   const given = [code, message].filter((part): part is string => typeof part === "string" && part !== "");
   return given.length > 0 ? given.join(": ") : String(err);

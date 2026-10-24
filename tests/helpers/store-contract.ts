@@ -27,7 +27,7 @@ import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
@@ -5187,12 +5187,60 @@ export function describeStoreContract(
         grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
       });
       const invite = (key: string, over: Partial<OrgInvite> = {}): OrgInvite => ({
-        orgId: "org_acme", key, role: "member", invitedBy: "u_github_1", invitedAt: 7, ...over,
+        orgId: "org_acme", key, role: "member", invitedBy: "u_github_1", invitedAt: 7, expiresAt: 7 + INVITE_TTL_MS, ...over,
       });
       const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
       const orgEvents = async (orgId = "org_acme") =>
         (await store.auditForOrg(orgId, 500)).map((e) => e.action).filter((a) => a !== "org_created" && a !== "plan_granted");
       const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+
+      it("lists an invite with its expiry, and reads one stored without the field as fourteen days after it was made (ADR 0036, D3)", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect((await store.listOrgInvites("org_acme", 10))[0].expiresAt).toBe(7 + INVITE_TTL_MS);
+        const legacy: Partial<OrgInvite> = invite("github:8");
+        delete legacy.expiresAt;
+        await store.putOrgInvite(legacy as OrgInvite, by);
+        expect((await store.invitesFor(["github:8"]))[0].expiresAt).toBe(7 + INVITE_TTL_MS);
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.expiresAt)).toEqual([7 + INVITE_TTL_MS, 7 + INVITE_TTL_MS]);
+      });
+
+      it("renews an invite: a new time, a fresh fourteen days, this admin, both rows, and a row in the stream", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);
+        const renewed = await store.renewOrgInvite("org_acme", "github:9", "u_github_7", 500, by);
+        expect(renewed).toMatchObject({ key: "github:9", role: "member", invitedAt: 500, expiresAt: 500 + INVITE_TTL_MS, invitedBy: "u_github_7" });
+        expect(await store.invitesFor(["github:9"])).toEqual([renewed]);
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([renewed]);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 501, by)).toBe("joined");
+        expect(await orgEvents()).toEqual(["member_invited", "invite_resent"]);
+      });
+
+      it("spends an org's invite mail against its budget for a UTC day: each org and each day its own, a refusal spending nothing", async () => {
+        const day = Date.UTC(2026, 9, 23);
+        for (let i = 0; i < 3; i++) expect(await store.spendInviteMail("org_acme", 3, day + i)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 10)).toBe(false);
+        expect(await store.spendInviteMail("org_acme", 4, day + 11)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 4, day + 12)).toBe(false);
+        expect(await store.spendInviteMail("org_b", 3, day + 13)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 86_400_000)).toBe(true);
+      });
+
+      it("renews nothing that is not there: no invite under the key, or another org's", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect(await store.renewOrgInvite("org_acme", "github:8", "u_github_1", 500, by)).toBe("missing");
+        expect(await store.renewOrgInvite("org_b", "github:9", "u_github_1", 500, by)).toBe("missing");
+      });
+
+      it("seats nobody for an expired invite and keeps its row for the roster (ADR 0036, D3)", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 100, by)).toBe("gone");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["github:9"]);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 99, by)).toBe("joined");
+      });
 
       it("keeps an invite out of every grant read: no grant, no seat, no member", async () => {
         await seated();

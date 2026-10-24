@@ -3,7 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "./a2a/cards.js";
-import { a2aRoutes, isA2aPath } from "./a2a/routes.js";
+import { a2aRoutes, isA2aPath, v03CardTenant } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
 import { scimRoutes } from "./http/scim.js";
@@ -310,8 +310,8 @@ export default {
 
     // The public reads (public rooms spec D3): no credential, so no caller is composed. Behind the
     // fail-closed guard the room routes share (plan ruling R7): a deploy that serves no room serves
-    // none in public either.
-    if (url.pathname === "/public" || url.pathname.startsWith("/public/")) {
+    // none in public either. A room's 0.3 A2A card is one, at /a2a/<room>/.well-known/agent-card.json.
+    if (url.pathname === "/public" || url.pathname.startsWith("/public/") || v03CardTenant(url.pathname) !== undefined) {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await publicRoutes(request, { store, blobs });

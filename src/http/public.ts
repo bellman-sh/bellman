@@ -5,7 +5,8 @@
  * ETag, its log, and the bytes of a blob an item on its surface names. And `GET
  * /public/handles/:handle`: the public rooms a handle has signed (D5). And `GET /public/rooms`: the
  * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml and the directory at bellman.sh/r/. And `GET
- * /public/rooms/:id/agent-card.json`, the room's A2A card (src/a2a/cards.ts). Nothing else.
+ * /public/rooms/:id/agent-card.json`, the room's A2A card (src/a2a/cards.ts), and the same room's 0.3 card at `GET
+ * /a2a/:id/.well-known/agent-card.json`, where a 0.3 resolver looks from the room's 0.3 URL. Nothing else.
  *
  * No credential is read here, by design. A cookie or a bearer changes nothing, so a member's
  * credential cannot open a private room through these paths, and every origin is answered
@@ -19,7 +20,8 @@
  * there, its own label, `host@bellman`, reading as an address too (`publicNames`). Runtime-free,
  * like rooms.ts beside it: a web Request in, a Response out, for both servers and the tests.
  */
-import { cardResponse, roomCard } from "../a2a/cards.js";
+import { cardResponse, roomCard, roomCard03 } from "../a2a/cards.js";
+import { v03CardTenant } from "../a2a/routes.js";
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { publicRoomUrl } from "../codes.js";
 import { handleFromSegment } from "../handles.js";
@@ -29,6 +31,7 @@ import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, sessionStatus } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
+import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, surfaceTag } from "./rooms.js";
 
@@ -105,6 +108,29 @@ function byNumber(value: unknown, names: ReadonlyMap<string, string>): unknown {
   ]));
 }
 
+/** The room a key names, a public name or a session id (public names spec, D6), while it is publicly readable. */
+async function publicRoom(store: BellmanStore, key: string): Promise<StoredSession | null> {
+  // A name has no `_`, and an id always has one. A name goes through the index and its room's record, so one nobody
+  // holds reads no room at all.
+  const session = PUBLIC_NAME.test(key) ? await roomNamed(store, key) : await store.getSession(key);
+  return session && isPublic(session) ? session : null;
+}
+
+/**
+ * A room's A2A card (ADR 0033), in 1.0's shape or 0.3's. A room that answers is public and open: every other room,
+ * and a key that names none, is the one 404, in the same words, so a card says nothing about a room that is not one.
+ */
+async function agentCard(session: StoredSession | null, shape: "1.0" | "0.3", request: Request, deps: PublicRouteDeps): Promise<Response> {
+  if (!session || session.closed) return notFound("no such public room");
+  // The tenant `/a2a` takes: the name, if the index still gives it to this room, else the id.
+  const name = heldName(session);
+  const tenant = name !== null && (await deps.store.publicNameEntry(name))?.id === session.id ? name : session.id;
+  const view = { tenant, name: session.manifest.room, purpose: session.manifest.purpose };
+  const origin = new URL(request.url).origin;
+  const how = { oauth: deps.oauth ?? true };
+  return cardResponse(shape === "0.3" ? roomCard03(view, origin, how) : roomCard(view, origin, how), request.headers.get("if-none-match"), OPEN);
+}
+
 /**
  * The public routes. `undefined` for a path outside `/public`, so a server carries on to the next
  * module; everything under it is answered here, a path this module does not know and a throw included.
@@ -112,7 +138,8 @@ function byNumber(value: unknown, names: ReadonlyMap<string, string>): unknown {
 export async function publicRoutes(request: Request, deps: PublicRouteDeps): Promise<Response | undefined> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");
-  if (path !== "/public" && !path.startsWith("/public/")) return undefined;
+  const room03 = v03CardTenant(path);
+  if (room03 === undefined && path !== "/public" && !path.startsWith("/public/")) return undefined;
   // A page polling the surface sends If-None-Match, which is not a CORS-safelisted header, so the browser asks first.
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -123,31 +150,18 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET", ...OPEN } });
 
   try {
+    if (room03 !== undefined) return await agentCard(await publicRoom(deps.store, room03), "0.3", request, deps);
     const page = HANDLE_PAGE.exec(path);
     if (page) return await handlePage(page[1], deps);
     if (path === "/public/rooms") return await namedRooms(deps);
     const m = PATH.exec(path);
     if (!m) return notFound("no such route");
     const [, key, part, blobId] = m;
-    // A public name or a session id (public names spec, D6): a name has no `_`, and an id always has one.
-    // A name goes through the index and its room's record, so one nobody holds reads no room at all.
-    const session = PUBLIC_NAME.test(key) ? await roomNamed(deps.store, key) : await deps.store.getSession(key);
-    if (!session || !isPublic(session)) return notFound("no such public room");
+    const session = await publicRoom(deps.store, key);
+    if (!session) return notFound("no such public room");
     const id = session.id;
 
-    if (part === "agent-card.json") {
-      // The A2A card (ADR 0033): a room that answers is public and open. Every other room got the 404 above, or gets
-      // it here in the same words, so a card says nothing about a room that is not one.
-      if (session.closed) return notFound("no such public room");
-      // The tenant `/a2a` takes: the name, if the index still gives it to this room, else the id.
-      const name = heldName(session);
-      const tenant = name !== null && (await deps.store.publicNameEntry(name))?.id === id ? name : id;
-      return cardResponse(
-        roomCard({ tenant, name: session.manifest.room, purpose: session.manifest.purpose }, url.origin, { oauth: deps.oauth ?? true }),
-        request.headers.get("if-none-match"),
-        OPEN,
-      );
-    }
+    if (part === "agent-card.json") return await agentCard(session, "1.0", request, deps);
 
     if (blobId !== undefined) {
       // Only a blob an item on the surface names: one uploaded and never placed, or one whose

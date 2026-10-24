@@ -156,16 +156,70 @@ describe("agent cards", () => {
     expect(new Set(answers).size, answers.join("\n")).toBe(1);
   });
 
+  it("a public room serves a 0.3 card where a 0.3 resolver looks, /a2a/<room>/.well-known/agent-card.json", async () => {
+    await seed(NAMED, {}, NAME);
+    await seed(PLAIN);
+    for (const [key, want] of [[NAME, NAME], [NAMED, NAME], [PLAIN, PLAIN]] as const) {
+      const res = await call(`/a2a/${key}/.well-known/agent-card.json`);
+      expect(res.status, key).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+      expect(res.headers.get("access-control-allow-origin")).toBe("*");
+      const body = await res.json() as any;
+      const v1 = await card(`/public/rooms/${key}/agent-card.json`);
+      expect(body).toEqual({
+        name: "Migration review",
+        description: v1.description,
+        url: `${ORIGIN}/a2a/${want}`,
+        protocolVersion: "0.3.0",
+        preferredTransport: "JSONRPC",
+        version: v1.version,
+        capabilities: v1.capabilities,
+        defaultInputModes: v1.defaultInputModes,
+        defaultOutputModes: v1.defaultOutputModes,
+        skills: v1.skills,
+        securitySchemes: {
+          bearer: { type: "http", scheme: "bearer", description: v1.securitySchemes.bearer.httpAuthSecurityScheme.description },
+          oauth: {
+            type: "oauth2",
+            description: v1.securitySchemes.oauth.oauth2SecurityScheme.description,
+            flows: { authorizationCode: { authorizationUrl: `${ORIGIN}/authorize`, tokenUrl: `${ORIGIN}/token`, scopes: { bellman: expect.any(String) } } },
+            oauth2MetadataUrl: `${ORIGIN}/.well-known/oauth-authorization-server`,
+          },
+        },
+        security: [{ bearer: [] }, { oauth: ["bellman"] }],
+      });
+      // The url the 1.0 card lists as the room's 0.3 interface.
+      expect(body.url).toBe(v1.supportedInterfaces[1].url);
+    }
+  });
+
+  it("a room with no 0.3 card gets the one 404 an unknown room gets", async () => {
+    await seed("qs_card_private", { manifest: roomManifest({ public: false }) });
+    await seed("qs_card_unpublished", { unpublishedAt: Date.now() }, "card-unpublished");
+    await seed("qs_card_closed", { closed: true }, "card-closed");
+    const keys = ["qs_card_private", "qs_card_unpublished", "card-unpublished", "qs_card_closed", "card-closed", "qs_card_nope", "no-such-room"];
+    const answers = await Promise.all([
+      ...keys.map((key) => `/a2a/${key}/.well-known/agent-card.json`),
+      "/public/rooms/no-such-room/agent-card.json",
+    ].map(async (path) => {
+      const res = await call(path);
+      return JSON.stringify([res.status, await res.text(), [...res.headers].sort()]);
+    }));
+    expect(JSON.parse(answers[0])[0]).toBe(404);
+    expect(new Set(answers).size, answers.join("\n")).toBe(1);
+  });
+
   it('the card has no "host" or "seat" text', async () => {
     await seed(NAMED, {}, NAME);
-    for (const path of [`/public/rooms/${NAME}/agent-card.json`, `/public/rooms/${NAMED}/agent-card.json`, "/.well-known/agent-card.json"]) {
+    for (const path of [`/public/rooms/${NAME}/agent-card.json`, `/public/rooms/${NAMED}/agent-card.json`, `/a2a/${NAME}/.well-known/agent-card.json`, "/.well-known/agent-card.json"]) {
       expect(await (await call(path)).text(), path).not.toMatch(/host|seat/i);
     }
   });
 
   it("ETag round-trips to 304", async () => {
     await seed(NAMED, {}, NAME);
-    for (const path of [`/public/rooms/${NAME}/agent-card.json`, "/.well-known/agent-card.json"]) {
+    for (const path of [`/public/rooms/${NAME}/agent-card.json`, `/a2a/${NAME}/.well-known/agent-card.json`, "/.well-known/agent-card.json"]) {
       const first = await call(path);
       const etag = first.headers.get("etag")!;
       expect(etag, path).toMatch(/^"[0-9a-f]{64}"$/);

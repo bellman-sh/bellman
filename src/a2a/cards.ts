@@ -5,8 +5,10 @@
  * (`authorizationUrl`, `tokenUrl`, `scopes`). Runtime-free, like the public routes that serve them.
  *
  * A card claims only what is built: the 1.0 JSON-RPC interface, and for a room the 0.3 one, streaming, no push, no
- * extended card. 0.3 has no `tenant`, so a room's 0.3 interface is its own URL, `/a2a/<tenant>`. The card stays in 1.0's
- * shape, with none of 0.3's top-level fields: its `securitySchemes` would have to be 0.3's, which 1.0 clients do not read.
+ * extended card. 0.3 has no `tenant`, so a room's 0.3 interface is its own URL, `/a2a/<tenant>`. The 1.0 card stays in
+ * 1.0's shape, with none of 0.3's top-level fields: its `securitySchemes` would have to be 0.3's, which 1.0 clients do not
+ * read. A 0.3 client reads a card of its own instead (`roomCard03`), served where a 0.3 resolver looks from that URL,
+ * `/a2a/<tenant>/.well-known/agent-card.json`: the same room, words and auth, in 0.3's shapes.
  */
 import { PACKAGE_VERSION } from "../ui/assets.js";
 
@@ -31,9 +33,19 @@ const skill = (description: string) => ({ id: "ask", name: "Ask the room", descr
  */
 export interface CardOptions { oauth: boolean }
 
-const BEARER = { httpAuthSecurityScheme: { description: "A Bellman key, sent as a bearer token.", scheme: "Bearer" } };
+const BEARER_WORDS = "A Bellman key, sent as a bearer token.";
+const BEARER = { httpAuthSecurityScheme: { description: BEARER_WORDS, scheme: "Bearer" } };
 
-/** The auth every card shares. The `oauth` scheme has no field for a resource, so its description carries it. */
+/** The `oauth` scheme has no field for a resource, in either version, so its description carries it. */
+const oauthWords = (origin: string) =>
+  `Sign in with OAuth. Request resource=${origin}/a2a when you authorize: a token minted for any other resource ` +
+  `(the default, with none named, is ${origin}/mcp) is refused here. The resource's metadata is at ` +
+  `${origin}/.well-known/oauth-protected-resource/a2a.`;
+const codeFlow = (origin: string) =>
+  ({ authorizationUrl: `${origin}/authorize`, tokenUrl: `${origin}/token`, scopes: { [SCOPE]: "Use your Bellman account." } });
+const metadataUrl = (origin: string) => `${origin}/.well-known/oauth-authorization-server`;
+
+/** The auth every card shares. */
 function security(origin: string, { oauth }: CardOptions) {
   if (!oauth) return { securitySchemes: { bearer: BEARER }, securityRequirements: [{ schemes: { bearer: { list: [] } } }] };
   return {
@@ -41,19 +53,9 @@ function security(origin: string, { oauth }: CardOptions) {
       bearer: BEARER,
       oauth: {
         oauth2SecurityScheme: {
-          description:
-            `Sign in with OAuth. Request resource=${origin}/a2a when you authorize: a token minted for any other resource ` +
-            `(the default, with none named, is ${origin}/mcp) is refused here. The resource's metadata is at ` +
-            `${origin}/.well-known/oauth-protected-resource/a2a.`,
-          flows: {
-            authorizationCode: {
-              authorizationUrl: `${origin}/authorize`,
-              tokenUrl: `${origin}/token`,
-              scopes: { [SCOPE]: "Use your Bellman account." },
-              pkceRequired: true,
-            },
-          },
-          oauth2MetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+          description: oauthWords(origin),
+          flows: { authorizationCode: { ...codeFlow(origin), pkceRequired: true } },
+          oauth2MetadataUrl: metadataUrl(origin),
         },
       },
     },
@@ -61,19 +63,38 @@ function security(origin: string, { oauth }: CardOptions) {
   };
 }
 
+/** `security` in 0.3's shapes, OpenAPI's: a `type` on each scheme, and `security` naming each by its key. 0.3 has no `pkceRequired`. */
+function security03(origin: string, { oauth }: CardOptions) {
+  const bearer = { type: "http", scheme: "bearer", description: BEARER_WORDS };
+  if (!oauth) return { securitySchemes: { bearer }, security: [{ bearer: [] }] };
+  return {
+    securitySchemes: {
+      bearer,
+      oauth: { type: "oauth2", description: oauthWords(origin), flows: { authorizationCode: codeFlow(origin) }, oauth2MetadataUrl: metadataUrl(origin) },
+    },
+    security: [{ bearer: [] }, { oauth: [SCOPE] }],
+  };
+}
+
+const CAPABILITIES = { streaming: true, pushNotifications: false, extendedAgentCard: false };
+/** A room's 0.3 URL: 0.3 has no `tenant`, so the room is in the path. */
+const v03Url = (origin: string, tenant: string) => `${origin}/a2a/${encodeURIComponent(tenant)}`;
+const roomWords = (room: PublicRoomView) => [room.purpose?.trim(), PUBLIC_SENTENCE].filter(Boolean).join(" ");
+const ROOM_ASK = "The room's members discuss your question and answer as one.";
+
 function card(origin: string, how: CardOptions, name: string, description: string, ask: string, tenant?: string) {
   const interfaces = tenant === undefined
     ? [{ url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }]
     : [
       { url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", tenant },
-      { url: `${origin}/a2a/${encodeURIComponent(tenant)}`, protocolBinding: "JSONRPC", protocolVersion: "0.3" },
+      { url: v03Url(origin, tenant), protocolBinding: "JSONRPC", protocolVersion: "0.3" },
     ];
   return {
     name,
     description,
     supportedInterfaces: interfaces,
     version: PACKAGE_VERSION,
-    capabilities: { streaming: true, pushNotifications: false, extendedAgentCard: false },
+    capabilities: CAPABILITIES,
     ...security(origin, how),
     defaultInputModes: ["text/plain"],
     defaultOutputModes: ["text/plain"],
@@ -87,10 +108,28 @@ export const roomCard = (room: PublicRoomView, origin: string, how: CardOptions 
     origin,
     how,
     room.name,
-    [room.purpose?.trim(), PUBLIC_SENTENCE].filter(Boolean).join(" "),
-    "The room's members discuss your question and answer as one.",
+    roomWords(room),
+    ROOM_ASK,
     room.tenant,
   );
+
+/**
+ * A public room's card for an A2A 0.3 client (spec D8): what `roomCard` says, in 0.3's shape, with the room's 0.3 URL as
+ * the one it asks at.
+ */
+export const roomCard03 = (room: PublicRoomView, origin: string, how: CardOptions = { oauth: true }): object => ({
+  name: room.name,
+  description: roomWords(room),
+  url: v03Url(origin, room.tenant),
+  protocolVersion: "0.3.0",
+  preferredTransport: "JSONRPC",
+  version: PACKAGE_VERSION,
+  capabilities: CAPABILITIES,
+  ...security03(origin, how),
+  defaultInputModes: ["text/plain"],
+  defaultOutputModes: ["text/plain"],
+  skills: [skill(ROOM_ASK)],
+});
 
 /** Bellman's own card: no `tenant`, because it is not a room. A message with no tenant is told which room to name. */
 export const bellmanCard = (origin: string): object =>

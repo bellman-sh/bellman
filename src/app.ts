@@ -97,7 +97,10 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   }))));
   // No credential, so no gate.
   // Bearer keys only, so the cards say no OAuth (this server has none to honour).
-  app.use("/public", serve((request) => publicRoutes(request, { store, blobs, oauth: false })));
+  const publicReads = serve((request) => publicRoutes(request, { store, blobs, oauth: false }));
+  app.use("/public", publicReads);
+  // A room's 0.3 card, where a 0.3 resolver looks from the room's 0.3 URL: a public read, ahead of /a2a's key check.
+  app.get("/a2a/:room/.well-known/agent-card.json", publicReads);
   // A2A (ADR 0033): outside agents ask a public room. The 401 is the Worker's, less the OAuth hint this server cannot give;
   // a suspended account is refused inside, in JSON-RPC.
   app.use("/a2a", serve(async (request) => {

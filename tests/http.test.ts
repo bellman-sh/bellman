@@ -435,6 +435,14 @@ describe("A2A over the Node server (ADR 0033)", () => {
     };
     expect(Object.keys(card.securitySchemes)).toEqual(["bearer"]);
     expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
+    // The 0.3 card, where a 0.3 resolver looks from the room's own URL, says the same: bearer and no OAuth, and no key needed to read it.
+    const old = await fetch(`${base}/a2a/qs_http_card/.well-known/agent-card.json`);
+    expect(old.status).toBe(200);
+    const v03 = (await old.json()) as { url: string; securitySchemes: Record<string, unknown>; security: unknown[] };
+    expect(v03.url).toBe(`${base}/a2a/qs_http_card`);
+    expect(Object.keys(v03.securitySchemes)).toEqual(["bearer"]);
+    expect(v03.security).toEqual([{ bearer: [] }]);
+    expect((await fetch(`${base}/a2a/qs_http_nope/.well-known/agent-card.json`)).status).toBe(404);
   });
 
   it("serves A2A 0.3 at the room's own URL, which its card lists, with a bearer key", async () => {

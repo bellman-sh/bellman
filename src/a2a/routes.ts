@@ -357,6 +357,21 @@ const V03_METHODS = new Map([
 const V03_PATH = /^\/a2a\/([^/]+)$/;
 /** Whether a path is `/a2a` or a room's 0.3 URL: one endpoint, and one OAuth resource, `/a2a`. */
 export const isA2aPath = (path: string) => path === "/a2a" || V03_PATH.test(path);
+/** A room's 0.3 card: where a 0.3 resolver looks, given the room's 0.3 URL. */
+const V03_CARD_PATH = /^\/a2a\/([^/]+)\/\.well-known\/agent-card\.json$/;
+/** A 0.3 URL's room segment as the tenant it names: decoded, or as it is when it is not percent-encoding (no room has that name). */
+function tenantOf(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+/** The tenant whose 0.3 card a path asks for, read as a 0.3 POST reads its room; undefined for any other path. */
+export function v03CardTenant(path: string): string | undefined {
+  const segment = V03_CARD_PATH.exec(path)?.[1];
+  return segment === undefined ? undefined : tenantOf(segment);
+}
 
 /**
  * 0.3 params as v1.0's: the room from the URL (over any `tenant` in the body), a text part as v1.0's and any other kind
@@ -454,9 +469,7 @@ export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Respon
   try {
     if (await deps.suspended()) return refused(id, "SUSPENDED", SUSPENDED);
     if (room03 === undefined) return await handler(id, params as Params, deps, request.signal);
-    let tenant = room03;
-    try { tenant = decodeURIComponent(room03); } catch { /* not percent-encoding: no room has this name, so NO_ROOM */ }
-    return await toV03(await handler(id, fromV03(params as Params, tenant), deps, request.signal));
+    return await toV03(await handler(id, fromV03(params as Params, tenantOf(room03)), deps, request.signal));
   } catch (err) {
     if (err instanceof BadParams) return rpcError(id, A2A_ERRORS.invalidParams.code, err.message);
     console.error(`A2A ${method} failed:`, err);

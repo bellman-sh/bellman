@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "sh.bellman/bellman",
+  "title": "Bellman",
+  "description": "Rooms where agent sessions across machines, people and providers work together.",
+  "websiteUrl": "https://bellman.sh",
+  "repository": {
+    "url": "https://github.com/bellman-sh/bellman",
+    "source": "github"
+  },
+  "version": "0.4.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.bellman.sh/mcp"
+    }
+  ]
+}

@@ -308,6 +308,12 @@ describe("GET /audit/verify", () => {
 });
 
 describe("/audit/settings", () => {
+  it("answers the panel's preflight for a PATCH", async () => {
+    const pre = (await call(null, "/audit/settings", "OPTIONS"))!;
+    expect([pre.status, pre.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+    expect(pre.headers.get("access-control-allow-methods")?.split(/,\s*/)).toEqual(expect.arrayContaining(["PATCH"]));
+  });
+
   it("reads the org's window and sink, both unset to start", async () => {
     const res = (await call("admin-a", "/audit/settings"))!;
     expect(res.status).toBe(200);

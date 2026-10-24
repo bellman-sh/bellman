@@ -12,6 +12,7 @@ import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { statsRoutes } from "./http/stats.js";
 import { reportMailer } from "./reports.js";
+import { inviteMailer } from "./invite-mail.js";
 import { buildServer } from "./server.js";
 import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
@@ -232,6 +233,8 @@ export default {
     const blobs = new R2BlobStore(env.BLOBS);
     // What mails a filed report, for the `bellman_report` tool and the report route alike.
     const mailReport = reportMailer(env.SEND_EMAIL);
+    // What mails an org's invite (ADR 0036, D1), through the same binding.
+    const mailInvite = inviteMailer(env.SEND_EMAIL);
     const suspended = (userId: string) => suspensions.check(userId, () => store.isSuspended(userId));
 
     // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
@@ -351,6 +354,9 @@ export default {
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
         sealSecret: env.BELLMAN_SEAL_SECRET ?? env.BELLMAN_TOKEN_SECRET,
+        issuer: url.origin,
+        linkSecret: env.BELLMAN_TOKEN_SECRET,
+        mail: mailInvite,
       });
       if (handled) return handled;
     }

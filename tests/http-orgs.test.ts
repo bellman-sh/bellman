@@ -8,7 +8,8 @@ import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
 import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
-import { INVITE_TTL_MS, policyView } from "../src/orgs.js";
+import { INVITE_TTL_MS, RESEND_COOLDOWN_MS, policyView } from "../src/orgs.js";
+import { verifyInviteLink, type InviteMailer } from "../src/invite-mail.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
@@ -65,10 +66,12 @@ const fakeFetch = (async (input: RequestInfo | URL) => {
 
 let store: MemoryStore;
 let deps: OrgRouteDeps;
+let mail: ReturnType<typeof vi.fn<InviteMailer>>;
 beforeEach(async () => {
   store = new MemoryStore();
   dns = { answers: [], status: 200 };
-  deps = { store, caller, panelOrigins: [PANEL], sealSecret: SEAL, fetchImpl: fakeFetch };
+  mail = vi.fn<InviteMailer>(async () => true);
+  deps = { store, caller, panelOrigins: [PANEL], sealSecret: SEAL, fetchImpl: fakeFetch, issuer: ISSUER, linkSecret: "link-secret", mail };
   await store.createOrg(acme, ownerGrant, { actorUserId: "u_op" });
   await store.createOrg({ ...acme, orgId: "org_b", name: "B", ownerUserId: "u_github_2" }, { ...ownerGrant, key: "github:2", orgId: "org_b" }, { actorUserId: "u_op" });
 });
@@ -235,7 +238,7 @@ describe("POST /org/members", () => {
       expect([res.status, await res.json()], key).toEqual([202, { member: {
         key, user_id: /^(github|google):\d+$/.test(key) ? `u_${key.replace(":", "_")}` : null, role: "member", status: "invited",
         invited_at: expect.any(String), invited_by: "u_github_1", expires_at: expect.any(String),
-      } }]);
+      }, link: expect.stringMatching(`^${ISSUER}/invite/`), mailed: key.startsWith("email:") }]);
     }
     for (const key of keys.slice(0, -1)) expect(await store.getGrant(key), key).toBeUndefined();
     expect(await store.getGrant("github:2")).toMatchObject({ orgId: "org_b" });
@@ -352,7 +355,7 @@ describe("DELETE /org/members/:key", () => {
   });
 
   it("withdraws an invite, once, recording the admin who did", async () => {
-    await call("owner", "/org/members", "POST", { key: "google:118", role: "member" });
+    await store.putOrgInvite({ orgId: "org_acme", key: "google:118", role: "member", invitedBy: "u_github_1", invitedAt: 3, expiresAt: Date.now() + INVITE_TTL_MS }, { actorUserId: "u_github_1" });
     await store.putOrgInvite({ orgId: "org_b", key: "google:118", role: "member", invitedBy: "u_github_2", invitedAt: 3, expiresAt: Date.now() + INVITE_TTL_MS }, { actorUserId: "u_github_2" });
     expect((await call("admin-2", "/org/members/google%3A118", "DELETE"))!.status).toBe(204);
     expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
@@ -370,6 +373,138 @@ describe("DELETE /org/members/:key", () => {
     expect((await call("cookie-owner", "/org/members/github%3A9", "DELETE", undefined, null))!.status).toBe(403);
     expect((await call("member", "/org/members/github%3A9", "DELETE"))!.status).toBe(403);
     expect(await store.getGrant("github:9")).toBeDefined();
+  });
+});
+
+describe("invitations by link and email (ADR 0036)", () => {
+  const invite = (key = "email:ana@example.com") => call("owner", "/org/members", "POST", { key, role: "member" });
+  const resend = (who: string, key = "email%3Aana%40example.com", origin: string | null = PANEL) =>
+    call(who, `/org/members/${key}/resend`, "POST", undefined, origin);
+  const fill = async () => {
+    await store.putGrantIfOwned({ ...ownerGrant, key: "github:9", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
+    await store.putGrantIfOwned({ ...ownerGrant, key: "github:8", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
+  };
+
+  it("mails an address its link, and answers the link and that it was mailed", async () => {
+    const res = (await invite())!;
+    expect(res.status).toBe(202);
+    const body = await json(res) as { member: { status: string }; link: string; mailed: boolean };
+    expect([body.member.status, body.mailed]).toEqual(["invited", true]);
+    expect(await verifyInviteLink(body.link.slice(`${ISSUER}/invite/`.length), ISSUER, "link-secret"))
+      .toEqual({ orgId: "org_acme", key: "email:ana@example.com" });
+    expect(mail).toHaveBeenCalledWith("ana@example.com", expect.objectContaining({ orgId: "org_acme" }),
+      expect.objectContaining({ key: "email:ana@example.com" }), body.link);
+  });
+
+  it("answers mailed false, and still the link and the invite, when nothing could send", async () => {
+    mail.mockResolvedValueOnce(false);
+    const body = await json(await invite());
+    expect([body.mailed, typeof body.link]).toEqual([false, "string"]);
+    expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:ana@example.com"]);
+  });
+
+  it("mails nothing for a subject key, and answers its link for the admin to hand on", async () => {
+    const body = await json(await invite("github:77"));
+    expect([body.mailed, typeof body.link]).toEqual([false, "string"]);
+    expect(mail).not.toHaveBeenCalled();
+  });
+
+  it("answers link null, and mails nothing, on a server with no token secret", async () => {
+    deps = { ...deps, linkSecret: undefined };
+    const body = await json(await invite());
+    expect([body.link, body.mailed]).toEqual([null, false]);
+    expect(mail).not.toHaveBeenCalled();
+  });
+
+  it("refuses to invite into a full org, before any mail", async () => {
+    await fill();
+    const res = (await invite())!;
+    expect([res.status, (await json(res)).error]).toEqual([409, "full"]);
+    expect(mail).not.toHaveBeenCalled();
+    expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
+  });
+
+  it("resends: a fresh link mailed, the roster's time moved, 200 with the same body as the 202", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_000_000);
+      const first = await json(await invite());
+      vi.setSystemTime(1_000_000 + RESEND_COOLDOWN_MS + 1);
+      const res = (await resend("admin-2"))!;
+      expect(res.status).toBe(200);
+      const body = await json(res) as { member: Record<string, string>; link: string; mailed: boolean };
+      expect(Object.keys(body).sort()).toEqual(Object.keys(first).sort());
+      expect(body.member).toMatchObject({ status: "invited", invited_by: "u_github_9",
+        invited_at: new Date(1_000_000 + RESEND_COOLDOWN_MS + 1).toISOString(),
+        expires_at: new Date(1_000_000 + RESEND_COOLDOWN_MS + 1 + INVITE_TTL_MS).toISOString() });
+      expect(body.mailed).toBe(true);
+      expect(body.link).not.toBe(first.link);
+      expect(mail).toHaveBeenCalledTimes(2);
+      expect(mail).toHaveBeenLastCalledWith("ana@example.com", expect.anything(), expect.anything(), body.link);
+      const listed = (await json(await call("owner", "/org/members"))).members as { key: string; invited_at?: string }[];
+      expect(listed.find((m) => m.key === "email:ana@example.com")!.invited_at).toBe(body.member.invited_at);
+      expect((await store.auditForOrg("org_acme", 20)).at(-1)).toMatchObject({ action: "invite_resent", actorUserId: "u_github_9", detail: { key: "email:ana@example.com" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a resend within ten minutes of the last, and one for a key not invited", async () => {
+    await invite();
+    const soon = (await resend("owner"))!;
+    expect([soon.status, (await json(soon)).error]).toEqual([429, "cooldown"]);
+    expect(Number(soon.headers.get("retry-after"))).toBeGreaterThan(RESEND_COOLDOWN_MS / 1000 - 5);
+    expect(Number(soon.headers.get("retry-after"))).toBeLessThanOrEqual(RESEND_COOLDOWN_MS / 1000);
+    const missing = (await resend("owner", "github%3A77"))!;
+    expect([missing.status, (await json(missing)).error]).toEqual([404, "missing"]);
+    expect(mail).toHaveBeenCalledTimes(1);
+  });
+
+  it("resends an expired invite, which is then open again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_000_000);
+      await invite();
+      vi.setSystemTime(1_000_000 + INVITE_TTL_MS + 1);
+      const status = async () => ((await json(await call("owner", "/org/members"))).members as { key: string; status: string }[])
+        .find((m) => m.key === "email:ana@example.com")!.status;
+      expect(await status()).toBe("expired");
+      expect((await resend("owner"))!.status).toBe(200);
+      expect(await status()).toBe("invited");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a resend into a full org, before any mail", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_000_000);
+      await invite();
+      await fill();
+      vi.setSystemTime(1_000_000 + RESEND_COOLDOWN_MS + 1);
+      const res = (await resend("owner"))!;
+      expect([res.status, (await json(res)).error]).toEqual([409, "full"]);
+      expect(mail).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gates a resend as the other writes: a member, a cookie with no Origin, another org's admin", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_000_000);
+      await invite();
+      vi.setSystemTime(1_000_000 + RESEND_COOLDOWN_MS + 1);
+      expect((await resend("member"))!.status).toBe(403);
+      expect((await resend("cookie-owner", undefined, null))!.status).toBe(403);
+      expect((await resend("admin-b"))!.status).toBe(404);
+      expect((await call("owner", "/org/members/email%3Aana%40example.com/resend", "GET"))!.status).toBe(405);
+      expect(mail).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

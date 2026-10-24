@@ -27,6 +27,9 @@ export const MAX_PENDING_INVITES = 200;
 /** How long an invite stays an offer (ADR 0036, D3). */
 export const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
+/** How soon an invite may be resent (ADR 0036, D4): long enough that a resend is not a way to flood an inbox. */
+export const RESEND_COOLDOWN_MS = 10 * 60 * 1000;
+
 /** The invite as the code reads it: a row written before `expiresAt` lapses fourteen days after it was made. */
 export function liftInvite(invite: OrgInvite): OrgInvite {
   return { ...invite, expiresAt: invite.expiresAt ?? invite.invitedAt + INVITE_TTL_MS };

@@ -76,7 +76,7 @@ async function seat(admin: Identity, key: string, role = "member") {
   const body = JSON.stringify({ key, role });
   return (await orgRoutes(new Request(`${ISSUER}/org/members`, {
     method: "POST", body, headers: { "content-type": "application/json", "content-length": String(body.length), authorization: "Bearer x" },
-  }), { store: plans, caller, panelOrigins: [PANEL] }))!;
+  }), { store: plans, caller, panelOrigins: [PANEL], issuer: ISSUER }))!;
 }
 
 /** A client's GitHub sign-in up to the callback's answer: the invites page, or the redirect with a code. */
@@ -233,7 +233,7 @@ describe("the invites page (ADR 0027)", () => {
     const { identity, page } = await signIn("continue");
     expect([page, identity?.orgId]).toEqual([null, null]);
     const roster = await (await orgRoutes(new Request(`${ISSUER}/org/members`, { headers: { authorization: "Bearer x" } }),
-      { store: plans, caller: async () => ({ identity: ACME_ADMIN, via: "bearer" }), panelOrigins: [PANEL] }))!.json() as { members: { key: string; status: string }[] };
+      { store: plans, caller: async () => ({ identity: ACME_ADMIN, via: "bearer" }), panelOrigins: [PANEL], issuer: ISSUER }))!.json() as { members: { key: string; status: string }[] };
     expect(roster.members.find((m) => m.key === "github:4242")?.status).toBe("expired");
     vi.useRealTimers();
   });
@@ -268,7 +268,9 @@ describe("the invites page (ADR 0027)", () => {
 
   it("escapes the org's name in the line an answer shows, as in the invitation", async () => {
     await plans.updateOrg("org_acme", { name: "<b>Bold</b> & Co", seats: 1 }, by);
-    await seat(ACME_ADMIN, "github:4242");
+    // Stored, not POSTed: the route refuses an invite into a full org (ADR 0036, D5), and this one already is.
+    const now = Date.now();
+    await plans.putOrgInvite({ orgId: "org_acme", key: "github:4242", role: "member", invitedBy: ACME_ADMIN.userId, invitedAt: now, expiresAt: now + INVITE_TTL_MS }, by);
     const full = await answer(heldOf(await (await githubCallback()).res.text()), "join", "org_acme");
     const page = await full.text();
     expect(page).toContain('<p class="notice"><bdi>&lt;b&gt;Bold&lt;/b&gt; &amp; Co</bdi> has no free seat');
@@ -390,7 +392,7 @@ describe("a seat on an address the org no longer owns by its form (ADR 0027)", (
     expect(page).toContain("<strong><bdi>Acme</bdi></strong> invited you");
     expect(identity).toMatchObject({ orgId: null, plan: "free" });
     const caller = async (): Promise<RoomCaller> => ({ identity: ACME_ADMIN, via: "bearer" });
-    const roster = await orgRoutes(new Request(`${ISSUER}/org/members`, { headers: { authorization: "Bearer x" } }), { store: plans, caller, panelOrigins: [PANEL] });
+    const roster = await orgRoutes(new Request(`${ISSUER}/org/members`, { headers: { authorization: "Bearer x" } }), { store: plans, caller, panelOrigins: [PANEL], issuer: ISSUER });
     const members = ((await roster!.json()) as { members: { key: string; status: string }[] }).members;
     expect(members.map((m) => [m.key, m.status])).toEqual([["github:1", "member"], ["email:jesse@example.dev", "invited"]]);
   });

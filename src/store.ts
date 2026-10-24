@@ -87,6 +87,10 @@ export interface PublicNameEntry {
 export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
   a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
 
+/** `listUsers`' order, both stores': first sign-in first, then user id, so equal times still read in one order. */
+export const firstSignInFirst = (users: UserRecord[]): UserRecord[] =>
+  users.sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
+
 /** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
 export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
 
@@ -1911,6 +1915,13 @@ export interface BellmanStore {
   /** How many people have ever signed in. */
   countUsers(): Promise<number>;
   /**
+   * The people who have signed in, oldest first sign-in first (ties by user id), at most `limit`: the operator's
+   * `GET /admin/accounts`. A record holds an id and two dates and nothing else, so neither does this.
+   *
+   * ponytail: every record is read and sorted to answer; page by first sign-in when there are tens of thousands.
+   */
+  listUsers(limit: number): Promise<UserRecord[]>;
+  /**
    * Take one of this person's hosted-room slots for `sessionId`, unless `limit` are held
    * already (I7): the count and the record are one operation, so two starts at the limit
    * cannot both pass. A plan's hosted rooms are the most a person holds open at once; a
@@ -3677,6 +3688,10 @@ export class MemoryStore implements BellmanStore {
 
   async countUsers(): Promise<number> {
     return this.users.size;
+  }
+
+  async listUsers(limit: number): Promise<UserRecord[]> {
+    return firstSignInFirst([...this.users.values()]).slice(0, limit);
   }
 
   async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {

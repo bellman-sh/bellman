@@ -7,7 +7,7 @@ import {
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, taskWithEvent, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, firstSignInFirst, taskWithEvent, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
@@ -5347,6 +5347,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
   }
 
+  /** `BellmanStore.listUsers`: every `us:u_` record (so not `us:count`), sorted here and cut to `limit`. */
+  async listUsers(limit: number): Promise<UserRecord[]> {
+    const rows = await this.ctx.storage.list<UserRecord>({ prefix: userKey("u_") });
+    return firstSignInFirst([...rows.values()]).slice(0, limit);
+  }
+
   /**
    * The write a room's outbox delivers as `creator_ban`: the check and the write in one transaction, and
    * only while the creator holds no ban on the account, so a redelivery and an eviction that asks again
@@ -6496,6 +6502,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async countUsers(): Promise<number> {
     return this.registry.countUsers();
+  }
+
+  async listUsers(limit: number): Promise<UserRecord[]> {
+    return this.registry.listUsers(limit);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

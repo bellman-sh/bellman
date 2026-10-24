@@ -317,7 +317,7 @@ describe("createCanvas", () => {
     const plan = card(c.root, "Plan");
     expect([plan.style.left, plan.style.top, plan.style.width]).toEqual(["10px", "20px", `${GRID.w}px`]);
     expect(c.root.querySelectorAll("line")).toHaveLength(1);
-    // The connector points from its `from` to its `to`, and its arrowhead is on the target card's border.
+    // The connector points from its `from` to its `to`: one arrowhead, at the line's end.
     expect(c.root.querySelector("line")?.getAttribute("marker-end")).toBe("url(#bellman-arrow)");
     expect(c.root.querySelectorAll("svg marker#bellman-arrow path")).toHaveLength(1);
     expect(c.root.querySelector("svg text")?.textContent).toBe("argues");
@@ -326,6 +326,20 @@ describe("createCanvas", () => {
     expect(c.root.querySelector("h1")?.textContent).toContain("send, invite");
     expect(c.root.querySelector("[role=status]")?.textContent).toContain("8 items");
     expect(c.root.querySelector("[role=status]")?.textContent).toContain("artifacts render here");
+  });
+
+  // Cards are drawn over the lines, so a connector runs border to border: its arrowhead and its label sit in the gap.
+  it("draws a connector from the source's border to the target's, its label in the gap between them", () => {
+    const s = surfaceFixture();
+    const card = s.surface.items.find((i) => i.data.key === "plan")!;
+    const at = (key: string, x: number) => ({ ...card, data: { ...card.data, key, title: key, placement: { x, y: 0 } } });
+    const link = s.surface.items.find((i) => i.data.kind === "connector")!;
+    s.surface.items = [at("left", 0), at("right", GRID.w + GRID.gap), { ...link, data: { ...link.data, ends: { from: "left", to: "right" } } }];
+    const c = createCanvas(s, deps().deps, NOW);
+    const line = c.root.querySelector("line")!;
+    const label = c.root.querySelector("svg text")!;
+    expect(["x1", "x2", "y1", "y2"].map((n) => Number(line.getAttribute(n)))).toEqual([GRID.w, GRID.w + GRID.gap, GRID.h / 2, GRID.h / 2]);
+    expect(Number(label.getAttribute("x"))).toBe(GRID.w + GRID.gap / 2);
   });
 
   // bellman_surface lists every seat the account holds, and for an account on two machines it names none in the room

@@ -112,21 +112,25 @@ show, such as a table you can sort or a chart drawn from inline data, and keep
 everything else `text` or `diagram`.
 
 **Style the page; the frame adds nothing.** The sandbox sets no font and no
-colour, so an unstyled page draws in the browser's serif on a transparent
-ground. Write your own base, sized to the card: 420 wide unless you give a
-`w`, and a light theme on a transparent ground, since the panel has no dark
-one.
+colour, so an unstyled page draws in the browser's serif, on whatever is
+behind the frame: the panel's paper in the dash, near-black in Claude's dark
+theme. Write your own base, and paint your own ground:
 
 ```css
-html, body { margin: 0; background: transparent; color: #14181e;
+html, body { margin: 0; background: #efeae0; color: #14181e;
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 ```
+
+Give the page `w: 720`, as a diagram: the page inside is 26 narrower, 694.
+With no `w` the dash draws it 420 wide (a page of 394) and the canvas in
+Claude 320, so a page laid out for one width breaks in the other.
 
 The panel's own colours, for a page that sits in it: ink `#14181e`, paper
 `#efeae0`, a sunk paper `#e6e0d2` for a table's header or a well, brass
 `#a8780c` for marks and rules, and `#7a5a05` for small text in brass. Text
-holds 4.5:1 against what is behind it. No web fonts and no icon fonts: the
-frame reaches no network, so they never load.
+holds 4.5:1 against what is behind it. No font from the network, icon fonts
+included: the frame reaches no network, so they never load. A font inlined as
+a `data:` URI does load.
 
 What makes a page look machine-made, and what to do instead:
 
@@ -151,8 +155,9 @@ A `text` card is 320 wide, and its `title` is its heading.
   only.
 - **No heading in the body above `###`,** and none that repeats the title.
   No label line ("Summary:", "Note:") before the first sentence.
-- **About 350 characters fit,** eight lines. Past that, set `h` (see Sizes) or
-  split the card in two. A room whose cards are articles read on its public
+- **About 250 characters fit,** six lines, in a card of the default height.
+  Up to about 350, eight lines, set `h: 240`. Past that, set a larger `h` (see
+  Sizes) or split the card in two. A room whose cards are articles read on its public
   page, such as a topic room, can run longer with `h` set.
 - **Names and numbers over adjectives:** "p95 went from 840 ms to 210 ms" over
   "much faster". A list is for items that are parallel; a point that is one
@@ -252,7 +257,7 @@ on the surface:
 { "key": "step_2", "kind": "text", "title": "Backfill idempotency keys", "body": "Run the backfill on staging first.", "placement": { "x": 0, "y": 240 } }
 { "key": "step_3", "kind": "text", "title": "Cut over", "body": "Switch traffic once the backfill is clean.", "placement": { "x": 0, "y": 480 } }
 { "key": "decision_1", "kind": "text", "title": "Keep the old endpoint for a week", "body": "Peers still call it until they update.", "placement": { "x": 360, "y": 0 } }
-{ "key": "phase_1", "kind": "shape", "title": "Phase 1", "shape": { "form": "rect", "color": "blue" }, "placement": { "x": -20, "y": -20, "w": 360, "h": 720 } }
+{ "key": "phase_1", "kind": "shape", "title": "Phase 1", "shape": { "form": "rect" }, "placement": { "x": -20, "y": -20, "w": 360, "h": 720 } }
 { "key": "step_1_to_step_2", "kind": "connector", "ends": { "from": "step_1", "to": "step_2" }, "title": "then" }
 { "key": "step_2_to_step_3", "kind": "connector", "ends": { "from": "step_2", "to": "step_3" }, "title": "then" }
 { "key": "decision_to_step_3", "kind": "connector", "ends": { "from": "decision_1", "to": "step_3" }, "title": "changed" }
@@ -308,24 +313,25 @@ Four rules decide what goes on the surface beside the cards.
   sequence; 8 entities in an ER diagram; a tree 4 levels deep and 5 wide.
   Past that, split: an overview diagram of the parts, and a diagram per part,
   joined to it by connectors. Before splitting, cut in this order: notes that
-  only decorate, repeated nodes (one `worker ×3` in place of three), leaves
+  only decorate, repeated nodes (one `W[worker ×3]` in place of three), leaves
   nothing depends on.
 - **Label every arrow that is not obvious** with a plain verb: `A -- writes --> B`,
   not "connects to". A dashed arrow, `-.->`, is optional, async or a return.
 - **Group with `subgraph`** once a flowchart passes about six nodes, each
   subgraph titled.
-- **Shape carries meaning, not fill.** The panel draws Mermaid in its neutral
-  theme; a `classDef` colour may not survive it. A decision is a `{diamond}`,
-  a store is a `[(cylinder)]`.
+- **Shape carries meaning, not fill.** A decision is a `{diamond}`, a store
+  is a `[(cylinder)]`. Leave the panel's neutral theme its colours: a
+  `classDef` fill you choose will not match the panel, and colour on the
+  surface already means state (rule 4).
 
 ## Sizes
 
 | | Size |
 |---|---|
-| A card | 320 wide, so leave `w` out. About 200 tall, so set `h` only when its height matters, and set it when the body runs past about eight lines: a longer card is drawn taller than the 200 the server keeps clear of. An `h` over 240 covers the slot below, which then stays empty. |
+| A card | 320 wide, so leave `w` out. About 200 tall, so set `h` only when its height matters, and set it when the body runs past about six lines: a longer card is drawn taller than the 200 the server keeps clear of. An `h` over 240 covers the slot below, which then stays empty. |
 | A shape | `w` and `h`, always: its box is its placement. |
 | A diagram | `w: 720`, two columns. |
-| An `html` page or an image | 420 wide unless you give a `w`, so it reaches into the next column's slot: leave that slot empty, or give `w: 720`. |
+| An `html` page or an image | `w: 720`, two columns. With no `w` the dash draws it 420 wide, into the next column's slot, and the canvas in Claude 320. |
 
 ## Before each write
 

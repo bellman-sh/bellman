@@ -123,9 +123,9 @@ function renderLines(lines: readonly Line[]): SVGSVGElement {
   defs.append(marker);
   svg.append(defs);
   for (const l of lines) {
-    const a = centerOf(l.from);
-    // The line stops at the target card's border, where its arrowhead shows: cards are drawn over the lines.
-    const b = borderPoint(l.to, a);
+    // The line runs border to border, so its arrowhead and its label sit in the gap: cards are drawn over the lines.
+    const a = borderPoint(l.from, centerOf(l.to));
+    const b = borderPoint(l.to, centerOf(l.from));
     const line = document.createElementNS(SVG, "line");
     line.setAttribute("marker-end", "url(#bellman-arrow)");
     line.setAttribute("x1", String(a.x));

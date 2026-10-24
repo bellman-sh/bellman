@@ -72,7 +72,7 @@ export function borderPoint(box: Box, from: { x: number; y: number }): { x: numb
   return { x: c.x + dx * t, y: c.y + dy * t };
 }
 
-export const clampZoom =(k: number): number => Math.min(ZOOM.max, Math.max(ZOOM.min, k));
+export const clampZoom = (k: number): number => Math.min(ZOOM.max, Math.max(ZOOM.min, k));
 
 /**
  * Every card with the margin, at the largest scale at or below 1, centred. A

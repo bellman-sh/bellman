@@ -7,7 +7,7 @@ import {
 import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, taskWithEvent, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
@@ -55,6 +55,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
 import { decideApproval } from "./proposal.js";
+import { decideAsk, type AskOutcome, type AskRequest } from "./outside.js";
 import { presetInNewWords } from "./presets.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
@@ -94,6 +95,8 @@ const SURFACE_PREFIX = "sf:";
 /** One row per outside task, `ot:<taskId>`, and one per outside caller, `oc:<user>` (A2A). The user segment is percent-encoded, for `userPrefix`'s reason. */
 const OUTSIDE_TASK_PREFIX = "ot:";
 const OUTSIDE_CALLER_PREFIX = "oc:";
+/** The last visitor number a room handed an outside caller. One row, read and bumped in the ask's own transaction. */
+const OUTSIDE_VISITORS_KEY = "ov";
 /**
  * One row per ban, `bn:<banId>` (abuse protections spec, section 1), and a row from the person to
  * their ban's id, `bu:<user>`, so a seating asks one `get` and not a listing. The user segment is
@@ -298,7 +301,7 @@ async function extraRows(
     const task = extras.outsideTask;
     // Thrown inside the transaction, so the event, its cursor and every other row of this append roll back with it.
     if (task.sessionId !== s.id) throw new Error(`Outside task ${task.id} belongs to ${task.sessionId}, not ${s.id}`);
-    puts[`${OUTSIDE_TASK_PREFIX}${task.id}`] = { ...task, questionCursors: [...task.questionCursors, event.cursor] };
+    puts[`${OUTSIDE_TASK_PREFIX}${task.id}`] = taskWithEvent(task, event);
   }
   if (extras.outsideCaller !== undefined) {
     puts[`${OUTSIDE_CALLER_PREFIX}${encodeURIComponent(extras.outsideCaller.userId)}`] = extras.outsideCaller;
@@ -2416,8 +2419,49 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return [...all.values()].filter((t) => t.callerUserId === callerUserId).sort(newestTaskFirst);
   }
 
-  async outsideCallers(): Promise<OutsideCaller[]> {
-    return [...(await this.ctx.storage.list<OutsideCaller>({ prefix: OUTSIDE_CALLER_PREFIX })).values()];
+  /**
+   * `BellmanStore.askOutside`: the follow-up rule, the cap, the caller's context and visitor number, the
+   * `outside_question`, its task row, the caller's standing row and the visitor counter, in ONE transaction. The reads
+   * are `decideAsk`'s inputs, taken in the transaction that writes, so two asks are serialised: the second reads the
+   * first's rows and sees the cap, the counter and the context the first left. Like `chargeBlobBytes`, `seatMember`
+   * and `approveProposal`, the decision is made where the write is.
+   */
+  async askOutside(req: AskRequest): Promise<AskOutcome> {
+    let broughtForward = false as boolean;
+    // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
+    let members: readonly Member[] = [];
+    let appended: SessionEvent | null = null;
+    const result = await this.ctx.storage.transaction<AskOutcome>(async (txn) => {
+      // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
+      broughtForward = false;
+      appended = null;
+      const s = await this.stored(txn);
+      if (!s || s.frozenAt !== null) return { ok: false, error: "not_found" };
+      members = s.members;
+      const mine = [...(await txn.list<OutsideTask>({ prefix: OUTSIDE_TASK_PREFIX })).values()]
+        .filter((t) => t.callerUserId === req.callerUserId);
+      const callerKey = `${OUTSIDE_CALLER_PREFIX}${encodeURIComponent(req.callerUserId)}`;
+      const known = await txn.get<OutsideCaller>(callerKey);
+      const issued = (await txn.get<number>(OUTSIDE_VISITORS_KEY)) ?? 0;
+      const d = decideAsk(s, req, { mine, known, issued });
+      if (!d.ok) return d;
+
+      const event: SessionEvent = { ...d.event, cursor: await this.nextCursor(txn), at: Date.now() };
+      const task = taskWithEvent(d.task, event);
+      broughtForward = await this.#writeEvent(txn, s, event, {
+        [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task,
+        ...(d.standing === null ? {} : { [callerKey]: d.standing }),
+        ...(d.issued === issued ? {} : { [OUTSIDE_VISITORS_KEY]: d.issued }),
+      });
+      appended = event;
+      return { ok: true, task };
+    });
+    const event = appended as SessionEvent | null;
+    if (event !== null) {
+      this.#wake(event, members);
+      if (broughtForward) await this.driver.reArm();
+    }
+    return result;
   }
 
   /**
@@ -5577,8 +5621,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).outsideTasksOf(callerUserId);
   }
 
-  async outsideCallers(sessionId: string): Promise<OutsideCaller[]> {
-    return this.session(sessionId).outsideCallers();
+  async askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome> {
+    return this.session(sessionId).askOutside(req);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {

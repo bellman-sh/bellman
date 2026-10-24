@@ -24,6 +24,7 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
+import { decideAsk, type AskOutcome, type AskRequest } from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -81,6 +82,13 @@ export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null):
 
 /** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
 export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
+
+/**
+ * The task row as an append writes it: an `outside_question` adds its own cursor, which only the store knows once the
+ * event is numbered, and any other event writes the row as given.
+ */
+export const taskWithEvent = (task: OutsideTask, event: SessionEvent): OutsideTask =>
+  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] } : task;
 
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
@@ -990,10 +998,10 @@ export interface AppendExtras {
    */
   approvedBy?: ApprovedBy;
   /**
-   * An outside caller's task (A2A), written in the event's own transaction: the row and the `outside_question` that
-   * asks it commit together or not at all. `questionCursors` is handed in WITHOUT this event's cursor, which the
-   * store assigns, and the store appends it. A row for a task of another room throws, so the append writes nothing.
-   * Used with `appendEvent`; not meaningful on `appendEventOnce`.
+   * An outside caller's task (A2A), written in the event's own transaction: the row and the event commit together or
+   * not at all. For an `outside_question` the row is handed in WITHOUT this event's cursor, which the store assigns and
+   * appends (`taskWithEvent`); any other event writes the row as given. A row for a task of another room throws, so the
+   * append writes nothing. Used with `appendEvent`; not meaningful on `appendEventOnce`.
    */
   outsideTask?: OutsideTask;
   /** The caller's standing in the room (context and visitor number), stored with the task. A repeat replaces the row. */
@@ -1645,8 +1653,13 @@ export interface BellmanStore {
   outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined>;
   /** This caller's tasks in this room, newest first. */
   outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]>;
-  /** Every outside caller this room has heard from, for the next visitor number and a caller's context. */
-  outsideCallers(sessionId: string): Promise<OutsideCaller[]>;
+  /**
+   * An outside caller asks the room (A2A): the follow-up rule, the open-task cap, the caller's context and visitor
+   * number, the `outside_question` and the task row, decided and written as one unit (`decideAsk` decides). Two asks
+   * therefore see each other: the cap and the numbers hold under concurrency. A room that is gone, frozen, or no longer
+   * public and open answers "not_found".
+   */
+  askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome>;
   /**
    * Charge `bytes` to this room's blob total unless that would pass the
    * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
@@ -2077,9 +2090,10 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
-  /** Outside tasks by session then task id, and outside callers by session then user: rows beside the record, as SessionDO keeps them. */
+  /** Outside tasks by session then task id, callers by session then user, and the last visitor number: rows beside the record, as SessionDO keeps them. */
   private outsideTasks = new Map<string, Map<string, OutsideTask>>();
   private outsideCallerRows = new Map<string, Map<string, OutsideCaller>>();
+  private outsideVisitors = new Map<string, number>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
   /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
@@ -2938,7 +2952,7 @@ export class MemoryStore implements BellmanStore {
       const task = extras.outsideTask;
       if (task.sessionId !== s.id) throw new Error(`Outside task ${task.id} belongs to ${task.sessionId}, not ${s.id}`);
       const tasks = this.outsideTasks.get(s.id) ?? new Map<string, OutsideTask>();
-      tasks.set(task.id, detach({ ...task, questionCursors: [...task.questionCursors, event.cursor] }));
+      tasks.set(task.id, detach(taskWithEvent(task, event)));
       this.outsideTasks.set(s.id, tasks);
     }
     if (extras.outsideCaller !== undefined) {
@@ -3173,8 +3187,20 @@ export class MemoryStore implements BellmanStore {
     return detach(mine.sort(newestTaskFirst));
   }
 
-  async outsideCallers(sessionId: string): Promise<OutsideCaller[]> {
-    return detach([...(this.outsideCallerRows.get(sessionId)?.values() ?? [])]);
+  async askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome> {
+    // No await from the reads to the writes, the rule and the reason chargeBlobBytes and seatMember give.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null) return { ok: false, error: "not_found" };
+    const mine = [...(this.outsideTasks.get(sessionId)?.values() ?? [])].filter((t) => t.callerUserId === req.callerUserId);
+    const known = this.outsideCallerRows.get(sessionId)?.get(req.callerUserId);
+    const issued = this.outsideVisitors.get(sessionId) ?? 0;
+    const d = decideAsk(s, req, { mine, known, issued });
+    if (!d.ok) return d;
+    const event = this.appendNow(s, d.event);
+    this.applyExtras(s, event, { outsideTask: d.task, ...(d.standing === null ? {} : { outsideCaller: d.standing }) });
+    this.outsideVisitors.set(sessionId, d.issued);
+    this.wakeHost(s, event);
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
@@ -4109,6 +4135,7 @@ export class MemoryStore implements BellmanStore {
     this.surfaces.delete(s.id);
     this.outsideTasks.delete(s.id);
     this.outsideCallerRows.delete(s.id);
+    this.outsideVisitors.delete(s.id);
     this.sessions.delete(s.id);
   }
 

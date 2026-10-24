@@ -1,7 +1,7 @@
 import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
 import { isPublic, type BellmanStore } from "./store.js";
-import type { OutsideCaller, OutsideTask } from "./types.js";
+import type { OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 
 /** Outside callers (A2A) of a public room: the limits, and asking. The task row's type is `OutsideTask`, in types.ts. */
 
@@ -32,20 +32,79 @@ export const outsideTasksOf = (store: BellmanStore, sessionId: string, callerUse
 
 const isOpen = (t: OutsideTask): boolean => t.state === "TASK_STATE_WORKING" || t.state === "TASK_STATE_INPUT_REQUIRED";
 
+/** What `askOutside` is handed: the caller, what they asked, and the handle they sign in under, if any. */
+export type AskRequest = { callerUserId: string; handle: string | undefined; text: string; taskId?: string; contextId?: string; now: number };
+/** What `askOutside` answers: the task as written, or why it wrote nothing. */
+export type AskOutcome = { ok: true; task: OutsideTask } | { ok: false; error: AskError };
+
+/** The rows `decideAsk` reads, which each store reads inside the transaction (or the synchronous turn) that writes. */
+export type AskRows = {
+  /** Every task of this caller in this room. */
+  mine: readonly OutsideTask[];
+  /** The caller's standing in this room, if they have asked before. */
+  known: OutsideCaller | undefined;
+  /** The last visitor number this room handed out. */
+  issued: number;
+};
+
+export type AskDecision =
+  | { ok: false; error: AskError }
+  | {
+    ok: true;
+    /** The task to write, WITHOUT this question's cursor, which the store assigns and appends. */
+    task: OutsideTask;
+    /** The caller's standing to write, or null when the row it holds is already right. */
+    standing: OutsideCaller | null;
+    /** The visitor counter to write. */
+    issued: number;
+    event: Omit<SessionEvent, "cursor" | "at">;
+  };
+
+/**
+ * The decisions of an ask that depend on rows another ask can change: whether the room is still open, the
+ * follow-up rule, the open-task cap, the caller's context and their visitor number. Pure, and shared by both stores,
+ * as `decideApproval` is: each runs it over rows it read in the unit that writes the result, so two asks cannot both
+ * pass a check the first one's write would have failed.
+ */
+export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "unpublishedAt">, req: AskRequest, rows: AskRows): AskDecision {
+  if (!isPublic(room) || room.closed) return { ok: false, error: "not_found" };
+  const named = req.taskId === undefined ? undefined : rows.mine.find((t) => t.id === req.taskId);
+  if (req.taskId !== undefined) {
+    if (!named) return { ok: false, error: "task_not_found" };
+    if (named.state !== "TASK_STATE_INPUT_REQUIRED") return { ok: false, error: "not_input_required" };
+  } else if (rows.mine.filter(isOpen).length >= MAX_OPEN_OUTSIDE_TASKS) {
+    return { ok: false, error: "too_many_open" };
+  }
+  const { known } = rows;
+  if (req.contextId !== undefined && req.contextId !== known?.contextId) return { ok: false, error: "bad_context" };
+
+  const visitor = req.handle !== undefined ? (known?.visitor ?? null) : known?.visitor ?? rows.issued + 1;
+  const issued = visitor !== null && visitor !== known?.visitor ? visitor : rows.issued;
+  const contextId = known?.contextId ?? crypto.randomUUID();
+  const origin = req.handle ?? `visitor ${visitor}`;
+  const task: OutsideTask = named
+    ? { ...named, state: "TASK_STATE_WORKING", updatedAt: req.now }
+    : {
+      id: crypto.randomUUID(), contextId, sessionId: room.id, callerUserId: req.callerUserId, origin,
+      state: "TASK_STATE_WORKING", voice: "members", questionCursors: [], answers: [], createdAt: req.now, updatedAt: req.now, seatDeadline: null,
+    };
+  return {
+    ok: true, task, issued,
+    standing: known && visitor === known.visitor ? null : { userId: req.callerUserId, contextId, visitor },
+    event: { type: "outside_question", fromMemberId: "system", fromUserId: "system", fromLabel: origin, payload: { taskId: task.id, text: req.text }, refId: null },
+  };
+}
+
 /**
  * An outside caller asks a public room (A2A). `roomRef` is a public name or a room id, resolved as `/public` resolves
  * it. A room that is not public and open is "not_found", the same answer as a room that does not exist.
  *
- * The checks run in this order: the room, suspension, a ban (the room's or its creator's), the stranger's minute
- * (`admitSend`, counted per account as a permanent-code stranger's is), the open-task cap or the follow-up rule, then the
- * context. The question and the task row are one `appendEvent`, so neither exists without the other.
+ * The checks here, in order: the room, suspension, a ban (the room's or its creator's), the stranger's minute
+ * (`admitSend`, counted per account as a permanent-code stranger's is). Then `store.askOutside` decides the rest (the
+ * follow-up rule or the open-task cap, the context, the visitor number) and writes the question and the task row, all in
+ * the one transaction, so concurrent asks see each other and neither the question nor the row exists without the other.
  *
  * Every task is answered by the members for now (`voice: "members"`, no `seatDeadline`).
- *
- * ponytail: the cap, a follow-up's state and a first ask's context and visitor number are read, then written, with
- * awaits between. Two asks from one account in the same instant can both pass the cap (at most one extra task, and the
- * minute's limit bounds the rest), mint two contexts, or double a visitor number. The upgrade is to re-check these
- * inside `extraRows`' transaction.
  */
 export async function askRoom(
   store: BellmanStore,
@@ -63,40 +122,11 @@ export async function askRoom(
   const admitted = await store.admitSend(session.id, `${STRANGER_KEY_PREFIX}${caller.userId}`, STRANGER_SEND_LIMIT, now);
   if (!admitted.ok) return refuse("rate_limited", Math.ceil(admitted.retryAfterMs / 1000));
 
-  let task: OutsideTask | undefined;
-  if (input.taskId !== undefined) {
-    task = await store.outsideTask(session.id, caller.userId, input.taskId);
-    if (!task) return refuse("task_not_found");
-    if (task.state !== "TASK_STATE_INPUT_REQUIRED") return refuse("not_input_required");
-  } else if ((await store.outsideTasksOf(session.id, caller.userId)).filter(isOpen).length >= MAX_OPEN_OUTSIDE_TASKS) {
-    return refuse("too_many_open");
-  }
-
-  const callers = await store.outsideCallers(session.id);
-  const known = callers.find((c) => c.userId === caller.userId);
-  if (input.contextId !== undefined && input.contextId !== known?.contextId) return refuse("bad_context");
-
-  const handle = await store.handleOf(caller.userId);
-  // A visitor's number is the next one the room has handed out, kept with them from their first ask.
-  const visitor = handle !== undefined ? (known?.visitor ?? null)
-    : known?.visitor ?? 1 + Math.max(0, ...callers.map((c) => c.visitor ?? 0));
-  const origin = handle ?? `visitor ${visitor}`;
-  const standing: OutsideCaller = { userId: caller.userId, contextId: known?.contextId ?? crypto.randomUUID(), visitor };
-  const asked: OutsideTask = task
-    ? { ...task, state: "TASK_STATE_WORKING", updatedAt: now }
-    : {
-      id: crypto.randomUUID(), contextId: standing.contextId, sessionId: session.id, callerUserId: caller.userId, origin,
-      state: "TASK_STATE_WORKING", voice: "members", questionCursors: [], answers: [], createdAt: now, updatedAt: now, seatDeadline: null,
-    };
-
-  const event = await store.appendEvent(
-    session.id,
-    { type: "outside_question", fromMemberId: "system", fromUserId: "system", fromLabel: origin, payload: { taskId: asked.id, text: input.text }, refId: null },
-    { outsideTask: asked, ...(known && !(known.visitor === null && handle === undefined) ? {} : { outsideCaller: standing }) },
-  );
-  // A room that froze since it was read takes no writes.
-  if (!event) return refuse("not_found");
-  const written = await store.outsideTask(session.id, caller.userId, asked.id);
-  if (!written) throw new Error(`Outside task ${asked.id} was not written with its question`);
-  return { ok: true, task: written };
+  const done = await store.askOutside(session.id, {
+    callerUserId: caller.userId, handle: await store.handleOf(caller.userId), text: input.text,
+    ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    ...(input.contextId === undefined ? {} : { contextId: input.contextId }),
+    now,
+  });
+  return done.ok ? done : refuse(done.error);
 }

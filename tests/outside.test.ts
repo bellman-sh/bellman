@@ -191,8 +191,8 @@ describe("asking a public room", () => {
     expect(r.task.id).toBe(first.task.id);
     expect(r.task.state).toBe("TASK_STATE_WORKING");
     const asked = await questions();
-    expect(r.task.questionCursors[0]).toBe(asked[0].cursor);
-    expect(r.task.questionCursors.at(-1)).toBe(asked.at(-1)!.cursor);
+    // Its first question and the follow-up, and not the setup's own event (which is not a question) or the other tasks'.
+    expect(r.task.questionCursors).toEqual([asked[0].cursor, asked[3].cursor]);
     expect((await questions()).map((e) => (e.payload as { text: string }).text)).toEqual(["what is this room for?", "b", "c", "here is the detail"]);
   });
 
@@ -215,5 +215,37 @@ describe("asking a public room", () => {
 
     expect([one, handled, two, oneAgain].map((r) => r.ok && r.task.origin)).toEqual(["visitor 1", "ada", "visitor 2", "visitor 1"]);
     expect((await questions()).map((e) => e.fromLabel)).toEqual(["visitor 1", "ada", "visitor 2", "visitor 1"]);
+  });
+
+  it("simultaneous asks from one account stop at the cap, share one context, and do not skip a visitor number", async () => {
+    const same = await Promise.all([1, 2, 3, 4, 5].map((n) => ask(caller(1), `q${n}`)));
+    const others = await Promise.all([2, 3].map((n) => ask(caller(n), "hi")));
+
+    expect(same.filter((r) => r.ok)).toHaveLength(3);
+    expect(same.filter((r) => !r.ok)).toEqual([{ ok: false, error: "too_many_open" }, { ok: false, error: "too_many_open" }]);
+    expect(new Set(same.flatMap((r) => (r.ok ? [r.task.contextId] : []))).size).toBe(1);
+    expect(same.flatMap((r) => (r.ok ? [r.task.origin] : []))).toEqual(["visitor 1", "visitor 1", "visitor 1"]);
+    expect(others.map((r) => r.ok && r.task.origin).sort()).toEqual(["visitor 2", "visitor 3"]);
+    expect(await questions()).toHaveLength(5);
+  });
+
+  it("two first-time callers asking at once get different visitor numbers", async () => {
+    const [a, b] = await Promise.all([ask(caller(1)), ask(caller(2))]);
+
+    expect([a, b].map((r) => r.ok && r.task.origin).sort()).toEqual(["visitor 1", "visitor 2"]);
+  });
+
+  it("two follow-ups at once on one task: one lands and the other finds it already working", async () => {
+    const first = await ask(caller(1));
+    if (!first.ok) throw new Error("refused");
+    await store.appendEvent(PUB, { type: "message", fromMemberId: "system", fromUserId: "system", fromLabel: "x", payload: {}, refId: null }, {
+      outsideTask: { ...first.task, state: "TASK_STATE_INPUT_REQUIRED" },
+    });
+
+    const both = await Promise.all([ask(caller(1), "one", { taskId: first.task.id }), ask(caller(1), "two", { taskId: first.task.id })]);
+
+    expect(both.filter((r) => r.ok)).toHaveLength(1);
+    expect(both.find((r) => !r.ok)).toEqual({ ok: false, error: "not_input_required" });
+    expect((await outsideTask(store, PUB, "u_out1", first.task.id))?.questionCursors).toHaveLength(2);
   });
 });

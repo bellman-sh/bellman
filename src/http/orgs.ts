@@ -28,7 +28,7 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, inviteMailBudget, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -161,9 +161,12 @@ const full = (org: Org, used: number, origin: string | undefined) =>
  */
 async function sendInvite(deps: OrgRouteDeps, org: Org, invite: OrgInvite, status: 200 | 202, origin: string | undefined): Promise<Response> {
   const link = deps.linkSecret ? await inviteLink(deps.issuer, deps.linkSecret, invite) : null;
-  const mailed = link !== null && invite.key.startsWith("email:") && deps.mail
-    ? await deps.mail(invite.key.slice("email:".length), org, invite, link)
-    : false;
+  let mailed = false;
+  // Every send spends the org's budget for the day (D4), so neither a resend nor a withdrawal and a fresh invite gets past
+  // it. Past it the invite stands, and the admin hands on the link.
+  if (link !== null && invite.key.startsWith("email:") && deps.mail && await deps.store.spendInviteMail(org.orgId, inviteMailBudget(org), Date.now())) {
+    mailed = await deps.mail(invite.key.slice("email:".length), org, invite, link);
+  }
   return json(status, { member: inviteView(invite), link, mailed }, origin);
 }
 

@@ -412,6 +412,28 @@ describe("invitations by link and email (ADR 0036)", () => {
     expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:ana@example.com"]);
   });
 
+  it("mails an org at most fifty invites a UTC day, re-invites and resends among them, and answers the link past that", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 23, 1));
+      for (let i = 0; i < 50; i++) {
+        expect(((await json((await invite())!)) as { mailed: boolean }).mailed, `invite ${i}`).toBe(true);
+        expect((await call("owner", "/org/members/email%3Aana%40example.com", "DELETE"))!.status).toBe(204);
+      }
+      const over = (await invite())!;
+      expect(over.status).toBe(202);
+      const body = await json(over) as { mailed: boolean; link: string };
+      expect([body.mailed, typeof body.link]).toEqual([false, "string"]);
+      expect(mail).toHaveBeenCalledTimes(50);
+      expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["email:ana@example.com"]);
+      vi.setSystemTime(Date.UTC(2026, 9, 24, 0, 0, 1));
+      expect(((await json((await resend("owner"))!)) as { mailed: boolean }).mailed).toBe(true);
+      expect(mail).toHaveBeenCalledTimes(51);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("mails nothing for a subject key, and answers its link for the admin to hand on", async () => {
     const body = await json(await invite("github:77"));
     expect([body.mailed, typeof body.link]).toEqual([false, "string"]);

@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -4041,6 +4041,18 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     });
   }
 
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = `invmail:${orgId}`;
+      const day = inviteMailDay(now);
+      const row = await txn.get<{ day: number; spent: number }>(key);
+      const spent = row?.day === day ? row.spent : 0;
+      if (spent >= budget) return false;
+      await txn.put(key, { day, spent: spent + 1 });
+      return true;
+    });
+  }
+
   async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
     const outcome = await this.#renewOrgInviteTxn(orgId, key, invitedBy, now, audit);
     if (outcome !== "missing") await this.driver.deliverNow();
@@ -6051,6 +6063,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
     return this.registry.renewOrgInvite(orgId, key, invitedBy, now, audit);
+  }
+
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    return this.registry.spendInviteMail(orgId, budget, now);
   }
 
   async acceptOrgInvite(

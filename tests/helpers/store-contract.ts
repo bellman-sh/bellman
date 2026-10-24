@@ -5216,6 +5216,16 @@ export function describeStoreContract(
         expect(await orgEvents()).toEqual(["member_invited", "invite_resent"]);
       });
 
+      it("spends an org's invite mail against its budget for a UTC day: each org and each day its own, a refusal spending nothing", async () => {
+        const day = Date.UTC(2026, 9, 23);
+        for (let i = 0; i < 3; i++) expect(await store.spendInviteMail("org_acme", 3, day + i)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 10)).toBe(false);
+        expect(await store.spendInviteMail("org_acme", 4, day + 11)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 4, day + 12)).toBe(false);
+        expect(await store.spendInviteMail("org_b", 3, day + 13)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 86_400_000)).toBe(true);
+      });
+
       it("renews nothing that is not there: no invite under the key, or another org's", async () => {
         await seated();
         await store.putOrgInvite(invite("github:9"), by);

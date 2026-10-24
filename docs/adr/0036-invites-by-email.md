@@ -32,6 +32,10 @@ reported that address, and nobody told Ana. It also never lapsed, and could not 
 - **Resend** is `POST /org/members/<key>/resend`: it moves `invitedAt`, extends the expiry, mails a
   fresh link, and is refused for ten minutes after the last one. Moving `invitedAt` is what makes a
   resend ask again after a decline (ADR 0027).
+- **An org mails at most fifty invites a UTC day**, or twice its seats if that is more. Every send
+  counts, an invite's and a resend's alike, so withdrawing and inviting again is no way past the
+  resend's ten minutes. Past the budget the invite is still made, and answers `mailed: false` with
+  its link.
 - **A full org refuses to invite** at `POST /org/members`, before any mail goes; an invite still
   takes no seat, and the Join re-checks.
 - The 202 of an invite and the 200 of a resend carry `link` and `mailed`, for any key: an admin can
@@ -45,5 +49,6 @@ reported that address, and nobody told Ana. It also never lapsed, and could not 
   Email Service; until then every invite is created, answered with its link, and `mailed: false`.
 - A resend retires the invite's older links: a person who opens an older mail is told the invitation
   expired or was withdrawn, and uses the newest one. A leaked link dies with a resend or a withdrawal.
+- A send the binding refuses still spends the budget: the count is taken before the mail goes.
 - Bounces are not reported to the Worker: an address that does not exist looks like one that was
   never opened, and the admin sees only an invite that expires.

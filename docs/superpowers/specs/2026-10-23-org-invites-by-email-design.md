@@ -107,6 +107,16 @@ when the invite was issued or renewed less than `RESEND_COOLDOWN_MS` (10 minutes
 before the renewal (two admins resending at once mail twice, which is harmless), and otherwise
 200 with the same body as a 202 (D6).
 
+The cooldown binds one invite, and withdrawing and inviting again makes a new one, so every send
+also spends a budget per org: `inviteMailBudget(org)`, fifty or twice the org's seats if that is
+more, counted per UTC day. Past it the invite or renewal still stands and answers `mailed: false`
+with its link. Store method, both stores and the contract suite, one row per org holding its day's
+count:
+
+```ts
+spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean>;
+```
+
 ### D5. A full org refuses to invite
 
 The invite path of `POST /org/members` answers 409 `full` when `countOrgMembers(orgId) >=

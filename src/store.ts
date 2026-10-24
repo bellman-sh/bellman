@@ -4,7 +4,7 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1941,6 +1941,11 @@ export interface BellmanStore {
    */
   renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing">;
   /**
+   * One invite mail against the org's budget for the UTC day `now` falls in (ADR 0036, D4): true, and counted, while
+   * fewer than `budget` were spent that day; false, and nothing written, once they were. One row per org, its day's count.
+   */
+  spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean>;
+  /**
    * A Join (ADR 0027), ONE operation, so a withdrawal that lands first means no seat. The org's offer
    * to one of the sign-in's `keys`, an invite or an admin's seat on an address the org no longer owns
    * by its form (`isUnownedSeat`), becomes the grant of `subjectKey`: team, the offer's role, `source:
@@ -2055,6 +2060,7 @@ export class MemoryStore implements BellmanStore {
   private domainIndex = new Map<string, string>();
   /** Each org's pending invites (ADR 0027), org to key to invite: apart from `grants`, which no invite enters. */
   private invites = new Map<string, Map<string, OrgInvite>>();
+  private inviteMail = new Map<string, { day: number; spent: number }>();
   /** The orgs each person declined (ADR 0027), subject key to org to when: the person's side, not the org's. */
   private declines = new Map<string, Map<string, number>>();
   /** Each org's SCIM token (SCIM spec, D1), and the lookup from a hash to its org. */
@@ -3703,6 +3709,15 @@ export class MemoryStore implements BellmanStore {
     pending.set(key, renewed);
     this.recordAudit([orgEventEntry(orgId, "invite_resent", { key }, audit, now)]);
     return detach(renewed);
+  }
+
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    const day = inviteMailDay(now);
+    const row = this.inviteMail.get(orgId);
+    const spent = row?.day === day ? row.spent : 0;
+    if (spent >= budget) return false;
+    this.inviteMail.set(orgId, { day, spent: spent + 1 });
+    return true;
   }
 
   async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {

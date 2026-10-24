@@ -77,6 +77,9 @@ describe("the operator stats through the Worker", () => {
   // The stats page's accounts pane, wired through the Worker to the registry: the Durable Objects list, not a stub.
   it("answers /operator/accounts on the same gate, listing the registry's sign-in records", async () => {
     await seed();
+    // A created room's index row, under the same `us:` prefix as the records (#377): it is not an account.
+    const registry = env.REGISTRY.get(env.REGISTRY.idFromName("registry")) as unknown as { indexSession(u: string, s: string): Promise<void> };
+    await registry.indexSession("u_github_1", "qs_by_one");
     const operator = envWith({ BELLMAN_OPERATORS: "u_jesse" });
     const res = await getStats(operator, "/operator/accounts");
     expect(res.status, await res.clone().text()).toBe(200);

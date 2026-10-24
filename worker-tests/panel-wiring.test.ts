@@ -112,7 +112,7 @@ describe("the Worker reads BELLMAN_PUBLIC_PAGE_ORIGINS", () => {
   it("grants bellman.sh no preflight on any other route while the var names it, and still serves the panel", async () => {
     const withVar = withPage(PAGE);
     for (const path of [
-      "/rooms/qs_any/bans", "/rooms/qs_any", "/account/handle", "/account/bans", "/presets", "/audit/org_any", "/operator/stats", "/auth/session",
+      "/rooms/qs_any/bans", "/rooms/qs_any", "/account/handle", "/account/bans", "/presets", "/audit/org_any", "/operator/stats", "/operator/accounts", "/auth/session",
     ]) {
       expect(await grant(withVar, path, PAGE), `${path} from bellman.sh`).toBeNull();
       expect(await grant(withVar, path, PANEL), `${path} from the panel`).toBe(PANEL);

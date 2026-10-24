@@ -102,7 +102,7 @@ describe("bellman.sh's one signed-in write (public rooms on bellman.sh spec, D7)
       for (const path of [reports, `${reports}/`]) expect(origin(method, path), `${method} ${path}`).toBe(PAGE);
     }
     for (const method of ["GET", "PUT", "DELETE"]) expect(origin(method, reports), `${method} ${reports}`).toBeUndefined();
-    for (const path of [...BAN_PATHS, `${reports}/extra`, `/rooms/${ROOM}`, "/rooms", "/account/handle", "/presets", "/operator/stats"]) {
+    for (const path of [...BAN_PATHS, `${reports}/extra`, `/rooms/${ROOM}`, "/rooms", "/account/handle", "/presets", "/operator/stats", "/operator/accounts"]) {
       for (const method of ["POST", "OPTIONS"]) expect(origin(method, path), `${method} ${path}`).toBeUndefined();
     }
     expect(origin("POST", reports, PANEL), "the panel's").toBe(PANEL);

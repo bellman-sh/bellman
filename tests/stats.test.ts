@@ -124,20 +124,23 @@ describe("GET /operator/stats", () => {
   // A browser hands the panel an answer, or a refusal, only if the response names its
   // origin. A row for each response the route gives besides the preflight, which has
   // its own test above; a new response gets a row.
-  it.each([
-    { status: 200, key: DEV_KEY.jesse }, // an operator
-    { status: 401, key: null }, // no credential
-    { status: 403, key: DEV_KEY.peer }, // signed in, not an operator
-    { status: 405, key: DEV_KEY.jesse, method: "POST" }, // an operator, anything but GET
-    { status: 500, key: DEV_KEY.jesse, storeFails: true }, // an operator, the store down
-  ])("carries the panel's origin on a $status", async ({ status, key, method, storeFails }) => {
-    if (storeFails) {
-      // Assigned on the instance, for the reason the 500 test below gives.
-      const failing = new MemoryStore();
-      failing.countUsers = () => Promise.reject(new Error("registry unreachable"));
-      deps = { ...deps, store: failing };
-    }
-    const res = await call(key, "/operator/stats", { method, origin: PANEL });
+  // Both paths: the accounts pane is read by the same panel, and its list fails on its own read (listUsers).
+  type Row = { at: string; status: number; key: string | null; method?: string; storeFails?: boolean; listFails?: boolean };
+  it.each(["/operator/stats", "/operator/accounts"].flatMap((at): Row[] => [
+    { at, status: 200, key: DEV_KEY.jesse }, // an operator
+    { at, status: 401, key: null }, // no credential
+    { at, status: 403, key: DEV_KEY.peer }, // signed in, not an operator
+    { at, status: 405, key: DEV_KEY.jesse, method: "POST" }, // an operator, anything but GET
+    { at, status: 500, key: DEV_KEY.jesse, storeFails: true }, // an operator, the store down
+    { at, status: 500, key: DEV_KEY.jesse, listFails: true }, // an operator, the list read down
+  ]))("carries the panel's origin on a $status at $at", async ({ at, status, key, method, storeFails, listFails }) => {
+    // Assigned on the instance, for the reason the 500 test below gives.
+    const failing = new MemoryStore();
+    if (storeFails) failing.countUsers = () => Promise.reject(new Error("registry unreachable"));
+    if (listFails) failing.listUsers = () => Promise.reject(new Error("registry unreachable"));
+    if (listFails && at === "/operator/stats") failing.listGrants = () => Promise.reject(new Error("registry unreachable"));
+    if (storeFails || listFails) deps = { ...deps, store: failing };
+    const res = await call(key, at, { method, origin: PANEL });
     expect(res!.status).toBe(status);
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });

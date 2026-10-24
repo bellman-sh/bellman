@@ -95,13 +95,13 @@ describe("a suspended account on the Node server (spec \u{A7}1, R8)", () => {
 
   // /operator/stats reads the store as its caller, so R8 gates it too. This server lists no operators, so the route
   // refuses every caller itself: the control is that refusal, which a suspended account must not reach.
-  it("is refused at /operator/stats with the one message, ahead of the route's own refusal", async () => {
+  it.each(["/operator/stats", "/operator/accounts"])("is refused at %s with the one message, ahead of the route's own refusal", async (at) => {
     const store = new MemoryStore();
     await store.suspend("u_peer", { note: "test", by: "u_operator", at: 0 });
     await withServer(store, async (base) => {
-      const refused = await fetch(`${base}/operator/stats`, { headers: { authorization: `Bearer ${DEV_KEY.peer}` } });
+      const refused = await fetch(`${base}${at}`, { headers: { authorization: `Bearer ${DEV_KEY.peer}` } });
       expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: SUSPENDED }]);
-      const control = await fetch(`${base}/operator/stats`, { headers: { authorization: `Bearer ${DEV_KEY.jesse}` } });
+      const control = await fetch(`${base}${at}`, { headers: { authorization: `Bearer ${DEV_KEY.jesse}` } });
       expect([control.status, ((await control.json()) as { error: string }).error], "the control").toEqual([403, "not_available"]);
     });
   });

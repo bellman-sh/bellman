@@ -317,6 +317,9 @@ describe("createCanvas", () => {
     const plan = card(c.root, "Plan");
     expect([plan.style.left, plan.style.top, plan.style.width]).toEqual(["10px", "20px", `${GRID.w}px`]);
     expect(c.root.querySelectorAll("line")).toHaveLength(1);
+    // The connector points from its `from` to its `to`, and its arrowhead is on the target card's border.
+    expect(c.root.querySelector("line")?.getAttribute("marker-end")).toBe("url(#bellman-arrow)");
+    expect(c.root.querySelectorAll("svg marker#bellman-arrow path")).toHaveLength(1);
     expect(c.root.querySelector("svg text")?.textContent).toBe("argues");
     expect(c.root.querySelector("h1")?.textContent).toContain("migration-swarm");
     expect(c.root.querySelector("h1")?.textContent).toContain("lead");

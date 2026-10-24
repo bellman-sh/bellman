@@ -43,6 +43,7 @@ fieldset label { display: block; margin: 4px 0; }
 .layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .lines { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; }
 .lines line { stroke: var(--muted); stroke-width: 2; }
+.lines marker path { fill: var(--muted); }
 .lines text { fill: var(--muted); font-size: 12px; text-anchor: middle; }
 /* A card is peer content: the same dashed frame the join screen gives the creator's brief. */
 .item { position: absolute; box-sizing: border-box; border: 1px dashed var(--warn); background: var(--peer); border-radius: 8px; padding: 8px 10px; overflow: auto; cursor: default; }

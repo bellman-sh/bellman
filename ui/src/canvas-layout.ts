@@ -59,7 +59,20 @@ export function layout(items: readonly Untrusted<SurfaceItemWire>[]): { boxes: B
 
 export const centerOf = (b: Box): { x: number; y: number } => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
 
-export const clampZoom = (k: number): number => Math.min(ZOOM.max, Math.max(ZOOM.min, k));
+/**
+ * Where a line from `from` towards `box`'s centre crosses the box's border: the arrowhead's point. A card is drawn
+ * over the lines, so a line run to the centre would hide its own arrowhead under the card.
+ */
+export function borderPoint(box: Box, from: { x: number; y: number }): { x: number; y: number } {
+  const c = centerOf(box);
+  const dx = from.x - c.x;
+  const dy = from.y - c.y;
+  if (dx === 0 && dy === 0) return c;
+  const t = Math.min(dx === 0 ? Infinity : box.w / 2 / Math.abs(dx), dy === 0 ? Infinity : box.h / 2 / Math.abs(dy));
+  return { x: c.x + dx * t, y: c.y + dy * t };
+}
+
+export const clampZoom =(k: number): number => Math.min(ZOOM.max, Math.max(ZOOM.min, k));
 
 /**
  * Every card with the margin, at the largest scale at or below 1, centred. A

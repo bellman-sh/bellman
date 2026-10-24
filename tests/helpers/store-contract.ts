@@ -3104,9 +3104,9 @@ export function describeStoreContract(
         });
 
         /** Review Focus 5. */
-        it("places a card after 64 occupied slots at slot 64", async () => {
+        it("places a card after 1,000 occupied slots at slot 1,000", async () => {
           const id = await room();
-          for (let i = 0; i < MAX_SURFACE_ITEMS; i++) await put(id, card(`c${i}`));
+          for (let i = 0; i < MAX_SURFACE_ITEMS; i++) await put(id, card(`c${i}`, { placement: gridSlot(i) }));
           await put(id, card("last"));
           const placed = await placements(id);
           expect(placed.c63).toEqual(gridSlot(63));

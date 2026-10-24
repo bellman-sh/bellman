@@ -1058,7 +1058,8 @@ export async function resolveSurfaceWrite(
     if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
       return refuse(
         "conflict",
-        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
+        // "1,000", written out: the tests pin the wording and a locale must not move it.
+        `this room's surface already holds 1,000 items; remove one with { key, remove: true } before adding "${write.key}".`,
       );
     }
     if (write.item.kind === "connector" && write.item.ends !== null) {

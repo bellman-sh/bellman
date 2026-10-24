@@ -15,10 +15,10 @@ import { MemoryStore } from "../../src/store.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
-import { SEND_LIMIT, SEND_WINDOW_MS } from "../../src/send-limit.js";
 import {
-  MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS,
+  MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS, gridSlot,
 } from "../../src/surface.js";
+import type { SurfaceItem } from "../../src/types.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -419,17 +419,18 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     await refused(p, { key: "l3", kind: "link", body: "https://example.com/" + "a".repeat(MAX_SURFACE_LINK_CHARS) }, "2,048");
   });
 
-  it("caps the room at 64 items, and a replace or a removal frees the way", async () => {
-    // 64 writes are more sends than a member gets in a minute (ADR 0022), so the clock steps past the
-    // window each time the allowance is spent. Only Date is faked; the transport runs on real timers.
-    vi.useFakeTimers({ toFake: ["Date"] });
+  it("caps the room at 1,000 items, and a replace or a removal frees the way", async () => {
+    // Seeded through the store with explicit placements (R23): 999 cards, then the thousandth through the tool.
     const p = await pairUp(h);
-    for (let i = 0; i < MAX_SURFACE_ITEMS; i++) {
-      if (i > 0 && i % SEND_LIMIT === 0) vi.setSystemTime(Date.now() + SEND_WINDOW_MS + 1);
-      const out = await write(p, { key: `k_${i}`, kind: "text", body: "x" });
-      expect(out.isError, out.text).toBe(false);
+    for (let i = 0; i < MAX_SURFACE_ITEMS - 1; i++) {
+      const item: SurfaceItem = { key: `k_${i}`, kind: "text", title: null, body: "x", ends: null, placement: gridSlot(i), blob: null, shape: null };
+      await h.store.appendEvent(p.sessionId, {
+        type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null,
+      }, { surface: { key: item.key, item } });
     }
-    await refused(p, { key: "one_more", kind: "text", body: "x" }, "64 items");
+    const last = await write(p, { key: `k_${MAX_SURFACE_ITEMS - 1}`, kind: "text", body: "x" });
+    expect(last.isError, last.text).toBe(false);
+    await refused(p, { key: "one_more", kind: "text", body: "x" }, "already holds 1,000 items");
     const replace = await write(p, { key: "k_0", kind: "text", body: "still fits" });
     expect(replace.isError, replace.text).toBe(false);
     await write(p, { key: "k_1", remove: true });

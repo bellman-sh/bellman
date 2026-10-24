@@ -58,19 +58,19 @@ export type InviteMailer = (to: string, org: Org, invite: OrgInvite, link: strin
 
 /**
  * Sends through the `send_email` binding. A missing binding or a failed send is logged once and answers false: the invite
- * is stored before this runs, and the admin holds the link to pass on by hand. The log names the org and the invite's key.
+ * is stored before this runs, and the admin holds the link to pass on by hand. The log names the org and when the invite was sent, never the address.
  */
 export function inviteMailer(binding: MailBinding | undefined): InviteMailer {
   return async (to, org, invite, link) => {
     if (!binding) {
-      console.error(`invite ${org.orgId} ${invite.key}: no send_email binding, so no email went; the admin has the link`);
+      console.error(`invite ${org.orgId} at ${invite.invitedAt}: no send_email binding, so no email went; the admin has the link`);
       return false;
     }
     try {
       await binding.send({ from: INVITE_FROM, to, ...inviteMail(org, invite, link) });
       return true;
     } catch (err) {
-      console.error(`invite ${org.orgId} ${invite.key}: the email was not sent (${whyNotSent(err)}); the admin has the link`);
+      console.error(`invite ${org.orgId} at ${invite.invitedAt}: the email was not sent (${whyNotSent(err)}); the admin has the link`);
       return false;
     }
   };

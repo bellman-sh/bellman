@@ -63,6 +63,8 @@ describe("invite mail", () => {
         expect.stringContaining("org_acme"),
         expect.stringContaining("E_SENDER_NOT_VERIFIED"),
       ]);
+      // A worker log is not where an invitee's address belongs; the admin has the invite and its link.
+      expect(err.mock.calls.flat().join(" ")).not.toContain("ana@example.com");
     } finally {
       err.mockRestore();
     }

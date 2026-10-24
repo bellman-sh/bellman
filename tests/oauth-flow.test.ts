@@ -548,6 +548,8 @@ describe("plan resolution", () => {
       await resolvePlan(PROFILE, config);
 
       expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
+      // The override is keyed to the GitHub account that signed in, so its login goes on the override's user id.
+      expect((await (config.plans as MemoryStore).listUsers(1))[0]?.githubLogin).toBe("mcfearsome");
     });
 
     /** A wrong count is worth less than a person locked out of their account. */

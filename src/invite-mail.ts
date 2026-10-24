@@ -53,6 +53,18 @@ export function inviteMail(org: Org, invite: OrgInvite, link: string): { subject
   };
 }
 
+// No space, control character, list separator, quote, bracket or second `@`: what is left cannot name two mailboxes.
+const ATOM = "[^\\s\\x00-\\x1f\\x7f@,;:<>()\\[\\]\\\\\"]+";
+const ADDRESS = new RegExp(`^${ATOM}@${ATOM}\\.${ATOM}$`);
+
+/**
+ * Whether an address is one plain mailbox the invite may be mailed to (D1). An `email:` key needs only an `@` to be a
+ * key, so a list, a display name or a header line would otherwise reach the binding; 254 is the longest a path can be.
+ */
+export function isMailableAddress(address: string): boolean {
+  return address.length <= 254 && ADDRESS.test(address);
+}
+
 /** Mails one invitation and answers whether the binding took it; never rejects. */
 export type InviteMailer = (to: string, org: Org, invite: OrgInvite, link: string) => Promise<boolean>;
 
@@ -62,6 +74,10 @@ export type InviteMailer = (to: string, org: Org, invite: OrgInvite, link: strin
  */
 export function inviteMailer(binding: MailBinding | undefined): InviteMailer {
   return async (to, org, invite, link) => {
+    if (!isMailableAddress(to)) {
+      console.error(`invite ${org.orgId} at ${invite.invitedAt}: the key is not one plain address, so no email went; the admin has the link`);
+      return false;
+    }
     if (!binding) {
       console.error(`invite ${org.orgId} at ${invite.invitedAt}: no send_email binding, so no email went; the admin has the link`);
       return false;

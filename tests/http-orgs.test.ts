@@ -396,6 +396,15 @@ describe("invitations by link and email (ADR 0036)", () => {
       expect.objectContaining({ key: "email:ana@example.com" }), body.link);
   });
 
+  it("refuses an address that is not one plain address, before any invite or mail", async () => {
+    for (const key of ["email:ana@example.com, eve@evil.test", "email:Ana <ana@example.com>", "email:ana@example.com\nBcc: eve@evil.test"]) {
+      const res = (await invite(key))!;
+      expect([key, res.status, (await json(res)).error]).toEqual([key, 400, "invalid_request"]);
+    }
+    expect(mail).not.toHaveBeenCalled();
+    expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
+  });
+
   it("answers mailed false, and still the link and the invite, when nothing could send", async () => {
     mail.mockResolvedValueOnce(false);
     const body = await json(await invite());

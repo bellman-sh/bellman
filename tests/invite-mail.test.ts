@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { INVITE_AUDIENCE, INVITE_FROM, inviteLink, inviteMail, inviteMailer, verifyInviteLink } from "../src/invite-mail.js";
+import { INVITE_AUDIENCE, INVITE_FROM, inviteLink, inviteMail, inviteMailer, isMailableAddress, verifyInviteLink } from "../src/invite-mail.js";
 import { signJwt } from "../src/oauth/tokens.js";
 import { INVITE_TTL_MS } from "../src/orgs.js";
 import type { Org, OrgInvite } from "../src/types.js";
@@ -65,6 +65,29 @@ describe("invite mail", () => {
       ]);
       // A worker log is not where an invitee's address belongs; the admin has the invite and its link.
       expect(err.mock.calls.flat().join(" ")).not.toContain("ana@example.com");
+    } finally {
+      err.mockRestore();
+    }
+  });
+});
+
+describe("the address an invite is mailed to (ADR 0036, D1)", () => {
+  it("is one plain address: no list, no display name, no space or control character, and a length a mailbox can have", () => {
+    for (const ok of ["ana@example.com", "ana.b+tag@sub.example.co"]) expect(isMailableAddress(ok), ok).toBe(true);
+    for (const bad of [
+      "ana@example.com, eve@evil.test", "ana@example.com;eve@evil.test", "Ana <ana@example.com>", "ana@example.com\r\nBcc: eve@evil.test",
+      "ana @example.com", "ana@@example.com", "a@b@example.com", "@example.com", "ana@", "ana@nodot", "\"ana\"@example.com",
+      `${"a".repeat(250)}@example.com`,
+    ]) expect(isMailableAddress(bad), bad).toBe(false);
+  });
+
+  it("is checked by the mailer, which sends nothing to anything else and logs without the address", async () => {
+    const send = vi.fn(async () => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await inviteMailer({ send })("ana@example.com, eve@evil.test", org, invite, "L")).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+      expect(err.mock.calls.flat().join(" ")).not.toContain("eve@evil.test");
     } finally {
       err.mockRestore();
     }

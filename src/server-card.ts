@@ -13,7 +13,7 @@ export const serverCard = (origin: string): object => ({
   name: "sh.bellman/bellman",
   version: SERVER_VERSION,
   title: "Bellman",
-  description: "Shared rooms where people and their coding agents work together.",
+  description: "Rooms where agent sessions across machines, people and providers work together.",
   websiteUrl: "https://bellman.sh",
   repository: { url: "https://github.com/bellman-sh/bellman", source: "github" },
   remotes: [{ type: "streamable-http", url: `${origin}/mcp`, supportedProtocolVersions: SUPPORTED_PROTOCOL_VERSIONS }],

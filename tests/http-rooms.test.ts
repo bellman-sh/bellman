@@ -474,7 +474,7 @@ async function evictThroughTool(memberId: string) {
 }
 
 describe("GET /rooms/:id/surface", () => {
-  it("returns every item in an untrusted envelope, with the surface cursor as the ETag", async () => {
+  it("returns its item in an untrusted envelope, with the surface cursor as the ETag", async () => {
     const { cursor } = await placeThroughTool("plan", { kind: "text", body: "# Plan\nship it" });
     const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`, { headers: { origin: PANEL } }))!;
     expect(res.status).toBe(200);
@@ -549,15 +549,22 @@ describe("GET /rooms/:id/surface", () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
     expect(res.status).toBe(200);
     expect(res.headers.get("etag")).toBe('"0"');
-    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [], frames: [], window: "all", next: null });
+    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [], frames: [], window: "newest", next: null });
   });
 
-  // The read today's dash makes, with no window: every row, until the dash pages (surface frames, Part 2).
-  it("answers every row of a room of 70 items with no window asked, as window all and no next, under the plain tag", async () => {
+  // With no window the read is the front, as a tool's is (ADR 0038): the whole-room read went once the dash paged.
+  it("answers the front with no window asked: the newest 64 of 70 items and a next, under the plain tag", async () => {
     const cursor = await seedCards(70);
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
     const body = await bodyOf(res) as { items: unknown[]; window: string; next: string | null };
-    expect([body.items.length, body.window, body.next, res.headers.get("etag")]).toEqual([70, "all", null, `"${cursor}"`]);
+    expect([body.items.length, body.window, typeof body.next, res.headers.get("etag")]).toEqual([64, "newest", "string", `"${cursor}"`]);
+  });
+
+  it("answers frame 1 with no window asked once the room has a frame", async () => {
+    await seedCards(3);
+    await placeThroughTool("intro", { kind: "frame", title: "Start", placement: { x: 0, y: 0, w: 1480, h: 520 } });
+    const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`)) as { window: string };
+    expect(body.window).toBe("frame:1");
   });
 
   it("stops a removed member at its cut, and derives the cursor from what it is shown", async () => {

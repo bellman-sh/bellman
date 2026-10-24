@@ -19,7 +19,7 @@ A surface held 64 items so one read fit one tool response. Topic rooms and the b
 ## Consequences
 
 - A client that reads only `surface.items` sees the front window. In a room with no frames and 64 items or fewer that is every item, as before.
-- Until the dash reads windows (Part 2), the HTTP surface reads asked for neither `window` nor `next` answer every row the reader may see as `window: "all"`, under the plain cursor ETag, so today's dash keeps the whole canvas after the deploy; Part 2 removes that path, and those reads then answer the front window.
+- Until the dash read windows (Part 2), the HTTP surface reads asked for neither `window` nor `next` answered every row the reader may see as `window: "all"`, so the dash kept the whole canvas across the deploy. Once the dash sent a window on every read, that path was removed: those reads answer the front window, under the plain cursor ETag.
 - A locked frame's move writes one `surface` event for each card it carries, authored by the mover, into every member's log. Moving a frame that holds 900 cards adds 901 events to every member's `bellman_sync`, and each member's poll pages through them at the usual 50. The cards' rows keep their writers and approvers, so the topic room page and the blog still credit who wrote and who approved each card.
 - Windows are computed over every row in the room's object on each read, so the cost of a read grows with the surface's size in that object and not across RPC. A store method that keeps the ranking in an index is the upgrade, if a room ever makes the scan slow.
 - The sitemap lists each room's newest 64 items until the sitemap pages, so a blog past 64 posts loses its older posts from the sitemap, though each post's own page still loads.

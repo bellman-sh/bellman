@@ -394,8 +394,7 @@ export async function surfaceAt(
 
 /**
  * One window of the surface as a member reads it (surface frames spec, D5): the page's rows in envelopes, every
- * frame in its writer's envelope, and where to go on. `window` is `"all"` on the HTTP read with no window, which
- * holds every row (`readWholeSurface`).
+ * frame in its writer's envelope, and where to go on.
  */
 export type SurfaceBlock = {
   cursor: number;
@@ -405,18 +404,6 @@ export type SurfaceBlock = {
   next: string | null;
   slots?: Record<string, { x: number; y: number }>;
 };
-
-/**
- * Every row a member may see, under `cut`, as one block: the HTTP surface read asked for no window, which is what
- * today's dash reads, so after the deploy it still sees the whole canvas and not frame 1 alone.
- *
- * ponytail: the transitional path. It moves every row across RPC, as the read before frames did; the dash's
- * windowed reads (surface frames, Part 2) remove it, and the no-argument read then answers the front window.
- */
-export async function readWholeSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
-  const { cursor, rows } = await surfaceAt(store, session, cut);
-  return { cursor, items: rows.map(surfaceItem), frames: frameEnvelopes(rows), window: "all", next: null };
-}
 
 /**
  * A window of the surface under `cut`, as `surfaceAt` would cut it. The store pages it where the rows are

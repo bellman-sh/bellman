@@ -27,7 +27,8 @@ import {
 } from "./cookies.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
-  AGENT_CODE_TTL_MS, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, CLAIM_GRANT, JWT_BEARER_GRANT,
+  AGENT_CODE_TTL_MS, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, ASSERTION_AUDIENCE, CLAIM_GRANT,
+  JWT_BEARER_GRANT,
   newAttempt, type AgentAttempt, type AgentRegistration, type ApproveVerdict,
 } from "./agent-auth.js";
 import {
@@ -1866,7 +1867,66 @@ export async function handleOAuth(
       }
     }
 
-    return oauthError("unsupported_grant_type", "use authorization_code or refresh_token");
+    // The agent's poll (D4): the store retires the registration as it grants,
+    // so a second poll after a grant is a claim token nobody knows.
+    if (grant === CLAIM_GRANT) {
+      const claimToken = form.get("claim_token");
+      if (!claimToken) return oauthError("invalid_request", "claim_token is required");
+      const now = Date.now();
+      const verdict = await config.store.pollAgentClaim(claimToken, now);
+      switch (verdict.kind) {
+        case "unknown":
+          return oauthError("invalid_grant", "claim token is invalid or already used");
+        case "pending":
+          return json({ error: "authorization_pending", error_description: "the human has not approved yet", status: "pending" }, 400);
+        case "slow_down":
+          return oauthError("slow_down", `poll at most every ${AGENT_POLL_INTERVAL_MS / 1000} s`);
+        case "expired":
+          return json({ error: "expired_token", error_description: "this registration or its code has expired", status: "expired" }, 400);
+        case "granted": {
+          const { identity, plan_source } = verdict.claimed;
+          // The grant row's expiry is now + REFRESH_TOKEN_TTL_MS, written by
+          // the same call with the same now.
+          const assertion = await signJwt(
+            { iss: config.issuer, sub: identity.userId, aud: ASSERTION_AUDIENCE, jti: verdict.registration_id, bellman: null as never },
+            config.secret,
+            REFRESH_TOKEN_TTL_MS / 1000
+          );
+          return json({
+            ...(await accessTokenBody(config, config.resource, identity, plan_source)),
+            identity_assertion: assertion,
+            assertion_expires: new Date(now + REFRESH_TOKEN_TTL_MS).toISOString(),
+          });
+        }
+      }
+    }
+
+    // The assertion buys access tokens, never a refresh token (D5), and each
+    // one re-resolves the plan as a refresh would (D6).
+    if (grant === JWT_BEARER_GRANT) {
+      const assertion = form.get("assertion");
+      if (!assertion) return oauthError("invalid_request", "assertion is required");
+      const requested = form.get("resource");
+      if (requested && canonicalResource(requested) !== config.resource) {
+        return oauthError("invalid_target", "this server issues tokens for its own resource only");
+      }
+      const claims = await verifyJwt(assertion, config.secret, { issuer: config.issuer, audience: ASSERTION_AUDIENCE });
+      const stored = claims ? await config.store.getAgentGrant(claims.jti, Date.now()) : null;
+      if (!claims || !stored) return oauthError("invalid_grant", "assertion is invalid, expired, or revoked");
+      try {
+        const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+        return json(await accessTokenBody(config, config.resource, current.identity, current.source));
+      } catch (err) {
+        if (err instanceof SignInRefused) {
+          await config.store.deleteAgentGrant(claims.jti);
+          return oauthError("invalid_grant", err.message);
+        }
+        console.error("could not exchange an agent assertion:", err);
+        return oauthError("temporarily_unavailable", "could not exchange the assertion — retry", 503);
+      }
+    }
+
+    return oauthError("unsupported_grant_type", "use authorization_code, refresh_token, jwt-bearer or the agent claim grant");
   }
 
   // -------------------------------------------------------------- /account
@@ -2492,11 +2552,7 @@ async function issueTokens(
   planSource = "default",
   identityKeysForRefresh: string[] = []
 ): Promise<Response> {
-  const accessToken = await signJwt(
-    { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity, plan_source: planSource },
-    config.secret,
-    ACCESS_TOKEN_TTL_SECONDS
-  );
+  const body = await accessTokenBody(config, resource, identity, planSource);
   // Rotated on every use: the previous one was deleted when it was taken.
   // Storing it is also what promotes the client out of being a disposable
   // registration — putRefresh does both in one operation, so a failure here
@@ -2510,13 +2566,22 @@ async function issueTokens(
     identity_keys: identityKeysForRefresh,
     expires_at: Date.now() + REFRESH_TOKEN_TTL_MS,
   });
-  return json({
-    access_token: accessToken,
-    token_type: "Bearer",
-    expires_in: ACCESS_TOKEN_TTL_SECONDS,
-    refresh_token: refreshToken,
-    scope: SCOPE,
-  });
+  return json({ ...body, refresh_token: refreshToken });
+}
+
+/** The access-token half of a token response: every grant mints this; only some add a refresh token. */
+async function accessTokenBody(
+  config: OAuthConfig,
+  resource: string,
+  identity: Identity,
+  planSource: string
+): Promise<{ access_token: string; token_type: "Bearer"; expires_in: number; scope: string }> {
+  const accessToken = await signJwt(
+    { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity, plan_source: planSource },
+    config.secret,
+    ACCESS_TOKEN_TTL_SECONDS
+  );
+  return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TOKEN_TTL_SECONDS, scope: SCOPE };
 }
 
 /** Resolve an access token presented to /mcp. Audience is checked here. */

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   AGENT_CODE_TTL_MS,
   AGENT_REGS_PER_HOUR,
@@ -15,7 +15,9 @@ import {
   newUserCode,
 } from "../src/oauth/agent-auth.js";
 import { MemoryAuthStore, REGISTRATION_WINDOW_MS } from "../src/oauth/storage.js";
-import { REFRESH_TOKEN_TTL_MS } from "../src/oauth/tokens.js";
+import { REFRESH_TOKEN_TTL_MS, signJwt } from "../src/oauth/tokens.js";
+import { identityFromAccessToken } from "../src/oauth/routes.js";
+import { DEFAULT_POLICY } from "../src/types.js";
 import { IDENTITY, ISSUER, panelConfig, routeWith, seedSession, withCookie } from "./helpers/panel.js";
 
 const CLAIMED: AgentClaimed = {
@@ -493,5 +495,166 @@ describe("claim page", () => {
     const res = await submit(await heldIn(await open()), registered.claim.user_code, other);
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("This link isn't valid. Ask your agent for a new one.");
+  });
+});
+
+describe("token grants", () => {
+  afterEach(() => vi.useRealTimers());
+  const body = async (res: Response) => (await res.json()) as Record<string, any>;
+  const setup = async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const config = panelConfig();
+    const route = routeWith(config);
+    const token = (fields: Record<string, string>) =>
+      route(
+        new Request(`${ISSUER}/token`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(fields).toString(),
+        })
+      );
+    const registered = await body(
+      await route(
+        new Request(`${ISSUER}/agent/identity`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "service_auth", login_hint: "jesse@example.dev" }),
+        })
+      )
+    );
+    const attemptToken = new URL(registered.claim.verification_uri).searchParams.get("claim_attempt_token")!;
+    const poll = () => token({ grant_type: "urn:workos:agent-auth:grant-type:claim", claim_token: registered.claim_token });
+    const approve = () => config.store.approveAgentClaim(attemptToken, registered.claim.user_code, CLAIMED, Date.now());
+    const exchange = (assertion: string, extra: Record<string, string> = {}) =>
+      token({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion, ...extra });
+    const later = (ms: number) => vi.setSystemTime(Date.now() + ms);
+    /** Approve, wait out the interval, and take the grant. */
+    const granted = async () => {
+      expect((await approve()).kind).toBe("approved");
+      later(AGENT_POLL_INTERVAL_MS + 1);
+      const res = await poll();
+      expect(res.status).toBe(200);
+      return body(res);
+    };
+    return { config, route, token, registered, poll, approve, exchange, later, granted };
+  };
+
+  test("poll pending then granted once then invalid_grant", async () => {
+    const { poll, granted } = await setup();
+    const pending = await poll();
+    expect(pending.status).toBe(400);
+    expect(await body(pending)).toMatchObject({ error: "authorization_pending", status: "pending" });
+    const ok = await granted();
+    expect(ok.identity_assertion).toEqual(expect.any(String));
+    expect(ok.refresh_token).toBeUndefined();
+    expect(ok.scope).toBe("bellman");
+    expect(ok.expires_in).toBe(600);
+    expect(ok.token_type).toBe("Bearer");
+    const assertion = JSON.parse(Buffer.from(ok.identity_assertion.split(".")[1], "base64url").toString());
+    expect(new Date(ok.assertion_expires).getTime()).toBe(Date.now() + REFRESH_TOKEN_TTL_MS);
+    expect(assertion).toMatchObject({ iss: ISSUER, sub: IDENTITY.userId, aud: "bellman:agent-assertion" });
+    expect(assertion.jti).toMatch(/^reg_/);
+    const again = await poll();
+    expect(await body(again)).toMatchObject({ error: "invalid_grant" });
+  });
+
+  test("the access token resolves", async () => {
+    const { config, granted } = await setup();
+    const ok = await granted();
+    expect((await identityFromAccessToken(ok.access_token, config))?.userId).toBe(IDENTITY.userId);
+  });
+
+  test("slow_down under 5 s", async () => {
+    const { poll, later } = await setup();
+    await poll();
+    later(AGENT_POLL_INTERVAL_MS - 1);
+    const res = await poll();
+    expect(res.status).toBe(400);
+    expect((await body(res)).error).toBe("slow_down");
+  });
+
+  test("expired_token after the code window and after 24 h", async () => {
+    const short = await setup();
+    short.later(AGENT_CODE_TTL_MS + 1);
+    expect(await body(await short.poll())).toMatchObject({ error: "expired_token", status: "expired" });
+    vi.useRealTimers();
+    const long = await setup();
+    long.later(AGENT_REGISTRATION_TTL_MS + 1);
+    expect(await body(await long.poll())).toMatchObject({ error: "expired_token", status: "expired" });
+  });
+
+  test("jwt-bearer exchanges twice", async () => {
+    const { config, granted, exchange } = await setup();
+    const { identity_assertion } = await granted();
+    for (let i = 0; i < 2; i++) {
+      const res = await exchange(identity_assertion);
+      expect(res.status).toBe(200);
+      const ok = await body(res);
+      expect(ok.refresh_token).toBeUndefined();
+      expect(ok.scope).toBe("bellman");
+      expect((await identityFromAccessToken(ok.access_token, config))?.userId).toBe(IDENTITY.userId);
+    }
+  });
+
+  test("exchange after deleteAgentGrant is invalid_grant", async () => {
+    const { config, granted, exchange } = await setup();
+    const { identity_assertion } = await granted();
+    const jti = JSON.parse(Buffer.from(identity_assertion.split(".")[1], "base64url").toString()).jti;
+    await config.store.deleteAgentGrant(jti);
+    expect((await body(await exchange(identity_assertion))).error).toBe("invalid_grant");
+  });
+
+  test("exchange after SignInRefused is invalid_grant and deletes the grant", async () => {
+    const { config, granted, exchange } = await setup();
+    const { identity_assertion } = await granted();
+    const owner = {
+      key: "github:1", plan: "team" as const, role: "admin" as const, orgId: "org_acme", source: "operator" as const,
+      grantedAt: 1, grantedBy: "u_op", expiresAt: null,
+    };
+    const acme = {
+      orgId: "org_acme", name: "Acme", ownerUserId: "u_github_1", seats: 3, source: "operator" as const,
+      active: true, createdAt: 1, requireSso: true, domains: [], policy: DEFAULT_POLICY,
+    };
+    await config.plans!.createOrg(acme, owner, { actorUserId: "u_op" });
+    await config.plans!.putGrant({ ...owner, key: "github:4242", role: "member", source: "org" });
+    const res = await exchange(identity_assertion);
+    expect(await body(res)).toMatchObject({ error: "invalid_grant" });
+    const jti = JSON.parse(Buffer.from(identity_assertion.split(".")[1], "base64url").toString()).jti;
+    expect(await config.store.getAgentGrant(jti, Date.now())).toBeNull();
+  });
+
+  test("wrong resource is invalid_target", async () => {
+    const { granted, exchange } = await setup();
+    const { identity_assertion } = await granted();
+    const res = await exchange(identity_assertion, { resource: "https://elsewhere.test/mcp" });
+    expect((await body(res)).error).toBe("invalid_target");
+  });
+
+  test("malformed grants answer 400", async () => {
+    const { config, token, exchange } = await setup();
+    const claim = "urn:workos:agent-auth:grant-type:claim";
+    const cases: [Promise<Response>, string][] = [
+      [token({ grant_type: claim, claim_token: "clm_nope" }), "invalid_grant"],
+      [token({ grant_type: claim }), "invalid_request"],
+      [token({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer" }), "invalid_request"],
+      [exchange("x.y.z"), "invalid_grant"],
+      [
+        exchange(await signJwt(
+          { iss: ISSUER, sub: IDENTITY.userId, aud: "bellman:session-state", bellman: null as never },
+          config.secret, 60
+        )),
+        "invalid_grant",
+      ],
+    ];
+    for (const [pending, error] of cases) {
+      const res = await pending;
+      expect(res.status).toBe(400);
+      expect((await body(res)).error).toBe(error);
+    }
+    const unknown = await body(await token({ grant_type: "password" }));
+    expect(unknown).toMatchObject({
+      error: "unsupported_grant_type",
+      error_description: "use authorization_code, refresh_token, jwt-bearer or the agent claim grant",
+    });
   });
 });

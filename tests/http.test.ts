@@ -421,6 +421,19 @@ describe("A2A over the Node server (ADR 0033)", () => {
     expect(((await got.json()) as { result: { id: string } }).result.id).toBe(body.result!.task.id);
   });
 
+  it("answers SendStreamingMessage with no tenant as one SSE event, while SendMessage stays JSON", async () => {
+    const noRoom = { message: { messageId: "m2", role: "ROLE_USER", parts: [{ text: "Anyone there?" }] } };
+    const streamed = await rpc("qk_dev_outsider", "SendStreamingMessage", noRoom);
+    expect(streamed.headers.get("content-type")?.startsWith("text/event-stream")).toBe(true);
+    const event = (await streamed.text()).split("\n").find((line) => line.startsWith("data: "))!;
+    const body = JSON.parse(event.slice("data: ".length)) as { id: number; result: { message: { parts: { text: string }[] } } };
+    expect(body.id).toBe(1);
+    expect(body.result.message.parts[0].text).toContain("tenant");
+    const plain = await rpc("qk_dev_outsider", "SendMessage", noRoom);
+    expect(plain.headers.get("content-type")?.startsWith("application/json")).toBe(true);
+    await expect(plain.json()).resolves.toMatchObject({ id: 1, result: { message: { role: "ROLE_AGENT" } } });
+  });
+
   it("answers a request with no key as a plain 401, with no OAuth hint this server cannot honour", async () => {
     const res = await rpc(null, "SendMessage", ask("qs_http_a2a"));
     expect([res.status, res.headers.get("content-type")?.startsWith("text/plain"), res.headers.get("www-authenticate")]).toEqual([401, true, null]);

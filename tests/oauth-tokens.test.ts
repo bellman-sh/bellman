@@ -80,6 +80,13 @@ describe("access tokens", () => {
       expect(await verifyJwt(bad, SECRET, { issuer: ISSUER, audience: RESOURCE })).toBeNull();
     }
   });
+
+  it("answers null, never throws, for a three-part token whose signature is not base64url", async () => {
+    const [header, payload] = (await signJwt(claims, SECRET, 600)).split(".");
+    for (const bad of ["not.a.token", `${header}.${payload}.!!`, `${header}.${payload}.abcde`]) {
+      await expect(verifyJwt(bad, SECRET, { issuer: ISSUER, audience: RESOURCE })).resolves.toBeNull();
+    }
+  });
 });
 
 describe("PKCE", () => {

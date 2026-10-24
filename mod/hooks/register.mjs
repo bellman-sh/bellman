@@ -69,6 +69,7 @@ function lineOf(e) {
 
 // src/action-state.ts
 var ACTION_REQUEST_TTL_MS = 30 * 6e4;
+var PROPOSAL_TTL_MS = 7 * 24 * 60 * 6e4;
 
 // src/payload.ts
 var MAX_PAYLOAD_CHARS = 2e4;

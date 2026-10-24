@@ -1,10 +1,12 @@
 /**
- * The `/a2a` JSON-RPC endpoint through the Worker (A2A, Task 7): the non-blocking methods over the real room objects.
- * Blocking `SendMessage` and the streaming methods are Task 8's.
+ * The `/a2a` JSON-RPC endpoint through the Worker (A2A, Tasks 7 and 8) over the real room objects: the non-blocking
+ * methods, blocking `SendMessage`, and the two streams.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
 import worker from "../src/worker.js";
+import { a2aRoutes } from "../src/a2a/routes.js";
+import { answerQuestion } from "../src/outside.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
 import { banAsker } from "../src/rooms.js";
 import { DurableObjectStore } from "../src/store-do.js";
@@ -49,6 +51,29 @@ const taskOf = async (as: string, tenant = NAME, text?: string) => {
   return res.result.task as { id: string; contextId: string };
 };
 const questionsIn = async (id: string) => (await store().eventsAfter(id, 0)).filter((e) => e.type === "outside_question");
+/** The room's first outside question, once a request in flight has stored it, and a beat more so its wait has begun. */
+const asked = async (id = ROOM) => {
+  for (;;) {
+    const [question] = await questionsIn(id);
+    if (question) {
+      await new Promise((r) => setTimeout(r, 100));
+      return question;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+const answer = (refId: number, text: string, needsInput = false) =>
+  answerQuestion(store(), ROOM, { memberId: "m_creator" }, { refId, text, needsInput });
+/** The JSON-RPC responses a stream carried, in order; keep-alive comments are not events. */
+const streamed = async (res: Response) => (await res.text()).split("\n\n")
+  .filter((chunk) => chunk.startsWith("data: ")).map((chunk) => JSON.parse(chunk.slice(6)) as Rpc);
+/** `/a2a` called directly, so a test can hand it a short cap. */
+const direct = (body: unknown, deps: { blockCapMs?: number; waitRoundMs?: number } = {}, signal?: AbortSignal) => a2aRoutes(
+  new Request(`${ORIGIN}/a2a`, {
+    method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0" }, body: JSON.stringify(body), signal,
+  }),
+  { store: store(), caller: person("u_alice"), suspended: async () => false, origin: ORIGIN, ...deps },
+) as Promise<Response>;
 
 const seed = async (id: string, over: Parameters<typeof session>[0] = {}, name?: string) => {
   await store().createSession(session({
@@ -189,13 +214,6 @@ describe("/a2a", () => {
     expect((await json(await rpc("u_alice", "GetExtendedAgentCard", {}))).error?.code).toBe(-32007);
   });
 
-  it("streaming methods are unsupportedOperation until blocking and streaming land", async () => {
-    await seedPublic();
-    expect((await json(await rpc("u_alice", "SendStreamingMessage", ask(NAME)))).error?.code).toBe(-32004);
-    expect((await json(await rpc("u_alice", "SubscribeToTask", { tenant: NAME, id: "t" }))).error?.code).toBe(-32004);
-    expect(await questionsIn(ROOM)).toEqual([]);
-  });
-
   it("no tenant returns a Message pointing at bellman.sh/r/", async () => {
     const res = await json(await rpc("u_alice", "SendMessage", ask(undefined)));
     expect(res.result.message).toMatchObject({
@@ -240,5 +258,114 @@ describe("/a2a", () => {
     const body = await json(seventh);
     expect(body.error?.data?.[0]).toMatchObject({ reason: "RATE_LIMITED", metadata: { retry_after: expect.stringMatching(/^[1-9]\d*$/) } });
     expect(seventh.headers.get("retry-after")).toBe(body.error?.data?.[0].metadata.retry_after);
+  });
+
+  it("blocking SendMessage returns COMPLETED once the creator answers", async () => {
+    await seedPublic();
+    const pending = rpc("u_alice", "SendMessage", { tenant: NAME, message: message("Is the review open?") });
+    const question = await asked();
+    const answered = Date.now();
+    expect(await answer(question.cursor, "Yes, until Friday.")).toMatchObject({ ok: true });
+    const res = await json(await pending);
+    // The answer woke the wait: nowhere near a 25-second round.
+    expect(Date.now() - answered).toBeLessThan(5_000);
+    expect(res.result.task).toMatchObject({
+      status: { state: "TASK_STATE_COMPLETED", message: { role: "ROLE_AGENT", parts: [{ text: "Yes, until Friday." }] } },
+      history: [{ role: "ROLE_USER", parts: [{ text: "Is the review open?" }] }, { role: "ROLE_AGENT", parts: [{ text: "Yes, until Friday." }] }],
+    });
+  });
+
+  it("blocking SendMessage returns INPUT_REQUIRED on needs_input", async () => {
+    await seedPublic();
+    const pending = rpc("u_alice", "SendMessage", { tenant: NAME, message: message() });
+    const question = await asked();
+    expect(await answer(question.cursor, "Which review?", true)).toMatchObject({ ok: true });
+    const res = await json(await pending);
+    expect(res.result.task.status).toMatchObject({ state: "TASK_STATE_INPUT_REQUIRED", message: { parts: [{ text: "Which review?" }] } });
+  });
+
+  it("unpublishing during a blocking SendMessage returns CANCELED promptly", async () => {
+    await seedPublic();
+    const pending = rpc("u_alice", "SendMessage", { tenant: NAME, message: message() });
+    await asked();
+    const unpublished = Date.now();
+    await store().unpublishSession(ROOM, unpublished);
+    const res = await json(await pending);
+    expect(Date.now() - unpublished).toBeLessThan(5_000);
+    expect(res.result.task.status).toMatchObject({
+      state: "TASK_STATE_CANCELED", message: { role: "ROLE_AGENT", parts: [{ text: "The room went private." }] },
+    });
+  });
+
+  it("a blocking SendMessage stops waiting when the client goes away", async () => {
+    await seedPublic();
+    const client = new AbortController();
+    const pending = direct({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { tenant: NAME, message: message() } }, {}, client.signal);
+    await asked();
+    const left = Date.now();
+    client.abort();
+    const res = await json(await pending);
+    expect(Date.now() - left).toBeLessThan(5_000);
+    expect(res.result.task.status.state).toBe("TASK_STATE_WORKING");
+  });
+
+  it("SendStreamingMessage emits the task then a COMPLETED statusUpdate and closes", async () => {
+    await seedPublic();
+    const res = await rpc("u_alice", "SendStreamingMessage", { tenant: NAME, message: message() });
+    expect(res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const question = await asked();
+    await answer(question.cursor, "Yes.");
+    const events = await streamed(res);
+    expect(events).toHaveLength(2);
+    const task = events[0].result.task;
+    expect(task).toMatchObject({ id: expect.any(String), contextId: expect.any(String), status: { state: "TASK_STATE_WORKING" } });
+    expect(events[1]).toMatchObject({
+      jsonrpc: "2.0", id: 1,
+      result: { statusUpdate: { taskId: task.id, contextId: task.contextId, status: { state: "TASK_STATE_COMPLETED", message: { parts: [{ text: "Yes." }] } } } },
+    });
+  });
+
+  it("SubscribeToTask on a completed task is the spec error", async () => {
+    await seedPublic();
+    const task = await taskOf("u_alice");
+    const [question] = await questionsIn(ROOM);
+    await answer(question.cursor, "Done.");
+    const res = await rpc("u_alice", "SubscribeToTask", { tenant: NAME, id: task.id });
+    expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+    expect((await json(res)).error?.code).toBe(-32004);
+  });
+
+  it("a stream cut at the cap can be resubscribed and starts with the current task", async () => {
+    await seedPublic();
+    const short = { blockCapMs: 300, waitRoundMs: 100 };
+    const first = await streamed(await direct({ jsonrpc: "2.0", id: 1, method: "SendStreamingMessage", params: { tenant: NAME, message: message() } }, short));
+    // Cut at the cap with no final event: the task is still working.
+    expect(first).toHaveLength(1);
+    const task = first[0].result.task;
+    expect(task.status.state).toBe("TASK_STATE_WORKING");
+
+    const [question] = await questionsIn(ROOM);
+    await answer(question.cursor, "Which review?", true);
+    const again = await streamed(await direct({ jsonrpc: "2.0", id: 2, method: "SubscribeToTask", params: { tenant: NAME, id: task.id } }, short));
+    expect(again).toHaveLength(1);
+    expect(again[0].result.task).toMatchObject({
+      id: task.id, status: { state: "TASK_STATE_INPUT_REQUIRED" },
+      history: [{ role: "ROLE_USER" }, { role: "ROLE_AGENT", parts: [{ text: "Which review?" }] }],
+    });
+  });
+
+  it("the asker still reads their own task after the room goes private; anyone else gets no room", async () => {
+    await seedPublic();
+    const task = await taskOf("u_alice");
+    await store().unpublishSession(ROOM, Date.now());
+    const ended = { state: "TASK_STATE_CANCELED", message: { parts: [{ text: "The room went private." }] } };
+    for (const tenant of [NAME, ROOM]) {
+      expect((await json(await rpc("u_alice", "GetTask", { tenant, id: task.id }))).result.status).toMatchObject(ended);
+      expect((await json(await rpc("u_alice", "ListTasks", { tenant }))).result.tasks).toMatchObject([{ id: task.id, status: ended }]);
+    }
+    const none = await (await rpc("u_bob", "GetTask", { tenant: "no-such-room", id: task.id })).text();
+    expect(await (await rpc("u_bob", "GetTask", { tenant: NAME, id: task.id })).text()).toBe(none);
+    expect(await (await rpc("u_bob", "ListTasks", { tenant: NAME })).text()).toBe(await (await rpc("u_bob", "ListTasks", { tenant: "no-such-room" })).text());
+    expect((await json(await rpc("u_alice", "SendMessage", ask(NAME)))).error?.code).toBe(-32602);
   });
 });

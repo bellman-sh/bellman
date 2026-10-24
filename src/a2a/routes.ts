@@ -3,15 +3,19 @@
  * `tenant`, a public name or a room id. Only a room that is public and open answers; every other tenant, a private,
  * unpublished, closed, nonexistent or malformed one, gets the one `NO_ROOM` error, byte for byte.
  *
- * The non-blocking methods only (Task 7): `SendMessage` answers with the task as it stands, WORKING, whatever
- * `returnImmediately` says, and the streaming methods are not supported. Task 8 replaces both.
+ * A room that has gone private or closed answers no new ask, but the caller who asked there still reads their own
+ * tasks in it, ended, with why (`statusMessage`).
+ *
+ * `SendMessage` waits for the answer unless `returnImmediately` says not to, and the two streams send each change as it
+ * happens; all three follow the task with `follow`, below, and stop at `BLOCK_CAP_MS`.
  */
 import { BANNED } from "../bans.js";
 import { askRoom, cancelOutsideTask, MAX_OPEN_OUTSIDE_TASKS, outsideTask, outsideTasksOf, type AskError } from "../outside.js";
 import { MAX_PAYLOAD_CHARS } from "../payload.js";
-import { PUBLIC_NAME, roomNamed } from "../public-names.js";
+import { PUBLIC_NAME } from "../public-names.js";
 import { isPublic, type BellmanStore } from "../store.js";
 import { SUSPENDED } from "../suspension.js";
+import { MAX_WAIT_SECONDS } from "../tools/kit.js";
 import type { Identity, OutsideTask } from "../types.js";
 import { A2A_ERRORS, errorInfo, parseRpc, rpcError, rpcResult, type RpcId } from "./jsonrpc.js";
 
@@ -22,7 +26,17 @@ export type A2aDeps = {
   /** Whether the caller's account is suspended, as the Worker's registry cache says. Asked only of a method that reads or writes a room. */
   suspended: () => Promise<boolean>;
   origin: string;
+  /** How long a blocking `SendMessage` or a stream follows a task; `BLOCK_CAP_MS` unless a test shortens it. */
+  blockCapMs?: number;
+  /** One wait on the room; `MAX_WAIT_SECONDS` unless a test shortens it. */
+  waitRoundMs?: number;
 };
+
+/**
+ * The longest a blocking `SendMessage` waits, and a stream stays open, before it hands back the task as it stands
+ * (ADR 0033 ruling b): Cloudflare's 400 s idle-connection limit less 5 s. A capped stream is resubscribed.
+ */
+export const BLOCK_CAP_MS = 395_000;
 
 const ROOMS = "https://bellman.sh/r/";
 const NO_TENANT = `Name a public room in \`tenant\`. Public rooms are listed at ${ROOMS}.`;
@@ -30,7 +44,7 @@ const NO_ROOM = `No public room answers to that tenant. Public rooms are listed 
 const NO_TASK = "No task of yours in this room has that id.";
 const NO_TEXT = "Rooms read text. Put the question in a text part.";
 const TOO_LONG = `The question is too long. Keep it under ${MAX_PAYLOAD_CHARS.toLocaleString("en-US")} characters.`;
-const STREAMING = "Streaming isn't available yet. Send with SendMessage and read the answer with GetTask.";
+const OVER = "That task is already over. Read it with GetTask.";
 const PUSH = "Push notifications aren't supported. Read the answer with GetTask.";
 const NO_EXTENDED_CARD = "This agent has no extended card.";
 const VERSION = "This endpoint speaks A2A 1.0. Send A2A-Version: 1.0.";
@@ -49,13 +63,21 @@ const field = <T>(p: Params, name: string, ok: (v: unknown) => v is T, wants: st
 };
 const isString = (v: unknown): v is string => typeof v === "string";
 const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
 const historyLengthOf = (p: Params) => field(p, "historyLength", isCount, "a whole number, 0 or more");
 
-/** The room a tenant names, when it is one that answers: public and open. Every other tenant is undefined, alike. */
-async function answeringRoom(store: BellmanStore, tenant: unknown) {
+/**
+ * The room a tenant names, if this caller may read in it: a room that answers (public and open), or one that no longer
+ * does, gone private or closed, for a caller who asked there. Every other tenant is undefined, alike. A public name
+ * still finds a room that gave it up, as long as its record names it and no other room has claimed it since.
+ */
+async function readableRoom(store: BellmanStore, tenant: unknown, callerUserId: string) {
   if (typeof tenant !== "string" || tenant === "" || tenant.length > MAX_TENANT_CHARS) return undefined;
-  const room = PUBLIC_NAME.test(tenant) ? await roomNamed(store, tenant) : await store.getSession(tenant);
-  return room && isPublic(room) && !room.closed ? room : undefined;
+  const id = PUBLIC_NAME.test(tenant) ? (await store.publicNameEntry(tenant))?.id : tenant;
+  const room = id === undefined ? undefined : await store.getSession(id);
+  if (!room || (PUBLIC_NAME.test(tenant) && room.publicName !== tenant)) return undefined;
+  if (isPublic(room) && !room.closed) return room;
+  return (await outsideTasksOf(store, room.id, callerUserId)).length > 0 ? room : undefined;
 }
 
 /** A refusal of this caller, with the reason a program can branch on. */
@@ -121,12 +143,91 @@ export function toA2aTask(task: OutsideTask, asked: readonly Asked[], historyLen
 const a2aTask = async (store: BellmanStore, task: OutsideTask, historyLength?: number) =>
   toA2aTask(task, historyLength === 0 ? [] : await askedOn(store, task), historyLength);
 
-async function sendMessage(id: RpcId, p: Params, deps: A2aDeps): Promise<Response> {
+/** A task that has stopped for its caller: ended, or waiting on them (INPUT_REQUIRED). Nothing changes it until they act. */
+const settled = (t: OutsideTask) => t.state !== "TASK_STATE_WORKING";
+
+/**
+ * Follow a task until it settles, the cap passes, or `signal` aborts (the client went away), and return it as it then
+ * stands. `changed` hears each new state. Each round long-polls the room from the end of its log, so any event, an
+ * answer or the notice an ending appends, wakes it at once; it then re-reads the task row and reads nothing from the
+ * event. A round is never longer than the time left, so no wait on the room outlives the cap, and an abort leaves the
+ * one wait in flight to end on its own within a round.
+ */
+async function follow(
+  deps: A2aDeps, start: OutsideTask, signal: AbortSignal, changed: (t: OutsideTask) => void = () => {}, idle: () => void = () => {},
+): Promise<OutsideTask> {
+  const until = Date.now() + (deps.blockCapMs ?? BLOCK_CAP_MS);
+  const round = deps.waitRoundMs ?? MAX_WAIT_SECONDS * 1000;
+  const reread = async (t: OutsideTask) => (await outsideTask(deps.store, t.sessionId, t.callerUserId, t.id)) ?? t;
+  const gone = new Promise<null>((resolve) => {
+    if (signal.aborted) resolve(null);
+    signal.addEventListener("abort", () => resolve(null), { once: true });
+  });
+  // The log's end first, then the row: a change that lands between the two is in the row, and any later one wakes the wait.
+  let cursor = (await deps.store.recentEvents(start.sessionId, 1))[0]?.cursor ?? 0;
+  let task = await reread(start);
+  if (task.state !== start.state) changed(task);
+  while (!settled(task) && !signal.aborted) {
+    const left = until - Date.now();
+    if (left <= 0) break;
+    const wait = deps.store.waitForEvents(task.sessionId, cursor, Math.min(round, left), 1);
+    wait.catch(() => {}); // still pending after an abort, and nobody left to hear it fail
+    const events = await Promise.race([wait, gone]);
+    if (events === null) break;
+    const last = events.at(-1);
+    if (last) cursor = last.cursor;
+    else idle();
+    const now = await reread(task);
+    if (now.state !== task.state) changed(now);
+    task = now;
+  }
+  return task;
+}
+
+const SSE = { "content-type": "text/event-stream", "cache-control": "no-store" };
+
+/**
+ * A2A's stream (spec 3.1.2, 3.1.6, 9.4.2): the task first, then a `statusUpdate` for each change, each event a JSON-RPC
+ * response carrying a `StreamResponse`. It closes after a settled state, at the cap (the client resubscribes), or
+ * when the client goes away. A round with no event sends a comment, so a client's read timeout does not cut it.
+ */
+function stream(id: RpcId, deps: A2aDeps, task: OutsideTask, first: object, signal: AbortSignal): Response {
+  const done = new AbortController();
+  signal.addEventListener("abort", () => done.abort(), { once: true });
+  const bytes = new TextEncoder();
+  return new Response(new ReadableStream<Uint8Array>({
+    start(out) {
+      const send = (text: string) => { if (!done.signal.aborted) out.enqueue(bytes.encode(text)); };
+      const event = (result: object) => send(`data: ${JSON.stringify({ jsonrpc: "2.0", id, result })}\n\n`);
+      const status = (t: OutsideTask) => (toA2aTask(t, [], 0) as { status: object }).status;
+      void (async () => {
+        try {
+          event({ task: first });
+          if (!settled(task)) {
+            await follow(deps, task, done.signal,
+              (t) => event({ statusUpdate: { taskId: t.id, contextId: t.contextId, status: status(t) } }), () => send(": waiting\n\n"));
+          }
+        } catch (err) {
+          console.error("A2A stream failed:", err);
+          send(`data: ${JSON.stringify({ jsonrpc: "2.0", id, error: { code: A2A_ERRORS.internal.code, message: A2A_ERRORS.internal.message } })}\n\n`);
+        }
+        try { out.close(); } catch { /* already canceled by the client */ }
+      })();
+    },
+    cancel() {
+      done.abort();
+    },
+  }), { headers: SSE });
+}
+
+/** Ask the room, or say why not: the task and how the caller wants it, or the response that refuses. */
+async function ask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response | { task: OutsideTask; historyLength?: number; immediate: boolean }> {
   const msg = p.message as { parts?: unknown; taskId?: unknown; contextId?: unknown } | undefined;
   if (!msg || typeof msg !== "object" || !Array.isArray(msg.parts)) throw new BadParams("`message` must be a Message with a `parts` list.");
   const taskId = field(msg as Params, "taskId", isString, "a string");
   const contextId = field(msg as Params, "contextId", isString, "a string");
   const historyLength = historyLengthOf(configOf(p));
+  const immediate = field(configOf(p), "returnImmediately", isBoolean, "true or false") === true;
   // Text parts are the question; a file or data part is dropped. With no text there is no question, and nothing is stored.
   const text = msg.parts
     .map((part) => (part as { text?: unknown } | null)?.text)
@@ -145,7 +246,33 @@ async function sendMessage(id: RpcId, p: Params, deps: A2aDeps): Promise<Respons
     text, ...(taskId === undefined ? {} : { taskId }), ...(contextId === undefined ? {} : { contextId }),
   });
   if (!asked.ok) return askRefused(id, asked.error, asked.retryAfter);
-  return rpcResult(id, { task: await a2aTask(deps.store, asked.task, historyLength) });
+  return { task: asked.task, historyLength, immediate };
+}
+
+/** Blocking unless `returnImmediately`: the task once it settles, or as it stands at the cap or when the client leaves. */
+async function sendMessage(id: RpcId, p: Params, deps: A2aDeps, signal: AbortSignal): Promise<Response> {
+  const asked = await ask(id, p, deps);
+  if (asked instanceof Response) return asked;
+  const task = asked.immediate ? asked.task : await follow(deps, asked.task, signal);
+  return rpcResult(id, { task: await a2aTask(deps.store, task, asked.historyLength) });
+}
+
+/** `returnImmediately` does nothing here: a stream always reports as it goes (spec 3.2.2). */
+async function sendStreamingMessage(id: RpcId, p: Params, deps: A2aDeps, signal: AbortSignal): Promise<Response> {
+  const asked = await ask(id, p, deps);
+  if (asked instanceof Response) return asked;
+  return stream(id, deps, asked.task, await a2aTask(deps.store, asked.task, asked.historyLength), signal);
+}
+
+/** The stream again, starting with the task as it is now (spec 3.1.6); a task that is over is UnsupportedOperation. */
+async function subscribeToTask(id: RpcId, p: Params, deps: A2aDeps, signal: AbortSignal): Promise<Response> {
+  const room = await readableRoom(deps.store, p.tenant, deps.caller.userId);
+  if (!room) return rpcError(id, A2A_ERRORS.invalidParams.code, NO_ROOM);
+  const taskId = field(p, "id", isString, "a string");
+  const task = taskId === undefined ? undefined : await outsideTask(deps.store, room.id, deps.caller.userId, taskId);
+  if (!task) return rpcError(id, A2A_ERRORS.taskNotFound.code, NO_TASK);
+  if (settled(task) && task.state !== "TASK_STATE_INPUT_REQUIRED") return rpcError(id, A2A_ERRORS.unsupportedOperation.code, OVER);
+  return stream(id, deps, task, await a2aTask(deps.store, task), signal);
 }
 
 const configOf = (p: Params): Params => {
@@ -156,7 +283,7 @@ const configOf = (p: Params): Params => {
 };
 
 async function getTask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response> {
-  const room = await answeringRoom(deps.store, p.tenant);
+  const room = await readableRoom(deps.store, p.tenant, deps.caller.userId);
   if (!room) return rpcError(id, A2A_ERRORS.invalidParams.code, NO_ROOM);
   const taskId = field(p, "id", isString, "a string");
   const historyLength = historyLengthOf(p);
@@ -165,7 +292,7 @@ async function getTask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response> {
 }
 
 async function listTasks(id: RpcId, p: Params, deps: A2aDeps): Promise<Response> {
-  const room = await answeringRoom(deps.store, p.tenant);
+  const room = await readableRoom(deps.store, p.tenant, deps.caller.userId);
   if (!room) return rpcError(id, A2A_ERRORS.invalidParams.code, NO_ROOM);
   const contextId = field(p, "contextId", isString, "a string");
   const state = field(p, "status", isString, "a task state");
@@ -192,7 +319,7 @@ async function listTasks(id: RpcId, p: Params, deps: A2aDeps): Promise<Response>
 }
 
 async function cancelTask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response> {
-  const room = await answeringRoom(deps.store, p.tenant);
+  const room = await readableRoom(deps.store, p.tenant, deps.caller.userId);
   if (!room) return rpcError(id, A2A_ERRORS.invalidParams.code, NO_ROOM);
   const taskId = field(p, "id", isString, "a string");
   if (taskId === undefined) return rpcError(id, A2A_ERRORS.taskNotFound.code, NO_TASK);
@@ -203,7 +330,11 @@ async function cancelTask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response
     : rpcError(id, A2A_ERRORS.taskNotCancelable.code, "That task is already over, so there is nothing to cancel.");
 }
 
-const HANDLERS = new Map([["SendMessage", sendMessage], ["GetTask", getTask], ["ListTasks", listTasks], ["CancelTask", cancelTask]]);
+type Handler = (id: RpcId, p: Params, deps: A2aDeps, signal: AbortSignal) => Promise<Response>;
+const HANDLERS = new Map<string, Handler>([
+  ["SendMessage", sendMessage], ["SendStreamingMessage", sendStreamingMessage], ["SubscribeToTask", subscribeToTask],
+  ["GetTask", getTask], ["ListTasks", listTasks], ["CancelTask", cancelTask],
+]);
 const PUSH_METHODS = new Set([
   "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig", "ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig",
 ]);
@@ -228,7 +359,6 @@ export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Respon
 
   if (PUSH_METHODS.has(method)) return rpcError(id, A2A_ERRORS.pushNotSupported.code, PUSH);
   if (method === "GetExtendedAgentCard") return rpcError(id, A2A_ERRORS.extendedCardNotConfigured.code, NO_EXTENDED_CARD);
-  if (method === "SendStreamingMessage" || method === "SubscribeToTask") return rpcError(id, A2A_ERRORS.unsupportedOperation.code, STREAMING);
   const handler = HANDLERS.get(method);
   if (!handler) return rpcError(id, A2A_ERRORS.methodNotFound.code, A2A_ERRORS.methodNotFound.message);
 
@@ -238,7 +368,7 @@ export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Respon
   }
   try {
     if (await deps.suspended()) return refused(id, "SUSPENDED", SUSPENDED);
-    return await handler(id, params as Params, deps);
+    return await handler(id, params as Params, deps, request.signal);
   } catch (err) {
     if (err instanceof BadParams) return rpcError(id, A2A_ERRORS.invalidParams.code, err.message);
     console.error(`A2A ${method} failed:`, err);

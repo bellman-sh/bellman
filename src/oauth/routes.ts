@@ -1025,13 +1025,12 @@ async function acceptInvite(
   plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string, linked?: InviteClaim,
 ): Promise<{ joined: boolean; notice: Notice }> {
   const person = defaultIdentity(profile);
-  // The link's key answers for its own org only, and only while its invite is the one the link was signed for
-  // (ADR 0036, D2); a Join of any other is the person's own keys'.
-  const viaLink = linked?.orgId === orgId && (await plans.invitesFor([linked.key])).some((invite) => inviteNamedBy(invite, linked));
-  const answering = linked && viaLink ? [...keys, linked.key] : keys;
-  const outcome = await plans.acceptOrgInvite(orgId, answering, subjectOf(profile), Date.now(), {
+  // The link's key answers for its own org only, and the store reads it only while its invite is the one the link was
+  // signed for, in the Join's own operation (ADR 0036, D2); a Join of any other org is the person's own keys'.
+  const link = linked?.orgId === orgId ? { key: linked.key, at: linked.at } : undefined;
+  const outcome = await plans.acceptOrgInvite(orgId, keys, subjectOf(profile), Date.now(), {
     actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
-  });
+  }, link);
   const org = outcome === "gone" ? undefined : await plans.getOrg(orgId);
   if (!org) return { joined: false, notice: { lead: "That invitation is no longer open." } };
   if (outcome === "joined") return { joined: true, notice: { lead: "You joined ", org, tail: "." } };

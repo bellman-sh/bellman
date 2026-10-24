@@ -5310,6 +5310,22 @@ export function describeStoreContract(
         expect([granted?.action, granted?.actorUserId, granted?.detail.key]).toEqual(["plan_granted", "u_github_9", "github:9"]);
       });
 
+      it("reads a link's key in the Join's own operation, only while its invite is the one the link names (ADR 0036, D2)", async () => {
+        await seated();
+        const link = { key: "email:ana@y.test", at: 7 };
+        await store.putOrgInvite(invite(link.key), by);
+        // Withdrawn and issued again after the link was signed: the old link seats nobody, and the new invite stands.
+        await store.deleteOrgInvite("org_acme", link.key, by);
+        await store.putOrgInvite(invite(link.key, { invitedAt: 30, expiresAt: 30 + INVITE_TTL_MS }), by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 40, person, link)).toBe("gone");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.invitesFor([link.key])).toHaveLength(1);
+        // The link the new invite was signed for joins under the subject, though no key of the person's names it.
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 40, person, { ...link, at: 30 })).toBe("joined");
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", source: "invite" });
+        expect(await store.invitesFor([link.key])).toEqual([]);
+      });
+
       it("seats nobody for an offer that is not there: no record, no invite, or one withdrawn first", async () => {
         expect(await store.acceptOrgInvite("org_acme", keys, "github:9", 40, person)).toBe("gone");
         await seated();

@@ -1,5 +1,5 @@
 # auth.md agent registration: design
-**Date:** 2026-10-23 · **Status:** draft
+**Date:** 2026-10-23 · **Status:** approved 2026-10-23 (anonymous stays off)
 
 Implements the `service_auth` path of WorkOS's auth.md profile (v0.6.0, https://github.com/workos/auth.md) on Bellman's authorization server. Builds on the panel sign-in (`/auth/signin`, `completeSession`), the invites page's single-use form (ADR 0027) and the token endpoint in `src/oauth/routes.ts`.
 

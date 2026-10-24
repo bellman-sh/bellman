@@ -427,6 +427,8 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       if (wait > 0) {
         const limited = problem(429, "cooldown", "this invite was sent less than ten minutes ago", origin);
         limited.headers.set("retry-after", String(Math.ceil(wait / 1000)));
+        // The panel is another origin, and Retry-After is not a CORS-safelisted header: exposed, its Resend can say when.
+        limited.headers.set("access-control-expose-headers", "retry-after");
         return limited;
       }
       // D5's reason holds for a resend too: a link into a full org can only end at a Join that says so.

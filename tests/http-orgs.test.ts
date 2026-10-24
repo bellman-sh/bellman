@@ -501,6 +501,7 @@ describe("invitations by link and email (ADR 0036)", () => {
     expect([soon.status, (await json(soon)).error]).toEqual([429, "cooldown"]);
     expect(Number(soon.headers.get("retry-after"))).toBeGreaterThan(RESEND_COOLDOWN_MS / 1000 - 5);
     expect(Number(soon.headers.get("retry-after"))).toBeLessThanOrEqual(RESEND_COOLDOWN_MS / 1000);
+    expect(soon.headers.get("access-control-expose-headers")).toBe("retry-after");
     const missing = (await resend("owner", "github%3A77"))!;
     expect([missing.status, (await json(missing)).error]).toEqual([404, "missing"]);
     expect(mail).toHaveBeenCalledTimes(1);

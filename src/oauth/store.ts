@@ -6,8 +6,14 @@ import {
   clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
   type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient, type SettledAnswer,
-  type SweepStorage,
+  type SweepStorage, type SweepVerdict,
 } from "./storage.js";
+import {
+  AGENT_COUNT_KEY, AGENT_REGS_PER_HOUR, AGENT_UNCLAIMED_CAP, decideApprove, decidePoll, decideReissue,
+  newAttempt, type AgentClaimed, type AgentGrant, type AgentRegistration, type ApproveVerdict,
+  type PollVerdict, type ReissueVerdict,
+} from "./agent-auth.js";
+import { REFRESH_TOKEN_TTL_MS } from "./tokens.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
 import { reconcilePurchase, type PurchaseGrantStore } from "../billing/grants.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
@@ -37,6 +43,16 @@ const COUNT = CLIENT_COUNT_KEY;
 /** Where each bounded sweep stopped, so the next pass does not re-read page one. */
 const CLIENT_CURSOR_KEY = "clients:cursor";
 const REG_CURSOR_KEY = "regs:cursor";
+/** The auth.md agent registration's records (ADR 0036): see the agent methods below. */
+const AGENT_REG = "agentreg:";
+const AGENT_ATTEMPT = "agentattempt:";
+const AGENT_GRANT = "agentgrant:";
+const AGENT_IP = "agentip:";
+const AGENT_REG_CURSOR_KEY = "agentregs:cursor";
+const AGENT_ATTEMPT_CURSOR_KEY = "agentattempts:cursor";
+const AGENT_GRANT_CURSOR_KEY = "agentgrants:cursor";
+const AGENT_IP_CURSOR_KEY = "agentips:cursor";
+type AttemptRow = { claim_token: string; expires_at: number };
 /** How much stale data one registration is willing to clear. */
 const PURGE_BATCH = 200;
 
@@ -393,17 +409,17 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     );
     if (clients.reclaimed > 0) await this.#bumpCount(rows, -clients.reclaimed, before);
 
-    const buckets = await sweepPage<number[]>(
-      sweepOver(rows), REG, REG_CURSOR_KEY, PURGE_BATCH,
-      (stamps) => {
-        const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
-        // An empty bucket is deleted, not stored empty: otherwise one key per
-        // source address survives forever and rotating addresses grow storage
-        // without bound.
-        if (recent.length === 0) return { action: "delete" };
-        return recent.length === stamps.length ? { action: "keep" } : { action: "rewrite", value: recent };
-      }
-    );
+    const pruneStamps = (stamps: number[]): SweepVerdict<number[]> => {
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      // An empty bucket is deleted, not stored empty: otherwise one key per
+      // source address survives forever and rotating addresses grow storage
+      // without bound.
+      if (recent.length === 0) return { action: "delete" };
+      return recent.length === stamps.length ? { action: "keep" } : { action: "rewrite", value: recent };
+    };
+    const buckets = await sweepPage<number[]>(sweepOver(rows), REG, REG_CURSOR_KEY, PURGE_BATCH, pruneStamps);
+    const agentIps = await sweepPage<number[]>(sweepOver(rows), AGENT_IP, AGENT_IP_CURSOR_KEY, PURGE_BATCH, pruneStamps);
+    const agent = await this.#purgeAgent(rows, now);
 
     // Freeing something un-sticks admission immediately, rather than leaving it
     // waiting out a backoff that is no longer true.
@@ -411,10 +427,137 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
     return {
       clients: clients.reclaimed,
-      buckets: buckets.reclaimed,
-      // Only a pass that reached the end of both keyspaces licenses a backoff.
-      complete: clients.wrapped && buckets.wrapped,
+      buckets: buckets.reclaimed + agentIps.reclaimed,
+      agent: agent.reclaimed,
+      // Only a pass that reached the end of every keyspace licenses a backoff.
+      complete: clients.wrapped && buckets.wrapped && agentIps.wrapped && agent.wrapped,
     };
+  }
+
+  /**
+   * The agent registration's share of the sweep: registrations past their 24 hours
+   * (with the attempt each still points at), attempts past their ten minutes, and
+   * grants past theirs. A registration is the only one of the three the count
+   * follows, so it moves here and in pollAgentClaim and nowhere else.
+   */
+  async #purgeAgent(rows: Rows, now: number): Promise<{ reclaimed: number; wrapped: boolean }> {
+    const orphans: string[] = [];
+    const regs = await sweepPage<AgentRegistration>(
+      sweepOver(rows), AGENT_REG, AGENT_REG_CURSOR_KEY, PURGE_BATCH,
+      (reg) => {
+        if (now <= reg.expires_at) return { action: "keep" };
+        orphans.push(`${AGENT_ATTEMPT}${reg.attempt.attempt_token}`);
+        return { action: "delete" };
+      }
+    );
+    // An attempt a wrong code killed is already gone, so this counts what it deletes.
+    const attemptsWithRegs = orphans.length > 0 ? await rows.delete(orphans) : 0;
+    if (regs.reclaimed > 0) {
+      const count = (await rows.get<number>(AGENT_COUNT_KEY)) ?? 0;
+      await rows.put(AGENT_COUNT_KEY, Math.max(0, count - regs.reclaimed));
+    }
+    const expired = (row: { expires_at: number }): SweepVerdict<never> =>
+      now > row.expires_at ? { action: "delete" } : { action: "keep" };
+    const attempts = await sweepPage<AttemptRow>(sweepOver(rows), AGENT_ATTEMPT, AGENT_ATTEMPT_CURSOR_KEY, PURGE_BATCH, expired);
+    const grants = await sweepPage<AgentGrant>(sweepOver(rows), AGENT_GRANT, AGENT_GRANT_CURSOR_KEY, PURGE_BATCH, expired);
+    return {
+      reclaimed: regs.reclaimed + attemptsWithRegs + attempts.reclaimed + grants.reclaimed,
+      wrapped: regs.wrapped && attempts.wrapped && grants.wrapped,
+    };
+  }
+
+  /**
+   * The auth.md agent registration (ADR 0036). Each method is one transaction, for
+   * admitRegistration's reason: the decision in agent-auth.ts and the write it
+   * leads to are one unit, so a poll and an approval cannot both act on the same
+   * read. worker-tests/agent-auth-race.test.ts holds calls at that point.
+   */
+  async admitAgentRegistration(claimToken: string, reg: AgentRegistration, ip: string, now: number): Promise<Admission> {
+    const outcome = await this.ctx.storage.transaction<Admission>(async (txn) => {
+      const bucket = `${AGENT_IP}${ip}`;
+      const recent = ((await txn.get<number[]>(bucket)) ?? []).filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      if (recent.length >= AGENT_REGS_PER_HOUR) return "rate_limited";
+      const count = (await txn.get<number>(AGENT_COUNT_KEY)) ?? 0;
+      if (count >= AGENT_UNCLAIMED_CAP) return "full";
+      await txn.put({
+        [`${AGENT_REG}${claimToken}`]: reg,
+        [`${AGENT_ATTEMPT}${reg.attempt.attempt_token}`]: { claim_token: claimToken, expires_at: reg.attempt.expires_at },
+        [bucket]: [...recent, now],
+        [AGENT_COUNT_KEY]: count + 1,
+      });
+      return "ok";
+    });
+    // After the transaction, for admitRegistration's reason.
+    if (outcome === "ok") await this.#armSweep(SWEEP_INTERVAL_MS);
+    return outcome;
+  }
+
+  async reissueAgentCode(claimToken: string, email: string, now: number): Promise<{ verdict: ReissueVerdict; reg?: AgentRegistration }> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const reg = await txn.get<AgentRegistration>(`${AGENT_REG}${claimToken}`);
+      const verdict = decideReissue(reg, email, now);
+      if (verdict !== "ok" || !reg) return { verdict };
+      const next: AgentRegistration = { ...reg, attempt: newAttempt(now) };
+      await txn.delete(`${AGENT_ATTEMPT}${reg.attempt.attempt_token}`);
+      await txn.put({
+        [`${AGENT_REG}${claimToken}`]: next,
+        [`${AGENT_ATTEMPT}${next.attempt.attempt_token}`]: { claim_token: claimToken, expires_at: next.attempt.expires_at },
+      });
+      return { verdict, reg: next };
+    });
+  }
+
+  async readAgentAttempt(attemptToken: string, now: number): Promise<AgentRegistration | null> {
+    const row = await this.ctx.storage.get<AttemptRow>(`${AGENT_ATTEMPT}${attemptToken}`);
+    if (!row || now > row.expires_at) return null;
+    return (await this.ctx.storage.get<AgentRegistration>(`${AGENT_REG}${row.claim_token}`)) ?? null;
+  }
+
+  async approveAgentClaim(attemptToken: string, code: string, claimed: AgentClaimed, now: number): Promise<ApproveVerdict> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const attemptKey = `${AGENT_ATTEMPT}${attemptToken}`;
+      const row = await txn.get<AttemptRow>(attemptKey);
+      const regKey = row ? `${AGENT_REG}${row.claim_token}` : undefined;
+      const reg = regKey ? await txn.get<AgentRegistration>(regKey) : undefined;
+      const verdict = decideApprove(reg, attemptToken, code, claimed.identity_keys, now);
+      if (!regKey || !reg) return verdict;
+      if (verdict.kind === "wrong_code" || verdict.kind === "dead") {
+        await txn.put(regKey, { ...reg, attempt: { ...reg.attempt, failures: reg.attempt.failures + 1 } });
+        if (verdict.kind === "dead") await txn.delete(attemptKey);
+      } else if (verdict.kind === "approved") {
+        await txn.put(regKey, { ...reg, claimed });
+      }
+      return verdict;
+    });
+  }
+
+  async pollAgentClaim(claimToken: string, now: number): Promise<PollVerdict> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const regKey = `${AGENT_REG}${claimToken}`;
+      const reg = await txn.get<AgentRegistration>(regKey);
+      const verdict = decidePoll(reg, now);
+      if (!reg || verdict.kind === "unknown") return verdict;
+      if (verdict.kind === "granted") {
+        const count = (await txn.get<number>(AGENT_COUNT_KEY)) ?? 0;
+        await txn.delete([regKey, `${AGENT_ATTEMPT}${reg.attempt.attempt_token}`]);
+        await txn.put({
+          [`${AGENT_GRANT}${reg.registration_id}`]: { ...verdict.claimed, expires_at: now + REFRESH_TOKEN_TTL_MS },
+          [AGENT_COUNT_KEY]: Math.max(0, count - 1),
+        });
+        return verdict;
+      }
+      await txn.put(regKey, { ...reg, last_poll_at: now });
+      return verdict;
+    });
+  }
+
+  async getAgentGrant(registrationId: string, now: number): Promise<AgentGrant | null> {
+    const grant = await this.ctx.storage.get<AgentGrant>(`${AGENT_GRANT}${registrationId}`);
+    return grant && now <= grant.expires_at ? grant : null;
+  }
+
+  async deleteAgentGrant(registrationId: string): Promise<void> {
+    await this.ctx.storage.delete(`${AGENT_GRANT}${registrationId}`);
   }
 
   async countClients(): Promise<number> {
@@ -696,6 +839,27 @@ export class AuthStore implements AuthStorage, BillingStorage {
   }
   deleteSession(id: string): Promise<void> {
     return this.object.deleteSession(id);
+  }
+  admitAgentRegistration(claimToken: string, reg: AgentRegistration, ip: string, now: number): Promise<Admission> {
+    return this.object.admitAgentRegistration(claimToken, reg, ip, now);
+  }
+  reissueAgentCode(claimToken: string, email: string, now: number): Promise<{ verdict: ReissueVerdict; reg?: AgentRegistration }> {
+    return this.object.reissueAgentCode(claimToken, email, now);
+  }
+  readAgentAttempt(attemptToken: string, now: number): Promise<AgentRegistration | null> {
+    return this.object.readAgentAttempt(attemptToken, now);
+  }
+  approveAgentClaim(attemptToken: string, code: string, claimed: AgentClaimed, now: number): Promise<ApproveVerdict> {
+    return this.object.approveAgentClaim(attemptToken, code, claimed, now);
+  }
+  pollAgentClaim(claimToken: string, now: number): Promise<PollVerdict> {
+    return this.object.pollAgentClaim(claimToken, now);
+  }
+  getAgentGrant(registrationId: string, now: number): Promise<AgentGrant | null> {
+    return this.object.getAgentGrant(registrationId, now);
+  }
+  deleteAgentGrant(registrationId: string): Promise<void> {
+    return this.object.deleteAgentGrant(registrationId);
   }
 }
 

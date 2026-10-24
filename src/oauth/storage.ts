@@ -1,4 +1,10 @@
 import type { Identity } from "../types.js";
+import {
+  AGENT_REGS_PER_HOUR, AGENT_UNCLAIMED_CAP, decideApprove, decidePoll, decideReissue, newAttempt,
+  type AgentClaimed, type AgentGrant, type AgentRegistration, type ApproveVerdict, type PollVerdict,
+  type ReissueVerdict,
+} from "./agent-auth.js";
+import { REFRESH_TOKEN_TTL_MS } from "./tokens.js";
 
 /**
  * The authorization server's storage shape, kept free of any Workers import so
@@ -418,6 +424,8 @@ export async function clientCount(
 export interface Reclaimed {
   clients: number;
   buckets: number;
+  /** Agent registration, attempt and grant records past their expiry (ADR 0036). */
+  agent: number;
   /**
    * The pass examined everything, so reclaiming nothing really does mean there
    * was nothing to reclaim. A bounded pass that stopped part-way must not be
@@ -522,6 +530,42 @@ export interface AuthStorage {
   replanSession(id: string, identity: Identity, planSource: string, planKey: string | null, now: number): Promise<boolean>;
   /** Sign out. Idempotent: an unknown id is not an error. */
   deleteSession(id: string): Promise<void>;
+
+  /**
+   * The auth.md agent registration (ADR 0036). Each method is one read-decide-write
+   * unit, under the rule admitRegistration states: nothing else may run between
+   * the read and the write. The decisions themselves live in agent-auth.ts.
+   */
+  admitAgentRegistration(claimToken: string, reg: AgentRegistration, ip: string, now: number): Promise<Admission>;
+  /** On "ok", retires the current attempt and returns the registration with a new one. */
+  reissueAgentCode(claimToken: string, email: string, now: number): Promise<{ verdict: ReissueVerdict; reg?: AgentRegistration }>;
+  /** The registration a claim page's attempt token belongs to; null once that attempt is gone. No writes. */
+  readAgentAttempt(attemptToken: string, now: number): Promise<AgentRegistration | null>;
+  approveAgentClaim(attemptToken: string, code: string, claimed: AgentClaimed, now: number): Promise<ApproveVerdict>;
+  /** "granted" is answered once: it turns the registration into a grant. */
+  pollAgentClaim(claimToken: string, now: number): Promise<PollVerdict>;
+  getAgentGrant(registrationId: string, now: number): Promise<AgentGrant | null>;
+  deleteAgentGrant(registrationId: string): Promise<void>;
+}
+
+/**
+ * Drop each address's stamps that left the window, and the address with them once
+ * none are left. Returns how many addresses went. An empty bucket is deleted, not
+ * stored empty: otherwise one key per source address survives forever and
+ * rotating addresses grow storage without bound.
+ */
+function pruneBuckets(buckets: Map<string, number[]>, now: number): number {
+  let dropped = 0;
+  for (const [ip, stamps] of buckets) {
+    const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+    if (recent.length === 0) {
+      buckets.delete(ip);
+      dropped++;
+    } else if (recent.length !== stamps.length) {
+      buckets.set(ip, recent);
+    }
+  }
+  return dropped;
 }
 
 /** In-memory implementation, for tests and for the Node server. */
@@ -533,6 +577,11 @@ export class MemoryAuthStore implements AuthStorage {
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
   private sessions = new Map<string, PanelSession>();
+  private agentRegs = new Map<string, AgentRegistration>();
+  /** attempt token → the claim token whose registration holds it. */
+  private agentAttempts = new Map<string, { claim_token: string; expires_at: number }>();
+  private agentGrants = new Map<string, AgentGrant>();
+  private agentIps = new Map<string, number[]>();
   /** Set after a purge that reclaimed nothing; see purgeDue. */
   private purgeIdleUntil: number | undefined;
 
@@ -607,21 +656,30 @@ export class MemoryAuthStore implements AuthStorage {
       }
     }
 
-    let buckets = 0;
-    for (const [ip, stamps] of this.registrations) {
-      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
-      // An empty bucket is deleted, not stored empty: otherwise one key per
-      // source address survives forever and rotating addresses grow storage
-      // without bound.
-      if (recent.length === 0) {
-        this.registrations.delete(ip);
-        buckets++;
-      } else if (recent.length !== stamps.length) {
-        this.registrations.set(ip, recent);
+    let agent = 0;
+    for (const [claimToken, reg] of this.agentRegs) {
+      if (now > reg.expires_at) {
+        this.agentRegs.delete(claimToken);
+        agent++;
+        if (this.agentAttempts.delete(reg.attempt.attempt_token)) agent++;
       }
     }
+    for (const [token, row] of this.agentAttempts) {
+      if (now > row.expires_at) {
+        this.agentAttempts.delete(token);
+        agent++;
+      }
+    }
+    for (const [id, grant] of this.agentGrants) {
+      if (now > grant.expires_at) {
+        this.agentGrants.delete(id);
+        agent++;
+      }
+    }
+
+    const buckets = pruneBuckets(this.registrations, now) + pruneBuckets(this.agentIps, now);
     // Nothing is paged here, so every pass has seen everything.
-    return { clients, buckets, complete: true };
+    return { clients, buckets, agent, complete: true };
   }
 
   async countClients(): Promise<number> {
@@ -735,5 +793,74 @@ export class MemoryAuthStore implements AuthStorage {
 
   async deleteSession(id: string): Promise<void> {
     this.sessions.delete(id);
+  }
+
+  // The agent methods below are synchronous between read and write, for
+  // admitRegistration's reason. Values are cloned in and out, so a caller holding
+  // one cannot change what is stored, as it cannot through the Durable Object.
+
+  async admitAgentRegistration(claimToken: string, reg: AgentRegistration, ip: string, now: number): Promise<Admission> {
+    const recent = (this.agentIps.get(ip) ?? []).filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+    if (recent.length >= AGENT_REGS_PER_HOUR) return "rate_limited";
+    if (this.agentRegs.size >= AGENT_UNCLAIMED_CAP) return "full";
+    this.agentRegs.set(claimToken, structuredClone(reg));
+    this.agentAttempts.set(reg.attempt.attempt_token, { claim_token: claimToken, expires_at: reg.attempt.expires_at });
+    this.agentIps.set(ip, [...recent, now]);
+    return "ok";
+  }
+
+  async reissueAgentCode(claimToken: string, email: string, now: number): Promise<{ verdict: ReissueVerdict; reg?: AgentRegistration }> {
+    const reg = this.agentRegs.get(claimToken);
+    const verdict = decideReissue(reg, email, now);
+    if (verdict !== "ok" || !reg) return { verdict };
+    this.agentAttempts.delete(reg.attempt.attempt_token);
+    const next = { ...reg, attempt: newAttempt(now) };
+    this.agentRegs.set(claimToken, next);
+    this.agentAttempts.set(next.attempt.attempt_token, { claim_token: claimToken, expires_at: next.attempt.expires_at });
+    return { verdict, reg: structuredClone(next) };
+  }
+
+  async readAgentAttempt(attemptToken: string, now: number): Promise<AgentRegistration | null> {
+    const row = this.agentAttempts.get(attemptToken);
+    if (!row || now > row.expires_at) return null;
+    const reg = this.agentRegs.get(row.claim_token);
+    return reg ? structuredClone(reg) : null;
+  }
+
+  async approveAgentClaim(attemptToken: string, code: string, claimed: AgentClaimed, now: number): Promise<ApproveVerdict> {
+    const row = this.agentAttempts.get(attemptToken);
+    const reg = row ? this.agentRegs.get(row.claim_token) : undefined;
+    const verdict = decideApprove(reg, attemptToken, code, claimed.identity_keys, now);
+    if (!row || !reg) return verdict;
+    if (verdict.kind === "wrong_code" || verdict.kind === "dead") {
+      this.agentRegs.set(row.claim_token, { ...reg, attempt: { ...reg.attempt, failures: reg.attempt.failures + 1 } });
+      if (verdict.kind === "dead") this.agentAttempts.delete(attemptToken);
+    } else if (verdict.kind === "approved") {
+      this.agentRegs.set(row.claim_token, { ...reg, claimed: structuredClone(claimed) });
+    }
+    return verdict;
+  }
+
+  async pollAgentClaim(claimToken: string, now: number): Promise<PollVerdict> {
+    const reg = this.agentRegs.get(claimToken);
+    const verdict = decidePoll(reg, now);
+    if (!reg || verdict.kind === "unknown") return verdict;
+    if (verdict.kind === "granted") {
+      this.agentRegs.delete(claimToken);
+      this.agentAttempts.delete(reg.attempt.attempt_token);
+      this.agentGrants.set(reg.registration_id, { ...structuredClone(verdict.claimed), expires_at: now + REFRESH_TOKEN_TTL_MS });
+      return structuredClone(verdict);
+    }
+    this.agentRegs.set(claimToken, { ...reg, last_poll_at: now });
+    return verdict;
+  }
+
+  async getAgentGrant(registrationId: string, now: number): Promise<AgentGrant | null> {
+    const grant = this.agentGrants.get(registrationId);
+    return grant && now <= grant.expires_at ? structuredClone(grant) : null;
+  }
+
+  async deleteAgentGrant(registrationId: string): Promise<void> {
+    this.agentGrants.delete(registrationId);
   }
 }

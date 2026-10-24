@@ -22,7 +22,9 @@
  *
  * The surface and events reads take `?query=` (room search spec, D3): a card search over the
  * surface, a message search over the newest `MAX_EVENTS_READ` events, bounded as the plain reads
- * are and named by number as they are.
+ * are and named by number as they are. The surface read also takes `?window=` and `?next=` (surface
+ * frames spec, D5): one window of the surface with its frames, under a validator of its own, each
+ * answer named by number as the plain read is.
  */
 import { cardResponse, roomCard, roomCard03 } from "../a2a/cards.js";
 import { v03CardTenant } from "../a2a/routes.js";
@@ -33,12 +35,14 @@ import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
-import { isPublic, readSurface, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
+import { isPublic, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import type { BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
-import { AFTER_WITH_QUERY, MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, searchTag, surfaceTag } from "./rooms.js";
+import {
+  AFTER_WITH_QUERY, MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, searchTag, surfaceBody, surfaceTag, windowParams, windowTag,
+} from "./rooms.js";
 
 export interface PublicRouteDeps {
   store: BellmanStore;
@@ -181,18 +185,30 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
     const checked = query === null ? undefined : checkQuery(query);
 
     if (part === "surface") {
+      // `?window=` and `?next=` take the member read's grammar (surface frames spec, D5); `query` beside either is refused first.
+      const ask = windowParams(url.searchParams, query !== null);
+      if (!ask.ok) return answer(400, { error: "invalid_request", error_description: ask.reason });
       if (checked !== undefined && !checked.ok) return answer(400, { error: "invalid_request", error_description: checked.reason });
       const words = checked?.ok ? checked.words : undefined;
       // As the member route answers a seat still in the room: from the record alone on a match. A
-      // search's tag carries the link and the words, so a poll's tag never answers it (R20).
+      // search's tag carries the link and the words, a window's the window and the token asked, so a
+      // poll's tag never answers either (R20, R16).
       const exposed = { "access-control-expose-headers": "etag" };
-      const tag = (cursor: number) => (words === undefined ? surfaceTag(cursor) : searchTag(cursor, roomLink(session), words));
+      const tag = (cursor: number) => words !== undefined ? searchTag(cursor, roomLink(session), words)
+        : ask.asked === null ? surfaceTag(cursor) : windowTag(cursor, ask.name, ask.next);
       if (etagMatches(request.headers.get("if-none-match"), tag(surfaceCursor(session)))) {
         return new Response(null, { status: 304, headers: { ...OPEN, ...exposed, "cache-control": "no-store", etag: tag(surfaceCursor(session)) } });
       }
-      const block = words === undefined
-        ? await readSurface(deps.store, session).then(({ cursor, items }) => ({ cursor, body: { surface_cursor: cursor, items } }))
-        : await searchSurface(deps.store, session, words).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+      let block: { cursor: number; body: unknown };
+      if (words !== undefined) {
+        block = await searchSurface(deps.store, session, words).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+      } else if (ask.asked === null) {
+        block = await readSurface(deps.store, session).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
+      } else {
+        const read = await readSurfaceWindow(deps.store, session, ask.asked);
+        if (!read.ok) return answer(400, { error: "invalid_request", error_description: read.reason });
+        block = { cursor: read.block.cursor, body: surfaceBody(read.block.cursor, read.block) };
+      }
       return answer(200, await numbered(deps.store, id, block.body), { ...exposed, etag: tag(block.cursor) });
     }
 

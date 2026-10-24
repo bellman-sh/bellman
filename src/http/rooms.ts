@@ -22,14 +22,15 @@ import {
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
   sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
+import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
-  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, roomLink, searchLog, searchSurface,
-  sessionStatus, writeSurface, type RoomFailure,
+  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
+  sessionStatus, writeSurface, type RoomFailure, type SurfaceBlock,
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
@@ -836,6 +837,49 @@ export const surfaceTag = (cursor: number): string => `"${cursor}"`;
 export const searchTag = (cursor: number, link: string | null, words: readonly string[]): string =>
   `"${cursor}:${encodeURIComponent(link ?? "")}:${encodeURIComponent(words.join(" "))}"`;
 
+/**
+ * The validator for a windowed surface read (surface frames spec, R16): the cursor, the window asked
+ * (`""` when only `next` was sent) and the `next` asked (`""` when none), so no tag answers another
+ * read. It has three colons where `searchTag` has two, and the plain read's tag has none.
+ */
+export const windowTag = (cursor: number, window: string, next: string): string =>
+  `"${cursor}:w:${encodeURIComponent(window)}:${encodeURIComponent(next)}"`;
+
+/** What a surface read asked of `?window=` and `?next=`: neither (`asked` null), or the parsed ask with the strings its tag is built from. */
+export type WindowParams =
+  | { ok: true; asked: { window?: Window; next?: string } | null; name: string; next: string }
+  | { ok: false; reason: string };
+
+/**
+ * Reads `?window=` and `?next=` off a surface request, in the order the routes refuse: `query` beside
+ * either, then the window's own grammar. The token is checked by the read, which holds the rows.
+ */
+export function windowParams(params: URLSearchParams, searching: boolean): WindowParams {
+  const rawWindow = params.get("window");
+  const rawNext = params.get("next");
+  if (rawWindow === null && rawNext === null) return { ok: true, asked: null, name: "", next: "" };
+  if (searching) return { ok: false, reason: QUERY_WITH_WINDOW };
+  const parsed = rawWindow === null ? undefined : parseWindow(rawWindow, "http");
+  if (parsed !== undefined && !parsed.ok) return { ok: false, reason: parsed.reason };
+  const window = parsed?.window;
+  return {
+    ok: true,
+    asked: { ...(window === undefined ? {} : { window }), ...(rawNext === null ? {} : { next: rawNext }) },
+    name: window === undefined ? "" : windowName(window),
+    next: rawNext ?? "",
+  };
+}
+
+/** A surface read's body: the page's envelopes with the frames and where to go on, and a region's slots. */
+export const surfaceBody = (cursor: number, block: SurfaceBlock) => ({
+  surface_cursor: cursor,
+  items: block.items,
+  frames: block.frames,
+  window: block.window,
+  next: block.next,
+  ...(block.slots === undefined ? {} : { slots: block.slots }),
+});
+
 /** A search reads the newest events, not a page past a cursor, so `after` has no meaning beside `query`. */
 export const AFTER_WITH_QUERY = "after and query cannot be used together: a search reads the newest events, not a page past a cursor";
 
@@ -924,6 +968,12 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
  * With `?query=` it searches the cards the caller would be shown instead (room search spec,
  * section 1): `{ surface_cursor, total, results }`, with `searchTag` as its ETag by the same two
  * paths, so a poll's tag and a search's never answer one another.
+ *
+ * With `?window=` or `?next=` it answers one window (surface frames spec, D5): `newest`, `unframed`,
+ * `frame:<n>`, `key:<key>` or `region:<x>,<y>,<w>,<h>`, and the `next` a page named, as
+ * `{ surface_cursor, items, frames, window, next }` (and `slots` for a region). Its ETag is `windowTag`
+ * by the same two paths. A refusal is a 400 `invalid_request` with its text; `query` beside either is
+ * one. With neither it answers the front window under the plain tag.
  */
 async function readSurfaceRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -942,10 +992,13 @@ async function readSurfaceRoute(request: Request, url: URL, sessionId: string, o
   // unless the header is exposed by name; on the 304 as on the 200.
   const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag" };
   const query = url.searchParams.get("query");
+  const ask = windowParams(url.searchParams, query !== null);
+  if (!ask.ok) return problem(400, "invalid_request", ask.reason, origin);
   const checked = query === null ? undefined : checkQuery(query);
   if (checked !== undefined && !checked.ok) return problem(400, "invalid_request", checked.reason, origin);
   const words = checked?.ok ? checked.words : undefined;
-  const tag = (cursor: number) => (words === undefined ? surfaceTag(cursor) : searchTag(cursor, roomLink(session), words));
+  const tag = (cursor: number) => words !== undefined ? searchTag(cursor, roomLink(session), words)
+    : ask.asked === null ? surfaceTag(cursor) : windowTag(cursor, ask.name, ask.next);
   const notModified = (cursor: number) =>
     new Response(null, { status: 304, headers: { ...exposed, "cache-control": "no-store", etag: tag(cursor) } });
 
@@ -953,9 +1006,16 @@ async function readSurfaceRoute(request: Request, url: URL, sessionId: string, o
   if (cut === undefined && etagMatches(ifNoneMatch, tag(surfaceCursor(session)))) {
     return notModified(surfaceCursor(session));
   }
-  const block = words === undefined
-    ? await readSurface(deps.store, session, cut).then(({ cursor, items }) => ({ cursor, body: { surface_cursor: cursor, items } }))
-    : await searchSurface(deps.store, session, words, cut).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+  let block: { cursor: number; body: unknown };
+  if (words !== undefined) {
+    block = await searchSurface(deps.store, session, words, cut).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+  } else if (ask.asked === null) {
+    block = await readSurface(deps.store, session, cut).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
+  } else {
+    const read = await readSurfaceWindow(deps.store, session, ask.asked, cut);
+    if (!read.ok) return problem(400, "invalid_request", read.reason, origin);
+    block = { cursor: read.block.cursor, body: surfaceBody(read.block.cursor, read.block) };
+  }
   if (cut !== undefined && etagMatches(ifNoneMatch, tag(block.cursor))) return notModified(block.cursor);
   const res = json(200, block.body, origin);
   res.headers.set("etag", tag(block.cursor));

@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { NEXT_REFUSAL, WINDOW_REFUSAL_HTTP } from "../src/frames.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, searchTag, type RoomRouteDeps } from "../src/http/rooms.js";
@@ -187,6 +188,29 @@ describe("GET /public/rooms/:id/surface", () => {
     expect(items[0].data.approved_by).toEqual({ member_id: "m_peer", label: "member 2" });
     // The sign-in label is nowhere in what a reader gets, whichever key a later change files the approver under.
     expect(JSON.stringify(items)).not.toContain("peer@codenerd");
+  });
+});
+
+describe("the public surface read's windows (surface frames spec, D5)", () => {
+  // Review Focus 3.
+  it("answers a garbage or tampered next or window 400 with its text, never a 500", async () => {
+    for (const [q, text] of [
+      ["?next=%00%FF", NEXT_REFUSAL], ["?next=" + btoa(JSON.stringify(["frame", 1, "x"])), NEXT_REFUSAL],
+      ["?window=region:1e999,0,1,1", WINDOW_REFUSAL_HTTP], ["?window=key:..", WINDOW_REFUSAL_HTTP],
+    ] as const) {
+      const res = (await read(`/public/rooms/${PUB}/surface${q}`))!;
+      expect([res.status, await bodyOf(res)]).toEqual([400, { error: "invalid_request", error_description: text }]);
+    }
+  });
+
+  it("names members by number in a window as in the plain read, and answers a private room 404 first", async () => {
+    await store.appendEvent(PUB, { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null },
+      { surface: { key: "a", item: { key: "a", kind: "text", title: null, body: "x", ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null } } });
+    const body = await bodyOf(await read(`/public/rooms/${PUB}/surface?window=newest`));
+    expect(JSON.stringify(body)).not.toContain("@codenerd");
+    expect(body).toMatchObject({ window: "newest", frames: [], next: null });
+    await store.createSession(session({ id: "qs_private", members: [member()] }));
+    expect(await bodyOf(await read("/public/rooms/qs_private/surface?window=frames"))).toEqual(NOT_PUBLIC);
   });
 });
 

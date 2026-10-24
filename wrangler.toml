@@ -68,6 +68,12 @@ bucket_name = "bellman-blobs"
 name = "SEND_EMAIL"
 destination_address = "support@bellman.sh"
 
+# An org's invites (ADR 0036), from invites@bellman.sh to the address invited, so no destination is fixed. It reaches
+# any address only once bellman.sh is onboarded to Cloudflare Email Service; until then a send fails, the API answers
+# `mailed: false` with the link, and the admin hands it on.
+[[send_email]]
+name = "INVITE_EMAIL"
+
 # SQLite-backed Durable Objects. Required on the Workers Free plan, and the
 # storage API is identical to the KV-backed flavour.
 [[migrations]]

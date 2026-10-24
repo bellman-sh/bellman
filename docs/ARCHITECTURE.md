@@ -1506,6 +1506,15 @@ loud:
   account, so the creator, who sets its instructions, does read it. In a small
   private room who filed a report may be evident by elimination, which no view can
   prevent.
+- **An org's invite mail is built from the server's text and the org's drawn name**
+  (ADR 0036). It goes from invites@bellman.sh through `INVITE_EMAIL`, a `send_email`
+  binding of its own, since the reports' is fixed to support@. Its subject and body
+  are the server's words, the role, the link and the expiry, with the org's name as
+  `drawnOrgName` draws it and CR/LF removed, so an admin's text cannot reach a header.
+  The key must be one plain address, checked at the invite and again at the mailer.
+  The log names the org and the send time, never the address. A failed send is
+  swallowed: the API answers `mailed: false` with the link, which is a bearer
+  credential for that one invite, and a resend, withdrawal, Join or expiry kills it.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both

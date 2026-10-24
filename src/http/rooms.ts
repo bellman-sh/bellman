@@ -29,7 +29,7 @@ import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untr
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
-  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurfaceWindow, readWholeSurface, roomLink, searchLog, searchSurface,
+  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
   sessionStatus, writeSurface, type RoomFailure, type SurfaceBlock,
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
@@ -973,8 +973,8 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
  * `frame:<n>`, `key:<key>` or `region:<x>,<y>,<w>,<h>`, and the `next` a page named, as
  * `{ surface_cursor, items, frames, window, next }` (and `slots` for a region). Its ETag is `windowTag`
  * by the same two paths. A refusal is a 400 `invalid_request` with its text; `query` beside either is
- * one. With neither it answers every row the caller may see, as `window: "all"` with `next: null`, under
- * the plain tag (`readWholeSurface`): today's dash reads it until it pages (surface frames, Part 2).
+ * one. With neither it answers the front (`readSurface`): frame 1 when the caller sees a frame, else
+ * the newest, under the plain tag.
  */
 async function readSurfaceRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -1011,7 +1011,7 @@ async function readSurfaceRoute(request: Request, url: URL, sessionId: string, o
   if (words !== undefined) {
     block = await searchSurface(deps.store, session, words, cut).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
   } else if (ask.asked === null) {
-    block = await readWholeSurface(deps.store, session, cut).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
+    block = await readSurface(deps.store, session, cut).then((b) => ({ cursor: b.cursor, body: surfaceBody(b.cursor, b) }));
   } else {
     const read = await readSurfaceWindow(deps.store, session, ask.asked, cut);
     if (!read.ok) return problem(400, "invalid_request", read.reason, origin);

@@ -1084,8 +1084,8 @@ rectangle; a card belongs to the frame holding its centre, and a frame's number 
 inside its object (`src/frames.ts` ranks, places and pages them, runtime-free, for both stores) and
 returns one page of at most 64 items with `frames[]`, the window it answered and `next`, a keyset
 position, so a read crosses RPC with one page and not a thousand rows. A tool read with no window is the
-front: frame 1 when the room has frames, else the newest items; the HTTP read with no window still
-returns every row (`readWholeSurface`) until the dash pages. `appendSurface` is the store operation
+front: frame 1 when the room has frames, else the newest items, and so is an HTTP read with no window.
+`appendSurface` is the store operation
 every surface write goes through: in the append's own transaction it lists the rows when the write is
 placed among them (a frame, a card naming a frame, a card with no placement), refuses a frame
 that would overlap another, places a card sent with `frame: <n>` in that frame's first free slot, and,

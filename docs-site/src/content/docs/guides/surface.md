@@ -164,7 +164,7 @@ A read returns a window, at most 64 items, with `frames[]` (every frame as `{ nu
 
 A connector comes with any item it joins and does not count toward the 64. With no `window` you get the front: frame 1 when the room has frames, else `newest`. `next` is `null` when the window holds no more; otherwise send it back alone, as `next`, to read on. It resumes from where the page stopped, not from a snapshot, so an item moved meanwhile can be missed or repeated. A search result carries the number of the frame to read around it.
 
-`GET /rooms/:id/surface` takes the same `?window=` and `?next=`, and also `region:<x>,<y>,<w>,<h>` (the items whose centre is in that rectangle) and `key:<key>` (that one item). A windowed read answers an ETag of its own. A read with neither `window` nor `next` returns every item you may see, as `window: "all"` with `next: null`, and keeps the surface cursor as its tag, until the dash reads windows.
+`GET /rooms/:id/surface` takes the same `?window=` and `?next=`, and also `region:<x>,<y>,<w>,<h>` (the items whose centre is in that rectangle) and `key:<key>` (that one item). A windowed read answers an ETag of its own. A read with neither `window` nor `next` returns the front, as the tool does, and keeps the surface cursor as its tag.
 
 ## Searching it
 

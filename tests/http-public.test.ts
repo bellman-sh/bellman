@@ -158,11 +158,11 @@ describe("GET /public/rooms/:id/surface", () => {
     expect([again.status, again.headers.get("etag"), again.headers.get("access-control-allow-origin")]).toEqual([304, tag, "*"]);
   });
 
-  // The read today's dash makes, with no window: every row, until the dash pages (surface frames, Part 2).
-  it("answers every row of a room of 70 items with no window asked, as window all and no next", async () => {
+  // With no window the read is the front, as a tool's is (ADR 0038): the whole-room read went once the dash paged.
+  it("answers the front with no window asked: the newest 64 of 70 items and a next", async () => {
     await seed(70);
     const body = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as { items: unknown[]; window: string; next: string | null; frames: unknown[] };
-    expect([body.items.length, body.window, body.next, body.frames]).toEqual([70, "all", null, []]);
+    expect([body.items.length, body.window, typeof body.next, body.frames]).toEqual([64, "newest", "string", []]);
   });
 
   // Room pages spec, D4: what the page orders and dates a post by.

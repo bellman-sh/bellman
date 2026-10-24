@@ -95,4 +95,5 @@ it("moves a locked frame holding 900 cards in one append: 900 carried events, ev
     const was = before.get(r.key)!;
     expect(r.placement, r.key).toEqual({ ...was, x: was.x + 5000 });
   }
-});
+  // Seeding 900 rows took past the 15 s default under load on 2026-10-23 and passed alone; the move is not what is slow.
+}, 60_000);

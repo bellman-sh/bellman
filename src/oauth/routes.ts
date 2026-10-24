@@ -1100,13 +1100,12 @@ async function acceptInvite(
   plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string, linked?: InviteClaim,
 ): Promise<{ joined: boolean; notice: Notice }> {
   const person = defaultIdentity(profile);
-  // The link's key answers for its own org only, and only while its invite is the one the link was signed for
-  // (ADR 0036, D2); a Join of any other is the person's own keys'.
-  const viaLink = linked?.orgId === orgId && (await plans.invitesFor([linked.key])).some((invite) => inviteNamedBy(invite, linked));
-  const answering = linked && viaLink ? [...keys, linked.key] : keys;
-  const outcome = await plans.acceptOrgInvite(orgId, answering, subjectOf(profile), Date.now(), {
+  // The link's key answers for its own org only, and the store reads it only while its invite is the one the link was
+  // signed for, in the Join's own operation (ADR 0036, D2); a Join of any other org is the person's own keys'.
+  const link = linked?.orgId === orgId ? { key: linked.key, at: linked.at } : undefined;
+  const outcome = await plans.acceptOrgInvite(orgId, keys, subjectOf(profile), Date.now(), {
     actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
-  });
+  }, link);
   const org = outcome === "gone" ? undefined : await plans.getOrg(orgId);
   if (!org) return { joined: false, notice: { lead: "That invitation is no longer open." } };
   if (outcome === "joined") return { joined: true, notice: { lead: "You joined ", org, tail: "." } };
@@ -1476,9 +1475,14 @@ export async function handleOAuth(
   // that the session's account is the one invited.
   const linkMatch = method === "GET" ? /^\/invite\/([^/]+)$/.exec(path) : null;
   if (linkMatch) {
+    // The page's own URL holds the token, which joins as the invite: no answer to it hands that on in a Referer.
+    const noReferrer = (res: Response): Response => {
+      res.headers.set("referrer-policy", "no-referrer");
+      return res;
+    };
     const panels = config.panelOrigins ?? [];
     if (panels.length === 0) {
-      return html(`<h1>No control panel configured</h1><p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`, 503);
+      return noReferrer(html(`<h1>No control panel configured</h1><p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`, 503));
     }
     const token = linkMatch[1];
     const claim = config.plans ? await verifyInviteLink(token, config.issuer, config.secret) : null;
@@ -1487,7 +1491,7 @@ export async function handleOAuth(
       : undefined;
     const org = invite ? await config.plans!.getOrg(invite.orgId) : undefined;
     if (!invite || !org) {
-      return html(`<h1>This invitation has expired or was withdrawn</h1><p>Ask the person who invited you to send it again.</p>`, 410);
+      return noReferrer(html(`<h1>This invitation has expired or was withdrawn</h1><p>Ask the person who invited you to send it again.</p>`, 410));
     }
     const nonce = randomId();
     const pending: SessionRequest = {
@@ -1505,7 +1509,7 @@ export async function handleOAuth(
       stateToken, org.requireSso ? [] : configured(config), true,
     ));
     page.headers.append("set-cookie", serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS));
-    return page;
+    return noReferrer(page);
   }
 
   // ------------------------------------------------------- /auth/session

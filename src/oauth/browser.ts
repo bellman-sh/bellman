@@ -14,7 +14,7 @@
 const PREFLIGHT_MAX_AGE_SECONDS = 86_400;
 
 /** The methods the panel uses. Explicit rather than echoing the request. */
-const ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
+const ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 
 /**
  * The request headers the panel sends that a browser does not send unasked. The

@@ -779,3 +779,20 @@ describe("the sink's deliveries", () => {
     expect(posts).toHaveLength(2);
   });
 });
+
+describe("the retention window on the local server's clock", () => {
+  const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+  const row = (at: number) => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+  const DAY = 86_400_000;
+
+  it("sweep deletes an org's rows past its window once its sweep is due, and not before (#323)", async () => {
+    const store = new MemoryStore();
+    const now = Date.now();
+    await store.appendAudit(row(now - 40 * DAY));
+    await store.setAuditRetention("org_a", 30, by);
+    await store.sweep(now - 60_000);
+    expect((await store.queryAudit("org_a", { limit: 10 })).entries.map((e) => e.action)).toEqual(["audit_retention_set", "sent_message"]);
+    await store.sweep(now + 60_000);
+    expect((await store.queryAudit("org_a", { limit: 10 })).entries.map((e) => e.action)).toEqual(["audit_swept", "audit_retention_set"]);
+  });
+});

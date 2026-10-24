@@ -66,12 +66,14 @@ again." No panel origin configured answers 503 as `/auth/signin` does.
 
 At the callback, `invitesHeld` reads `session.invite`: a token that verifies and names a live
 invite is added to the offers (first, before the keys' own), and the held sign-in carries
-`invite`, the verified `InviteClaim` `{ orgId, key, at }`. A Join of the claim's org, while its
-invite is still the one the claim names, passes `[...grantKeys(identityKeys(profile)), claim.key]`
-to the store; a Join of any other org passes the person's own keys alone, so one org's link never
-reaches another org's invite of the same address. `acceptOrgInvite` is unchanged:
-it finds the invite under that key and writes the grant on the subject key, so the person who
-clicked the link joins whatever their provider reported. A token that does not verify at the
+`invite`, the verified `InviteClaim` `{ orgId, key, at }`. A Join of the claim's org passes the
+person's own keys, `grantKeys(identityKeys(profile))`, and the claim's `{ key, at }` as `link`;
+`acceptOrgInvite` reads the link's key only while the org's invite on it has `invitedAt === at`,
+in its own operation, so a withdraw and re-invite between the claim and the Join seats nobody
+(#331). A Join of any other org passes the person's own keys alone, so one org's link never
+reaches another org's invite of the same address. The store finds the invite under the link's key
+and writes the grant on the subject key, so the person who clicked the link joins whatever their
+provider reported. A token that does not verify at the
 callback is ignored: the sign-in carries on as one without a link.
 
 A signed-in person who opens the link signs in again. One page and one path, and the invite is

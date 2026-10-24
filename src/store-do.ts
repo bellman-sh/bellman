@@ -4061,12 +4061,14 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   /** The offer, the switch, every key's grant and the seats are read in the transaction that writes the grant (ADR 0027). */
   async #acceptOrgInviteTxn(
-    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
   ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
     return this.ctx.storage.transaction(async (txn) => {
       const org = await txn.get<Org>(orgKey(orgId));
       if (!org) return "gone" as const;
-      const unique = [...new Set([subjectKey, ...keys])];
+      const named = link ? await txn.get<OrgInvite>(inviteKeysFor({ orgId, key: link.key })[0]) : undefined;
+      const linked = link && named?.invitedAt === link.at ? [link.key] : [];
+      const unique = [...new Set([subjectKey, ...keys, ...linked])];
       const inviteRows = unique.map((key) => inviteKeysFor({ orgId, key }));
       const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg))))
         .find((i): i is OrgInvite => i !== undefined && inviteLive(liftInvite(i), now));
@@ -4100,9 +4102,9 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async acceptOrgInvite(
-    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
   ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
-    const outcome = await this.#acceptOrgInviteTxn(orgId, keys, subjectKey, now, audit);
+    const outcome = await this.#acceptOrgInviteTxn(orgId, keys, subjectKey, now, audit, link);
     if (outcome === "joined") await this.driver.deliverNow();
     return outcome;
   }
@@ -6070,9 +6072,9 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async acceptOrgInvite(
-    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
   ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
-    return this.registry.acceptOrgInvite(orgId, keys, subjectKey, now, audit);
+    return this.registry.acceptOrgInvite(orgId, keys, subjectKey, now, audit, link);
   }
 
   async declineOrg(subjectKey: string, orgId: string, now: number): Promise<void> {

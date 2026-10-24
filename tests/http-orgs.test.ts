@@ -99,6 +99,8 @@ describe("the module's edge", () => {
     expect(await call("owner", "/audit")).toBeUndefined();
     const preflight = (await call(null, "/org", "OPTIONS"))!;
     expect([preflight.status, preflight.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+    // PATCH /org is the panel's, so its preflight must name the method or the browser never sends it.
+    expect(preflight.headers.get("access-control-allow-methods")?.split(/,\s*/)).toEqual(expect.arrayContaining(["PATCH"]));
   });
 
   it("asks for a caller, and tells an unknown path under /org from a method it does not take", async () => {

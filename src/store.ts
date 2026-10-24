@@ -1953,9 +1953,13 @@ export interface BellmanStore {
    * those keys go, and every such seat of the org's, which the grant replaces. An unowned seat in any org
    * holds nothing, so none counts below. `gone` for no record or no such offer; `sso` when the org requires
    * single sign-on; `member` when a key holds this org's grant otherwise (its invites go); `taken` when a
-   * key holds any other grant; `full` at the seats, unless a seat moves.
+   * key holds any other grant; `full` at the seats, unless a seat moves. `link` is an invite link's key and the
+   * `invitedAt` it was signed for (ADR 0036, D2): its key joins `keys` only while this org's invite on it is that one,
+   * read in the same operation, so a link whose invite was withdrawn and issued again seats nobody.
    */
-  acceptOrgInvite(orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
+  acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
   /**
    * That the person behind `subjectKey` declined this org's offers made by `now` (ADR 0027), kept on their
    * side: the org's invites stay as they were, so a decline tells its admins nothing. A later decline moves
@@ -1993,9 +1997,10 @@ export interface BellmanStore {
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
    * sweeps the unnamed objects of a closed room whose close it did not see (#65), drops
-   * expired connect tokens, and deletes the reports resolved 180 days ago (R15). MemoryStore does
-   * all of it here; the Durable Objects store does none, because each room's alarm does its
-   * room's and the registry's alarm does the reports'.
+   * expired connect tokens, deletes the reports resolved 180 days ago (R15), and delivers and sweeps
+   * each org's audit stream when due (ADR 0035). MemoryStore does all of it here; the Durable Objects
+   * store does none, because each room's alarm does its room's, the registry's alarm does the
+   * reports', and each org's AuditDO alarm does its stream's.
    */
   sweep(now: number): Promise<void>;
 }
@@ -3728,12 +3733,13 @@ export class MemoryStore implements BellmanStore {
 
   /** Synchronous throughout, as the guarded grant writes are: the offer's read and the grant's write must not be split. */
   async acceptOrgInvite(
-    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
   ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
     const org = this.orgs.get(orgId);
     if (!org) return "gone";
-    const unique = [...new Set([subjectKey, ...keys])];
     const pending = this.invites.get(orgId);
+    const linked = link && pending?.get(link.key)?.invitedAt === link.at ? [link.key] : [];
+    const unique = [...new Set([subjectKey, ...keys, ...linked])];
     const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined && inviteLive(i, now));
     const grants = unique.map((key) => this.liveGrant(key)).filter((g): g is PlanGrant => g !== undefined);
     // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
@@ -4111,8 +4117,9 @@ export class MemoryStore implements BellmanStore {
     for (const [reporter, times] of this.filings) {
       if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
-    // Every sink whose delivery is due: what AuditDO's own alarm does per org.
+    // Every sink whose delivery is due, and every retention window whose sweep is: what AuditDO's own alarm does per org.
     for (const [orgId, st] of this.auditState) if (st.sinkAt !== null && st.sinkAt <= now) await this.pumpAuditSink(orgId, now);
+    for (const [orgId, st] of this.auditState) if (st.sweepAt !== null && st.sweepAt <= now) await this.sweepAudit(orgId, now);
   }
 
   /**

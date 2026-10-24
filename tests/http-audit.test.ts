@@ -23,12 +23,13 @@ const people: Record<string, Identity> = {
   "member-a": { userId: "u_al", orgId: "org_a", plan: "team", role: "member", label: "Al" },
   "free-a": { userId: "u_fi", orgId: "org_a", plan: "free", role: "admin", label: "Fi" },
   "no-org": { userId: "u_nn", orgId: null, plan: "team", role: "admin", label: "Nn" },
+  "cookie-a": { userId: "u_ana", orgId: "org_a", plan: "team", role: "admin", label: "Ana" },
 };
 
 const caller = async (request: Request): Promise<RoomCaller | null> => {
   const token = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
   const identity = token === undefined ? undefined : people[token];
-  return identity ? { identity, via: "bearer" } : null;
+  return identity ? { identity, via: token!.startsWith("cookie-") ? "cookie" : "bearer" } : null;
 };
 
 let store: MemoryStore;
@@ -39,11 +40,13 @@ beforeEach(() => {
   deps = { store, caller, panelOrigins: [PANEL] };
 });
 
-const call = (who: string | null, path: string, method = "GET") =>
+const call = (who: string | null, path: string, method = "GET", body?: string, origin: string | null = PANEL) =>
   auditRoutes(new Request(`${ISSUER}${path}`, {
     method,
-    headers: { origin: PANEL, ...(who ? { authorization: `Bearer ${who}` } : {}) },
+    headers: { ...(origin ? { origin } : {}), ...(who ? { authorization: `Bearer ${who}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body,
   }), deps);
+const patch = (who: string, body: string) => call(who, "/audit/settings", "PATCH", body);
 
 interface ListBody {
   org_id: string;
@@ -127,6 +130,7 @@ describe("GET /audit", () => {
     const seen = {
       seq: 1, at: expect.any(String), action: "sent_message", room: { id: "qs_q3", name: room.manifest.room },
       actor: { id: "u_ana", label: "Ana", org_id: "org_a" }, parties: ["org_a", "org_b"], crossing: "cross_org", detail: { chars: 5 },
+      hash: expect.stringMatching(/^[0-9a-f]{64}$/),
     };
     expect((await list("/audit", "admin-a")).entries).toEqual([{ ...seen, direction: "outbound" }]);
     expect((await list("/audit", "admin-b")).entries).toEqual([{ ...seen, direction: "inbound" }]);
@@ -163,7 +167,7 @@ describe("GET /audit", () => {
     expect(grant).toMatchObject({ room: null, crossing: "internal" });
     expect(old).toEqual({
       seq: 1, at: "1970-01-01T00:00:01.000Z", action: "member_left", room: { id: "qs_old", name: null },
-      actor: { id: "u_old" }, parties: null, crossing: null, direction: null, detail: {},
+      actor: { id: "u_old" }, parties: null, crossing: null, direction: null, detail: {}, hash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
   });
 });
@@ -185,8 +189,8 @@ describe("the CSV", () => {
   });
 
   it("writes a row in the columns' order, the parties joined with ; and a person with no org named so", () => {
-    const view = entryView({ seq: 3, ...row({ at: 7, parties: ["org_a", null], crossing: "cross_org", direction: "outbound", detail: { chars: 5 } }) });
-    expect(csvRow(view)).toBe(`3,1970-01-01T00:00:00.007Z,sent_message,qs_q3,q3-plan,u_ana,Ana,org_a,org_a;(no org),cross_org,outbound,"{""chars"":5}"\r\n`);
+    const view = entryView({ seq: 3, hash: "ab12", prevHash: "", ...row({ at: 7, parties: ["org_a", null], crossing: "cross_org", direction: "outbound", detail: { chars: 5 } }) });
+    expect(csvRow(view)).toBe(`3,1970-01-01T00:00:00.007Z,sent_message,qs_q3,q3-plan,u_ana,Ana,org_a,org_a;(no org),cross_org,outbound,"{""chars"":5}",ab12\r\n`);
   });
 
   it("writes an org id that would break a header as a safe file name", () => {
@@ -233,6 +237,8 @@ describe("GET /audit/export", () => {
     const csv = await (await call("admin-a", `/audit/export?${filter}&format=csv&through=${page.through}`))!.text();
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(CSV_COLUMNS.join(","));
+    expect(lines[0].endsWith(",hash")).toBe(true);
+    expect(lines[1].split(",").at(-1)).toBe(listed[0]!.hash);
     expect(lines.slice(1).map((l) => Number(l.split(",")[0]))).toEqual(listed.map((e) => e.seq));
   });
 
@@ -241,6 +247,7 @@ describe("GET /audit/export", () => {
     await store.appendAudit(row());
     const json = (await (await call("admin-a", "/audit/export?format=json&through=3"))!.json()) as { through: number; entries: AuditEntryView[] };
     expect([json.through, json.entries.map((e) => e.seq)]).toEqual([3, [3, 2, 1]]);
+    expect(json.entries.map((e) => e.hash)).toEqual([3, 2, 1].map(() => expect.stringMatching(/^[0-9a-f]{64}$/)));
   });
 
   it("writes a stream with no rows as the header alone, and as a list with none in it", async () => {
@@ -283,5 +290,106 @@ describe("GET /audit/export", () => {
     const res = (await call("admin-a", "/audit/export?format=csv"))!;
     expect(res.status).toBe(200);
     await expect(res.text()).rejects.toThrow();
+  });
+});
+
+describe("GET /audit/verify", () => {
+  it("walks the org's chain, from a seq on request, and refuses a bad from", async () => {
+    for (const at of [1, 2, 3]) await store.appendAudit(row({ at }));
+    const res = (await call("admin-a", "/audit/verify"))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, from_seq: 1, through_seq: 3, checked: 3, unhashed: 0 });
+    expect(await (await call("admin-a", "/audit/verify?from=2"))!.json()).toMatchObject({ ok: true, from_seq: 2, checked: 2 });
+    expect((await call("admin-a", "/audit/verify?from=x"))!.status).toBe(400);
+    expect(await said(await call("admin-a", "/audit/verify?from=0"))).toBe("from must be a positive integer");
+    expect((await call("member-a", "/audit/verify"))!.status).toBe(403);
+    expect((await call("free-a", "/audit/verify"))!.status).toBe(403);
+  });
+});
+
+describe("/audit/settings", () => {
+  it("answers the panel's preflight for a PATCH", async () => {
+    const pre = (await call(null, "/audit/settings", "OPTIONS"))!;
+    expect([pre.status, pre.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+    expect(pre.headers.get("access-control-allow-methods")?.split(/,\s*/)).toEqual(expect.arrayContaining(["PATCH"]));
+  });
+
+  it("reads the org's window and sink, both unset to start", async () => {
+    const res = (await call("admin-a", "/audit/settings"))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ retention_days: null, sink: null });
+  });
+
+  it("sets the window, writes the row, and refuses a window under the floor, a string, a bad body and an empty one", async () => {
+    const res = (await patch("admin-a", JSON.stringify({ retention_days: 90 })))!;
+    expect([res.status, await res.json()]).toEqual([200, { retention_days: 90, sink: null }]);
+    expect((await store.auditForOrg("org_a", 10)).at(-1)).toMatchObject({ action: "audit_retention_set", actorUserId: "u_ana", detail: { days: 90 } });
+    expect(await said(await patch("admin-a", JSON.stringify({ retention_days: 29 })))).toBe("retention_days must be an integer of at least 30, or null");
+    expect((await patch("admin-a", JSON.stringify({ retention_days: "90" })))!.status).toBe(400);
+    expect((await patch("admin-a", "not json"))!.status).toBe(400);
+    expect((await patch("admin-a", "{}"))!.status).toBe(400);
+    const cleared = (await patch("admin-a", JSON.stringify({ retention_days: null })))!;
+    expect([cleared.status, await cleared.json()]).toEqual([200, { retention_days: null, sink: null }]);
+  });
+
+  it("refuses a cookie write without the panel's Origin, and takes the read", async () => {
+    expect((await call("cookie-a", "/audit/settings", "PATCH", '{"retention_days":90}', null))!.status).toBe(403);
+    expect((await store.auditSettings("org_a")).retentionDays).toBeNull();
+    expect((await call("cookie-a", "/audit/settings", "GET", undefined, null))!.status).toBe(200);
+    expect((await call("cookie-a", "/audit/settings", "PATCH", '{"retention_days":90}'))!.status).toBe(200);
+  });
+
+  it("is an admin's route, and takes no other method", async () => {
+    expect((await call("member-a", "/audit/settings"))!.status).toBe(403);
+    expect((await patch("member-a", JSON.stringify({ retention_days: 90 })))!.status).toBe(403);
+    expect((await call("admin-a", "/audit/settings", "PUT"))!.status).toBe(405);
+  });
+});
+
+describe("/audit/sink", () => {
+  const put = (who: string, body: string, origin: string | null = PANEL) => call(who, "/audit/sink", "PUT", body, origin);
+  const URL_A = "https://siem.example.test/bellman";
+
+  it("sets the sink, answering its status and the secret once, and shows it in the settings", async () => {
+    const res = (await put("admin-a", JSON.stringify({ url: URL_A })))!;
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ sink: { url: URL_A, status: "ok", delivered_through: 0, pending: 1 } }); // the audit_sink_set row is the first delivery
+    expect(body.secret).toMatch(/^[A-Za-z0-9_-]{43}$/); // randomId(32): 256 bits, base64url
+    const settings = await (await call("admin-a", "/audit/settings"))!.json();
+    expect(settings.sink).toMatchObject({ url: URL_A, status: "ok" });
+    expect(settings).not.toHaveProperty("secret");
+    expect((await store.auditForOrg("org_a", 10)).at(-1)).toMatchObject({ action: "audit_sink_set", actorUserId: "u_ana", detail: { url: URL_A } });
+  });
+
+  it("refuses an http URL, a missing one, and a body that is not JSON", async () => {
+    expect(await said(await put("admin-a", JSON.stringify({ url: "http://siem.example.test/x" })))).toBe("url must be an https URL without credentials");
+    expect(await said(await put("admin-a", JSON.stringify({ url: "https://u:p@siem.example.test/x" })))).toBe("url must be an https URL without credentials");
+    expect((await put("admin-a", "{}"))!.status).toBe(400);
+    expect((await put("admin-a", "nope"))!.status).toBe(400);
+    expect((await store.auditSettings("org_a")).sink).toBeNull();
+  });
+
+  it("removes the sink: 204, then 404 when there is none", async () => {
+    await put("admin-a", JSON.stringify({ url: URL_A }));
+    expect((await call("admin-a", "/audit/sink", "DELETE"))!.status).toBe(204);
+    expect((await store.auditSettings("org_a")).sink).toBeNull();
+    expect((await call("admin-a", "/audit/sink", "DELETE"))!.status).toBe(404);
+  });
+
+  it("resumes a sink: 200 with its status, 404 when there is none", async () => {
+    expect((await call("admin-a", "/audit/sink/resume", "POST"))!.status).toBe(404);
+    await put("admin-a", JSON.stringify({ url: URL_A }));
+    const res = (await call("admin-a", "/audit/sink/resume", "POST"))!;
+    expect([res.status, (await res.json()).status]).toEqual([200, "ok"]);
+  });
+
+  it("is an admin's route, CSRF-gated, and takes no other method", async () => {
+    expect((await put("member-a", JSON.stringify({ url: URL_A })))!.status).toBe(403);
+    expect((await call("member-a", "/audit/sink", "DELETE"))!.status).toBe(403);
+    expect((await call("member-a", "/audit/sink/resume", "POST"))!.status).toBe(403);
+    expect((await put("cookie-a", JSON.stringify({ url: URL_A }), null))!.status).toBe(403);
+    expect((await call("admin-a", "/audit/sink", "GET"))!.status).toBe(405);
+    expect((await call("admin-a", "/audit/sink/resume", "GET"))!.status).toBe(405);
   });
 });

@@ -70,6 +70,8 @@ An admin seats a teammate by a stable identity: `github:<numeric id>`, `google:<
 
 A seat takes effect at once only for someone the org owns by its form: a subject of its own identity provider, or an address under a domain it has verified. Anyone else is invited. The org gets nothing of theirs until they accept: not their sign-in, their plan, the rooms they sit in or its audit of them. Their next sign-in stops at a page that names the org, with **Join**, **Decline**, and a way to carry on without answering, which asks again next time. Joining takes a seat, so a full org refuses it, and so does an org that requires single sign-on, which they join by signing in through it. Declining is kept on their side: the invitation stops showing for them, and stays pending for the org's admins, who see no change. An invitation the org makes after the decline asks again. An invite takes no seat. `GET /org/members` lists invites after the members, each marked `invited`, `POST` answers `202` for one, and `DELETE /org/members/<key>` withdraws it.
 
+An invite to an address, `email:<address>`, is mailed from invites@bellman.sh with a link. The key must be one plain address. The link opens a page that names the org and the role and starts a sign-in, and joining through it works under whichever account the person signs in with, even one whose provider does not report that address. Every invite expires 14 days after it was issued, and the roster then marks it `expired`. `POST /org/members/<key>/resend` mails a fresh link and gives the invite another 14 days, at most once every ten minutes, and the links sent before it stop working. An org mails at most fifty invites a day (UTC), or twice its seats if that is more; past that, invites are still made and answer `mailed: false`. The `202` and the resend's `200` carry the `link` and `mailed`: `mailed: false` means no email went, and the admin hands the link on. The link lets whoever holds it join as that invite, so pass it only to the person invited.
+
 An address the org stops owning, because it released the domain, is an invitation again: a seat given to it takes no effect at the person's next sign-in, which asks them instead, and the roster lists it as `invited` while it keeps its seat. A seat given before invitations existed, to an address the org never owned, reads the same way, and holds the person nowhere: they can join another org, and an org that verifies the address's domain can seat it. An org's name holds no character that draws nothing, such as a control, format or invisible character, and the invitation shows it as text, never as a button's label.
 
 When the subscription stops paying, the org keeps its members and loses the plan: everyone in it is on the free plan, with their org and role kept, until a payment brings it back. Nothing is removed by a failed card. An org set up by the operator rather than bought is always active.
@@ -112,9 +114,42 @@ Each entry is `{ at, session_id, actor, action, detail }`, where `actor` is a us
 - A creator changing what a hosted room's host is told to ask (`host_instructions_changed`). Its entry records the length of the new text, not the text, and none is written when the text did not change.
 - The end of a room's record: `room_deleted` when its creator or an org admin asked for it to be deleted, and `room_purged` when it was purged.
 - Plan grants and revocations, `plan_granted` and `plan_revoked`. A team purchase or cancellation appears here with `stripe` as the actor.
-- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats, its standing or `require_sso`; `idp_configured` and `idp_removed`; `domain_claimed`, `domain_verified` and `domain_released`; and `member_invited` and `invite_withdrawn`, naming the key the admin entered. A person's answer to an invite adds no entry of its own: a Join is its `plan_granted`.
+- The org itself: `org_created` when it was bought or set up, and `org_updated` naming what changed, such as its name, its seats, its standing or `require_sso`; `idp_configured` and `idp_removed`; `domain_claimed`, `domain_verified` and `domain_released`; and `member_invited`, `invite_resent` and `invite_withdrawn`, naming the key the admin entered. A person's answer to an invite adds no entry of its own: a Join is its `plan_granted`.
 
 A room that crosses organisations writes to both orgs' logs, so each side sees the crossings that touched its own boundary and nothing else.
+
+### Tamper evidence
+
+Every row carries a `hash`: SHA-256 over its seq, the previous row's hash and the row's own columns, computed in the same transaction that appends it. A row changed, dropped or inserted after the fact breaks every hash after it. The page and both exports show the column; `bellman_audit` does not, since it reads the newest entries without the stream's seq.
+
+`GET /audit/verify` walks the chain and answers `200` with `{ ok, from_seq, through_seq, checked, unhashed, broken_at?, anchor }`. `broken_at` is the first seq whose hash does not follow from the row before it: everything before it is intact, nothing after it can be trusted. Rows written before hashing shipped have no hash and are counted in `unhashed`; they may sit only at the start of the stream, and a hashless row after a hashed one is itself a break. `?from=<seq>` starts the walk partway, taking that row's stored previous hash on trust.
+
+### Retention
+
+The log keeps everything until you set a window. `PATCH /audit/settings` with `{ "retention_days": 90 }` sets one, `null` clears it, and `GET /audit/settings` reads it; both answer `200` with the window and the sink. The floor is 30 days and the route answers `400` below it: a shorter window would let an intruder erase their own trail before anyone looked.
+
+A sweep runs once a day and deletes rows older than the window, oldest first, writing one `audit_swept` row by the `system` actor that names the seq it deleted through and how many rows went. The deleted run's last hash is kept as the chain's anchor, so `GET /audit/verify` still passes after a sweep: the first surviving row is checked against the anchor, not against nothing. Setting the window writes `audit_retention_set`.
+
+### Streaming to a SIEM
+
+`PUT /audit/sink` with `{ "url": "https://..." }` points the stream at your collector and answers `200` with `{ sink, secret }`. The secret is shown in that response and never again; setting the sink a second time issues a new one and keeps the delivery cursor. The URL must be `https:` and carry no credentials, or the route answers `400`. `DELETE /audit/sink` removes it (`204`, or `404` when there is none).
+
+Within a few seconds of a row landing, the server POSTs every undelivered row, in seq order, up to 100 per request:
+
+```json
+{ "org_id": "org_a", "delivery": "org_a:1-100", "entries": [ ... ] }
+```
+
+Each entry is the shape the JSON export writes, `detail` included. `delivery` names the org and the seq range and is repeated in a `Bellman-Delivery` header: a receiver that stores it can drop a batch it has already taken, since a retry after a lost response sends the same range again. The request is signed Stripe-style in `Bellman-Signature: t=<unix ms>,v1=<hex>`, where `v1` is HMAC-SHA256 over `<t>.<body>` with the secret:
+
+```js
+const [t, v1] = sig.split(",").map((kv) => kv.slice(kv.indexOf("=") + 1));
+const mac = createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
+if (!timingSafeEqual(Buffer.from(mac), Buffer.from(v1))) throw new Error("bad signature");
+if (Math.abs(Date.now() - Number(t)) > 300_000) throw new Error("stale");
+```
+
+Any response other than a 2xx, or no response within ten seconds, is a failure: the sink shows `failing` in `GET /audit/settings`, with the last error and when it started, and the server retries with backoff. After a day of failing it is `dead` and nothing more is sent; an `audit_sink_dead` row says so. Fix the collector and `POST /audit/sink/resume` (`200` with the sink's status, `404` when there is none): delivery picks up from the cursor, so nothing in the window is lost. Setting, removing and resuming the sink each write a row.
 
 ## Reading and deleting closed rooms
 

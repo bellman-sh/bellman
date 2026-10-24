@@ -24,9 +24,10 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
+import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
+import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
 import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
@@ -5186,12 +5187,60 @@ export function describeStoreContract(
         grantedAt: 1, grantedBy: "u_op", expiresAt: null, ...over,
       });
       const invite = (key: string, over: Partial<OrgInvite> = {}): OrgInvite => ({
-        orgId: "org_acme", key, role: "member", invitedBy: "u_github_1", invitedAt: 7, ...over,
+        orgId: "org_acme", key, role: "member", invitedBy: "u_github_1", invitedAt: 7, expiresAt: 7 + INVITE_TTL_MS, ...over,
       });
       const by = { actorUserId: "u_github_1", actorLabel: "Ana", actorOrgId: "org_acme" };
       const orgEvents = async (orgId = "org_acme") =>
         (await store.auditForOrg(orgId, 500)).map((e) => e.action).filter((a) => a !== "org_created" && a !== "plan_granted");
       const seated = async () => { await store.createOrg(acme(), owner(), { actorUserId: "u_op" }); };
+
+      it("lists an invite with its expiry, and reads one stored without the field as fourteen days after it was made (ADR 0036, D3)", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect((await store.listOrgInvites("org_acme", 10))[0].expiresAt).toBe(7 + INVITE_TTL_MS);
+        const legacy: Partial<OrgInvite> = invite("github:8");
+        delete legacy.expiresAt;
+        await store.putOrgInvite(legacy as OrgInvite, by);
+        expect((await store.invitesFor(["github:8"]))[0].expiresAt).toBe(7 + INVITE_TTL_MS);
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.expiresAt)).toEqual([7 + INVITE_TTL_MS, 7 + INVITE_TTL_MS]);
+      });
+
+      it("renews an invite: a new time, a fresh fourteen days, this admin, both rows, and a row in the stream", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);
+        const renewed = await store.renewOrgInvite("org_acme", "github:9", "u_github_7", 500, by);
+        expect(renewed).toMatchObject({ key: "github:9", role: "member", invitedAt: 500, expiresAt: 500 + INVITE_TTL_MS, invitedBy: "u_github_7" });
+        expect(await store.invitesFor(["github:9"])).toEqual([renewed]);
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([renewed]);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 501, by)).toBe("joined");
+        expect(await orgEvents()).toEqual(["member_invited", "invite_resent"]);
+      });
+
+      it("spends an org's invite mail against its budget for a UTC day: each org and each day its own, a refusal spending nothing", async () => {
+        const day = Date.UTC(2026, 9, 23);
+        for (let i = 0; i < 3; i++) expect(await store.spendInviteMail("org_acme", 3, day + i)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 10)).toBe(false);
+        expect(await store.spendInviteMail("org_acme", 4, day + 11)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 4, day + 12)).toBe(false);
+        expect(await store.spendInviteMail("org_b", 3, day + 13)).toBe(true);
+        expect(await store.spendInviteMail("org_acme", 3, day + 86_400_000)).toBe(true);
+      });
+
+      it("renews nothing that is not there: no invite under the key, or another org's", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect(await store.renewOrgInvite("org_acme", "github:8", "u_github_1", 500, by)).toBe("missing");
+        expect(await store.renewOrgInvite("org_b", "github:9", "u_github_1", 500, by)).toBe("missing");
+      });
+
+      it("seats nobody for an expired invite and keeps its row for the roster (ADR 0036, D3)", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 100, by)).toBe("gone");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.key)).toEqual(["github:9"]);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 99, by)).toBe("joined");
+      });
 
       it("keeps an invite out of every grant read: no grant, no seat, no member", async () => {
         await seated();
@@ -5259,6 +5308,22 @@ export function describeStoreContract(
         expect(await store.countOrgMembers("org_acme")).toBe(2);
         const granted = (await store.auditForOrg("org_acme", 20)).at(-1);
         expect([granted?.action, granted?.actorUserId, granted?.detail.key]).toEqual(["plan_granted", "u_github_9", "github:9"]);
+      });
+
+      it("reads a link's key in the Join's own operation, only while its invite is the one the link names (ADR 0036, D2)", async () => {
+        await seated();
+        const link = { key: "email:ana@y.test", at: 7 };
+        await store.putOrgInvite(invite(link.key), by);
+        // Withdrawn and issued again after the link was signed: the old link seats nobody, and the new invite stands.
+        await store.deleteOrgInvite("org_acme", link.key, by);
+        await store.putOrgInvite(invite(link.key, { invitedAt: 30, expiresAt: 30 + INVITE_TTL_MS }), by);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 40, person, link)).toBe("gone");
+        expect(await store.getGrant("github:9")).toBeUndefined();
+        expect(await store.invitesFor([link.key])).toHaveLength(1);
+        // The link the new invite was signed for joins under the subject, though no key of the person's names it.
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 40, person, { ...link, at: 30 })).toBe("joined");
+        expect(await store.getGrant("github:9")).toMatchObject({ orgId: "org_acme", source: "invite" });
+        expect(await store.invitesFor([link.key])).toEqual([]);
       });
 
       it("seats nobody for an offer that is not there: no record, no invite, or one withdrawn first", async () => {
@@ -6339,6 +6404,129 @@ export function describeStoreContract(
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
     });
 
+    it("chains appended rows: hash over seq, prev_hash and the record, the first prev_hash empty", async () => {
+      const row = (at: number): AuditEntry => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+      const stripSeq = ({ seq: _s, hash: _h, prevHash: _p, ...e }: SeqEntry): AuditEntry => e;
+      await store.appendAudit(row(1));
+      await store.appendAudit(row(2));
+      const [a, b] = (await store.queryAudit("org_a", { limit: 10 })).entries.slice().reverse();
+      expect(a.prevHash).toBe("");
+      expect(a.hash).toBe(chainHash(a.seq, "", stripSeq(a)));
+      expect(b.prevHash).toBe(a.hash);
+      expect(b.hash).toBe(chainHash(b.seq, a.hash!, stripSeq(b)));
+    });
+
+    // ---------------------------------------------------------- verifying the chain (ADR 0035)
+    const chainRow = (at: number): AuditEntry => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
+
+    it("verifyAudit over an intact stream is ok and counts every hashed row", async () => {
+      for (const at of [1, 2, 3]) await store.appendAudit(chainRow(at));
+      expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 1, through_seq: 3, checked: 3, unhashed: 0, anchor: NO_ANCHOR });
+    });
+
+    it("verifyAudit resumes from a seq", async () => {
+      for (const at of [1, 2, 3]) await store.appendAudit(chainRow(at));
+      expect(await store.verifyAudit("org_a", 2)).toMatchObject({ ok: true, from_seq: 2, through_seq: 3, checked: 2 });
+    });
+
+    it("verifyAudit over an empty stream is ok with zero counts", async () => {
+      expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 0, through_seq: 0, checked: 0, unhashed: 0, anchor: NO_ANCHOR });
+    });
+
+    // ---------------------------------------------------------- retention and the sweep (ADR 0035, D2)
+    describe("retention", () => {
+      const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+      const day = (n: number) => Date.parse("2026-03-01T00:00:00Z") + n * 24 * 3_600_000;
+
+      it("auditSettings defaults to no retention and no sink", async () => {
+        expect(await store.auditSettings("org_a")).toEqual({ retentionDays: null, sink: null });
+      });
+
+      it("setAuditRetention stores the window and audits audit_retention_set by the caller", async () => {
+        expect(await store.setAuditRetention("org_a", 90, by)).toEqual({ retentionDays: 90, sink: null });
+        expect(await store.auditSettings("org_a")).toEqual({ retentionDays: 90, sink: null });
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_retention_set", detail: { days: 90 }, actorUserId: "u_admin" });
+      });
+
+      it("sweepAudit deletes rows older than the window in seq order, stops at the first young row, anchors the chain and appends audit_swept", async () => {
+        for (const at of [day(1), day(2), day(40), day(3)]) await store.appendAudit(chainRow(at));
+        const second = (await store.queryAudit("org_a", { limit: 10 })).entries.find((e) => e.seq === 2)!;
+        await store.setAuditRetention("org_a", 30, by);
+        expect(await store.sweepAudit("org_a", day(40) + 3_600_000)).toBe(2);
+        const after = (await store.queryAudit("org_a", { limit: 10 })).entries;
+        expect(after.map((e) => [e.seq, e.action, e.at])).toEqual([
+          [6, "audit_swept", after[0]!.at], [5, "audit_retention_set", after[1]!.at], [4, "sent_message", day(3)], [3, "sent_message", day(40)],
+        ]);
+        expect(after[0]).toMatchObject({ actorUserId: "system", detail: { through_seq: 2, count: 2 } });
+        expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 3, through_seq: 6, checked: 4, unhashed: 0, anchor: { seq: 2, hash: second.hash } });
+      });
+
+      it("sweepAudit with no window deletes nothing", async () => {
+        await store.appendAudit(chainRow(day(1)));
+        expect(await store.sweepAudit("org_a", day(400))).toBe(0);
+        expect((await store.queryAudit("org_a", { limit: 10 })).total).toBe(1);
+      });
+
+      it("sweepAudit past the whole stream leaves an empty stream whose next row chains from the anchor", async () => {
+        for (const at of [day(1), day(2)]) await store.appendAudit(chainRow(at));
+        await store.setAuditRetention("org_a", 30, by);
+        const third = (await store.queryAudit("org_a", { limit: 10 })).entries[0]!;
+        expect(await store.sweepAudit("org_a", Date.now() + 40 * 24 * 3_600_000)).toBe(3);
+        const [swept] = (await store.queryAudit("org_a", { limit: 10 })).entries;
+        expect(swept).toMatchObject({ seq: 4, orgId: "org_a", action: "audit_swept", prevHash: third.hash, detail: { through_seq: 3, count: 3 } });
+        expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 4, through_seq: 4, checked: 1, unhashed: 0, anchor: { seq: 3, hash: third.hash } });
+      });
+    });
+
+    describe("the sink", () => {
+      const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
+      const url = "https://collector.example/in";
+
+      it("setAuditSink returns the secret once, status ok with pending = rows not yet delivered, and audits audit_sink_set", async () => {
+        await store.appendAudit(chainRow(1));
+        await store.appendAudit(chainRow(2));
+        const set = await store.setAuditSink("org_a", url, by);
+        expect(set.secret).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+        expect(set.sink).toMatchObject({ url, status: "ok", delivered_through: 0, pending: 3, attempts: 0, failing_since: null, last_error: null });
+        expect((await store.auditSettings("org_a")).sink).toEqual(set.sink);
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_set", detail: { url }, actorUserId: "u_admin" });
+      });
+
+      it("setAuditSink again issues a new secret and keeps delivered_through", async () => {
+        const first = await store.setAuditSink("org_a", url, by);
+        const second = await store.setAuditSink("org_a", "https://other.example/in", by);
+        expect(second.secret).not.toBe(first.secret);
+        expect(second.sink).toMatchObject({ url: "https://other.example/in", delivered_through: first.sink.delivered_through, status: "ok" });
+      });
+
+      it("setAuditSink stores the url as given", async () => {
+        const odd = "https://collector.example/in?k=v#frag";
+        expect((await store.setAuditSink("org_a", odd, by)).sink.url).toBe(odd);
+        expect((await store.auditSettings("org_a")).sink?.url).toBe(odd);
+      });
+
+      it("removeAuditSink is false when none, true once, and audits audit_sink_removed", async () => {
+        expect(await store.removeAuditSink("org_a", by)).toBe(false);
+        await store.setAuditSink("org_a", url, by);
+        expect(await store.removeAuditSink("org_a", by)).toBe(true);
+        expect(await store.removeAuditSink("org_a", by)).toBe(false);
+        expect((await store.auditSettings("org_a")).sink).toBeNull();
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_removed", detail: { url }, actorUserId: "u_admin" });
+      });
+
+      it("resumeAuditSink is undefined when none and clears nothing on a healthy sink", async () => {
+        expect(await store.resumeAuditSink("org_a", by)).toBeUndefined();
+        const { sink } = await store.setAuditSink("org_a", url, by);
+        const resumed = await store.resumeAuditSink("org_a", by);
+        expect(resumed).toMatchObject({ url, status: "ok", attempts: 0, delivered_through: sink.delivered_through });
+        expect((await store.auditForOrg("org_a", 1)).at(-1)).toMatchObject({ action: "audit_sink_resumed", detail: { url, delivered_through: 0 } });
+      });
+
+      it("pumpAuditSink is undefined when there is no sink", async () => {
+        expect(await store.pumpAuditSink("org_a", Date.now())).toBeUndefined();
+      });
+    });
+
     // ------------------------------------------------------------- the audit query (audit trail spec, D6)
     describe("the audit query", () => {
       const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);
@@ -6419,8 +6607,9 @@ export function describeStoreContract(
       it("hands back a recorded row with its fields, and a row from before them without", async () => {
         await fill();
         const entries = (await store.queryAudit("org_a", q())).entries;
-        expect(entries[3]).toEqual({ seq: 3, ...row({ at: day("12"), ...boInbound }) });
-        expect(entries[5]).toEqual({ seq: 1, ...legacy({ at: day("10") }) });
+        const hex64 = expect.stringMatching(/^[0-9a-f]{64}$/);
+        expect(entries[3]).toEqual({ seq: 3, hash: hex64, prevHash: hex64, ...row({ at: day("12"), ...boInbound }) });
+        expect(entries[5]).toEqual({ seq: 1, hash: hex64, prevHash: "", ...legacy({ at: day("10") }) });
       });
 
       it("offers the stream's actors, rooms, other orgs and actions, newest first", async () => {

@@ -4,7 +4,7 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -19,6 +19,9 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { SINK_BATCH, SINK_DELAY_MS, SWEEP_EVERY_MS, SYSTEM_INTENT, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
+import { entryView } from "./audit.js";
+import { randomId } from "./oauth/tokens.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -2010,6 +2013,16 @@ export interface BellmanStore {
   /** An admin's withdrawal of one invite: both rows, and `invite_withdrawn` in the org's stream. */
   deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing">;
   /**
+   * Resend (ADR 0036, D4): the row rewritten with `invitedAt: now`, `expiresAt: now + INVITE_TTL_MS`, `invitedBy`;
+   * the role stands. One `invite_resent` row `{ key }`.
+   */
+  renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing">;
+  /**
+   * One invite mail against the org's budget for the UTC day `now` falls in (ADR 0036, D4): true, and counted, while
+   * fewer than `budget` were spent that day; false, and nothing written, once they were. One row per org, its day's count.
+   */
+  spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean>;
+  /**
    * A Join (ADR 0027), ONE operation, so a withdrawal that lands first means no seat. The org's offer
    * to one of the sign-in's `keys`, an invite or an admin's seat on an address the org no longer owns
    * by its form (`isUnownedSeat`), becomes the grant of `subjectKey`: team, the offer's role, `source:
@@ -2017,9 +2030,13 @@ export interface BellmanStore {
    * those keys go, and every such seat of the org's, which the grant replaces. An unowned seat in any org
    * holds nothing, so none counts below. `gone` for no record or no such offer; `sso` when the org requires
    * single sign-on; `member` when a key holds this org's grant otherwise (its invites go); `taken` when a
-   * key holds any other grant; `full` at the seats, unless a seat moves.
+   * key holds any other grant; `full` at the seats, unless a seat moves. `link` is an invite link's key and the
+   * `invitedAt` it was signed for (ADR 0036, D2): its key joins `keys` only while this org's invite on it is that one,
+   * read in the same operation, so a link whose invite was withdrawn and issued again seats nobody.
    */
-  acceptOrgInvite(orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
+  acceptOrgInvite(
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
+  ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone">;
   /**
    * That the person behind `subjectKey` declined this org's offers made by `now` (ADR 0027), kept on their
    * side: the org's invites stay as they were, so a decline tells its admins nothing. A later decline moves
@@ -2036,14 +2053,31 @@ export interface BellmanStore {
   queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
   /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
   auditFacets(orgId: string): Promise<AuditFacets>;
+  /** Walks the chain from the anchor, or from `from` taking that row's prev_hash on trust (ADR 0035, D1). */
+  verifyAudit(orgId: string, from?: number): Promise<AuditVerification>;
+  /** The org's retention window and sink (ADR 0035): both unset until an admin sets them. */
+  auditSettings(orgId: string): Promise<AuditSettings>;
+  /** Sets or clears the window (D2) and records `audit_retention_set` by the caller; the sweep is the store's own alarm. */
+  setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings>;
+  /** One sweep at `now`: deletes the rows past the window in seq order and returns how many (D2). */
+  sweepAudit(orgId: string, now: number): Promise<number>;
+  /** Sets the org's one sink (D3): a fresh secret, returned this once; the cursor survives a re-set. Records `audit_sink_set`. */
+  setAuditSink(orgId: string, url: string, audit: AuditIntent): Promise<{ sink: AuditSinkStatus; secret: string }>;
+  /** Removes the sink and records `audit_sink_removed`; false when there was none. */
+  removeAuditSink(orgId: string, audit: AuditIntent): Promise<boolean>;
+  /** Clears a sink's failure state, dead or not, and delivers again from its cursor; undefined when none. */
+  resumeAuditSink(orgId: string, audit: AuditIntent): Promise<AuditSinkStatus | undefined>;
+  /** One delivery attempt at `now`: the next batch past the cursor, and the state it leaves; undefined when no sink. */
+  pumpAuditSink(orgId: string, now: number): Promise<AuditSinkStatus | undefined>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
    * sweeps the unnamed objects of a closed room whose close it did not see (#65), drops
-   * expired connect tokens, and deletes the reports resolved 180 days ago (R15). MemoryStore does
-   * all of it here; the Durable Objects store does none, because each room's alarm does its
-   * room's and the registry's alarm does the reports'.
+   * expired connect tokens, deletes the reports resolved 180 days ago (R15), and delivers and sweeps
+   * each org's audit stream when due (ADR 0035). MemoryStore does all of it here; the Durable Objects
+   * store does none, because each room's alarm does its room's, the registry's alarm does the
+   * reports', and each org's AuditDO alarm does its stream's.
    */
   sweep(now: number): Promise<void>;
 }
@@ -2121,6 +2155,7 @@ export class MemoryStore implements BellmanStore {
   private domainIndex = new Map<string, string>();
   /** Each org's pending invites (ADR 0027), org to key to invite: apart from `grants`, which no invite enters. */
   private invites = new Map<string, Map<string, OrgInvite>>();
+  private inviteMail = new Map<string, { day: number; spent: number }>();
   /** The orgs each person declined (ADR 0027), subject key to org to when: the person's side, not the org's. */
   private declines = new Map<string, Map<string, number>>();
   /** Each org's SCIM token (SCIM spec, D1), and the lookup from a hash to its org. */
@@ -2131,9 +2166,10 @@ export class MemoryStore implements BellmanStore {
   private directory = new Map<string, DirectoryEntry>();
   private scimByKey = new Map<string, { orgId: string; scimId: string }>();
   private users = new Map<string, UserRecord>();
-  /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
-  private audit: { seq: number; entry: AuditEntry }[] = [];
+  /** Each org's stream, with each row's seq and chain link: one counter per org, as each AuditDO keeps its own. */
+  private audit: { seq: number; entry: AuditEntry; prevHash: string; hash: string }[] = [];
   private auditSeq = new Map<string, number>();
+  private auditState = new Map<string, { retentionDays: number | null; anchor: ChainAnchor; sweepAt: number | null; sink: AuditSink | null; sinkAt: number | null }>();
   private waiters = new Map<string, Waiter[]>();
   /**
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
@@ -2178,8 +2214,8 @@ export class MemoryStore implements BellmanStore {
    */
   private readonly blobs: BlobStore;
 
-  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`. */
-  constructor(private readonly options: { blobs?: BlobStore; host?: (wake: HostWake) => void } = {}) {
+  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`; `post` is the sink's `fetch`. */
+  constructor(private readonly options: { blobs?: BlobStore; host?: (wake: HostWake) => void; post?: typeof fetch } = {}) {
     this.blobs = options.blobs ?? new MemoryBlobStore();
   }
 
@@ -3585,7 +3621,11 @@ export class MemoryStore implements BellmanStore {
       if (!entry.orgId) continue;
       const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
       this.auditSeq.set(entry.orgId, seq);
-      this.audit.push({ seq, entry: detach(entry) });
+      const state = this.auditStateOf(entry.orgId);
+      const prevHash = this.audit.filter((r) => r.entry.orgId === entry.orgId).at(-1)?.hash ?? state.anchor.hash;
+      this.audit.push({ seq, entry: detach(entry), prevHash, hash: chainHash(seq, prevHash, entry) });
+      // A live sink with no delivery dated gets one: as AuditDO's append arms its alarm (D3).
+      if (state.sink && !state.sink.dead && state.sinkAt === null) state.sinkAt = Date.now() + SINK_DELAY_MS;
     }
   }
 
@@ -3866,7 +3906,7 @@ export class MemoryStore implements BellmanStore {
     const pending = this.invites.get(invite.orgId) ?? new Map<string, OrgInvite>();
     if (pending.has(invite.key)) return "exists";
     if (pending.size >= MAX_PENDING_INVITES) return "limit";
-    pending.set(invite.key, detach(invite));
+    pending.set(invite.key, detach(liftInvite(invite)));
     this.invites.set(invite.orgId, pending);
     this.recordAudit([orgEventEntry(invite.orgId, "member_invited", { key: invite.key, role: invite.role }, audit, invite.invitedAt)]);
     return "invited";
@@ -3882,6 +3922,25 @@ export class MemoryStore implements BellmanStore {
     return detach([...new Set(keys)].flatMap((key) => orgIds.flatMap((orgId) => this.invites.get(orgId)?.get(key) ?? [])));
   }
 
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    const pending = this.invites.get(orgId);
+    const found = pending?.get(key);
+    if (!pending || !found) return "missing";
+    const renewed: OrgInvite = { ...found, invitedBy, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
+    pending.set(key, renewed);
+    this.recordAudit([orgEventEntry(orgId, "invite_resent", { key }, audit, now)]);
+    return detach(renewed);
+  }
+
+  async spendInviteMail(orgId: string, budget: number, now: number): Promise<boolean> {
+    const day = inviteMailDay(now);
+    const row = this.inviteMail.get(orgId);
+    const spent = row?.day === day ? row.spent : 0;
+    if (spent >= budget) return false;
+    this.inviteMail.set(orgId, { day, spent: spent + 1 });
+    return true;
+  }
+
   async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     if (!this.invites.get(orgId)?.delete(key)) return "missing";
     this.recordAudit([orgEventEntry(orgId, "invite_withdrawn", { key }, audit, Date.now())]);
@@ -3890,13 +3949,14 @@ export class MemoryStore implements BellmanStore {
 
   /** Synchronous throughout, as the guarded grant writes are: the offer's read and the grant's write must not be split. */
   async acceptOrgInvite(
-    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
+    orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent, link?: { key: string; at: number },
   ): Promise<"joined" | "member" | "taken" | "full" | "sso" | "gone"> {
     const org = this.orgs.get(orgId);
     if (!org) return "gone";
-    const unique = [...new Set([subjectKey, ...keys])];
     const pending = this.invites.get(orgId);
-    const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined);
+    const linked = link && pending?.get(link.key)?.invitedAt === link.at ? [link.key] : [];
+    const unique = [...new Set([subjectKey, ...keys, ...linked])];
+    const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined && inviteLive(i, now));
     const grants = unique.map((key) => this.liveGrant(key)).filter((g): g is PlanGrant => g !== undefined);
     // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
     const unowned = grants.filter((g) => isUnownedSeat(g, g.orgId === null ? undefined : this.orgs.get(g.orgId)));
@@ -4156,8 +4216,94 @@ export class MemoryStore implements BellmanStore {
     return detach(facetsOf(this.streamOf(orgId), orgId));
   }
 
+  async verifyAudit(orgId: string, from?: number): Promise<AuditVerification> {
+    // ponytail: one feed over the whole stream; a memory store never holds a stream worth paging.
+    const walk = chainWalk(this.auditStateOf(orgId).anchor, from);
+    walk.feed(this.audit.filter((r) => r.entry.orgId === orgId && (from === undefined || r.seq >= from)).map((r) => ({ seq: r.seq, prevHash: r.prevHash, hash: r.hash, entry: r.entry })));
+    return detach(walk.result());
+  }
+
+  private auditStateOf(orgId: string) {
+    let state = this.auditState.get(orgId);
+    if (!state) this.auditState.set(orgId, (state = { retentionDays: null, anchor: NO_ANCHOR, sweepAt: null, sink: null, sinkAt: null }));
+    return state;
+  }
+
+  async auditSettings(orgId: string): Promise<AuditSettings> {
+    const { retentionDays, sink } = this.auditStateOf(orgId);
+    return { retentionDays, sink: sink && sinkStatus(sink, this.auditSeq.get(orgId) ?? 0) };
+  }
+
+  async setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    state.retentionDays = days;
+    state.sweepAt = days === null ? null : now;
+    this.recordAudit([orgEventEntry(orgId, "audit_retention_set", { days }, audit, now)]);
+    return this.auditSettings(orgId);
+  }
+
+  async sweepAudit(orgId: string, now: number): Promise<number> {
+    const state = this.auditStateOf(orgId);
+    if (state.retentionDays === null) return 0;
+    // ponytail: one plan over the whole stream, where the DO goes a batch at a time.
+    const plan = sweepPlan(this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ seq: r.seq, at: r.entry.at, hash: r.hash })), now - state.retentionDays * 86_400_000);
+    if (state.sweepAt !== null) state.sweepAt = now + SWEEP_EVERY_MS;
+    if (!plan) return 0;
+    this.audit = this.audit.filter((r) => r.entry.orgId !== orgId || r.seq > plan.through);
+    state.anchor = plan.anchor;
+    this.recordAudit([orgEventEntry(orgId, "audit_swept", { through_seq: plan.through, count: plan.count }, SYSTEM_INTENT, now)]);
+    return plan.count;
+  }
+
+  async setAuditSink(orgId: string, url: string, audit: AuditIntent): Promise<{ sink: AuditSinkStatus; secret: string }> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    const secret = randomId(32);
+    state.sink = newSink(url, now, secret, state.sink?.deliveredThrough ?? 0);
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_set", { url }, audit, now)]);
+    return { sink: (await this.auditSettings(orgId)).sink!, secret };
+  }
+
+  async removeAuditSink(orgId: string, audit: AuditIntent): Promise<boolean> {
+    const state = this.auditStateOf(orgId);
+    if (!state.sink) return false;
+    const { url } = state.sink;
+    state.sink = null; state.sinkAt = null;
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_removed", { url }, audit, Date.now())]);
+    return true;
+  }
+
+  async resumeAuditSink(orgId: string, audit: AuditIntent): Promise<AuditSinkStatus | undefined> {
+    const now = Date.now();
+    const state = this.auditStateOf(orgId);
+    if (!state.sink) return undefined;
+    state.sink = { ...state.sink, attempts: 0, failingSince: null, lastError: null, dead: false };
+    state.sinkAt = now;
+    this.recordAudit([orgEventEntry(orgId, "audit_sink_resumed", { url: state.sink.url, delivered_through: state.sink.deliveredThrough }, audit, now)]);
+    return (await this.auditSettings(orgId)).sink!;
+  }
+
+  async pumpAuditSink(orgId: string, now: number): Promise<AuditSinkStatus | undefined> {
+    const state = this.auditStateOf(orgId);
+    const sink = state.sink;
+    if (!sink) return undefined;
+    state.sinkAt = null;
+    const newest = () => this.auditSeq.get(orgId) ?? 0;
+    const rows = sink.dead ? [] : this.streamOf(orgId).filter((r) => r.seq > sink.deliveredThrough).slice(0, SINK_BATCH);
+    if (rows.length === 0) return sinkStatus(sink, newest());
+    const outcome = await deliverBatch(this.options.post ?? fetch, sink, orgId, rows.map(entryView), now);
+    // Removed or replaced while the post was in flight: the outcome belongs to a sink that is gone.
+    if (state.sink?.secret !== sink.secret) return state.sink ? sinkStatus(state.sink, newest()) : undefined;
+    // Rows appended while the post was in flight are pending too: one more pass, not a wait for the next append.
+    const next = nextSinkState(sink, outcome, now, rows.length === SINK_BATCH || newest() > rows.at(-1)!.seq);
+    state.sink = next.sink; state.sinkAt = next.armAt;
+    if (next.died) this.recordAudit([orgEventEntry(orgId, "audit_sink_dead", deadDetail(next.sink), SYSTEM_INTENT, now)]);
+    return sinkStatus(next.sink, newest());
+  }
+
   private streamOf(orgId: string): SeqEntry[] {
-    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq }));
+    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq, hash: r.hash, prevHash: r.prevHash }));
   }
 
   async sweep(now: number): Promise<void> {
@@ -4194,6 +4340,9 @@ export class MemoryStore implements BellmanStore {
     for (const [reporter, times] of this.filings) {
       if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
+    // Every sink whose delivery is due, and every retention window whose sweep is: what AuditDO's own alarm does per org.
+    for (const [orgId, st] of this.auditState) if (st.sinkAt !== null && st.sinkAt <= now) await this.pumpAuditSink(orgId, now);
+    for (const [orgId, st] of this.auditState) if (st.sweepAt !== null && st.sweepAt <= now) await this.sweepAudit(orgId, now);
   }
 
   /**

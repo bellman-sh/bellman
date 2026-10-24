@@ -195,7 +195,9 @@ export function orgAuditEntries(previous: Org | undefined, next: Org, intent: Au
 export type OrgEvent =
   | "idp_configured" | "idp_removed" | "domain_claimed" | "domain_verified" | "domain_released"
   | "scim_token_issued" | "scim_token_revoked"
-  | "member_invited" | "invite_withdrawn";
+  | "member_invited" | "invite_withdrawn" | "invite_resent"
+  | "audit_retention_set" | "audit_swept"
+  | "audit_sink_set" | "audit_sink_removed" | "audit_sink_resumed" | "audit_sink_dead";
 
 export function orgEventEntry(orgId: string, action: OrgEvent, detail: Record<string, unknown>, intent: AuditIntent, now: number): AuditEntry {
   return auditRow(orgId, [orgId], { at: now, sessionId: `org:${orgId}`, action, roomName: null, detail: { ...detail, ...intent.detail } },

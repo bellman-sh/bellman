@@ -152,3 +152,28 @@ it("moves the whole stream or none of it when an insert fails past its first bat
     kv: [...ctx.storage.kv.list()].map(([key]) => key),
   }))).toEqual({ marks: rows, kv: [] });
 });
+
+/**
+ * A table from before the chain (ADR 0035) has no prev_hash or hash column. The next wake
+ * adds them: the rows it held read back unhashed, and the first row appended after them
+ * starts the chain from an empty prev_hash.
+ */
+it("adds the chain columns to a table from before them, leaving its rows unhashed and chaining from the next append", async () => {
+  await runInDurableObject(env.AUDIT.get(env.AUDIT.idFromName("org_old")), (_i: AuditDO, ctx) => {
+    ctx.storage.sql.exec("DROP TABLE entries");
+    ctx.storage.sql.exec(`CREATE TABLE entries (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, org_id TEXT, session_id TEXT NOT NULL, action TEXT NOT NULL,
+      actor_id TEXT NOT NULL, actor_label TEXT, actor_org TEXT, room_name TEXT, parties TEXT, crossing TEXT, direction TEXT, detail TEXT NOT NULL)`);
+    ctx.storage.sql.exec(
+      "INSERT INTO entries (at, org_id, session_id, action, actor_id, detail) VALUES (1000, 'org_old', 'qs_old', 'member_left', 'u_old', '{}')",
+    );
+  });
+  await abortAllDurableObjects();
+
+  const stub = env.AUDIT.get(env.AUDIT.idFromName("org_old"));
+  await stub.append(entry("sent_message"));
+  const [old, fresh] = (await stub.query({ limit: 10 })).entries.slice().reverse();
+  expect([old.action, old.hash, old.prevHash]).toEqual(["member_left", null, null]);
+  expect([fresh.action, fresh.prevHash]).toEqual(["sent_message", ""]);
+  expect(fresh.hash).toMatch(/^[0-9a-f]{64}$/);
+});

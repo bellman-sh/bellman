@@ -266,7 +266,7 @@ an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes them, and with the list
 unset or empty nobody does.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The room read carries `preset` (ADR 0032). The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The room read carries `preset` (ADR 0032). The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 0034): `src/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a card search's ETag carries its query and the room's link. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -623,6 +623,9 @@ Why the split is shaped that way:
   to every one of their streams (`auditEntries`, `src/rooms.ts`), and each side must see only
   the crossings that touched its own boundary. Its rows are a SQL table (`entries`, with the
   delivery marks in `delivered`), so one query serves the panel's filters, paging and export.
+  Each row is hash-chained to the one before it in `append`'s transaction; the object's one alarm
+  runs the daily retention sweep and the org's SIEM sink, whose URL, secret and cursor live in
+  its KV beside the retention window (ADR 0035).
 - **`HostDO`, one per hosted seat,** because a model call takes seconds and the
   room's object must never wait on one: the room stays a record of events, and
   the seat that calls the model is an object of its own, keyed by the room's
@@ -1389,6 +1392,18 @@ loud:
   every other write answers the panel's origins alone, `BELLMAN_PANEL_ORIGINS`,
   the dash's (ADR 0026).
 
+- **An agent's identity comes from a person's sign-in, never from its own
+  request** (ADR 0037). `POST /agent/identity` is unauthenticated, so it is
+  admitted like dynamic registration: 20 an hour per IP and 10,000 unclaimed
+  registrations at once, swept by the `AuthDO` alarm. What it buys is a claim,
+  not an identity. The identity is copied from the panel session that approves
+  the code on `/agent/claim`, and only when that session's verified `email:` key
+  matches the registration's `login_hint`, so an agent naming an address gets
+  nothing until its owner signs in. The claim page renders no peer content: a
+  registration keeps no name or text from the agent, the hinted address appears
+  nowhere on it, and every word is the server's beside the signed-in account's
+  own label.
+
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
@@ -1503,6 +1518,15 @@ loud:
   account, so the creator, who sets its instructions, does read it. In a small
   private room who filed a report may be evident by elimination, which no view can
   prevent.
+- **An org's invite mail is built from the server's text and the org's drawn name**
+  (ADR 0036). It goes from invites@bellman.sh through `INVITE_EMAIL`, a `send_email`
+  binding of its own, since the reports' is fixed to support@. Its subject and body
+  are the server's words, the role, the link and the expiry, with the org's name as
+  `drawnOrgName` draws it and CR/LF removed, so an admin's text cannot reach a header.
+  The key must be one plain address, checked at the invite and again at the mailer.
+  The log names the org and the send time, never the address. A failed send is
+  swallowed: the API answers `mailed: false` with the link, which is a bearer
+  credential for that one invite, and a resend, withdrawal, Join or expiry kills it.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -2260,12 +2284,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,751** | every request, whether or not you are in a room |
+| Tool definitions | **~10,168** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~364 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~603 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-23 for room search, by the method below: 239 tokens over the 9,929
+that trunk (`cd0f5e91`, main after topic rooms) measures, all of them `bellman_surface`'s (364 to
+603: `query`, `in` and one sentence on what a search answers). No tool was added. That is 10,168.
+The 9,751 the row held was main before org policy (#315) merged; the 178 between are its, not
+this branch's.
 
 Re-measured on 2026-10-23 for topic rooms, by the method below: 253 tokens over the 9,498
 that main records and this branch's base (`e3a0dd39`) measures, in `bellman_send` (1,425 to

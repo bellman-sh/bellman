@@ -20,6 +20,7 @@
  * `404 no_org` for an org with no record, and only then the body.
  */
 import { auditRefusal } from "../audit.js";
+import { inviteLink, isMailableAddress, type InviteMailer } from "../invite-mail.js";
 import { grantKeyForUser } from "../billing/grants.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { domainVerified, isDomain, newDomainToken, verificationRecord } from "../oauth/dns.js";
@@ -27,7 +28,7 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, inviteMailBudget, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -37,6 +38,12 @@ export type OrgRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigin
   sealSecret?: string;
   /** For discovery and the resolver; the tests hand in a fake. */
   fetchImpl?: typeof fetch;
+  /** The server's own origin, which an invite link is under (ADR 0036, D2). */
+  issuer: string;
+  /** What signs an invite link: the token secret. Absent, an invite answers `link: null` and nothing is mailed. */
+  linkSecret?: string;
+  /** Mails an address its invite (D1). Absent, nothing is mailed. */
+  mail?: InviteMailer;
 };
 
 // ponytail: a client secret is at most 1 KB; Okta's and Entra's are under 100 characters.
@@ -52,6 +59,7 @@ const IDP = "/org/idp";
 const DOMAINS = "/org/domains";
 const DOMAIN = /^\/org\/domains\/([^/]+)$/;
 const VERIFY = /^\/org\/domains\/([^/]+)\/verify$/;
+const RESEND = /^\/org\/members\/([^/]+)\/resend$/;
 const SCIM = "/org/scim";
 const SCIM_TOKEN = "/org/scim/token";
 
@@ -75,9 +83,12 @@ export interface InviteView {
   user_id: string | null;
   /** The role the grant will carry if the person accepts. */
   role: Role;
-  status: "invited";
+  /** `expired` once its fourteen days have passed (ADR 0036, D3): it seats nobody, and the admin resends or withdraws it. */
+  status: "invited" | "expired";
   invited_at: string;
   invited_by: string;
+  /** Null for a seat on an address the org no longer owns by its form, which does not lapse. */
+  expires_at: string | null;
 }
 
 const iso = (at: number): string => new Date(at).toISOString();
@@ -99,10 +110,11 @@ export function memberView(grant: PlanGrant, org: Org): MemberView {
   };
 }
 
-export function inviteView(invite: OrgInvite): InviteView {
+export function inviteView(invite: OrgInvite, now = Date.now()): InviteView {
   return {
-    key: invite.key, user_id: userIdForKey(invite.key), role: invite.role, status: "invited",
+    key: invite.key, user_id: userIdForKey(invite.key), role: invite.role, status: inviteLive(invite, now) ? "invited" : "expired",
     invited_at: iso(invite.invitedAt), invited_by: invite.invitedBy,
+    expires_at: Number.isFinite(invite.expiresAt) ? iso(invite.expiresAt) : null,
   };
 }
 
@@ -143,6 +155,21 @@ const domainSegment = (segment: string): string | undefined => {
 const full = (org: Org, used: number, origin: string | undefined) =>
   json(409, { error: "full", error_description: `this org holds ${used} of ${org.seats} seats`, seats: org.seats, seats_used: used }, origin);
 
+/**
+ * The answer to an invite and to a resend (ADR 0036, D6): the invite, its link for the admin to hand on, and whether
+ * it was mailed. Only an address is mailed; a provider subject has nowhere to send to.
+ */
+async function sendInvite(deps: OrgRouteDeps, org: Org, invite: OrgInvite, status: 200 | 202, origin: string | undefined): Promise<Response> {
+  const link = deps.linkSecret ? await inviteLink(deps.issuer, deps.linkSecret, invite) : null;
+  let mailed = false;
+  // Every send spends the org's budget for the day (D4), so neither a resend nor a withdrawal and a fresh invite gets past
+  // it. Past it the invite stands, and the admin hands on the link.
+  if (link !== null && invite.key.startsWith("email:") && deps.mail && await deps.store.spendInviteMail(org.orgId, inviteMailBudget(org), Date.now())) {
+    mailed = await deps.mail(invite.key.slice("email:".length), org, invite, link);
+  }
+  return json(status, { member: inviteView(invite), link, mailed }, origin);
+}
+
 /** `undefined` for a path outside `/org`, so the Worker carries on; everything under it is answered here. */
 export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<Response | undefined> {
   const path = new URL(request.url).pathname.replace(/\/+$/, "");
@@ -151,14 +178,15 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
   if (request.method === "OPTIONS") return preflightResponse(origin);
   try {
     const member = MEMBER.exec(path);
+    const resend = RESEND.exec(path);
     const verify = VERIFY.exec(path);
     const domain = verify ? null : DOMAIN.exec(path);
-    const known = path === ORG || path === MEMBERS || path === IDP || path === DOMAINS || path === SCIM || path === SCIM_TOKEN || member || domain || verify;
+    const known = path === ORG || path === MEMBERS || path === IDP || path === DOMAINS || path === SCIM || path === SCIM_TOKEN || member || resend || domain || verify;
     if (!known) return problem(404, "not_found", "no such route", origin);
     const allow = path === ORG ? "GET, PATCH"
       : path === MEMBERS ? "GET, POST"
         : path === IDP ? "GET, PUT, DELETE"
-          : path === DOMAINS || verify ? "POST"
+          : path === DOMAINS || verify || resend ? "POST"
             : path === SCIM ? "GET"
               : path === SCIM_TOKEN ? "POST, DELETE"
                 : domain ? "DELETE" : "PATCH, DELETE";
@@ -314,15 +342,19 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
         // A seat on an address the org no longer owns by its form takes no effect until the person accepts it
         // (ADR 0027), so it is listed as the invite it now is; it still holds its seat, and DELETE removes it.
         const listed = grants.map((grant) => isUnownedSeat(grant, org)
-          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt })
+          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt, expiresAt: Infinity })
           : memberView(grant, org));
-        return json(200, { members: [...listed, ...invites.map(inviteView)] }, origin);
+        return json(200, { members: [...listed, ...invites.map((invite) => inviteView(invite))] }, origin);
       }
       const body = await readBody(request, origin);
       if (body instanceof Response) return body;
       if (typeof body.key !== "string" || !isStableIdentityKey(body.key)) {
         return problem(400, "invalid_request",
           "key must be github:<numeric id>, google:<numeric id>, or an email address (github:, google: or email:) — a username or display name can be reassigned", origin);
+      }
+      // An invite to an address is mailed (ADR 0036, D1), so the address is one mailbox, not a list or a header line.
+      if (body.key.startsWith("email:") && !isMailableAddress(body.key.slice("email:".length))) {
+        return problem(400, "invalid_request", "an email key is one plain address: no list, display name or spaces", origin);
       }
       // An sso key names its org (SSO spec, D10): seated here, a person of another org would sign in
       // through their own IdP and land in this one, with their own admin unable to see why.
@@ -353,7 +385,11 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       // or a refusal from, and that becomes their grant only when they accept it at a sign-in. Whether the
       // key holds another org's grant is not asked here, so an invite says nothing of the person to the admin.
       if (!ownsByForm(org, body.key)) {
-        const invite: OrgInvite = { orgId, key: body.key, role, invitedBy: identity.userId, invitedAt: Date.now() };
+        // An invite takes no seat (ADR 0027), but one into a full org could only end at a Join that says so (D5).
+        const used = await deps.store.countOrgMembers(orgId);
+        if (used >= org.seats) return full(org, used, origin);
+        const now = Date.now();
+        const invite: OrgInvite = { orgId, key: body.key, role, invitedBy: identity.userId, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
         const invited = await deps.store.putOrgInvite(invite, intent);
         if (invited === "exists") {
           return problem(409, "exists", "that key is already invited; withdraw it with DELETE /org/members/:key to change the role", origin);
@@ -361,7 +397,7 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
         if (invited === "limit") return problem(409, "limit", `this org has ${MAX_PENDING_INVITES} pending invites; withdraw one first`, origin);
         if (invited === "no_org") return problem(404, "no_org", "this org has no record yet; the operator creates one", origin);
         // 202: the seat is offered, not taken. The person's answer is what seats them.
-        return json(202, { member: inviteView(invite) }, origin);
+        return sendInvite(deps, org, invite, 202, origin);
       }
       // What the body says of plan, org, source or expiry is not read: a member of this org is a
       // team grant in this org, from this org, that lapses with the org and not on a date.
@@ -374,12 +410,31 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       return json(201, { member: memberView(grant, org) }, origin);
     }
 
-    // /org/members/:key
+    // /org/members/:key and /org/members/:key/resend
     let key: string;
     try {
-      key = decodeURIComponent(member![1]);
+      key = decodeURIComponent((member ?? resend)![1]);
     } catch {
       return problem(400, "invalid_request", "the path's key is not a valid percent-encoding", origin);
+    }
+    if (resend) {
+      // A fresh fourteen days and a fresh link (ADR 0036, D4). The cooldown is read before the renewal: two admins
+      // resending at once mail twice, which is harmless.
+      const found = (await deps.store.invitesFor([key])).find((invite) => invite.orgId === orgId);
+      if (!found) return problem(404, "missing", "this org has no invite for that key", origin);
+      const now = Date.now();
+      const wait = found.invitedAt + RESEND_COOLDOWN_MS - now;
+      if (wait > 0) {
+        const limited = problem(429, "cooldown", "this invite was sent less than ten minutes ago", origin);
+        limited.headers.set("retry-after", String(Math.ceil(wait / 1000)));
+        return limited;
+      }
+      // D5's reason holds for a resend too: a link into a full org can only end at a Join that says so.
+      const used = await deps.store.countOrgMembers(orgId);
+      if (used >= org.seats) return full(org, used, origin);
+      const renewed = await deps.store.renewOrgInvite(orgId, key, identity.userId, now, intent);
+      if (renewed === "missing") return problem(404, "missing", "this org has no invite for that key", origin);
+      return sendInvite(deps, org, renewed, 200, origin);
     }
     // The owner's grant is not this route's to touch, in either direction: they stay an admin (D1).
     if (isOwner(key, org)) return problem(409, "owner", "the owner stays an admin and cannot be removed", origin);
@@ -414,7 +469,8 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
     if (outcome === "full") return full(org, await deps.store.countOrgMembers(orgId), origin);
     return json(200, { member: memberView(changed, org) }, origin);
   } catch (err) {
-    console.error(`${request.method} ${path} failed:`, err);
+    // The key in a member's path may be an invitee's address, which stays out of the log (ADR 0036, D1).
+    console.error(`${request.method} ${path.replace(/^\/org\/members\/[^/]+/, "/org/members/:key")} failed:`, err);
     return problem(500, "internal", "the request failed on the server", origin);
   }
 }

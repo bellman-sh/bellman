@@ -83,7 +83,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   })));
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
   // A fixed seal secret: this server keeps nothing between runs, so there is nothing a rotation could lock out.
-  app.use("/org", serve(gated((request) => orgRoutes(request, { store, caller, panelOrigins: [], sealSecret: "local-dev-seal" }))));
+  // No link secret: this server signs no one in, so an invite link would lead nowhere; an invite answers `link: null`.
+  app.use("/org", serve(gated((request) => orgRoutes(request, { store, caller, panelOrigins: [], sealSecret: "local-dev-seal", issuer: "http://localhost:3900" }))));
   // The org's token is the only credential, so no gate: the module answers 401 itself.
   app.use("/scim/v2", serve((request) => scimRoutes(request, { store })));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));

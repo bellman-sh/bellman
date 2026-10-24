@@ -1,13 +1,15 @@
 /**
  * The audit routes (audit trail spec, D7 and D8): an org admin reads their own org's stream, a
  * page at a time or whole as a file. On the room routes' rules: the same caller, CORS for the
- * panel's origins and the same preflight. Both are reads, so neither needs a CSRF check. The
- * org is always the caller's own, never a parameter.
+ * panel's origins and the same preflight. The reads need no CSRF check; every write on this
+ * router goes through the one gate, as the org routes' writes do. The org is always the
+ * caller's own, never a parameter.
  */
-import { auditRefusal, type AuditPage, type AuditQuery, type SeqEntry } from "../audit.js";
+import { auditRefusal, entryView, type AuditEntryView, type AuditPage, type AuditQuery } from "../audit.js";
+import { RETENTION_FLOOR_DAYS, retentionDaysOf, sinkUrlOf, type AuditSettings } from "../audit-sink.js";
 import { attachmentDisposition } from "../blobs.js";
-import { allowedOrigin, corsHeaders, preflightResponse } from "../oauth/browser.js";
-import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
+import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
+import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type AuditRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
 
@@ -15,6 +17,11 @@ export type AuditRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrig
 export const AUDIT_PAGE = 100;
 
 export type AuditParams = Omit<AuditQuery, "limit">;
+
+const MAX_SETTINGS_BYTES = 4096;
+
+/** `GET` and `PATCH /audit/settings` answer the same shape: the window and the sink as the admin set them. */
+const settingsView = (s: AuditSettings) => ({ retention_days: s.retentionDays, sink: s.sink });
 
 const LIST_PARAMS = ["from", "to", "actor", "room", "org", "action", "scope", "before", "through"];
 const EXPORT_PARAMS = ["from", "to", "actor", "room", "org", "action", "scope", "through", "format"];
@@ -73,44 +80,14 @@ export function parseAuditQuery(
   return { query, format };
 }
 
-/** One row as the panel and an export read it (D7). A row from before D2 says it recorded no crossing. */
-export interface AuditEntryView {
-  seq: number;
-  at: string;
-  action: string;
-  room: { id: string; name: string | null } | null;
-  /** `label` and `org_id` are absent on a row from before D2: not recorded, which is not the same as no org. */
-  actor: { id: string; label?: string | null; org_id?: string | null };
-  parties: (string | null)[] | null;
-  crossing: "internal" | "cross_org" | null;
-  direction: "outbound" | "inbound" | null;
-  detail: Record<string, unknown>;
-}
-
-export function entryView(e: SeqEntry): AuditEntryView {
-  const recorded = e.crossing !== undefined;
-  return {
-    seq: e.seq,
-    at: new Date(e.at).toISOString(),
-    action: e.action,
-    // A grant row is about an org's plan, filed under `grant:<key>`, an org row about the org itself, under
-    // `org:<id>` (orgs spec, D8), and a SCIM row about a member the IdP pushed, under `scim:<id>` (SCIM spec,
-    // D11): none is about a room.
-    room: /^(grant|org|scim):/.test(e.sessionId) ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
-    actor: recorded ? { id: e.actorUserId, label: e.actorLabel ?? null, org_id: e.actorOrgId ?? null } : { id: e.actorUserId },
-    parties: recorded ? e.parties ?? [] : null,
-    crossing: e.crossing ?? null,
-    direction: recorded ? e.direction ?? null : null,
-    detail: e.detail,
-  };
-}
+export { entryView, type AuditEntryView } from "../audit.js";
 
 /** Rows the export reads per page: one page per pull, so a long stream is never held whole. */
 export const AUDIT_EXPORT_PAGE = 500;
 
 export const CSV_COLUMNS = [
   "seq", "at", "action", "room_id", "room_name", "actor_id", "actor_label", "actor_org",
-  "parties", "crossing", "direction", "detail",
+  "parties", "crossing", "direction", "detail", "hash",
 ] as const;
 
 export const csvHeader = `${CSV_COLUMNS.join(",")}\r\n`;
@@ -129,7 +106,7 @@ export function csvCell(value: string | number | null | undefined): string {
 export function csvRow(v: AuditEntryView): string {
   return `${[
     v.seq, v.at, v.action, v.room?.id, v.room?.name, v.actor.id, v.actor.label, v.actor.org_id,
-    v.parties?.map((p) => p ?? "(no org)").join(";"), v.crossing, v.direction, JSON.stringify(v.detail),
+    v.parties?.map((p) => p ?? "(no org)").join(";"), v.crossing, v.direction, JSON.stringify(v.detail), v.hash,
   ].map(csvCell).join(",")}\r\n`;
 }
 
@@ -146,13 +123,51 @@ export async function auditRoutes(request: Request, deps: AuditRouteDeps): Promi
   if (request.method === "OPTIONS") return preflightResponse(origin);
   try {
     const exporting = path === "/audit/export";
-    if (path !== "/audit" && !exporting) return problem(404, "not_found", "no such route", origin);
-    if (request.method !== "GET") return methodNotAllowed("GET", origin);
+    const settings = path === "/audit/settings";
+    const sink = path === "/audit/sink";
+    const resume = path === "/audit/sink/resume";
+    if (path !== "/audit" && !exporting && path !== "/audit/verify" && !settings && !sink && !resume) return problem(404, "not_found", "no such route", origin);
+    const allowed = settings ? "GET, PATCH" : sink ? "PUT, DELETE" : resume ? "POST" : "GET";
+    if (!allowed.split(", ").includes(request.method)) return methodNotAllowed(allowed, origin);
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+    const csrf = csrfRefusal(request, who.via, origin);
+    if (csrf) return csrf;
     const refused = auditRefusal(who.identity);
     if (refused) return problem(403, "forbidden", refused, origin);
     const orgId = who.identity.orgId as string; // auditRefusal refuses an identity with no org
+    const intent = { actorUserId: who.identity.userId, actorLabel: who.identity.label, actorOrgId: who.identity.orgId };
+    if (resume) {
+      const status = await deps.store.resumeAuditSink(orgId, intent);
+      return status ? json(200, status, origin) : problem(404, "not_found", "this org has no sink", origin);
+    }
+    if (sink && request.method === "DELETE") {
+      return (await deps.store.removeAuditSink(orgId, intent))
+        ? new Response(null, { status: 204, headers: corsHeaders(origin) })
+        : problem(404, "not_found", "this org has no sink", origin);
+    }
+    if (sink) {
+      const refusedLength = lengthRefusal(request, MAX_SETTINGS_BYTES, "an audit sink", origin);
+      if (refusedLength) return refusedLength;
+      const body: unknown = await request.json().catch(() => undefined);
+      const url = sinkUrlOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).url : "invalid");
+      if (url === "invalid") return problem(400, "invalid_request", "url must be an https URL without credentials", origin);
+      return json(200, await deps.store.setAuditSink(orgId, url, intent), origin);
+    }
+    if (settings) {
+      if (request.method === "GET") return json(200, settingsView(await deps.store.auditSettings(orgId)), origin);
+      const refusedLength = lengthRefusal(request, MAX_SETTINGS_BYTES, "an audit setting", origin);
+      if (refusedLength) return refusedLength;
+      const body: unknown = await request.json().catch(() => undefined);
+      const days = retentionDaysOf(typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).retention_days : "invalid");
+      if (days === "invalid") return problem(400, "invalid_request", `retention_days must be an integer of at least ${RETENTION_FLOOR_DAYS}, or null`, origin);
+      return json(200, settingsView(await deps.store.setAuditRetention(orgId, days, intent)), origin);
+    }
+    if (path === "/audit/verify") {
+      const from = url.searchParams.get("from");
+      if (from !== null && !/^[1-9]\d*$/.test(from)) return problem(400, "invalid_request", "from must be a positive integer", origin);
+      return json(200, await deps.store.verifyAudit(orgId, from === null ? undefined : Number(from)), origin);
+    }
     const parsed = parseAuditQuery(url.searchParams, exporting);
     if ("invalid" in parsed) return problem(400, "invalid_request", parsed.invalid, origin);
     if (parsed.format) return await exportAudit(orgId, parsed.query, parsed.format, url.searchParams, origin, deps);

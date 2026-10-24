@@ -19,6 +19,10 @@
  * email address for most, and a reader with the link is not owed it. The hosted seat is `host`
  * there, its own label, `host@bellman`, reading as an address too (`publicNames`). Runtime-free,
  * like rooms.ts beside it: a web Request in, a Response out, for both servers and the tests.
+ *
+ * The surface and events reads take `?query=` (room search spec, D3): a card search over the
+ * surface, a message search over the newest `MAX_EVENTS_READ` events, bounded as the plain reads
+ * are and named by number as they are.
  */
 import { cardResponse, roomCard, roomCard03 } from "../a2a/cards.js";
 import { v03CardTenant } from "../a2a/routes.js";
@@ -29,11 +33,12 @@ import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
-import { isPublic, readSurface, sessionStatus } from "../rooms.js";
+import { isPublic, readSurface, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
+import { checkQuery } from "../search.js";
 import type { BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
-import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, surfaceTag } from "./rooms.js";
+import { AFTER_WITH_QUERY, MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, searchTag, surfaceTag } from "./rooms.js";
 
 export interface PublicRouteDeps {
   store: BellmanStore;
@@ -172,15 +177,23 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       return got === null ? notFound("no such blob") : blobResponse(got, OPEN);
     }
 
+    const query = url.searchParams.get("query");
+    const checked = query === null ? undefined : checkQuery(query);
+
     if (part === "surface") {
-      // As the member route answers a seat still in the room: from the record alone on a match.
+      if (checked !== undefined && !checked.ok) return answer(400, { error: "invalid_request", error_description: checked.reason });
+      const words = checked?.ok ? checked.words : undefined;
+      // As the member route answers a seat still in the room: from the record alone on a match. A
+      // search's tag carries the link and the words, so a poll's tag never answers it (R20).
       const exposed = { "access-control-expose-headers": "etag" };
-      const tag = surfaceTag(surfaceCursor(session));
-      if (etagMatches(request.headers.get("if-none-match"), tag)) {
-        return new Response(null, { status: 304, headers: { ...OPEN, ...exposed, "cache-control": "no-store", etag: tag } });
+      const tag = (cursor: number) => (words === undefined ? surfaceTag(cursor) : searchTag(cursor, roomLink(session), words));
+      if (etagMatches(request.headers.get("if-none-match"), tag(surfaceCursor(session)))) {
+        return new Response(null, { status: 304, headers: { ...OPEN, ...exposed, "cache-control": "no-store", etag: tag(surfaceCursor(session)) } });
       }
-      const block = await readSurface(deps.store, session);
-      return answer(200, await numbered(deps.store, id, { surface_cursor: block.cursor, items: block.items }), { ...exposed, etag: surfaceTag(block.cursor) });
+      const block = words === undefined
+        ? await readSurface(deps.store, session).then(({ cursor, items }) => ({ cursor, body: { surface_cursor: cursor, items } }))
+        : await searchSurface(deps.store, session, words).then(({ cursor, total, results }) => ({ cursor, body: { surface_cursor: cursor, total, results } }));
+      return answer(200, await numbered(deps.store, id, block.body), { ...exposed, etag: tag(block.cursor) });
     }
 
     if (part === "events") {
@@ -189,6 +202,13 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
         return answer(400, { error: "invalid_request", error_description: "after is a cursor: a whole number, 0 or more" });
       }
       const after = raw === null ? undefined : Number(raw);
+      if (checked !== undefined) {
+        if (after !== undefined) return answer(400, { error: "invalid_request", error_description: AFTER_WITH_QUERY });
+        if (!checked.ok) return answer(400, { error: "invalid_request", error_description: checked.reason });
+        // R14: the public bound is the newest MAX_EVENTS_READ, what the plain read takes with no `after`.
+        const window = await deps.store.recentEvents(id, MAX_EVENTS_READ);
+        return answer(200, await numbered(deps.store, id, searchLog(window, checked.words)));
+      }
       const read = after === undefined
         ? await deps.store.recentEvents(id, MAX_EVENTS_READ)
         : await deps.store.eventsAfter(id, after, MAX_EVENTS_READ);

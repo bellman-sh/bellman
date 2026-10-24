@@ -61,8 +61,12 @@ export function auditRows(parties: (string | null)[], facts: AuditFacts, actor: 
   return parties.filter((p): p is string => p !== null).map((orgId) => auditRow(orgId, parties, facts, actor));
 }
 
-/** An entry with its place in its org's stream: the cursor `before` and `through` count in (D6). */
-export type SeqEntry = AuditEntry & { seq: number };
+/**
+ * An entry with its place in its org's stream: the cursor `before` and `through` count in (D6),
+ * and its link in the chain (ADR 0035): `hash` over seq, `prevHash` and the record, both null on
+ * a row from before the chain.
+ */
+export type SeqEntry = AuditEntry & { seq: number; hash: string | null; prevHash: string | null };
 
 /** The `entries` table's columns after `seq`, in the order `recordOf` binds them (D5). */
 export const AUDIT_COLUMNS = [
@@ -85,15 +89,21 @@ export type AuditRecord = {
   crossing: string | null;
   direction: string | null;
   detail: string;
+  prev_hash: string | null;
+  hash: string | null;
 };
 
 /**
  * An entry as the table's columns, in AUDIT_COLUMNS order. A row from before D2 has no
  * `crossing`, and its five companions are stored null beside it, so it reads back as it was.
  */
+/** A lone surrogate becomes U+FFFD in SQLite's text columns; hash the value the row will hold. */
+const wellFormed = (v: string | number | null) =>
+  typeof v === "string" ? v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD") : v;
+
 export function recordOf(e: AuditEntry): (string | number | null)[] {
   const recorded = e.crossing !== undefined;
-  return [
+  return ([
     e.at, e.orgId, e.sessionId, e.action, e.actorUserId,
     recorded ? e.actorLabel ?? null : null,
     recorded ? e.actorOrgId ?? null : null,
@@ -102,14 +112,14 @@ export function recordOf(e: AuditEntry): (string | number | null)[] {
     e.crossing ?? null,
     recorded ? e.direction ?? null : null,
     JSON.stringify(e.detail ?? {}),
-  ];
+  ] as (string | number | null)[]).map(wellFormed);
 }
 
 /** A table row as an entry: with the six fields when it recorded a crossing, without them when it is from before (D4). */
 export function entryOf(r: AuditRecord): SeqEntry {
   const base: SeqEntry = {
     seq: r.seq, at: r.at, orgId: r.org_id, sessionId: r.session_id, actorUserId: r.actor_id, action: r.action,
-    detail: JSON.parse(r.detail) as Record<string, unknown>,
+    detail: JSON.parse(r.detail) as Record<string, unknown>, hash: r.hash, prevHash: r.prev_hash,
   };
   if (r.crossing === null) return base;
   return {
@@ -250,4 +260,39 @@ export function auditRefusal(identity: Identity): string | null {
   if (identity.role !== "admin") return "the audit log requires the admin role.";
   if (!identity.orgId) return "your identity has no org.";
   return null;
+}
+
+/** One row as the panel and an export read it (D7); the sink posts the same shape (ADR 0035). A row from before D2 says it recorded no crossing. */
+export interface AuditEntryView {
+  seq: number;
+  at: string;
+  action: string;
+  room: { id: string; name: string | null } | null;
+  /** `label` and `org_id` are absent on a row from before D2: not recorded, which is not the same as no org. */
+  actor: { id: string; label?: string | null; org_id?: string | null };
+  parties: (string | null)[] | null;
+  crossing: "internal" | "cross_org" | null;
+  direction: "outbound" | "inbound" | null;
+  detail: Record<string, unknown>;
+  /** The row's link in the chain (ADR 0035); null on a row from before it. `GET /audit/verify` walks them. */
+  hash: string | null;
+}
+
+export function entryView(e: SeqEntry): AuditEntryView {
+  const recorded = e.crossing !== undefined;
+  return {
+    seq: e.seq,
+    at: new Date(e.at).toISOString(),
+    action: e.action,
+    // A grant row is about an org's plan, filed under `grant:<key>`, an org row about the org itself, under
+    // `org:<id>` (orgs spec, D8), and a SCIM row about a member the IdP pushed, under `scim:<id>` (SCIM spec,
+    // D11): none is about a room.
+    room: /^(grant|org|scim):/.test(e.sessionId) ? null : { id: e.sessionId, name: recorded ? e.roomName ?? null : null },
+    actor: recorded ? { id: e.actorUserId, label: e.actorLabel ?? null, org_id: e.actorOrgId ?? null } : { id: e.actorUserId },
+    parties: recorded ? e.parties ?? [] : null,
+    crossing: e.crossing ?? null,
+    direction: recorded ? e.direction ?? null : null,
+    detail: e.detail,
+    hash: e.hash ?? null,
+  };
 }

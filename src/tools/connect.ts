@@ -26,9 +26,9 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }], frames: [{ number, key, count }] } }
 max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
-surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
+surface lists the room's front window and its frames: keys, kinds, sizes and counts, no content. The items themselves come with bellman_confirm.
 public: true means anyone with the room's public page can read its surface and its log, with members named by number and never a brief: tell your human before they accept.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
@@ -131,7 +131,12 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
       // The index, not the items (#129, D7/D9): a code holder who never joins
       // is shown that the room keeps a plan and a diagram, not their contents —
       // the line that keeps joiners' briefs out of this preview.
-      const index = surfaceIndex(await s.surfaceOf(session.id));
+      // The front window's index, and its frames by number, key and count (surface frames spec, R19): a frame's
+      // title is prose, so the preview never carries one.
+      const front = await s.surfaceWindow(session.id, {}, {});
+      if (!front.ok) throw new Error(`the front of the surface was refused: ${front.reason}`);
+      const index = surfaceIndex(front.page.items);
+      const frames = front.page.frames.map(({ data: { number, key, count } }) => ({ number, key, count }));
 
       return ok(
         {
@@ -148,7 +153,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
             { memberId: creator.memberId, label: creator.label },
             creatorBrief
           ),
-          surface: { cursor: surfaceCursor(session), items: index },
+          surface: { cursor: surfaceCursor(session), items: index, frames },
         },
         UNTRUSTED_PREAMBLE +
           "\n\nShow this preview to your human before calling bellman_confirm — confirming ships YOUR brief to the room."

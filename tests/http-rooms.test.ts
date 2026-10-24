@@ -10,8 +10,9 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { hostMember } from "../src/host.js";
 import {
-  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, searchTag, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, searchTag, windowTag, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
+import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_HTTP } from "../src/frames.js";
 import { resolveManifest } from "../src/manifest.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
@@ -486,7 +487,7 @@ describe("GET /rooms/:id/surface", () => {
     expect(body.items).toEqual([
       { trust: "untrusted", origin: { memberId: "m_creator", label: "jesse@codenerd" }, data: expect.objectContaining({ key: "plan", kind: "text", body: "# Plan\nship it", cursor }) },
     ]);
-    expect(Object.keys(body).sort()).toEqual(["items", "surface_cursor"]);
+    expect(Object.keys(body).sort()).toEqual(["frames", "items", "next", "surface_cursor", "window"]);
   });
 
   it("dates each item for a member as for the public read", async () => {
@@ -548,7 +549,15 @@ describe("GET /rooms/:id/surface", () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
     expect(res.status).toBe(200);
     expect(res.headers.get("etag")).toBe('"0"');
-    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [] });
+    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [], frames: [], window: "all", next: null });
+  });
+
+  // The read today's dash makes, with no window: every row, until the dash pages (surface frames, Part 2).
+  it("answers every row of a room of 70 items with no window asked, as window all and no next, under the plain tag", async () => {
+    const cursor = await seedCards(70);
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
+    const body = await bodyOf(res) as { items: unknown[]; window: string; next: string | null };
+    expect([body.items.length, body.window, body.next, res.headers.get("etag")]).toEqual([70, "all", null, `"${cursor}"`]);
   });
 
   it("stops a removed member at its cut, and derives the cursor from what it is shown", async () => {
@@ -568,7 +577,7 @@ describe("GET /rooms/:id/surface", () => {
     await placeThroughTool("b", { kind: "text", body: "after" });
     await store.addMember(ROOM, member({ memberId: "m_peer2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }));
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   it("answers one 404 for a stranger and an unknown room", async () => {
@@ -614,7 +623,7 @@ describe("GET /rooms/:id/surface", () => {
     await store.updateMember(ROOM, "m_peer", { leftAt: Date.now() });
     await placeThroughTool("b", { kind: "text", body: "after" });
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   // Removed, back on a fresh handle, removed again: the person read the open feed in between, so the cut is the
@@ -627,7 +636,7 @@ describe("GET /rooms/:id/surface", () => {
     await evictThroughTool("m_peer2");
     await placeThroughTool("c", { kind: "text", body: "third" });
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   it("refuses without a credential, with CORS on the refusal, and answers 405 to a method it does not take", async () => {
@@ -650,6 +659,18 @@ const del = (key: string | null, itemKey: string, over: CallOptions & { member?:
   return call(key, `/rooms/${ROOM}/surface/${itemKey}${q}`, { method: "DELETE", ...over });
 };
 
+/** `n` placed text cards written straight to the store; answers the last cursor. */
+async function seedCards(n: number): Promise<number> {
+  let cursor = 0;
+  for (let i = 0; i < n; i++) {
+    const item = { key: `c${String(i).padStart(2, "0")}`, kind: "text" as const, title: null, body: "x", ends: null, placement: { x: i * 400, y: 0 }, blob: null, shape: null };
+    const e = await store.appendEvent(ROOM, { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+      { surface: { key: item.key, item } });
+    cursor = e!.cursor;
+  }
+  return cursor;
+}
+
 /** The surface as the tool reads it, for the agreement tests. */
 async function surfaceThroughTool(key: string, memberId: string) {
   const h = new Harness(store, blobs);
@@ -658,6 +679,79 @@ async function surfaceThroughTool(key: string, memberId: string) {
   await h.close();
   return out.data as { surface?: { cursor: number; items: unknown[] }; surface_cursor?: number };
 }
+
+describe("GET /rooms/:id/surface?window= (surface frames spec, D5)", () => {
+  const put = async (key: string, body: Record<string, unknown>) => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/${key}?member_id=m_creator`, { method: "PUT", body }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+  };
+
+  it("answers a window with frames, window and next, under a tag of its own", async () => {
+    await put("intro", { kind: "frame", title: "Start", placement: { x: 0, y: 0, w: 1480, h: 520 } });
+    await put("a", { kind: "text", body: "x", frame: 1 });
+    const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface?window=frame:1`, { headers: { origin: PANEL } }))!;
+    const body = await bodyOf(res) as { surface_cursor: number; items: { data: { key: string } }[]; frames: unknown[]; window: string; next: string | null };
+    expect(Object.keys(body).sort()).toEqual(["frames", "items", "next", "surface_cursor", "window"]);
+    expect([body.window, body.next, body.items.map((i) => i.data.key)]).toEqual(["frame:1", null, ["a"]]);
+    expect(res.headers.get("etag")).toBe(windowTag(body.surface_cursor, "frame:1", ""));
+    expect(res.headers.get("etag")).toBe(`"${body.surface_cursor}:w:frame%3A1:"`);
+  });
+
+  // Review Focus 5.
+  it("keeps the plain read's tag, and never lets a window's tag answer the plain read or another window", async () => {
+    await put("a", { kind: "text", body: "x" });
+    const plain = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
+    const tag = plain.headers.get("etag")!;
+    expect(tag).toBe(`"${(await bodyOf(plain) as { surface_cursor: number }).surface_cursor}"`);
+    const newest = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?window=newest`))!.headers.get("etag")!;
+    const ask = (q: string, t: string) => call(DEV_KEY.jesse, `/rooms/${ROOM}/surface${q}`, { headers: { "if-none-match": t } });
+    expect((await ask("?window=newest", tag))!.status).toBe(200);
+    expect((await ask("", newest))!.status).toBe(200);
+    expect((await ask("?window=unframed", newest))!.status).toBe(200);
+    expect((await ask("?window=newest", newest))!.status).toBe(304);
+  });
+
+  it("still pages a window of 70 items with next", async () => {
+    await seedCards(70);
+    const first = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?window=newest`)) as { items: unknown[]; next: string | null };
+    expect(first.items).toHaveLength(64);
+    const second = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?next=${encodeURIComponent(first.next!)}`)) as { items: unknown[]; next: string | null };
+    expect([second.items.length, second.next]).toEqual([6, null]);
+  });
+
+  // A removed member's tag is the cursor of what it is shown, checked after the read: 304 for that window's tag alone.
+  it("answers a removed member's windowed read 304 for its own tag and 200 for another window's", async () => {
+    const first = await placeThroughTool("a", { kind: "text", body: "before" });
+    await evictThroughTool("m_peer");
+    await placeThroughTool("b", { kind: "text", body: "after" });
+    const ask = (q: string, t: string) => call(DEV_KEY.peer, `/rooms/${ROOM}/surface${q}`, { headers: { "if-none-match": t } });
+    expect((await ask("?window=newest", windowTag(first.cursor, "newest", "")))!.status).toBe(304);
+    expect((await ask("?window=unframed", windowTag(first.cursor, "newest", "")))!.status).toBe(200);
+  });
+
+  it("reads a region with the slots of its unplaced rows, and one key", async () => {
+    // A shape handed to the store with no placement stays unplaced (the store places only PLACED_KINDS): the stand-in
+    // for a row from before ADR 0030 that the contract's placement cases use.
+    const old = { key: "old", kind: "shape" as const, title: null, body: null, ends: null, placement: null, blob: null, shape: { form: "rect" as const, color: "slate" as const, flip: false } };
+    await store.appendEvent(ROOM, { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: old, refId: null },
+      { surface: { key: "old", item: old } });
+    const region = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?window=region:0,0,800,600`)) as { items: { data: { key: string } }[]; slots: unknown };
+    expect([region.items.map((i) => i.data.key), region.slots]).toEqual([["old"], { old: { x: 0, y: 0 } }]);
+    const one = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface?window=key:old`)) as { items: unknown[]; window: string; slots?: unknown };
+    expect([one.window, one.items.length, one.slots]).toEqual(["key:old", 1, undefined]);
+  });
+
+  it("refuses a bad window, next beside a window, a token it did not write, and query beside a window", async () => {
+    const refused = async (q: string, text: string) => {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface${q}`))!;
+      expect([res.status, await bodyOf(res)]).toEqual([400, { error: "invalid_request", error_description: text }]);
+    };
+    await refused("?window=frames", WINDOW_REFUSAL_HTTP);
+    await refused("?window=newest&next=abc", NEXT_ALONE);
+    await refused("?next=abc", NEXT_REFUSAL);
+    await refused("?query=retry&window=newest", QUERY_WITH_WINDOW);
+  });
+});
 
 describe("PUT and DELETE /rooms/:id/surface/:key", () => {
   it("writes an item through the route, and the tool reads back exactly what the route reads", async () => {
@@ -680,7 +774,30 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(res.status, await res.clone().text()).toBe(200);
     }
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string; placement: unknown } }[] };
-    expect(body.items.map((i) => [i.data.key, i.data.placement])).toEqual([["plan", { x: 0, y: 0 }], ["risks", { x: 360, y: 0 }]]);
+    expect(Object.fromEntries(body.items.map((i) => [i.data.key, i.data.placement]))).toEqual({ plan: { x: 0, y: 0 }, risks: { x: 360, y: 0 } });
+  });
+
+  // Surface frames spec, R21: an overlap is a conflict, and the route answers it in the words the tool does.
+  it("answers 409 for a frame that overlaps one already on the surface, naming that frame", async () => {
+    const frame = (x: number) => ({ kind: "frame", title: "F", placement: { x, y: 0, w: 1480, h: 520 } });
+    expect((await put(DEV_KEY.jesse, "one", frame(0)))!.status).toBe(200);
+    const res = (await put(DEV_KEY.jesse, "two", frame(1000)))!;
+    expect(res.status).toBe(409);
+    expect(await bodyOf(res)).toEqual({
+      error: "conflict",
+      error_description: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+    });
+    expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["one"]);
+  });
+
+  it("answers 400 for a card naming a frame the room does not have", async () => {
+    const res = (await put(DEV_KEY.jesse, "a", { kind: "text", body: "x", frame: 1 }))!;
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toEqual({
+      error: "invalid",
+      error_description: 'surface text "a": frame 1 does not exist: this room has no frames',
+    });
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
   });
 
   // Both transports call writeSurface, so the route takes an html page because the tool does (#185).

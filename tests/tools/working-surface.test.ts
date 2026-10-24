@@ -15,10 +15,10 @@ import { MemoryStore } from "../../src/store.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
-import { SEND_LIMIT, SEND_WINDOW_MS } from "../../src/send-limit.js";
 import {
-  MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS,
+  MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS, gridSlot,
 } from "../../src/surface.js";
+import type { SurfaceItem } from "../../src/types.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -200,7 +200,7 @@ describe("writing an item", () => {
     expect(read.isError, read.text).toBe(false);
     const asRead = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items
       .map((i) => i.data);
-    expect(asRead.map((i) => i.key)).toEqual(["arch", "box", "c1", "plan", "pr"]);
+    expect(asRead.map((i) => i.key).sort()).toEqual(["arch", "box", "c1", "plan", "pr"]);
     const item = (key: string) => asRead.find((i) => i.key === key)!;
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
@@ -419,17 +419,18 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     await refused(p, { key: "l3", kind: "link", body: "https://example.com/" + "a".repeat(MAX_SURFACE_LINK_CHARS) }, "2,048");
   });
 
-  it("caps the room at 64 items, and a replace or a removal frees the way", async () => {
-    // 64 writes are more sends than a member gets in a minute (ADR 0022), so the clock steps past the
-    // window each time the allowance is spent. Only Date is faked; the transport runs on real timers.
-    vi.useFakeTimers({ toFake: ["Date"] });
+  it("caps the room at 1,000 items, and a replace or a removal frees the way", async () => {
+    // Seeded through the store with explicit placements (R23): 999 cards, then the thousandth through the tool.
     const p = await pairUp(h);
-    for (let i = 0; i < MAX_SURFACE_ITEMS; i++) {
-      if (i > 0 && i % SEND_LIMIT === 0) vi.setSystemTime(Date.now() + SEND_WINDOW_MS + 1);
-      const out = await write(p, { key: `k_${i}`, kind: "text", body: "x" });
-      expect(out.isError, out.text).toBe(false);
+    for (let i = 0; i < MAX_SURFACE_ITEMS - 1; i++) {
+      const item: SurfaceItem = { key: `k_${i}`, kind: "text", title: null, body: "x", ends: null, placement: gridSlot(i), blob: null, shape: null };
+      await h.store.appendEvent(p.sessionId, {
+        type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null,
+      }, { surface: { key: item.key, item } });
     }
-    await refused(p, { key: "one_more", kind: "text", body: "x" }, "64 items");
+    const last = await write(p, { key: `k_${MAX_SURFACE_ITEMS - 1}`, kind: "text", body: "x" });
+    expect(last.isError, last.text).toBe(false);
+    await refused(p, { key: "one_more", kind: "text", body: "x" }, "already holds 1,000 items");
     const replace = await write(p, { key: "k_0", kind: "text", body: "still fits" });
     expect(replace.isError, replace.text).toBe(false);
     await write(p, { key: "k_1", remove: true });
@@ -491,7 +492,8 @@ describe("bellman_sync and the surface", () => {
       cursor: number; items: { trust: string; origin: { memberId: string }; data: { key: string } }[];
     };
     expect(surface.cursor).toBe(out.data.surface_cursor);
-    expect(surface.items.map((i) => i.data.key)).toEqual(["plan", "pr"]);
+    // Newest first (D5), and two writes in one millisecond tie by key, so the order is not pinned here.
+    expect(surface.items.map((i) => i.data.key).sort()).toEqual(["plan", "pr"]);
     for (const item of surface.items) {
       expect(item.trust).toBe("untrusted");
       expect(item.origin.memberId).toBe(p.creatorMemberId);
@@ -615,7 +617,7 @@ describe("bellman_sync and the surface", () => {
 
     const asked = await poll(p, { surface: true });
     expect(asked.data.removed).toBe(true);
-    expect(asked.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(asked.data.surface).toEqual({ cursor: 0, items: [], frames: [], window: "newest", next: null });
     expect(asked.data.surface_cursor, "surface_cursor, surface asked for").toBeUndefined();
   });
 });
@@ -657,6 +659,22 @@ describe("joining a room with a surface", () => {
     expect(flat).not.toContain(BODY);
   });
 
+  // R19: the front window's index, and the frames by number, key and count, never by title.
+  it("lists the frames without their titles, and indexes only the front window", async () => {
+    const room = await roomWithSurface();
+    const send = (payload: Record<string, unknown>) =>
+      room.creator.call("bellman_send", { session_id: room.sessionId, member_id: room.memberId, type: "surface", payload });
+    expect((await send({ key: "intro", kind: "frame", title: "Secret plan", placement: { x: 5000, y: 0, w: 1480, h: 520 } })).isError).toBe(false);
+    expect((await send({ key: "inside", kind: "text", body: "x", frame: 1 })).isError).toBe(false);
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: room.joinCode });
+    expect(preview.isError, preview.text).toBe(false);
+    const surface = preview.data.surface as { items: { key: string }[]; frames: unknown[] };
+    expect(surface.frames).toEqual([{ number: 1, key: "intro", count: 1 }]);
+    expect(JSON.stringify(preview.data)).not.toContain("Secret plan");
+    expect(surface.items.map((i) => i.key)).toEqual(["inside"]);
+  });
+
   it("hands a member the items in envelopes on confirm", async () => {
     const room = await roomWithSurface();
     const joiner = await h.connect(DEV_KEY.peer);
@@ -682,11 +700,11 @@ describe("joining a room with a surface", () => {
     });
     const joiner = await h.connect(DEV_KEY.peer);
     const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
-    expect(preview.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(preview.data.surface).toEqual({ cursor: 0, items: [], frames: [] });
     const confirmed = await joiner.call("bellman_confirm", {
       connect_token: String(preview.data.connect_token), brief: brief(),
     });
-    expect(confirmed.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(confirmed.data.surface).toEqual({ cursor: 0, items: [], frames: [], window: "newest", next: null });
   });
 });
 
@@ -1028,5 +1046,28 @@ describe("shape items (#197)", () => {
         'shape.color: must be slate, blue, green, amber, red or violet, or a hex colour such as "#3b82f6"',
       );
     }
+  });
+});
+
+describe("frames through bellman_send (surface frames spec, D2, D8)", () => {
+  const frameOf = (key: string, x: number, extra: Record<string, unknown> = {}) =>
+    ({ key, kind: "frame", title: key, placement: { x, y: 0, w: 1480, h: 520 }, ...extra });
+
+  it("writes a frame, puts a card in it by number, and refuses an overlap naming the frame it hits", async () => {
+    const p = await pairUp(h);
+    expect((await write(p, frameOf("intro", 0))).isError).toBe(false);
+    expect((await write(p, { key: "a", kind: "text", body: "x", frame: 1 })).isError).toBe(false);
+    expect((await h.store.surfaceOf(p.sessionId)).find((r) => r.key === "a")!.placement).toEqual({ x: 40, y: 40 });
+    await refusedWith(p, frameOf("next", 1000), 'surface frame "next" would overlap frame 1 ("intro"): frames may touch but not overlap');
+  });
+
+  it("refuses the 101st frame and lets a frame already on the surface be rewritten", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < 100; i++) {
+      const f = { key: `f${i}`, kind: "frame" as const, title: "F", body: null, ends: null, placement: { x: i * 2000, y: 0, w: 1000, h: 1000 }, blob: null, shape: null, locked: true };
+      await h.store.appendSurface(p.sessionId, { type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse", payload: f, refId: null }, { surface: { key: f.key, item: f } }, null);
+    }
+    await refusedWith(p, frameOf("f100", 500_000), 'this room\'s surface already holds 100 frames; remove one with { key, remove: true } before adding frame "f100".');
+    expect((await write(p, { ...frameOf("f0", 0), title: "Renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } })).isError).toBe(false);
   });
 });

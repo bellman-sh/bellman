@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { NEXT_REFUSAL, WINDOW_REFUSAL_HTTP } from "../src/frames.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, searchTag, type RoomRouteDeps } from "../src/http/rooms.js";
@@ -62,6 +63,14 @@ const upload = async (name: string) => {
   }))!;
   expect(res.status, await res.clone().text()).toBe(201);
   return ((await res.json()) as { blob_id: string }).blob_id;
+};
+const creatorBy = { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null } as const;
+/** `n` placed text cards, written straight to the store. */
+const seed = async (n: number) => {
+  for (let i = 0; i < n; i++) {
+    const item = { key: `c${String(i).padStart(2, "0")}`, kind: "text" as const, title: null, body: "x", ends: null, placement: { x: i * 400, y: 0 }, blob: null, shape: null };
+    await store.appendEvent(PUB, { ...creatorBy, payload: item }, { surface: { key: item.key, item } });
+  }
 };
 const say = async (from: Member, type: EventType, payload: unknown) => {
   const e = await store.appendEvent(PUB, { type, fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload, refId: null });
@@ -149,6 +158,13 @@ describe("GET /public/rooms/:id/surface", () => {
     expect([again.status, again.headers.get("etag"), again.headers.get("access-control-allow-origin")]).toEqual([304, tag, "*"]);
   });
 
+  // The read today's dash makes, with no window: every row, until the dash pages (surface frames, Part 2).
+  it("answers every row of a room of 70 items with no window asked, as window all and no next", async () => {
+    await seed(70);
+    const body = (await bodyOf(await read(`/public/rooms/${PUB}/surface`))) as { items: unknown[]; window: string; next: string | null; frames: unknown[] };
+    expect([body.items.length, body.window, body.next, body.frames]).toEqual([70, "all", null, []]);
+  });
+
   // Room pages spec, D4: what the page orders and dates a post by.
   it("dates each item: when its key was first written and when it last changed, ISO 8601", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -187,6 +203,54 @@ describe("GET /public/rooms/:id/surface", () => {
     expect(items[0].data.approved_by).toEqual({ member_id: "m_peer", label: "member 2" });
     // The sign-in label is nowhere in what a reader gets, whichever key a later change files the approver under.
     expect(JSON.stringify(items)).not.toContain("peer@codenerd");
+  });
+});
+
+describe("the public surface read's windows (surface frames spec, D5)", () => {
+  // Review Focus 3.
+  it("answers a garbage or tampered next or window 400 with its text, never a 500", async () => {
+    for (const [q, text] of [
+      ["?next=%00%FF", NEXT_REFUSAL], ["?next=" + btoa(JSON.stringify(["frame", 1, "x"])), NEXT_REFUSAL],
+      ["?window=region:1e999,0,1,1", WINDOW_REFUSAL_HTTP], ["?window=key:..", WINDOW_REFUSAL_HTTP],
+    ] as const) {
+      const res = (await read(`/public/rooms/${PUB}/surface${q}`))!;
+      expect([res.status, await bodyOf(res)]).toEqual([400, { error: "invalid_request", error_description: text }]);
+    }
+  });
+
+  // Every frame entry crosses in its writer's envelope, and the public read names that writer by number.
+  it("carries each frame entry in the envelope of the frame's writer, named by number", async () => {
+    const f = { key: "f", kind: "frame" as const, title: "Board", body: null, ends: null, placement: { x: 0, y: 0, w: 1000, h: 1000 }, blob: null, shape: null, locked: true };
+    await store.appendSurface(PUB, { ...creatorBy, payload: f }, { surface: { key: "f", item: f } }, null);
+    for (const q of ["", "?window=newest"]) {
+      const { frames } = (await bodyOf(await read(`/public/rooms/${PUB}/surface${q}`))) as { frames: unknown[] };
+      expect(frames[0], q).toEqual({
+        trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" },
+        data: { number: 1, key: "f", title: "Board", placement: { x: 0, y: 0, w: 1000, h: 1000 }, locked: true, count: 0 },
+      });
+    }
+  });
+
+  it("pages a window of 70 items with next, and answers a window's own tag 304 and another window's tag 200", async () => {
+    await seed(70);
+    const first = (await read(`/public/rooms/${PUB}/surface?window=newest`))!;
+    const page = (await first.clone().json()) as { items: unknown[]; next: string | null };
+    expect([first.status, page.items.length]).toEqual([200, 64]);
+    const second = (await bodyOf(await read(`/public/rooms/${PUB}/surface?next=${encodeURIComponent(page.next!)}`))) as { items: unknown[]; next: string | null };
+    expect([second.items.length, second.next]).toEqual([6, null]);
+    const tag = first.headers.get("etag")!;
+    expect((await read(`/public/rooms/${PUB}/surface?window=newest`, { "if-none-match": tag }))!.status).toBe(304);
+    expect((await read(`/public/rooms/${PUB}/surface?window=unframed`, { "if-none-match": tag }))!.status).toBe(200);
+  });
+
+  it("names members by number in a window as in the plain read, and answers a private room 404 first", async () => {
+    await store.appendEvent(PUB, { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null },
+      { surface: { key: "a", item: { key: "a", kind: "text", title: null, body: "x", ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null } } });
+    const body = await bodyOf(await read(`/public/rooms/${PUB}/surface?window=newest`));
+    expect(JSON.stringify(body)).not.toContain("@codenerd");
+    expect(body).toMatchObject({ window: "newest", frames: [], next: null });
+    await store.createSession(session({ id: "qs_private", members: [member()] }));
+    expect(await bodyOf(await read("/public/rooms/qs_private/surface?window=frames"))).toEqual(NOT_PUBLIC);
   });
 });
 

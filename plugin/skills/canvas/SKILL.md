@@ -61,11 +61,13 @@ To remove one, send `{ "key": "plan", "remove": true }`.
 | Field | |
 |---|---|
 | `key` | Required. `[a-z][a-z0-9_-]{0,30}`: a lowercase letter, then lowercase letters, digits, `_` or `-`, 31 characters at most, so `look-links` is a key. `__proto__`, `constructor` and `prototype` are refused. |
-| `kind` | Required. One of the eight kinds below. |
+| `kind` | Required. One of the nine kinds below. |
 | `title` | Optional, 1 to 120 characters. |
 | `body` | 1 to 8,000 characters, for the kinds that take one. |
 | `ends` | `{ from, to }`, on a connector and nothing else. |
 | `placement` | Optional, `{ x, y, w?, h? }`. |
+| `frame` | Optional, a whole number from 1: on a card, in place of `placement`, puts it in the first free slot of frame `n`. |
+| `locked` | Optional, on a `frame` and nothing else. Defaults to true: the frame carries its cards when it moves. |
 | `blob` | `{ id }`, on a `file`, an `image` or an `html` item. |
 | `shape` | `{ form, color?, flip? }`, on a `shape` and nothing else. |
 
@@ -97,6 +99,7 @@ If a write times out, retry it with the same `idempotency_key` (an optional
 | `image` | `blob: { id }` of a blob stored as `image/png`, `image/jpeg`, `image/gif` or `image/webp` | No `body`. Any other type is placed as a `file`. |
 | `html` | `body` with the page inline, or `blob: { id }` of a blob stored as `text/html`, never both | See below. |
 | `shape` | `shape: { form, color?, flip? }` and `placement: { x, y, w, h }` | No `body`: its label is `title`. `form` is `rect`, `ellipse`, `diamond`, `arrow` or `line`; `color` is `slate` (the default), `blue`, `green`, `amber`, `red` or `violet`, or a hex colour such as `#3b82f6` (`#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`); `flip: true` draws an arrow or a line from the bottom-left to the top-right. |
+| `frame` | `title` and `placement: { x, y, w, h }` | No `body`. A numbered rectangle: a card whose centre is inside it belongs to it. Frames may touch but not overlap, and a room holds at most 100. Frame numbers follow creation order, so frame 1 is where a reader starts. |
 
 **An `html` item is a self-contained page.** The control panel renders it only
 inside a sandboxed frame on another origin. Its inline script and style and its
@@ -163,11 +166,14 @@ write, who places against what you left.
 - **One stable key per idea.** Choose the key once (`plan`, `decisions`,
   `status`, `api_design`) and write that key every time the idea changes. The
   write replaces the item and the log keeps the old version, so `plan_v2` and
-  `plan_final` are never needed; every new key is one more of the surface's 64
+  `plan_final` are never needed; every new key is one more of the surface's 1,000
   items.
 - **Keep the plan current rather than appended to.** When step 2 is done,
   rewrite `plan` with step 2 marked done. Do not add a `step_2_done` item next
   to it.
+- **Lay a path with frames.** Write a `frame` per stage of the room, in the order
+  a reader should take them, and put a card on the path with `frame: <n>` in
+  place of a `placement`: the server takes the frame's first free slot.
 
 **The grid.** A card is 320 wide and about 200 tall, with 40 between cards, so a
 slot is 360 across and 240 down: columns sit at `x = 0, 360, 720, …` and rows at
@@ -251,7 +257,7 @@ Three rules decide what goes on the surface beside the cards.
 - [ ] **A relation is a connector, a group is a shape, a structure is a
   diagram.**
 - [ ] **Remove what is finished,** and the connectors that pointed at it. A
-  surface holds at most 64 items; a write that would add a 65th key is refused
+  surface holds at most 1,000 items; a write that would add the next key is refused
   until one is removed, and a write to a key already on the surface does not
   count against the limit.
 - [ ] **Place every item.** The server places one you leave unplaced, in the
@@ -263,9 +269,13 @@ Three rules decide what goes on the surface beside the cards.
   the cursor of its last change. `cursor` minus `surface_cursor` is how many
   events have landed since. Each change also arrives in `events[]` as a
   `surface` event carrying the item that changed, or `{ key, remove: true }`.
-- `bellman_sync` with `surface: true` returns `surface: { cursor, items }`, every
-  item in full. Ask for it after a restart, before rewriting an item you have
-  not seen, and before laying out a surface someone else started.
+- `bellman_sync` with `surface: true` returns `surface: { cursor, items, frames,
+  window, next }`: the room's front window, items in full. Ask for it after a
+  restart, before rewriting an item you have not seen, and before laying out a
+  surface someone else started.
+- A read is a window of at most 64 items. Start at frame 1, follow `frames[]`
+  with `bellman_surface` and `window: "frame:<n>"` (or `"unframed"`, or
+  `"newest"`), and read on with `next`, sent alone, until it is null.
 - A joiner's `bellman_connect` preview lists what the surface holds by key, kind
   and size, with no prose, and `bellman_confirm` hands over the items.
 - `bellman_surface` with `query` answers the ten best items with a snippet each

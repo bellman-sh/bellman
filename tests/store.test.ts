@@ -796,3 +796,27 @@ describe("the retention window on the local server's clock", () => {
     expect((await store.queryAudit("org_a", { limit: 10 })).entries.map((e) => e.action)).toEqual(["audit_swept", "audit_retention_set"]);
   });
 });
+
+/**
+ * A surface write lists the room's rows only when placement needs them: a frame, a card naming a frame, or a
+ * card with no placement. The listing is the room map's `values()`, counted through a spy.
+ */
+describe("MemoryStore.appendSurface reads the rows only when it places among them", () => {
+  it("lists nothing for a placed card and lists once for a frame write", async () => {
+    const store = new MemoryStore();
+    const s = session({});
+    await store.createSession(s);
+    const by = { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null } as const;
+    const base = { title: null, body: "x", ends: null, blob: null, shape: null };
+    const frame = (x: number) => ({ ...base, key: "f", kind: "frame" as const, title: "F", body: null, placement: { x, y: 0, w: 1000, h: 1000 }, locked: true });
+    const card = { ...base, key: "a", kind: "text" as const, placement: { x: 40, y: 40 } };
+    await store.appendSurface(s.id, { ...by, payload: frame(0) }, { surface: { key: "f", item: frame(0) } }, null);
+    const rows = (store as unknown as { surfaces: Map<string, Map<string, unknown>> }).surfaces.get(s.id)!;
+    const listed = vi.spyOn(rows, "values");
+
+    expect((await store.appendSurface(s.id, { ...by, payload: card }, { surface: { key: "a", item: card } }, null)).outcome).toBe("appended");
+    expect(listed, "a placed card").toHaveBeenCalledTimes(0);
+    expect((await store.appendSurface(s.id, { ...by, payload: frame(10) }, { surface: { key: "f", item: frame(10) } }, null)).outcome).toBe("appended");
+    expect(listed, "a frame write").toHaveBeenCalledTimes(1);
+  });
+});

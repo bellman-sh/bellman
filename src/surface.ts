@@ -15,12 +15,12 @@ import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
 
-export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape"] as const satisfies readonly SurfaceKind[];
+export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape", "frame"] as const satisfies readonly SurfaceKind[];
 
-// ponytail: ceilings, not tuned. 64 keeps a full read inside one tool response;
-// the first room past it wants pagination, not a bigger number. 8,000 is the
-// scribe spec's 4,000 doubled, for a body read on demand rather than on every poll.
-export const MAX_SURFACE_ITEMS = 64;
+// ponytail: ceilings, not tuned. 1,000 is a courtesy bound (ADR 0015); a read is a window of `SURFACE_PAGE`,
+// so the cap no longer sizes a response. 8,000 is the scribe spec's 4,000 doubled, for a body read on demand
+// rather than on every poll.
+export const MAX_SURFACE_ITEMS = 1_000;
 export const MAX_SURFACE_BODY_CHARS = 8_000;
 export const MAX_SURFACE_TITLE_CHARS = 120;
 export const MAX_SURFACE_LINK_CHARS = 2_048;
@@ -42,8 +42,12 @@ export const surfaceCursor = (s: StoredSession): number => s.surfaceCursor ?? 0;
  */
 export const createdAtOf = (row: Pick<SurfaceRow, "at" | "createdAt">): number => row.createdAt ?? row.at;
 
-/** What an append asks the store to do to one key. `item: null` removes it. */
-export type SurfaceWrite = { key: string; item: SurfaceItem | null };
+/**
+ * What an append asks the store to do to one key. `item: null` removes it. `frame` is the number of the frame a
+ * card asked to be put in (surface frames spec, D2): never stored, it travels with the write until the store
+ * turns it into a placement among the frames.
+ */
+export type SurfaceWrite = { key: string; item: SurfaceItem | null; frame?: number };
 
 /**
  * The monotonic rule (spec D6), shared by both stores.
@@ -63,7 +67,9 @@ export type SurfaceWrite = { key: string; item: SurfaceItem | null };
  *
  * `createdAt` is stamped from the event on a key's first write and carried over by `createdAtOf` on every
  * edit, so a row from before the field keeps its `at`; a removal leaves no row, so a key written again finds
- * none and is stamped afresh.
+ * none and is stamped afresh. So is a key whose kind changes to or from `frame` (surface frames spec, D3): a
+ * frame is ranked by its `createdAt`, so a converted card joins the path at its end and an old date never
+ * moves a frame into the middle of it.
  *
  * `approvedBy` is stamped beside the author when the append carries one (topic rooms spec, D2). The row is
  * built from the item and the event and never from `existing`, so a write without an approver stores a row
@@ -77,11 +83,14 @@ export function applySurfaceWrite(
 ): SurfaceRow | "remove" | null {
   if (existing !== undefined && existing.cursor >= event.cursor) return null;
   if (write.item === null) return existing === undefined ? null : "remove";
+  // `frame` is the write's own field and `...write.item` carries only the item's, so the row never holds it.
   return {
     ...write.item,
     cursor: event.cursor,
     at: event.at,
-    createdAt: existing === undefined ? event.at : createdAtOf(existing),
+    createdAt: existing === undefined || (existing.kind === "frame") !== (write.item.kind === "frame")
+      ? event.at
+      : createdAtOf(existing),
     byMemberId: event.fromMemberId,
     byLabel: event.fromLabel,
     ...(approvedBy === undefined ? {} : { approvedBy }),
@@ -105,16 +114,17 @@ export const PLACED_KINDS: readonly SurfaceKind[] = ["text", "link", "diagram", 
 // rect behind a column covers more than one slot, and a box sized 1e300 covers every slot there is; a search
 // with no end would hang the room's object inside its transaction. Past it the item is stored unplaced, as
 // it was before this, and the write still succeeds; the upgrade is a search that skips a covered run in one step.
+// Measured 7 to 10 ms for 1,000 rows and slot 1,000 on 2026-10-23; the 4,000-slot worst case is about four times that.
 export const MAX_SLOT_SEARCH = MAX_SURFACE_ITEMS * GRID.cols;
 
 /** Whether a write arrives without the placement the room gives it. */
 export const needsPlacement = (write: SurfaceWrite): write is { key: string; item: SurfaceItem } =>
   write.item !== null && write.item.placement === null && PLACED_KINDS.includes(write.item.kind);
 
-interface Box { x: number; y: number; w: number; h: number }
+export interface Box { x: number; y: number; w: number; h: number }
 
 /** Whether two boxes share area. Boxes that only touch do not. */
-const overlaps = (a: Box, b: Box): boolean =>
+export const overlaps = (a: Box, b: Box): boolean =>
   a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
 /**
@@ -127,7 +137,7 @@ const overlaps = (a: Box, b: Box): boolean =>
  * whichever of them is drawn where, and the server keeps clear of the same cells the viewers draw them in,
  * whatever order each viewer sorts them in.
  */
-function coveredBoxes(rows: readonly SurfaceRow[], skipKey: string): Box[] {
+export function coveredBoxes(rows: readonly SurfaceRow[], skipKey: string): Box[] {
   let unplaced = 0;
   return rows
     .filter((r) => r.key !== skipKey && r.kind !== "connector")
@@ -231,6 +241,9 @@ export const SurfaceItemShape = z.strictObject({
   placement: PlacementShape.nullish(),
   blob: BlobShape.nullish(),
   shape: ShapeShape.nullish(),
+  // Surface frames spec, D2: `frame` places a card in frame N and is never stored; `locked` is a frame's own.
+  frame: z.number().int().positive().nullish(),
+  locked: z.boolean().nullish(),
 });
 
 /** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */
@@ -279,7 +292,7 @@ export function normalizeSurfaceWrite(
   if (!parsed.success) {
     return {
       ok: false,
-      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, blob?, shape? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
+      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, frame?, blob?, shape?, locked? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
     };
   }
   const v = parsed.data;
@@ -303,6 +316,13 @@ export function normalizeSurfaceWrite(
       // bridge still has a way onto the surface, and anything larger is an upload.
       if (v.body && v.blob) return refuse("an html item is inline (body) or a blob (blob: { id }), not both");
       if (!v.body && !v.blob) return refuse("an html item needs a body (the page, inline) or blob { id } naming a blob stored as text/html");
+    } else if (v.kind === "frame") {
+      // A frame is a titled rectangle (surface frames spec, D2): its name on the canvas and the page, its full box, no body.
+      if (!v.title) return refuse("a frame needs a title: its name on the canvas and the page");
+      if (!v.placement || v.placement.w === undefined || v.placement.h === undefined) {
+        return refuse("a frame needs placement { x, y, w, h }");
+      }
+      if (v.body) return refuse("a frame has no body");
     } else if (v.kind === "shape") {
       // A shape is a few numbers the canvas draws (#197, D1, D2, D4): its own field, its size on the placement, no body.
       if (!v.shape) return refuse("a shape needs shape { form, color?, flip? }");
@@ -319,6 +339,12 @@ export function normalizeSurfaceWrite(
   }
   if (v.blob && !blobBacked && v.kind !== "html") return refuse("only a file, an image or an html item names a blob");
   if (v.shape && v.kind !== "shape") return refuse("only a shape has shape");
+  if (v.locked != null && v.kind !== "frame") return refuse("only a frame is locked");
+  if (v.frame != null) {
+    if (v.kind === "frame") return refuse("a frame is not placed in a frame: frames do not nest");
+    if (!PLACED_KINDS.includes(v.kind)) return refuse(`frame: ${v.frame} places text, link, diagram, file, image and html items`);
+    if (v.placement) return refuse("send placement or frame, not both");
+  }
 
   if (v.kind === "link") {
     if (v.body!.length > MAX_SURFACE_LINK_CHARS) {
@@ -350,7 +376,10 @@ export function normalizeSurfaceWrite(
         // Filled from the object by writeSurface (D5): the writer's word is the id alone.
         blob: null,
         shape: v.kind === "shape" ? v.shape! : null,
+        // A frame's alone: locked unless the write says otherwise (D2); absent on every other row.
+        ...(v.kind === "frame" ? { locked: v.locked ?? true } : {}),
       },
+      ...(v.frame != null ? { frame: v.frame } : {}),
     },
     blobId: v.blob?.id ?? null,
   };

@@ -761,9 +761,10 @@ export interface SavedPreset {
  * client is shown maps to a shape the server validates, and a kind lands with
  * its validator. `file` and `image` (#183) reference a blob; `html` (#185) is
  * a page inline in body or a blob, never both; `shape` (#197) is a few numbers
- * the canvas draws, with its own field and no body.
+ * the canvas draws, with its own field and no body; `frame` is a titled rectangle
+ * that names a region of the canvas and, in the order it was written, a step of the path.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape" | "frame";
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -817,6 +818,11 @@ export interface SurfaceItem {
   blob: BlobRef | null;
   /** A shape's own field (#197); null for every other kind. */
   shape: Shape | null;
+  /**
+   * Whether the members of a frame move with it. A frame's alone: `normalizeSurfaceWrite` sets it on a frame
+   * (locked unless the write says otherwise) and it is absent on every other row, so no stored row changes.
+   */
+  locked?: boolean;
 }
 
 /**

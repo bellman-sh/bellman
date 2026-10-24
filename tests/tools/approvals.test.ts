@@ -10,7 +10,7 @@ import { newBlobId } from "../../src/blobs.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { sendKeyFor, sendLimitFor } from "../../src/send-limit.js";
 import { MemoryStore } from "../../src/store.js";
-import { MAX_SURFACE_ITEMS } from "../../src/surface.js";
+import { MAX_SURFACE_ITEMS, gridSlot } from "../../src/surface.js";
 import type { SurfaceItem } from "../../src/types.js";
 import { text } from "../helpers/blob-bytes.js";
 
@@ -38,7 +38,7 @@ const seatMaintainer = async (r: TopicRoom) => {
 /** The surface at its cap, written by the maintainer straight into the store. */
 const fillSurface = async (r: TopicRoom) => {
   for (let i = 0; i < MAX_SURFACE_ITEMS; i++) {
-    const item: SurfaceItem = { ...card({ key: `k${i}` }), kind: "text", ends: null, placement: null, blob: null, shape: null };
+    const item: SurfaceItem = { ...card({ key: `k${i}` }), kind: "text", ends: null, placement: gridSlot(i), blob: null, shape: null };
     await h.store.appendEvent(r.sessionId, {
       type: "surface", fromMemberId: r.maintainerId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null,
     }, { surface: { key: `k${i}`, item } });
@@ -275,7 +275,7 @@ describe("a proposal whose card cannot be written when it is approved", () => {
     const before = (await eventsOf(r)).length;
     const out = await answer(r, asked.data.cursor);
     expect(out.isError).toBe(true);
-    expect(out.text).toContain(`already holds ${MAX_SURFACE_ITEMS} items`);
+    expect(out.text).toContain("already holds 1,000 items");
     expect((await eventsOf(r)).length).toBe(before);
     expect(((await sync(r.contributor, r.sessionId, r.contributorId)).data.outstanding as Outstanding).map((o) => o.cursor)).toEqual([asked.data.cursor]);
   });
@@ -289,6 +289,27 @@ describe("a proposal whose card cannot be written when it is approved", () => {
     expect(out.text).toContain('connector "link" names "a", which is not on the surface');
   });
 
+  // Surface frames spec, D8: a frame needs no source, and an approval places it among the frames already there.
+  it("places a proposed frame at approval, and refuses one that overlaps a frame already there with nothing appended", async () => {
+    const r = await topicRoom(h);
+    const frame = (key: string, x: number) => ({ key, kind: "frame", title: key, placement: { x, y: 0, w: 1480, h: 520 } });
+    const one = await propose(r, { item: frame("one", 0) });
+    const two = await propose(r, { item: frame("two", 1000) });
+    expect(one.isError, one.text).toBe(false);
+    expect(two.isError, two.text).toBe(false);
+
+    const placed = await answer(r, one.data.cursor);
+    expect(placed.isError, placed.text).toBe(false);
+    expect((await rowsOf(r)).map((x) => [x.key, x.kind, x.byMemberId])).toEqual([["one", "frame", r.contributorId]]);
+
+    const before = (await eventsOf(r)).length;
+    const out = await answer(r, two.data.cursor);
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap');
+    expect((await eventsOf(r)).length).toBe(before);
+    expect((await rowsOf(r)).map((x) => x.key)).toEqual(["one"]);
+  });
+
   // ADR 0022: the refusal comes before the minute's count, so the approver keeps the place the refused answer did not use.
   it("spends no place of the send limit when it is refused", async () => {
     const r = await topicRoom(h);
@@ -299,7 +320,7 @@ describe("a proposal whose card cannot be written when it is approved", () => {
 
     const refused = await answer(r, asked.data.cursor);
     expect(refused.isError).toBe(true);
-    expect(refused.text).toContain(`already holds ${MAX_SURFACE_ITEMS} items`);
+    expect(refused.text).toContain("already holds 1,000 items");
 
     const next = await r.maintainer.call("bellman_send", {
       session_id: r.sessionId, member_id: r.maintainerId, type: "message", payload: { text: "the last place of the minute" },

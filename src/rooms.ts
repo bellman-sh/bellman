@@ -25,7 +25,7 @@ import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
   JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
-  type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
+  type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { cardResult, messageResult, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
@@ -34,6 +34,7 @@ import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
+import { MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -358,8 +359,9 @@ export const cutAtFor = (handles: readonly Member[]): number | undefined =>
   cutFor(handles) === undefined ? undefined : Math.max(...handles.map((m) => m.leftAt ?? 0));
 
 /**
- * The surface as a member reads it (#129, D7): every row in an envelope, and
- * the cursor of the last change.
+ * The surface as a member reads it (#129, D7): the rows the member may see, and
+ * the cursor of the last change. Search reads it this way; a window read cuts the rows inside the
+ * room's object (`surfaceWindow`) and carries one page.
  *
  * `cut` is a removed member's cursor (#113): such a member reads its history
  * up to the `member_evicted` event that removed it and nothing after, so rows
@@ -390,10 +392,59 @@ export async function surfaceAt(
   return { cursor, rows: visible };
 }
 
-/** The surface as a member reads it: `surfaceAt`'s rows, each in its untrusted envelope. */
-export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number) {
+/**
+ * One window of the surface as a member reads it (surface frames spec, D5): the page's rows in envelopes, every
+ * frame in its writer's envelope, and where to go on. `window` is `"all"` on the HTTP read with no window, which
+ * holds every row (`readWholeSurface`).
+ */
+export type SurfaceBlock = {
+  cursor: number;
+  items: ReturnType<typeof surfaceItem>[];
+  frames: FrameEnvelope[];
+  window: string;
+  next: string | null;
+  slots?: Record<string, { x: number; y: number }>;
+};
+
+/**
+ * Every row a member may see, under `cut`, as one block: the HTTP surface read asked for no window, which is what
+ * today's dash reads, so after the deploy it still sees the whole canvas and not frame 1 alone.
+ *
+ * ponytail: the transitional path. It moves every row across RPC, as the read before frames did; the dash's
+ * windowed reads (surface frames, Part 2) remove it, and the no-argument read then answers the front window.
+ */
+export async function readWholeSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
   const { cursor, rows } = await surfaceAt(store, session, cut);
-  return { cursor, items: rows.map(surfaceItem) };
+  return { cursor, items: rows.map(surfaceItem), frames: frameEnvelopes(rows), window: "all", next: null };
+}
+
+/**
+ * A window of the surface under `cut`, as `surfaceAt` would cut it. The store pages it where the rows are
+ * (lead ruling L1), so this projects one page and never every row.
+ */
+export async function readSurfaceWindow(
+  store: BellmanStore,
+  session: StoredSession,
+  asked: { window?: Window; next?: string },
+  cut?: number,
+): Promise<{ ok: true; block: SurfaceBlock } | { ok: false; reason: string }> {
+  const read = await store.surfaceWindow(session.id, asked, { cut });
+  if (!read.ok) return read;
+  const { page, cursor } = read;
+  return {
+    ok: true,
+    block: {
+      cursor, items: page.items.map(surfaceItem), frames: page.frames, window: page.window, next: page.next,
+      ...(page.slots === undefined ? {} : { slots: page.slots }),
+    },
+  };
+}
+
+/** The front of the surface: frame 1 when the member sees a frame, else the newest. Asked for nothing, it is never refused. */
+export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
+  const read = await readSurfaceWindow(store, session, {}, cut);
+  if (!read.ok) throw new Error(`the front of the surface was refused: ${read.reason}`);
+  return read.block;
 }
 
 /** A public room's page link, or null for a private room (room search spec, R11). */
@@ -418,7 +469,8 @@ export async function searchSurface(
 ): Promise<{ cursor: number; total: number; results: CardResult[] }> {
   const { cursor, rows } = await surfaceAt(store, session, cut);
   const { total, results } = searchCards(rows, words);
-  return { cursor, total, results: results.map((hit) => cardResult(hit, cardUrl(session, hit.row.key))) };
+  const frames = frameNumbers(rows);
+  return { cursor, total, results: results.map((hit) => cardResult(hit, cardUrl(session, hit.row.key), frames.get(hit.row.key) ?? null)) };
 }
 
 /**
@@ -972,7 +1024,7 @@ export async function settleBlob(
  * The item is read here as text and structure only. When a maintainer approves the proposal it is normalised
  * again and settled again, since what the room holds by then may differ: a proposal is never applied on trust.
  *
- * The cap is read before the append, as the 64-item cap in `writeSurface` is, so two proposals landing together
+ * The cap is read before the append, as the 1,000-item cap in `writeSurface` is, so two proposals landing together
  * can make a fourth (R11). It is a courtesy bound and is checked here and in no store.
  *
  * ponytail: the cap reads the log back across a proposal's seven days for every proposal sent, the window
@@ -1024,16 +1076,16 @@ export async function checkProposal(
 /**
  * The checks of a surface write that come before it counts as a send, for any payload (topic rooms plan, R14): the
  * shape and each kind's rule (`normalizeSurfaceWrite`), the blob a file, image or html item names
- * (`settleBlob`), the 64-item cap, and a connector's ends. The write it returns carries the object's size, type and
- * name where a blob is named, and is what the append is handed.
+ * (`settleBlob`), the 1,000-item cap, the 100-frame cap, and a connector's ends. The write it returns carries the
+ * object's size, type and name where a blob is named, and is what the append is handed.
  *
  * `writeSurface` calls it after its gate, and an approval calls it for the proposal's item, so a card a
  * maintainer's human approves is held to the rule a card a maintainer writes is held to, in the same words and the
  * same order. It appends nothing and spends no place under the send limit, so a refusal here leaves the log and the
  * minute's count as they were.
  *
- * The rows are read once, and the caller's append is a separate step: the cap and a connector's ends are
- * courtesy bounds, as `writeSurface` says.
+ * The room is read once, through `surfaceFacts` (the counts and the rows of the keys the write names), and the
+ * caller's append is a separate step: the caps and a connector's ends are courtesy bounds, as `writeSurface` says.
  */
 export async function resolveSurfaceWrite(
   store: BellmanStore,
@@ -1052,13 +1104,25 @@ export async function resolveSurfaceWrite(
     write = settled.value;
   }
 
-  const rows = await store.surfaceOf(sessionId);
-  const byKey = new Map(rows.map((r) => [r.key, r] as const));
+  // The counts and the rows this write names, from where the rows are: never every row across RPC.
+  const ends = write.item?.kind === "connector" && write.item.ends !== null ? [write.item.ends.from, write.item.ends.to] : [];
+  const facts = await store.surfaceFacts(sessionId, [write.key, ...ends]);
+  const byKey = new Map(facts.rows.map((r) => [r.key, r] as const));
   if (write.item !== null) {
-    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
+    if (!byKey.has(write.key) && facts.count >= MAX_SURFACE_ITEMS) {
       return refuse(
         "conflict",
-        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
+        // "1,000", written out: the tests pin the wording and a locale must not move it.
+        `this room's surface already holds 1,000 items; remove one with { key, remove: true } before adding "${write.key}".`,
+      );
+    }
+    // A frame key already on the surface is a rewrite and passes; a key that is not a frame yet is a new frame.
+    if (
+      write.item.kind === "frame" && byKey.get(write.key)?.kind !== "frame" && facts.frames >= MAX_FRAMES
+    ) {
+      return refuse(
+        "conflict",
+        `this room's surface already holds ${MAX_FRAMES} frames; remove one with { key, remove: true } before adding frame "${write.key}".`,
       );
     }
     if (write.item.kind === "connector" && write.item.ends !== null) {
@@ -1157,16 +1221,19 @@ async function restoreVersion(
  * exists: a second transport re-typing the sequence is a second chance to skip
  * the verb guard or the audit row. The order is the write path the spec gives:
  * the seat's guards (`gateSeat`, which also touches the caller), the payload's
- * shape and each kind's rule, the blob a file, image or html item names, the rows for the
- * cap and a connector's ends, the append with the row riding it, the audit row.
+ * shape and each kind's rule, the blob a file, image or html item names, the room's facts for the
+ * caps and a connector's ends, the append with the row riding it, the audit row.
  *
- * The rows are read once and then the append happens, which is a
- * read-then-write with the window open: two writers can both add a 64th item,
+ * The facts are read once and then the append happens, which is a
+ * read-then-write with the window open: two writers can both add a 1,000th item,
  * and a connector can name a key removed a millisecond earlier. Both are
- * courtesy bounds — a 65th row costs nothing and a dangling connector is a
- * state the spec declares a reader handles — so neither moves into the store.
+ * courtesy bounds: a 1,001st row costs nothing and a dangling connector is a
+ * state the spec declares a reader handles, so neither moves into the store.
+ * The 100-frame cap is read with the item cap and is the same kind of bound.
  * The verb guard, the frozen guard and the row's write are not courtesies, and
- * each is where it has to be.
+ * each is where it has to be. Neither is the placement among frames: the append
+ * is `appendSurface`, which places the write inside the store's own transaction
+ * and refuses an overlap, a full frame or a missing frame there, writing nothing.
  *
  * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
  * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
@@ -1221,7 +1288,7 @@ export async function writeSurface(
     payload: write.item ?? { key: write.key, remove: true },
     refId: null,
   };
-  const extras: AppendExtras = {
+  const extras: Parameters<BellmanStore["appendSurface"]>[2] = {
     surface: write,
     // The seat that restores a version approves it, whoever wrote it (D5).
     ...(restored === null ? {} : { approvedBy: { memberId: me.memberId, label: me.label } }),
@@ -1233,24 +1300,20 @@ export async function writeSurface(
   // so each restorer's keys are their own (R23); the refusal below still names the key as the caller wrote it.
   const key = restored === null || !idempotencyKey ? idempotencyKey : `${memberId}:${idempotencyKey}`;
 
-  let event: SessionEvent;
-  let replayed = false;
-  if (key) {
-    const w = await store.appendEventOnce(sessionId, draft, key, extras);
-    if (w.outcome === "conflict") {
-      return refuse(
-        "conflict",
-        `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
-      );
-    }
-    if (w.outcome === "frozen") return refuse("frozen", FROZEN);
-    event = w.event;
-    replayed = w.outcome === "replayed";
-  } else {
-    const appended = await store.appendEvent(sessionId, draft, extras);
-    if (!appended) return refuse("frozen", FROZEN);
-    event = appended;
+  // One call for the keyed and the unkeyed write: the store places the write among the frames inside its own
+  // transaction, so an overlap or a full or missing frame is refused there and nothing is written.
+  const appended = await store.appendSurface(sessionId, draft, extras, key ?? null);
+  if (appended.outcome === "conflict") {
+    return refuse(
+      "conflict",
+      `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
+    );
   }
+  if (appended.outcome === "frozen") return refuse("frozen", FROZEN);
+  // The store names the kind (`Placed`, frames.ts): a missing frame is `invalid`, the rest `conflict`.
+  if (appended.outcome === "refused") return refuse(appended.kind, appended.reason);
+  const event = appended.event;
+  const replayed = appended.outcome === "replayed";
 
   // Nothing below happens twice: a replay's original call did it.
   if (!replayed) {

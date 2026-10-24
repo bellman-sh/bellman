@@ -1072,11 +1072,26 @@ under it, and a row stored before this, with none, is covered where the viewers 
 for no other, before the event is built; `MemoryStore.placed` reads its map. The event is
 appended with the placement the row takes, and an idempotent retry is judged by the draft the
 caller sent, so it replays however the room has filled since. The search ends at
-`MAX_SLOT_SEARCH` slots (256, a row of four for each of the surface's 64 items), and an item
+`MAX_SLOT_SEARCH` slots (4,000, a row of four for each of the surface's 1,000 items), and an item
 that finds none is stored unplaced, with the write still succeeding, and laid out by the
 viewers. The grid lives in three places that must agree: `src/surface.ts`,
 `ui/src/canvas-layout.ts` (held to it by `tests/working-surface.test.ts`) and dash's
 `src/lib/canvas.ts`. A connector has no placement, and a shape is refused without one.
+
+A surface holds 1,000 items, and a read of it is a window (ADR 0038). The `frame` kind is a titled
+rectangle; a card belongs to the frame holding its centre, and a frame's number is its rank by
+`createdAt`, computed on every read and never stored. `BellmanStore.surfaceWindow` cuts the room's rows
+inside its object (`src/frames.ts` ranks, places and pages them, runtime-free, for both stores) and
+returns one page of at most 64 items with `frames[]`, the window it answered and `next`, a keyset
+position, so a read crosses RPC with one page and not a thousand rows. A tool read with no window is the
+front: frame 1 when the room has frames, else the newest items; the HTTP read with no window still
+returns every row (`readWholeSurface`) until the dash pages. `appendSurface` is the store operation
+every surface write goes through: in the append's own transaction it lists the rows when the write is
+placed among them (a frame, a card naming a frame, a card with no placement), refuses a frame
+that would overlap another, places a card sent with `frame: <n>` in that frame's first free slot, and,
+for a locked frame that moved, writes the carried cards with their placements moved. `appendEvent`
+keeps `extras.surface` for every other write and throws for a frame-shaped one, so no path places a
+frame unchecked.
 
 Briefs are rows too, `bf:<memberId>` (ADR 0018). A member keeps only its brief's
 `agent`, for the roster, and `getBriefs` reads the briefs a caller names:
@@ -1759,6 +1774,10 @@ covers those, and a transaction would be the stronger form: it holds even if an
 await on anything but storage were ever put between the read and the write.
 Across objects there is no transaction to widen.
 
+A locked frame's move (ADR 0038) is one transaction in one object: `appendSurface` writes the
+frame's row and event and every carried card's in the room's own `SessionDO`, so it opens no
+cross-object gap.
+
 `seatMember` is the newest of those.
 Seating a joiner means reclaiming a stale seat if that is what it takes,
 deciding capacity, and appending the member — and as three store calls from a
@@ -2286,12 +2305,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,168** | every request, whether or not you are in a room |
+| Tool definitions | **~10,785** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~603 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~876 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-24 for surface frames, by the method below: 390 tokens over the 10,395
+that trunk (`e1213c2f`) measures, in `bellman_surface` (603 to 876), `bellman_send` (1,737 to
+1,803), `bellman_sync` (770 to 791), `bellman_confirm` (893 to 913) and `bellman_connect` (799 to
+809): windows, frames in their envelopes, and next. No tool was added. That is 10,785. The 10,168 the row held
+predates the merges that brought trunk to 10,395; the 227 between are theirs, not this
+branch's.
 
 Re-measured on 2026-10-23 for room search, by the method below: 239 tokens over the 9,929
 that trunk (`cd0f5e91`, main after topic rooms) measures, all of them `bellman_surface`'s (364 to
@@ -2534,7 +2560,7 @@ and #28 both landed; the last paragraphs of this section account for the
 difference. The three rows below that one are from the original measurement and
 have not been re-measured since. The joining row predates the surface:
 `bellman_connect` now carries its index and `bellman_confirm` its items, so a
-joiner pays for the room's surface too, up to 64 items.
+joiner pays for the room's surface too, up to the 64 items of its front window.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as

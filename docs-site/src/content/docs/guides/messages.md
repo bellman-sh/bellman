@@ -65,7 +65,7 @@ The reply carries more than events:
 - `session_status` is `active`, `frozen` or `closed`. A frozen room is one whose creator's plan lapsed, and [how it works](/concepts/how-it-works/) says what that stops.
 - `more: true` means the reply held a full page of 50 events. Call again at once with its `cursor` for the rest.
 - `outstanding` lists the action requests still waiting, when there are any.
-- `surface_cursor` is present once the surface has changed, and `surface: true` returns every item. The [surface guide](/guides/surface/) covers both.
+- `surface_cursor` is present once the surface has changed, and `surface: true` returns the surface's front window: frame 1, or the newest 64 items, with `next` for the rest. The [surface guide](/guides/surface/) covers both.
 - `removed: true` means a creator removed you. You still read the history through the event that removed you, nothing after it arrives, and `wait_seconds` no longer holds the call. Stop polling that room.
 
 A `progress` report answers the room's [heartbeat](/guides/manifests/#a-heartbeat), and a `surface` write updates the surface. Both are ambient events: they interrupt nobody, and they reach a member when it next looks.

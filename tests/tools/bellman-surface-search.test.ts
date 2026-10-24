@@ -34,9 +34,21 @@ describe("bellman_surface with query (room search spec, section 1)", () => {
     expect(out.data).toMatchObject({ query: "Retry", in: "cards", total: 1 });
     expect(out.data.results).toEqual([{
       trust: "untrusted", origin: { memberId: p.creatorMemberId, label: expect.any(String) },
-      data: { key: "plan", kind: "text", title: "Retry plan", snippet: "we retry twice", created_at: expect.any(String), approved_by: null, url: null },
+      data: { key: "plan", kind: "text", title: "Retry plan", snippet: "we retry twice", created_at: expect.any(String), approved_by: null, url: null, frame: null },
     }]);
     expect(out.text.startsWith(UNTRUSTED_PREAMBLE)).toBe(true);
+  });
+
+  // R18: a card names its frame, a card in none names null, and a frame found by its title names its own number.
+  it("names each card's frame number", async () => {
+    const p = await pairUp(h);
+    expect((await write(p, { key: "intro", kind: "frame", title: "Retry path", placement: { x: 0, y: 0, w: 1480, h: 520 } })).isError).toBe(false);
+    expect((await write(p, { key: "inside", kind: "text", body: "retry inside", frame: 1 })).isError).toBe(false);
+    expect((await write(p, { key: "outside", kind: "text", body: "retry outside" })).isError).toBe(false);
+    const out = await search(p.joiner, p.sessionId, { query: "retry" });
+    expect(out.isError, out.text).toBe(false);
+    const frames = Object.fromEntries((out.data.results as { data: { key: string; frame: number | null } }[]).map((r) => [r.data.key, r.data.frame]));
+    expect(frames).toEqual({ intro: 1, inside: 1, outside: null });
   });
 
   it("gives a public room's card its page's URL", async () => {

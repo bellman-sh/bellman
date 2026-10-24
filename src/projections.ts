@@ -432,6 +432,8 @@ export function surfaceItem(r: SurfaceRow) {
       // reader never tells "absent" from "null", and a legacy row has no key at all.
       blob: r.blob ?? null,
       shape: r.shape ?? null,
+      // Surface frames spec, D2: a frame's alone; `null` on every other row, as `shape` is.
+      locked: r.locked ?? null,
       cursor: r.cursor,
       at: new Date(r.at).toISOString(),
       // Room pages spec, D4: when the key was first written and when it last changed, the dates a page shows and orders by.
@@ -465,10 +467,12 @@ export type CardResult = { trust: "untrusted"; origin: Origin; data: {
   created_at: string;
   approved_by: { member_id: string; label: string } | null;
   url: string | null;
+  /** The frame the card sits in, a frame's own number for a frame, null for a card in none (surface frames spec, R18). */
+  frame: number | null;
 } };
 export type MessageResult = { trust: "untrusted"; origin: Origin; data: { cursor: number; snippet: string; at: string } };
 
-export function cardResult(hit: CardHit, url: string | null): CardResult {
+export function cardResult(hit: CardHit, url: string | null, frame: number | null): CardResult {
   const r = hit.row;
   return untrusted({ memberId: r.byMemberId, label: r.byLabel }, {
     key: r.key,
@@ -478,6 +482,7 @@ export function cardResult(hit: CardHit, url: string | null): CardResult {
     created_at: new Date(createdAtOf(r)).toISOString(),
     approved_by: approvedByOf(r),
     url,
+    frame,
   });
 }
 

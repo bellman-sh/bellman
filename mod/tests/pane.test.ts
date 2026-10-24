@@ -814,7 +814,7 @@ test("a hostile canvas is cleaned wherever it is drawn", async ($, on) => {
 });
 
 test("the canvas kept is the shown room's alone, within CANVAS_MAX", async ($, on) => {
-  // One bridge with seats in two rooms, each canvas as large as the server lets one be: 64 items of 8,000 characters,
+  // One bridge with seats in two rooms, each canvas as large as a read makes one, a page of 64 items of 8,000 characters,
   // each of which JSON writes as two.
   const w = await world($, on);
   w.status.seats.push({ session_id: "qs_room2", member_id: "m-me2", retrying: false });

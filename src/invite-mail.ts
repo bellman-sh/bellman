@@ -8,8 +8,15 @@ export const INVITE_FROM = "invites@bellman.sh";
 /** The audience an invite link's token carries, so no other token this server signs opens the page (D2). */
 export const INVITE_AUDIENCE = "bellman:invite";
 
-/** What an invite link names: the org, and the key its invite is on. */
-export type InviteClaim = { orgId: string; key: string };
+/**
+ * What an invite link names: the org, the key its invite is on, and the `invitedAt` of the invite it was signed for. A
+ * resend moves `invitedAt`, and a withdrawn invite issued again has a new one, so either retires every earlier link.
+ */
+export type InviteClaim = { orgId: string; key: string; at: number };
+
+/** Whether `invite` is the one `claim` was signed for: its org, its key, and not resent or issued again since. */
+export const inviteNamedBy = (invite: OrgInvite, claim: InviteClaim): boolean =>
+  invite.orgId === claim.orgId && invite.key === claim.key && invite.invitedAt === claim.at;
 
 /**
  * The link an invitation carries (D2): `<issuer>/invite/<token>`, the token naming the org and the invite's key and
@@ -18,7 +25,7 @@ export type InviteClaim = { orgId: string; key: string };
  */
 export async function inviteLink(issuer: string, secret: string, invite: OrgInvite): Promise<string> {
   const exp = Math.floor(invite.expiresAt / 1000);
-  const claim: InviteClaim = { orgId: invite.orgId, key: invite.key };
+  const claim: InviteClaim = { orgId: invite.orgId, key: invite.key, at: invite.invitedAt };
   const token = await signJwt(
     { iss: issuer, sub: "invite", aud: INVITE_AUDIENCE, bellman: claim as never, exp },
     secret,
@@ -27,11 +34,13 @@ export async function inviteLink(issuer: string, secret: string, invite: OrgInvi
   return `${issuer}/invite/${token}`;
 }
 
-/** The org and key a link names, or null for a bad signature, another audience, an expired link or a malformed claim. */
+/** The claim a link carries, or null for a bad signature, another audience, an expired link or a malformed claim. */
 export async function verifyInviteLink(token: string, issuer: string, secret: string): Promise<InviteClaim | null> {
   const claims = await verifyJwt(token, secret, { issuer, audience: INVITE_AUDIENCE });
-  const { orgId, key } = (claims?.bellman ?? {}) as Partial<Record<keyof InviteClaim, unknown>>;
-  return typeof orgId === "string" && orgId !== "" && typeof key === "string" && key !== "" ? { orgId, key } : null;
+  const { orgId, key, at } = (claims?.bellman ?? {}) as Partial<Record<keyof InviteClaim, unknown>>;
+  return typeof orgId === "string" && orgId !== "" && typeof key === "string" && key !== "" && typeof at === "number" && Number.isFinite(at)
+    ? { orgId, key, at }
+    : null;
 }
 
 /**

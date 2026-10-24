@@ -13,10 +13,10 @@ const ISSUER = "https://mcp.test";
 const tokenOf = (link: string) => link.slice(`${ISSUER}/invite/`.length);
 
 describe("invite links", () => {
-  it("signs a link that verifies to the org and the key, and dies with the invite", async () => {
+  it("signs a link that verifies to the org, the key and the invite's issue time, and dies with the invite", async () => {
     const link = await inviteLink(ISSUER, "s", invite);
     expect(link.startsWith(`${ISSUER}/invite/`)).toBe(true);
-    expect(await verifyInviteLink(tokenOf(link), ISSUER, "s")).toEqual({ orgId: "org_acme", key: "email:ana@example.com" });
+    expect(await verifyInviteLink(tokenOf(link), ISSUER, "s")).toEqual({ orgId: "org_acme", key: "email:ana@example.com", at: 1_000_000 });
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(invite.expiresAt + 1000);
     try {
@@ -26,7 +26,7 @@ describe("invite links", () => {
     }
   });
 
-  it("refuses another secret, another audience, and a claim without a key", async () => {
+  it("refuses another secret, another audience, and a claim without a key or an issue time", async () => {
     const link = await inviteLink(ISSUER, "s", invite);
     expect(await verifyInviteLink(tokenOf(link), ISSUER, "other")).toBeNull();
     const session = await signJwt(
@@ -34,6 +34,8 @@ describe("invite links", () => {
     expect(await verifyInviteLink(session, ISSUER, "s")).toBeNull();
     const keyless = await signJwt({ iss: ISSUER, sub: "invite", aud: INVITE_AUDIENCE, bellman: { orgId: "org_acme" } as never }, "s", 60);
     expect(await verifyInviteLink(keyless, ISSUER, "s")).toBeNull();
+    const timeless = await signJwt({ iss: ISSUER, sub: "invite", aud: INVITE_AUDIENCE, bellman: { orgId: "org_acme", key: "k" } as never }, "s", 60);
+    expect(await verifyInviteLink(timeless, ISSUER, "s")).toBeNull();
     expect(await verifyInviteLink("not.a.token", ISSUER, "s")).toBeNull();
   });
 });

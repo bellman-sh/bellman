@@ -391,7 +391,7 @@ describe("invitations by link and email (ADR 0036)", () => {
     const body = await json(res) as { member: { status: string }; link: string; mailed: boolean };
     expect([body.member.status, body.mailed]).toEqual(["invited", true]);
     expect(await verifyInviteLink(body.link.slice(`${ISSUER}/invite/`.length), ISSUER, "link-secret"))
-      .toEqual({ orgId: "org_acme", key: "email:ana@example.com" });
+      .toEqual({ orgId: "org_acme", key: "email:ana@example.com", at: expect.any(Number) });
     expect(mail).toHaveBeenCalledWith("ana@example.com", expect.objectContaining({ orgId: "org_acme" }),
       expect.objectContaining({ key: "email:ana@example.com" }), body.link);
   });

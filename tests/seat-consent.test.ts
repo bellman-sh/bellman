@@ -859,19 +859,7 @@ describe("the invitation link (ADR 0036)", () => {
     expect(await plans.getGrant("github:4242")).toBeUndefined();
   });
 
-  it("attaches nothing to a sign-in whose token fails at the callback", async () => {
-    await linkFor(NOBODY);
-    const forged = await signJwt({ iss: ISSUER, sub: "invite", aud: INVITE_AUDIENCE, bellman: { orgId: "org_acme", key: NOBODY } as never }, "another-secret", 600);
-    const nonce = "n".repeat(43);
-    const state = await signJwt(
-      { iss: ISSUER, sub: "session", aud: "bellman:session-state", bellman: { return_to: PANEL, nonce, invite: forged } as never }, "test-signing-secret", 600,
-    );
-    const res = await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(state)}`, { headers: { cookie: `${NONCE_COOKIE}=${nonce}` } });
-    expect([res.status, res.headers.get("location")]).toEqual([302, PANEL]);
-    expect(await plans.getGrant("github:4242")).toBeUndefined();
-  });
-
-  it("asks again through a resent link after a decline, and through the old link, which opens the same invite", async () => {
+  it("asks again through a resent link after a decline, and the resend retires the old link", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(1_000_000);
     const first = await linkFor(NOBODY);
@@ -886,7 +874,57 @@ describe("the invitation link (ADR 0036)", () => {
     const second = ((await resent.json()) as { link: string }).link;
     expect(second).not.toBe(first);
     expect(buttons(await (await signInThroughLink(second)).res.text())).toEqual(["Join", "Decline", "Not now: continue signing in"]);
-    expect(buttons(await (await signInThroughLink(first)).res.text())).toEqual(["Join", "Decline", "Not now: continue signing in"]);
+    expect((await openLink(first)).status).toBe(410);
+  });
+
+  /** Withdraws the invite on NOBODY and issues it again a millisecond later, as an admin redoing an invite would. */
+  async function reissued(): Promise<string> {
+    await plans.deleteOrgInvite("org_acme", NOBODY, by);
+    vi.setSystemTime(Date.now() + 1);
+    return linkFor(NOBODY);
+  }
+
+  it("retires a link whose invite was withdrawn and issued again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const first = await linkFor(NOBODY);
+    const second = await reissued();
+    expect((await openLink(first)).status).toBe(410);
+    expect((await openLink(second)).status).toBe(200);
+  });
+
+  it("attaches nothing when the invite is withdrawn and issued again during the sign-in", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const start = await openLink(await linkFor(NOBODY));
+    const nonce = /__Host-bellman_signin=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1];
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await start.text())![1]);
+    await reissued();
+    const res = await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(req)}`, { headers: { cookie: `${NONCE_COOKIE}=${nonce}` } });
+    expect([res.status, res.headers.get("location")]).toEqual([302, PANEL]);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("joins nothing when the invite is withdrawn and issued again between the page and the Join", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const { res, cookie } = await signInThroughLink(await linkFor(NOBODY));
+    const page = await res.text();
+    await reissued();
+    const refused = await answer(heldOf(page), "join", "org_acme", cookie);
+    expect(await refused.text()).toContain("That invitation is no longer open.");
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    expect(await plans.invitesFor([NOBODY])).toHaveLength(1);
+  });
+
+  it("keeps the link's token out of the state the provider is sent", async () => {
+    const link = await linkFor(NOBODY);
+    const token = link.slice(`${ISSUER}/invite/`.length);
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await (await openLink(link)).text())![1]);
+    const payload = JSON.parse(Buffer.from(req.split(".")[1], "base64url").toString()) as { bellman: { invite: unknown } };
+    expect(req).not.toContain(token.split(".")[2]);
+    expect(JSON.stringify(payload)).not.toContain(token.split(".")[1]);
+    expect(payload.bellman.invite).toEqual({ orgId: "org_acme", key: NOBODY, at: expect.any(Number) });
   });
 
   it("shows an SSO-required org's link page with the SSO form and no provider buttons", async () => {

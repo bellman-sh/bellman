@@ -13,7 +13,7 @@ import { parseSsoKey,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import { verifyInviteLink, type InviteClaim } from "../invite-mail.js";
+import { inviteNamedBy, verifyInviteLink, type InviteClaim } from "../invite-mail.js";
 import { domainOf } from "./dns.js";
 import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
 import { unseal } from "./sealed.js";
@@ -573,8 +573,11 @@ interface SessionRequest {
   return_to: string;
   /** Binds this sign-in to the browser that started it. See finishSession. */
   nonce: string;
-  /** The invite link this sign-in started from (ADR 0036, D2), verified again at the callback. */
-  invite?: string;
+  /**
+   * The invite the link this sign-in started from names (ADR 0036, D2): the verified claim, never the link's token,
+   * since this state is sent to the provider. It is as trustworthy as the state that signs it.
+   */
+  invite?: InviteClaim;
 }
 
 /**
@@ -938,8 +941,9 @@ async function offersFor(plans: PlanStore, keys: string[], subjectKey: string, n
     plans.invitesFor(keys), linked ? plans.invitesFor([linked.key]) : [],
     Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
   ]);
-  // A link offers its own invite and no other: the address's invites from other orgs stay that address's (ADR 0036, D2).
-  const invites = [...viaLink.filter((invite) => invite.orgId === linked?.orgId), ...own];
+  // A link offers its own invite and no other: the address's invites from other orgs stay that address's, and one
+  // resent or issued again since the link was signed is not the link's to offer (ADR 0036, D2).
+  const invites = [...viaLink.filter((invite) => linked && inviteNamedBy(invite, linked)), ...own];
   const seats: OrgInvite[] = [];
   for (const grant of grants) {
     if (grant?.orgId && isUnownedSeat(grant, await plans.getOrg(grant.orgId))) {
@@ -966,8 +970,7 @@ async function invitesHeld(
   let offers: OrgInvite[];
   let invite: InviteClaim | undefined;
   try {
-    // The link is read again here: whatever the state carried, only a token this server signed names an invite.
-    invite = next.session?.invite ? await verifyInviteLink(next.session.invite, config.issuer, config.secret) ?? undefined : undefined;
+    invite = next.session?.invite;
     offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile), Date.now(), invite);
   } catch (err) {
     console.error("could not read a sign-in's invites:", err);
@@ -1022,8 +1025,10 @@ async function acceptInvite(
   plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string, linked?: InviteClaim,
 ): Promise<{ joined: boolean; notice: Notice }> {
   const person = defaultIdentity(profile);
-  // The link's key answers for its own org only (ADR 0036, D2); a Join of any other is the person's own keys'.
-  const answering = linked?.orgId === orgId ? [...keys, linked.key] : keys;
+  // The link's key answers for its own org only, and only while its invite is the one the link was signed for
+  // (ADR 0036, D2); a Join of any other is the person's own keys'.
+  const viaLink = linked?.orgId === orgId && (await plans.invitesFor([linked.key])).some((invite) => inviteNamedBy(invite, linked));
+  const answering = linked && viaLink ? [...keys, linked.key] : keys;
   const outcome = await plans.acceptOrgInvite(orgId, answering, subjectOf(profile), Date.now(), {
     actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
   });
@@ -1316,7 +1321,7 @@ export async function handleOAuth(
 
   // ------------------------------------------------------- /invite/:token
   // An invitation's link (ADR 0036, D2): the panel's sign-in, with the org and the role named above the
-  // buttons and the token carried in the state, so the callback offers the invite it names, whichever
+  // buttons and the token's claim carried in the state, so the callback offers the invite it names, whichever
   // address the provider reports. Opening it grants nothing: the invite is read again, live, at the
   // callback and at the answer. A browser signed in already signs in again, since the link is not proof
   // that the session's account is the one invited.
@@ -1329,7 +1334,7 @@ export async function handleOAuth(
     const token = linkMatch[1];
     const claim = config.plans ? await verifyInviteLink(token, config.issuer, config.secret) : null;
     const invite = claim
-      ? (await config.plans!.invitesFor([claim.key])).find((i) => i.orgId === claim.orgId && inviteLive(i, Date.now()))
+      ? (await config.plans!.invitesFor([claim.key])).find((i) => inviteNamedBy(i, claim) && inviteLive(i, Date.now()))
       : undefined;
     const org = invite ? await config.plans!.getOrg(invite.orgId) : undefined;
     if (!invite || !org) {
@@ -1337,7 +1342,7 @@ export async function handleOAuth(
     }
     const nonce = randomId();
     const pending: SessionRequest = {
-      return_to: panelDestination(undefined, panels, config.publicPageOrigins ?? []), nonce, invite: token,
+      return_to: panelDestination(undefined, panels, config.publicPageOrigins ?? []), nonce, invite: claim!,
     };
     const stateToken = await signJwt(
       { iss: config.issuer, sub: "session", aud: SESSION_AUDIENCE, bellman: pending as never }, config.secret, STATE_TTL_SECONDS,

@@ -1392,6 +1392,18 @@ loud:
   every other write answers the panel's origins alone, `BELLMAN_PANEL_ORIGINS`,
   the dash's (ADR 0026).
 
+- **An agent's identity comes from a person's sign-in, never from its own
+  request** (ADR 0037). `POST /agent/identity` is unauthenticated, so it is
+  admitted like dynamic registration: 20 an hour per IP and 10,000 unclaimed
+  registrations at once, swept by the `AuthDO` alarm. What it buys is a claim,
+  not an identity. The identity is copied from the panel session that approves
+  the code on `/agent/claim`, and only when that session's verified `email:` key
+  matches the registration's `login_hint`, so an agent naming an address gets
+  nothing until its owner signs in. The claim page renders no peer content: a
+  registration keeps no name or text from the agent, the hinted address appears
+  nowhere on it, and every word is the server's beside the signed-in account's
+  own label.
+
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event

@@ -43,5 +43,9 @@ These are documented tradeoffs, not findings:
   content, and human approval for action requests. Reports that strengthen those
   are welcome; "an agent followed instructions in a message" on its own is the
   known shape of the problem.
+- **An agent can ask you to approve it.** An attacker's agent can register with a
+  victim's email and talk the victim into approving its code (agent claim,
+  auth.md). This is the RFC 8628 device-flow exposure; the claim page's copy is
+  the mitigation.
 - **Bellman holds no secrets for you.** It is a coordination layer. If you put a
   credential in a message, it is stored with the session and replayed to members.

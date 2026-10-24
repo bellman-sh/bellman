@@ -13,12 +13,13 @@ import { scimRoutes } from "../src/http/scim.js";
 import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { seal } from "../src/oauth/sealed.js";
-import { sha256Base64url } from "../src/oauth/tokens.js";
+import { sha256Base64url, signJwt } from "../src/oauth/tokens.js";
+import { INVITE_AUDIENCE } from "../src/invite-mail.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
-import { INVITE_TTL_MS } from "../src/orgs.js";
+import { INVITE_TTL_MS, RESEND_COOLDOWN_MS } from "../src/orgs.js";
 import { brief, manifestFixture, member as seatOf, session } from "./helpers/fixtures.js";
 import { Harness } from "./helpers/harness.js";
 
@@ -70,14 +71,18 @@ afterEach(async () => {
 
 const oauth = async (path: string, init?: RequestInit) => (await handleOAuth(new Request(`${ISSUER}${path}`, init), config))!;
 
-/** What an org's admin sends `POST /org/members`, over a bearer token. */
-async function seat(admin: Identity, key: string, role = "member") {
+/** An org admin's POST under `/org/members`, over a bearer token, its links signed with the server's secret. */
+async function asAdmin(admin: Identity, path: string, payload?: unknown) {
   const caller = async (): Promise<RoomCaller> => ({ identity: admin, via: "bearer" });
-  const body = JSON.stringify({ key, role });
-  return (await orgRoutes(new Request(`${ISSUER}/org/members`, {
-    method: "POST", body, headers: { "content-type": "application/json", "content-length": String(body.length), authorization: "Bearer x" },
-  }), { store: plans, caller, panelOrigins: [PANEL], issuer: ISSUER }))!;
+  const body = payload === undefined ? undefined : JSON.stringify(payload);
+  return (await orgRoutes(new Request(`${ISSUER}${path}`, {
+    method: "POST", body,
+    headers: { authorization: "Bearer x", ...(body ? { "content-type": "application/json", "content-length": String(body.length) } : {}) },
+  }), { store: plans, caller, panelOrigins: [PANEL], issuer: ISSUER, linkSecret: "test-signing-secret" }))!;
 }
+
+/** What an org's admin sends `POST /org/members`. */
+const seat = (admin: Identity, key: string, role = "member") => asAdmin(admin, "/org/members", { key, role });
 
 /** A client's GitHub sign-in up to the callback's answer: the invites page, or the redirect with a code. */
 async function githubCallback() {
@@ -743,5 +748,174 @@ describe("the rooms an org sat in (ADR 0027)", () => {
     const after = await closedRoomOf(member);
     expect(await plans.sessionsForOrg("org_acme", 50)).toEqual([after]);
     expect(await adminList()).toEqual([after]);
+  });
+});
+
+describe("the invitation link (ADR 0036)", () => {
+  const NOBODY = "email:nobody@example.org"; // an address GitHub does not report for 4242
+
+  /** The link an invite's 202 answers. */
+  const linkFor = async (key: string, admin = ACME_ADMIN) => ((await (await seat(admin, key)).json()) as { link: string }).link;
+  const openLink = (link: string, init?: RequestInit) => oauth(new URL(link).pathname, init);
+
+  /** A panel sign-in through the link page's GitHub button, up to the callback's answer, with the browser's nonce cookie. */
+  async function signInThroughLink(link: string) {
+    const start = await openLink(link);
+    const nonce = /__Host-bellman_signin=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1];
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await start.text())![1]);
+    const cookie = `${NONCE_COOKIE}=${nonce}`;
+    return { res: await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(req)}`, { headers: { cookie } }), cookie };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("opens a live invite: the org's name, the role, and provider buttons that start a panel sign-in", async () => {
+    const page = await openLink(await linkFor(NOBODY));
+    expect(page.status).toBe(200);
+    const text = await page.text();
+    expect(text).toContain("<bdi>Acme</bdi>");
+    expect(text).toContain("as a member");
+    expect(text).toContain("Until you join, it has none of that.");
+    expect(text).toMatch(/href="\/authorize\/github\?req=/);
+    expect(page.headers.getSetCookie().join()).toContain(NONCE_COOKIE);
+  });
+
+  it("escapes the org's name on the link page", async () => {
+    await plans.updateOrg("org_acme", { name: "<b>Bold</b> & Co" }, by);
+    const text = await (await openLink(await linkFor(NOBODY))).text();
+    expect(text).toContain("<bdi>&lt;b&gt;Bold&lt;/b&gt; &amp; Co</bdi>");
+    expect(text).not.toContain("<b>Bold");
+  });
+
+  it("joins through the link under the subject, though the provider reports no such address", async () => {
+    const { res, cookie } = await signInThroughLink(await linkFor(NOBODY));
+    expect(res.status).toBe(200);
+    const page = await res.text();
+    expect(buttons(page)).toEqual(["Join", "Decline", "Not now: continue signing in"]);
+    const done = await answer(heldOf(page), "join", "org_acme", cookie);
+    expect([done.status, done.headers.get("location")]).toEqual([302, PANEL]);
+    expect(await plans.getGrant("github:4242")).toMatchObject({ orgId: "org_acme", role: "member" });
+    expect(await plans.listOrgInvites("org_acme", 10)).toEqual([]);
+  });
+
+  it("answers 410 for a link whose invite was withdrawn, accepted, or has expired, and for a forged or malformed token", async () => {
+    const gone = async (link: string) => {
+      const res = await openLink(link);
+      return [res.status, (await res.text()).includes("This invitation has expired or was withdrawn")];
+    };
+    const withdrawn = await linkFor(NOBODY);
+    await plans.deleteOrgInvite("org_acme", NOBODY, by);
+    expect(await gone(withdrawn)).toEqual([410, true]);
+
+    const accepted = await linkFor("github:4242");
+    await signIn("join");
+    expect(await plans.getGrant("github:4242")).toMatchObject({ orgId: "org_acme" });
+    expect(await gone(accepted)).toEqual([410, true]);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const expired = await linkFor("email:late@example.org");
+    vi.setSystemTime(1_000_000 + INVITE_TTL_MS + 1);
+    expect(await gone(expired)).toEqual([410, true]);
+    vi.useRealTimers();
+
+    const live = await linkFor("email:live@example.org");
+    expect((await openLink(live)).status).toBe(200);
+    const claims = { iss: ISSUER, sub: "invite", aud: INVITE_AUDIENCE };
+    const forged = await signJwt({ ...claims, bellman: { orgId: "org_acme", key: "email:live@example.org" } as never }, "another-secret", 600);
+    expect(await gone(`${ISSUER}/invite/${forged}`)).toEqual([410, true]);
+    const keyless = await signJwt({ ...claims, bellman: { orgId: "org_acme" } as never }, "test-signing-secret", 600);
+    expect(await gone(`${ISSUER}/invite/${keyless}`)).toEqual([410, true]);
+    expect(await gone(`${ISSUER}/invite/not-a-token`)).toEqual([410, true]);
+  });
+
+  it("offers only the token's org: another org's invite of the same address is not reachable through it", async () => {
+    const link = await linkFor(NOBODY);
+    expect((await seat(B_ADMIN, NOBODY)).status).toBe(202);
+    const { res, cookie } = await signInThroughLink(link);
+    const page = await res.text();
+    expect(page).toContain("<bdi>Acme</bdi>");
+    expect(page).not.toContain("<bdi>Bee</bdi>");
+    const refused = await answer(heldOf(page), "join", "org_b", cookie);
+    expect(await refused.text()).toContain("That invitation is no longer open.");
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+    expect(await plans.invitesFor([NOBODY])).toHaveLength(2);
+  });
+
+  it("attaches nothing when the token's invite has expired by the callback", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const link = await linkFor(NOBODY);
+    vi.setSystemTime(1_000_000 + INVITE_TTL_MS - 60_000);
+    const start = await openLink(link);
+    expect(start.status).toBe(200);
+    const nonce = /__Host-bellman_signin=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1];
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await start.text())![1]);
+    vi.setSystemTime(1_000_000 + INVITE_TTL_MS + 1);
+    const res = await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(req)}`, { headers: { cookie: `${NONCE_COOKIE}=${nonce}` } });
+    expect([res.status, res.headers.get("location")]).toEqual([302, PANEL]);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("attaches nothing to a sign-in whose token fails at the callback", async () => {
+    await linkFor(NOBODY);
+    const forged = await signJwt({ iss: ISSUER, sub: "invite", aud: INVITE_AUDIENCE, bellman: { orgId: "org_acme", key: NOBODY } as never }, "another-secret", 600);
+    const nonce = "n".repeat(43);
+    const state = await signJwt(
+      { iss: ISSUER, sub: "session", aud: "bellman:session-state", bellman: { return_to: PANEL, nonce, invite: forged } as never }, "test-signing-secret", 600,
+    );
+    const res = await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(state)}`, { headers: { cookie: `${NONCE_COOKIE}=${nonce}` } });
+    expect([res.status, res.headers.get("location")]).toEqual([302, PANEL]);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("asks again through a resent link after a decline, and through the old link, which opens the same invite", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const first = await linkFor(NOBODY);
+    const { res, cookie } = await signInThroughLink(first);
+    const declined = await answer(heldOf(await res.text()), "decline", "org_acme", cookie);
+    expect(declined.status).toBe(302);
+    expect((await signInThroughLink(first)).res.status).toBe(302);
+
+    vi.setSystemTime(1_000_000 + RESEND_COOLDOWN_MS + 1);
+    const resent = await asAdmin(ACME_ADMIN, `/org/members/${encodeURIComponent(NOBODY)}/resend`);
+    expect(resent.status).toBe(200);
+    const second = ((await resent.json()) as { link: string }).link;
+    expect(second).not.toBe(first);
+    expect(buttons(await (await signInThroughLink(second)).res.text())).toEqual(["Join", "Decline", "Not now: continue signing in"]);
+    expect(buttons(await (await signInThroughLink(first)).res.text())).toEqual(["Join", "Decline", "Not now: continue signing in"]);
+  });
+
+  it("shows an SSO-required org's link page with the SSO form and no provider buttons", async () => {
+    const link = await linkFor(NOBODY);
+    await plans.updateOrg("org_acme", { requireSso: true }, by);
+    const page = await openLink(link);
+    expect(page.status).toBe(200);
+    const text = await page.text();
+    expect(text).toContain("<bdi>Acme</bdi>");
+    expect(text).toContain('action="/authorize/sso"');
+    expect(text).not.toContain("/authorize/github");
+  });
+
+  it("sends a signed-in browser through a sign-in again: the link alone seats nobody", async () => {
+    const start = await oauth(`/auth/signin?return_to=${encodeURIComponent(PANEL)}`);
+    const nonce = /__Host-bellman_signin=([^;]+)/.exec(start.headers.get("set-cookie") ?? "")![1];
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await start.text())![1]);
+    const done = await oauth(`/callback/github?code=upstream&state=${encodeURIComponent(req)}`, { headers: { cookie: `${NONCE_COOKIE}=${nonce}` } });
+    const sid = new RegExp(`${SESSION_COOKIE}=([^;]+)`).exec(done.headers.get("set-cookie") ?? "")![1];
+
+    const page = await openLink(await linkFor(NOBODY), { headers: { cookie: `${SESSION_COOKIE}=${sid}` } });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toMatch(/href="\/authorize\/github\?req=/);
+    expect(await plans.getGrant("github:4242")).toBeUndefined();
+  });
+
+  it("answers 503 with no panel configured", async () => {
+    const link = await linkFor(NOBODY);
+    config.panelOrigins = [];
+    expect((await openLink(link)).status).toBe(503);
   });
 });

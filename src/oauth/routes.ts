@@ -13,6 +13,7 @@ import { parseSsoKey,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
+import { verifyInviteLink, type InviteClaim } from "../invite-mail.js";
 import { domainOf } from "./dns.js";
 import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
 import { unseal } from "./sealed.js";
@@ -572,6 +573,8 @@ interface SessionRequest {
   return_to: string;
   /** Binds this sign-in to the browser that started it. See finishSession. */
   nonce: string;
+  /** The invite link this sign-in started from (ADR 0036, D2), verified again at the callback. */
+  invite?: string;
 }
 
 /**
@@ -911,6 +914,8 @@ interface HeldSignIn {
   via: string;
   authorize?: AuthorizeRequest;
   session?: SessionRequest;
+  /** The invite the link named (ADR 0036, D2), verified at the callback: offered and joinable, and no other. */
+  invite?: InviteClaim;
 }
 
 /** A line the page shows after an answer: fixed text, and an org's name between, drawn apart from it. */
@@ -928,10 +933,13 @@ const subjectOf = (profile: ProviderProfile): string => `${profile.provider}:${p
  * its place, read as the invite it would be; but no offer an org made by the time the person last declined
  * it, while one made since shows. Most specific key first, as `firstGrant` picks a grant, and one an org.
  */
-async function offersFor(plans: PlanStore, keys: string[], subjectKey: string, now: number): Promise<OrgInvite[]> {
-  const [invites, grants, declined] = await Promise.all([
-    plans.invitesFor(keys), Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
+async function offersFor(plans: PlanStore, keys: string[], subjectKey: string, now: number, linked?: InviteClaim): Promise<OrgInvite[]> {
+  const [own, viaLink, grants, declined] = await Promise.all([
+    plans.invitesFor(keys), linked ? plans.invitesFor([linked.key]) : [],
+    Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
   ]);
+  // A link offers its own invite and no other: the address's invites from other orgs stay that address's (ADR 0036, D2).
+  const invites = [...viaLink.filter((invite) => invite.orgId === linked?.orgId), ...own];
   const seats: OrgInvite[] = [];
   for (const grant of grants) {
     if (grant?.orgId && isUnownedSeat(grant, await plans.getOrg(grant.orgId))) {
@@ -956,14 +964,17 @@ async function invitesHeld(
 ): Promise<Response | undefined> {
   if (!config.plans || profile.provider === "sso") return undefined;
   let offers: OrgInvite[];
+  let invite: InviteClaim | undefined;
   try {
-    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile), Date.now());
+    // The link is read again here: whatever the state carried, only a token this server signed names an invite.
+    invite = next.session?.invite ? await verifyInviteLink(next.session.invite, config.issuer, config.secret) ?? undefined : undefined;
+    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile), Date.now(), invite);
   } catch (err) {
     console.error("could not read a sign-in's invites:", err);
     return undefined;
   }
   if (offers.length === 0) return undefined;
-  return invitesPage({ profile, via, ...next }, offers, config, Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS);
+  return invitesPage({ profile, via, ...next, invite }, offers, config, Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS);
 }
 
 /** An org's name as the page draws it: without what a name may not hold, escaped, and isolated so it reorders nothing around it. */
@@ -1007,9 +1018,13 @@ async function invitesPage(held: HeldSignIn, offers: OrgInvite[], config: OAuthC
  * whether the person is now a member, and the line the page shows, which names the org only when it
  * made this person an offer.
  */
-async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string): Promise<{ joined: boolean; notice: Notice }> {
+async function acceptInvite(
+  plans: PlanStore, profile: ProviderProfile, keys: string[], orgId: string, linked?: InviteClaim,
+): Promise<{ joined: boolean; notice: Notice }> {
   const person = defaultIdentity(profile);
-  const outcome = await plans.acceptOrgInvite(orgId, keys, subjectOf(profile), Date.now(), {
+  // The link's key answers for its own org only (ADR 0036, D2); a Join of any other is the person's own keys'.
+  const answering = linked?.orgId === orgId ? [...keys, linked.key] : keys;
+  const outcome = await plans.acceptOrgInvite(orgId, answering, subjectOf(profile), Date.now(), {
     actorUserId: person.userId, actorLabel: person.label, actorOrgId: null,
   });
   const org = outcome === "gone" ? undefined : await plans.getOrg(orgId);
@@ -1029,8 +1044,10 @@ async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: st
  * its invites stay as they were, so its admins learn nothing from it, not even which of the keys they
  * invited were one person's. Only an org that made this sign-in an offer is declined, or named.
  */
-async function declineInvite(plans: PlanStore, keys: string[], subjectKey: string, orgId: string): Promise<{ declined: boolean; notice: Notice }> {
-  const offered = (await offersFor(plans, keys, subjectKey, Date.now())).some((offer) => offer.orgId === orgId);
+async function declineInvite(
+  plans: PlanStore, keys: string[], subjectKey: string, orgId: string, linked?: InviteClaim,
+): Promise<{ declined: boolean; notice: Notice }> {
+  const offered = (await offersFor(plans, keys, subjectKey, Date.now(), linked)).some((offer) => offer.orgId === orgId);
   const org = offered ? await plans.getOrg(orgId) : undefined;
   if (!org) return { declined: false, notice: { lead: "That invitation is no longer open." } };
   await plans.declineOrg(subjectKey, orgId, Date.now());
@@ -1053,7 +1070,7 @@ async function answeredAlready(
     for (const cookie of settled.cookies) res.headers.append("set-cookie", cookie);
     return res;
   }
-  if (settled?.redrawn) return invitesPage(held, await offersFor(config.plans!, keys, subjectKey, Date.now()), config, exp);
+  if (settled?.redrawn) return invitesPage(held, await offersFor(config.plans!, keys, subjectKey, Date.now(), held.invite), config, exp);
   if (settled) return html(`<h1>That sign-in has ended</h1><p>Start it again.</p>`, 400);
   return html(
     `<h1>Your answer is on its way</h1><p>It was sent once already. Continue when it has been saved.</p>` +
@@ -1297,6 +1314,46 @@ export async function handleOAuth(
     return page;
   }
 
+  // ------------------------------------------------------- /invite/:token
+  // An invitation's link (ADR 0036, D2): the panel's sign-in, with the org and the role named above the
+  // buttons and the token carried in the state, so the callback offers the invite it names, whichever
+  // address the provider reports. Opening it grants nothing: the invite is read again, live, at the
+  // callback and at the answer. A browser signed in already signs in again, since the link is not proof
+  // that the session's account is the one invited.
+  const linkMatch = method === "GET" ? /^\/invite\/([^/]+)$/.exec(path) : null;
+  if (linkMatch) {
+    const panels = config.panelOrigins ?? [];
+    if (panels.length === 0) {
+      return html(`<h1>No control panel configured</h1><p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`, 503);
+    }
+    const token = linkMatch[1];
+    const claim = config.plans ? await verifyInviteLink(token, config.issuer, config.secret) : null;
+    const invite = claim
+      ? (await config.plans!.invitesFor([claim.key])).find((i) => i.orgId === claim.orgId && inviteLive(i, Date.now()))
+      : undefined;
+    const org = invite ? await config.plans!.getOrg(invite.orgId) : undefined;
+    if (!invite || !org) {
+      return html(`<h1>This invitation has expired or was withdrawn</h1><p>Ask the person who invited you to send it again.</p>`, 410);
+    }
+    const nonce = randomId();
+    const pending: SessionRequest = {
+      return_to: panelDestination(undefined, panels, config.publicPageOrigins ?? []), nonce, invite: token,
+    };
+    const stateToken = await signJwt(
+      { iss: config.issuer, sub: "session", aud: SESSION_AUDIENCE, bellman: pending as never }, config.secret, STATE_TTL_SECONDS,
+    );
+    // An org that requires single sign-on is joined through its IdP, so its page offers only the work-email form.
+    const page = html(signInBody(
+      `Join ${drawnName(org)} on Bellman`,
+      `${drawnName(org)} invited you to join it as ${invite.role === "admin" ? "an admin" : "a member"}. Sign in to accept. ` +
+        `Joining puts this account in the organisation: it records rooms you take part in, its admins can read rooms once ` +
+        `they close, and if it requires single sign-on you sign in through it. Until you join, it has none of that.`,
+      stateToken, org.requireSso ? [] : configured(config), true,
+    ));
+    page.headers.append("set-cookie", serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS));
+    return page;
+  }
+
   // ------------------------------------------------------- /auth/session
   // What the panel calls on boot: who am I, or 401.
   if (method === "GET" && path === "/auth/session") {
@@ -1385,15 +1442,15 @@ export async function handleOAuth(
     let notice: Notice | undefined;
     let stay = false;
     if (choice === "join") {
-      const answer = await acceptInvite(plans, held.profile, keys, orgId);
+      const answer = await acceptInvite(plans, held.profile, keys, orgId, held.invite);
       notice = answer.notice;
       stay = !answer.joined;
     } else if (choice === "decline") {
-      const answer = await declineInvite(plans, keys, subjectKey, orgId);
+      const answer = await declineInvite(plans, keys, subjectKey, orgId, held.invite);
       notice = answer.notice;
       stay = !answer.declined;
     }
-    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey, Date.now());
+    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey, Date.now(), held.invite);
     const redrawn = stay || remaining.length > 0;
     const res = redrawn
       ? await invitesPage(held, remaining, config, claims.exp, notice)

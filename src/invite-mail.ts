@@ -8,7 +8,8 @@ export const INVITE_FROM = "invites@bellman.sh";
 /** The audience an invite link's token carries, so no other token this server signs opens the page (D2). */
 export const INVITE_AUDIENCE = "bellman:invite";
 
-type InviteClaim = { orgId: string; key: string };
+/** What an invite link names: the org, and the key its invite is on. */
+export type InviteClaim = { orgId: string; key: string };
 
 /**
  * The link an invitation carries (D2): `<issuer>/invite/<token>`, the token naming the org and the invite's key and

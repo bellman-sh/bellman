@@ -55,7 +55,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
 import { decideApproval } from "./proposal.js";
-import { decideAsk, type AskOutcome, type AskRequest } from "./outside.js";
+import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest } from "./outside.js";
 import { presetInNewWords } from "./presets.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
@@ -2453,6 +2453,38 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...(d.standing === null ? {} : { [callerKey]: d.standing }),
         ...(d.issued === issued ? {} : { [OUTSIDE_VISITORS_KEY]: d.issued }),
       });
+      appended = event;
+      return { ok: true, task };
+    });
+    const event = appended as SessionEvent | null;
+    if (event !== null) {
+      this.#wake(event, members);
+      if (broughtForward) await this.driver.reArm();
+    }
+    return result;
+  }
+
+  /**
+   * `BellmanStore.answerOutside`: who the voice is, whether the question is still open, the `outside_answer` and the
+   * task row's new state, in ONE transaction. The room and the row are read in the transaction that writes them, so of
+   * two answers at once the second reads the first's row and finds the question answered.
+   */
+  async answerOutside(req: AnswerRequest): Promise<AnswerResult> {
+    let broughtForward = false as boolean;
+    let members: readonly Member[] = [];
+    let appended: SessionEvent | null = null;
+    const result = await this.ctx.storage.transaction<AnswerResult>(async (txn) => {
+      broughtForward = false;
+      appended = null;
+      const s = await this.stored(txn);
+      if (!s || s.frozenAt !== null || s.closed) return { ok: false, error: "task_closed" };
+      members = s.members;
+      const d = decideAnswer(s, await txn.get<OutsideTask>(`${OUTSIDE_TASK_PREFIX}${req.taskId}`), req);
+      if (!d.ok) return d;
+
+      const event: SessionEvent = { ...d.event, cursor: await this.nextCursor(txn), at: Date.now() };
+      const task = taskWithEvent(d.task, event);
+      broughtForward = await this.#writeEvent(txn, s, event, { [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task });
       appended = event;
       return { ok: true, task };
     });
@@ -5623,6 +5655,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome> {
     return this.session(sessionId).askOutside(req);
+  }
+
+  async answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult> {
+    return this.session(sessionId).answerOutside(req);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {

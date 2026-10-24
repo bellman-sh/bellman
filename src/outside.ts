@@ -1,9 +1,10 @@
 import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
-import { isPublic, type BellmanStore } from "./store.js";
-import type { OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
+import { verbsOfRole } from "./roles.js";
+import { isActiveMember, isHostMember, isPublic, type BellmanStore } from "./store.js";
+import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 
-/** Outside callers (A2A) of a public room: the limits, and asking. The task row's type is `OutsideTask`, in types.ts. */
+/** Outside callers (A2A) of a public room: the limits, asking and answering. The task row's type is `OutsideTask`, in types.ts. */
 
 /** Tasks one caller may hold open in one room. */
 export const MAX_OPEN_OUTSIDE_TASKS = 3;
@@ -129,4 +130,75 @@ export async function askRoom(
     now,
   });
   return done.ok ? done : refuse(done.error);
+}
+
+export type AnswerInput = { refId: number; text: string; needsInput?: boolean };
+export type AnswerError = "not_a_question" | "not_the_voice" | "already_answered" | "task_closed";
+export type AnswerResult = { ok: true; task: OutsideTask } | { ok: false; error: AnswerError };
+
+/** What `answerOutside` is handed: the question answered, the task it belongs to, and who answers with what. */
+export type AnswerRequest = { taskId: string; refId: number; memberId: string; text: string; needsInput: boolean; now: number };
+
+/**
+ * Whether this member is the voice that answers this task, at this moment:
+ * - a `seat` task is answered by the host seat alone;
+ * - otherwise by the current members whose role holds `answer`;
+ * - and where no role does, by the creator's seat, while the creator is still in the room.
+ * Read when the answer arrives, so a member who gained `answer` since the question was asked qualifies.
+ */
+export function isVoice(session: Pick<Session, "members" | "manifest" | "creator">, task: Pick<OutsideTask, "voice">, memberId: string): boolean {
+  const me = session.members.find((m) => m.memberId === memberId);
+  if (!me || !isActiveMember(me)) return false;
+  if (task.voice === "seat") return isHostMember(me);
+  const holders = session.members.filter((m) => isActiveMember(m) && verbsOfRole(session.manifest, m.roomRole).includes("answer"));
+  return holders.length > 0 ? holders.includes(me) : me.memberId === session.creator.memberId;
+}
+
+export type AnswerDecision =
+  | { ok: false; error: AnswerError }
+  | { ok: true; task: OutsideTask; event: Omit<SessionEvent, "cursor" | "at"> };
+
+/**
+ * The decisions of an answer that depend on rows another answer can change: who the voice is, and whether the question
+ * is still open. Pure and shared by both stores, as `decideAsk` is, each running it over the room and the task row it
+ * read in the unit that writes the result, so two answers cannot both find the question open. The order of the errors
+ * is the order of what a non-voice may learn: nothing about the task.
+ *
+ * The task is answerable while WORKING and `refId` is its latest question; an earlier question, or a task already
+ * COMPLETED or waiting on INPUT_REQUIRED, is "already_answered". The returned task lacks the answer's own entry, which
+ * `taskWithEvent` adds once the event is numbered.
+ */
+export function decideAnswer(room: Pick<Session, "members" | "manifest" | "creator">, task: OutsideTask | undefined, req: AnswerRequest): AnswerDecision {
+  if (!task) return { ok: false, error: "task_closed" };
+  if (!isVoice(room, task, req.memberId)) return { ok: false, error: "not_the_voice" };
+  if (task.state === "TASK_STATE_FAILED" || task.state === "TASK_STATE_CANCELED") return { ok: false, error: "task_closed" };
+  if (task.state !== "TASK_STATE_WORKING" || task.questionCursors.at(-1) !== req.refId) return { ok: false, error: "already_answered" };
+  const me = room.members.find((m) => m.memberId === req.memberId) as Member;
+  return {
+    ok: true,
+    task: { ...task, state: req.needsInput ? "TASK_STATE_INPUT_REQUIRED" : "TASK_STATE_COMPLETED", updatedAt: req.now },
+    event: {
+      type: "outside_answer", fromMemberId: me.memberId, fromUserId: me.userId, fromLabel: me.label,
+      payload: { taskId: task.id, text: req.text, needsInput: req.needsInput }, refId: String(req.refId),
+    },
+  };
+}
+
+/**
+ * A member answers an outside question (A2A). `refId` is the `outside_question`'s cursor: an event that is not one is
+ * "not_a_question", decided here because events never change. Who may answer and whether the question is still open
+ * change, so `store.answerOutside` decides them where it writes, and appends the `outside_answer` and the task row as
+ * one unit: of two answers at once, one lands.
+ */
+export async function answerQuestion(
+  store: BellmanStore,
+  sessionId: string,
+  member: Pick<Member, "memberId">,
+  input: AnswerInput,
+  now: number = Date.now(),
+): Promise<AnswerResult> {
+  const asked = await store.eventAt(sessionId, input.refId);
+  const taskId = asked?.type === "outside_question" ? (asked.payload as { taskId?: unknown }).taskId : undefined;
+  if (typeof taskId !== "string") return { ok: false, error: "not_a_question" };
+  return store.answerOutside(sessionId, { taskId, refId: input.refId, memberId: member.memberId, text: input.text, needsInput: input.needsInput === true, now });
 }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
 import { FROZEN } from "../rooms.js";
+import { MAX_PAYLOAD_CHARS } from "../payload.js";
 import type { AppendExtras, BellmanStore } from "../store.js";
 
 // What every tool file shares: the MCP result shape, the zod shapes a tool's
@@ -125,6 +126,12 @@ export const ProgressShape = z.strictObject({
   note: z.string().min(1).max(500),
   step: z.string().max(40).optional(),
   eta_seconds: z.number().int().nonnegative().max(86_400).optional(),
+});
+
+/** An answer to an outside question: its text, and whether it asks the caller for more. */
+export const OutsideAnswerShape = z.object({
+  text: z.string().min(1).max(MAX_PAYLOAD_CHARS),
+  needs_input: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------

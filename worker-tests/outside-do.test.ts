@@ -4,7 +4,7 @@
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { askRoom, type AskRequest } from "../src/outside.js";
+import { answerQuestion, askRoom, type AskRequest } from "../src/outside.js";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
@@ -113,4 +113,24 @@ it("asks a public room through the Durable Object store", async () => {
   const asked = (await store.eventsAfter(ID, 0)).filter((e) => e.type === "outside_question");
   expect(asked.map((e) => [e.fromLabel, (e.payload as { text: string }).text])).toEqual([["visitor 1", "one"], ["visitor 1", "two"], ["visitor 2", "three"]]);
   expect(first.task.questionCursors).toEqual([asked[0].cursor]);
+});
+
+it("two role holders answering at once: one answer event, one winner, and the row shows it", async () => {
+  const store = new DurableObjectStore(env as never);
+  const m = roomManifest({ public: true, room: "Open review", purpose: "Ask us" });
+  const manifest = { ...m, roles: Object.fromEntries(Object.entries(m.roles).map(([r, def]) => [r, { ...def, can: [...def.can, "answer" as const] }])) };
+  await store.createSession(session({ id: ID, manifest, members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })] }));
+  const asked = await askRoom(store, ID, { userId: "u_1", label: "1@x" }, { text: "q" });
+  if (!asked.ok) throw new Error("refused");
+  const ref = asked.task.questionCursors[0];
+
+  const both = await Promise.all(["m_creator", "m_peer"].map((memberId, n) => answerQuestion(store, ID, { memberId }, { refId: ref, text: `answer ${n}` })));
+
+  expect(both.filter((r) => r.ok)).toHaveLength(1);
+  expect(both.find((r) => !r.ok)).toEqual({ ok: false, error: "already_answered" });
+  const events = (await store.eventsAfter(ID, 0)).filter((e) => e.type === "outside_answer");
+  expect(events).toHaveLength(1);
+  const row = await store.outsideTask(ID, "u_1", asked.task.id);
+  expect(row).toMatchObject({ state: "TASK_STATE_COMPLETED" });
+  expect(row?.answers).toEqual([{ cursor: events[0].cursor, text: (events[0].payload as { text: string }).text, at: events[0].at }]);
 });

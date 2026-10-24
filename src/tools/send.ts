@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok, refusal,
+  ActionResponseShape, BriefShape, OutsideAnswerShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok, refusal,
 } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
@@ -12,6 +12,7 @@ import {
   touchMember, writeSurface,
 } from "../rooms.js";
 import { isProposalPayload } from "../action-state.js";
+import { answerQuestion, type AnswerError } from "../outside.js";
 import { isTopicRoom } from "../manifest.js";
 import { readProposal } from "../proposal.js";
 import type { StoredSession } from "../stored-session.js";
@@ -39,6 +40,14 @@ function approvedProposal(
 /** The refusal of a second answer, said once for the tool's own look at the log and for the store's `answered` outcome, so the two cannot read differently. */
 const alreadyAnswered = (refId: string, by: string): string =>
   `action_request ${refId} was already answered by ${by}. The first answer is the one that counts, so this one would be ignored.`;
+
+/** What each refusal of an outside answer says. */
+const OUTSIDE_ANSWER_ERROR = (error: AnswerError, refId: string): string => ({
+  not_a_question: `no outside_question with cursor id ${refId}.`,
+  not_the_voice: "Only the room's voice answers outside questions.",
+  already_answered: "This question was already answered.",
+  task_closed: "This question's task is closed.",
+})[error];
 
 /**
  * An approval the card's key has moved past (plan R16): the refusal names the cursor of the change and what to do next,
@@ -71,7 +80,7 @@ Args:
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
-      "outside_answer" — a seat's reply to an outside A2A caller's question. Needs the answer verb, which no built-in preset grants. Not accepted yet.
+      "outside_answer" — a member's reply to an outside A2A caller's question. Set ref_id to the outside_question's cursor id and send { text, needs_input? }; needs_input: true asks the caller for more and leaves the task waiting on them. Only the room's voice may: the members whose role holds the answer verb (no built-in preset grants it), or, while no member's role does, the room's creator.
       "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, blob?, shape? } or { key, remove: true }. { key, restore: <cursor> } re-applies the version of that key written at that cursor, with its author kept (needs write_surface).
                          Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp), html (a self-contained page: the page inline in body, or blob: { id } naming a blob stored as text/html (uploaded as for a file, or bellman_upload with kind: "html"), never both; the panel renders it only inside a sandboxed frame on another origin, where its inline script and style and data: images work and it gets no cookies, no parent, no navigation, no popups, no downloads, no forms and no network through anything the policy governs (fetch, sockets, beacons; WebRTC is outside it in Chromium, so a page naming a STUN or TURN server reaches that host) — inline any library it needs; the bytes are the artifact, whatever they claim to be), shape (shape: { form: rect, ellipse, diamond, arrow or line, color?: slate, blue, green, amber, red or violet, or a hex such as #3b82f6, flip?: true draws an arrow or a line from the bottom-left to the top-right }; placement { x, y, w, h } required; the label is title; no body). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
                          Needs the write_surface verb. Items replace by key; at most 64 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
@@ -114,9 +123,6 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         });
       }
 
-      // Not usable yet: the handling of an outside answer arrives with the A2A door.
-      if (type === "outside_answer") return fail("outside_answer is not supported yet.");
-
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
@@ -127,6 +133,21 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // a member whose role forbids this kind still counts as present — it is
       // here, and refusing the send does not make it absent.
       await touchMember(s, session, me);
+
+      // An outside answer is the voice's, which `isVoice` decides in the store with the state of the task; no verb check
+      // stands in for it, and nobody else has to be in the room (a creator may answer alone).
+      if (type === "outside_answer") {
+        if (!ref_id) return fail("outside_answer requires ref_id (the cursor id of the outside_question).");
+        const parsed = OutsideAnswerShape.safeParse(payload);
+        if (!parsed.success) return fail(`outside_answer payload must be { text: string, needs_input?: boolean }: ${parsed.error.issues[0]?.message}`);
+        const at = Number(ref_id);
+        const answered = Number.isSafeInteger(at) && at > 0 && String(at) === ref_id
+          ? await answerQuestion(s, session_id, me, { refId: at, text: parsed.data.text, needsInput: parsed.data.needs_input })
+          : { ok: false as const, error: "not_a_question" as const };
+        if (!answered.ok) return fail(OUTSIDE_ANSWER_ERROR(answered.error, ref_id));
+        await audit(s, session, identity, "sent_outside_answer", { chars: parsed.data.text.length, ref_id });
+        return ok({ task_id: answered.task.id, state: answered.task.state, cursor: answered.task.answers.at(-1)?.cursor });
+      }
 
       // Authority first: before the payload, before who is listening. A seat that
       // may not act hears why, rather than being sent off to shorten a message it

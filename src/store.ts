@@ -24,7 +24,7 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
-import { decideAsk, type AskOutcome, type AskRequest } from "./outside.js";
+import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest } from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -84,11 +84,14 @@ export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null):
 export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
 
 /**
- * The task row as an append writes it: an `outside_question` adds its own cursor, which only the store knows once the
- * event is numbered, and any other event writes the row as given.
+ * The task row as an append writes it: an `outside_question` adds its own cursor and an `outside_answer` its own entry,
+ * which only the store knows once the event is numbered. Any other event writes the row as given.
  */
 export const taskWithEvent = (task: OutsideTask, event: SessionEvent): OutsideTask =>
-  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] } : task;
+  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] }
+  : event.type === "outside_answer"
+    ? { ...task, answers: [...task.answers, { cursor: event.cursor, text: (event.payload as { text: string }).text, at: event.at }] }
+  : task;
 
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
@@ -1661,6 +1664,13 @@ export interface BellmanStore {
    */
   askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome>;
   /**
+   * A member answers an outside question (A2A): who the voice is, whether the question is still open, the
+   * `outside_answer` and the task row's new state, decided and written as one unit (`decideAnswer` decides). Of two
+   * answers at once, one lands and the other finds the question answered. A room that is gone, frozen or closed
+   * answers "task_closed".
+   */
+  answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult>;
+  /**
    * Charge `bytes` to this room's blob total unless that would pass the
    * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
    * plan that made it. The read and the write are one operation, for
@@ -3199,6 +3209,18 @@ export class MemoryStore implements BellmanStore {
     const event = this.appendNow(s, d.event);
     this.applyExtras(s, event, { outsideTask: d.task, ...(d.standing === null ? {} : { outsideCaller: d.standing }) });
     this.outsideVisitors.set(sessionId, d.issued);
+    this.wakeHost(s, event);
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  async answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult> {
+    // No await from the reads to the writes, as in askOutside.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null || s.closed) return { ok: false, error: "task_closed" };
+    const d = decideAnswer(s, this.outsideTasks.get(sessionId)?.get(req.taskId), req);
+    if (!d.ok) return d;
+    const event = this.appendNow(s, d.event);
+    this.applyExtras(s, event, { outsideTask: d.task });
     this.wakeHost(s, event);
     return { ok: true, task: detach(taskWithEvent(d.task, event)) };
   }

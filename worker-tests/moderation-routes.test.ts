@@ -245,9 +245,10 @@ describe("the moderation routes through the Worker", () => {
 
   // /operator/stats reads the registry as its caller, so R8 gates it too. Both accounts are operators here, so with no
   // gate the suspended one would read the platform's counts; the control is the other operator, served them.
-  it("refuses a suspended operator at /operator/stats with the one message, and serves another operator", async () => {
+  // /operator/accounts, the stats page's accounts pane, the same: it is mounted with the counts, behind the one gate.
+  it.each(["/operator/stats", "/operator/accounts"])("refuses a suspended operator at %s with the one message, and serves another operator", async (at) => {
     const operators = oauthEnv({ BELLMAN_OPERATORS: "u_wire_stats,u_wire_stats_control" });
-    const as = async (userId: string) => worker.fetch(new Request(`${ORIGIN}/operator/stats`, {
+    const as = async (userId: string) => worker.fetch(new Request(`${ORIGIN}${at}`, {
       headers: { authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` })}` },
     }), operators, ctx);
     await store().suspend("u_wire_stats", { note: "wire", by: OPERATOR.userId, at: Date.now() });

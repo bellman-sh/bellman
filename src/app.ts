@@ -93,9 +93,11 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   // them would make the local server the loose one. No overrides and no billing either, which is the truth
   // here: nothing on this server reads BELLMAN_USERS or BELLMAN_BILLING, and a plan here comes from the key
   // table, never from a grant. With no operators the route answers 403 before it reads either.
-  app.use("/operator/stats", serve(gated((request) => statsRoutes(request, {
-    store, caller, panelOrigins: [], operators: undefined, overrides: {}, honourPurchases: false,
-  }))));
+  for (const at of ["/operator/stats", "/operator/accounts"]) {
+    app.use(at, serve(gated((request) => statsRoutes(request, {
+      store, caller, panelOrigins: [], operators: undefined, overrides: {}, honourPurchases: false,
+    }))));
+  }
   // No credential, so no gate.
   // Bearer keys only, so the cards say no OAuth (this server has none to honour).
   const publicReads = serve((request) => publicRoutes(request, { store, blobs, oauth: false }));

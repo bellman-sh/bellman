@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import type { RoomCaller } from "../src/http/rooms.js";
-import { MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
+import { MAX_ACCOUNTS_ANSWERED, MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, PlanGrant } from "../src/types.js";
 import { DEV_KEY } from "./helpers/harness.js";
@@ -124,20 +124,23 @@ describe("GET /operator/stats", () => {
   // A browser hands the panel an answer, or a refusal, only if the response names its
   // origin. A row for each response the route gives besides the preflight, which has
   // its own test above; a new response gets a row.
-  it.each([
-    { status: 200, key: DEV_KEY.jesse }, // an operator
-    { status: 401, key: null }, // no credential
-    { status: 403, key: DEV_KEY.peer }, // signed in, not an operator
-    { status: 405, key: DEV_KEY.jesse, method: "POST" }, // an operator, anything but GET
-    { status: 500, key: DEV_KEY.jesse, storeFails: true }, // an operator, the store down
-  ])("carries the panel's origin on a $status", async ({ status, key, method, storeFails }) => {
-    if (storeFails) {
-      // Assigned on the instance, for the reason the 500 test below gives.
-      const failing = new MemoryStore();
-      failing.countUsers = () => Promise.reject(new Error("registry unreachable"));
-      deps = { ...deps, store: failing };
-    }
-    const res = await call(key, "/operator/stats", { method, origin: PANEL });
+  // Both paths: the accounts pane is read by the same panel, and its list fails on its own read (listUsers).
+  type Row = { at: string; status: number; key: string | null; method?: string; storeFails?: boolean; listFails?: boolean };
+  it.each(["/operator/stats", "/operator/accounts"].flatMap((at): Row[] => [
+    { at, status: 200, key: DEV_KEY.jesse }, // an operator
+    { at, status: 401, key: null }, // no credential
+    { at, status: 403, key: DEV_KEY.peer }, // signed in, not an operator
+    { at, status: 405, key: DEV_KEY.jesse, method: "POST" }, // an operator, anything but GET
+    { at, status: 500, key: DEV_KEY.jesse, storeFails: true }, // an operator, the store down
+    { at, status: 500, key: DEV_KEY.jesse, listFails: true }, // an operator, the list read down
+  ]))("carries the panel's origin on a $status at $at", async ({ at, status, key, method, storeFails, listFails }) => {
+    // Assigned on the instance, for the reason the 500 test below gives.
+    const failing = new MemoryStore();
+    if (storeFails) failing.countUsers = () => Promise.reject(new Error("registry unreachable"));
+    if (listFails) failing.listUsers = () => Promise.reject(new Error("registry unreachable"));
+    if (listFails && at === "/operator/stats") failing.listGrants = () => Promise.reject(new Error("registry unreachable"));
+    if (storeFails || listFails) deps = { ...deps, store: failing };
+    const res = await call(key, at, { method, origin: PANEL });
     expect(res!.status).toBe(status);
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
@@ -331,5 +334,41 @@ describe("GET /operator/stats", () => {
     const res = await call(DEV_KEY.jesse);
     expect(res!.status).toBe(500);
     expect(await bodyOf(res)).toMatchObject({ error: "internal" });
+  });
+});
+
+// The accounts pane on dash.bellman.sh/stats: the people who have signed in, for the operator alone, read by the
+// panel's session as the counts are. Rows, which /operator/stats is built never to answer (#259), so a route of its own.
+describe("GET /operator/accounts", () => {
+  it("lists accounts by first sign-in with the total, to an operator's session and bearer token alike", async () => {
+    await store.recordSignIn("u_google_2", Date.UTC(2026, 9, 3));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1));
+    const want = {
+      total: 2,
+      accounts: [
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-01T00:00:00.000Z" },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z" },
+      ],
+    };
+    const viaCookie = await call(null, "/operator/accounts", { cookie: DEV_KEY.jesse, origin: PANEL });
+    expect([viaCookie!.status, await bodyOf(viaCookie), viaCookie!.headers.get("access-control-allow-origin")]).toEqual([200, want, PANEL]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/operator/accounts/"))).toEqual(want);
+  });
+
+  it("lists at most MAX_ACCOUNTS_ANSWERED, and tells nobody else anything, the method included", async () => {
+    for (let i = 0; i < MAX_ACCOUNTS_ANSWERED + 2; i++) await store.recordSignIn(`u_github_${i}`, i);
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/operator/accounts"));
+    expect([body.total, (body.accounts as unknown[]).length]).toEqual([MAX_ACCOUNTS_ANSWERED + 2, MAX_ACCOUNTS_ANSWERED]);
+    expect((await call(null, "/operator/accounts"))!.status).toBe(401);
+    expect((await call(DEV_KEY.peer, "/operator/accounts"))!.status).toBe(403);
+    expect((await call(DEV_KEY.peer, "/operator/accounts", { method: "POST" }))!.status).toBe(403);
+    deps = { ...deps, operators: new Set() };
+    expect((await call(DEV_KEY.jesse, "/operator/accounts"))!.status).toBe(403);
+  });
+
+  it("takes GET alone, and carries on for a path below it", async () => {
+    const res = await call(DEV_KEY.jesse, "/operator/accounts", { method: "DELETE" });
+    expect([res!.status, res!.headers.get("allow")]).toEqual([405, "GET"]);
+    expect(await call(DEV_KEY.jesse, "/operator/accounts/u_github_9")).toBeUndefined();
   });
 });

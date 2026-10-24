@@ -1997,9 +1997,10 @@ export interface BellmanStore {
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
    * sweeps the unnamed objects of a closed room whose close it did not see (#65), drops
-   * expired connect tokens, and deletes the reports resolved 180 days ago (R15). MemoryStore does
-   * all of it here; the Durable Objects store does none, because each room's alarm does its
-   * room's and the registry's alarm does the reports'.
+   * expired connect tokens, deletes the reports resolved 180 days ago (R15), and delivers and sweeps
+   * each org's audit stream when due (ADR 0035). MemoryStore does all of it here; the Durable Objects
+   * store does none, because each room's alarm does its room's, the registry's alarm does the
+   * reports', and each org's AuditDO alarm does its stream's.
    */
   sweep(now: number): Promise<void>;
 }
@@ -4116,8 +4117,9 @@ export class MemoryStore implements BellmanStore {
     for (const [reporter, times] of this.filings) {
       if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
-    // Every sink whose delivery is due: what AuditDO's own alarm does per org.
+    // Every sink whose delivery is due, and every retention window whose sweep is: what AuditDO's own alarm does per org.
     for (const [orgId, st] of this.auditState) if (st.sinkAt !== null && st.sinkAt <= now) await this.pumpAuditSink(orgId, now);
+    for (const [orgId, st] of this.auditState) if (st.sweepAt !== null && st.sweepAt <= now) await this.sweepAudit(orgId, now);
   }
 
   /**

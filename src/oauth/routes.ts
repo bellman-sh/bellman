@@ -27,6 +27,10 @@ import {
 } from "./cookies.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
+  AGENT_CODE_TTL_MS, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, CLAIM_GRANT, JWT_BEARER_GRANT,
+  newAttempt, type AgentAttempt, type AgentRegistration,
+} from "./agent-auth.js";
+import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
   canonicalResource, randomId, signJwt, verifyJwt, verifyPkce, type Claims,
 } from "./tokens.js";
@@ -492,6 +496,17 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 
 const oauthError = (error: string, description: string, status = 400) =>
   json({ error, error_description: description }, status);
+
+/** Where the human approves an agent: the claim page, keyed by the attempt. */
+const verificationUri = (issuer: string, attemptToken: string) =>
+  `${issuer}/agent/claim?claim_attempt_token=${encodeURIComponent(attemptToken)}`;
+
+const claimOffer = (issuer: string, attempt: AgentAttempt) => ({
+  user_code: attempt.user_code,
+  expires_in: AGENT_CODE_TTL_MS / 1000,
+  verification_uri: verificationUri(issuer, attempt.attempt_token),
+  interval: AGENT_POLL_INTERVAL_MS / 1000,
+});
 
 const html = (body: string, status = 200) =>
   new Response(
@@ -1124,11 +1139,85 @@ export async function handleOAuth(
       token_endpoint: `${config.issuer}/token`,
       registration_endpoint: `${config.issuer}/register`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
+      grant_types_supported: ["authorization_code", "refresh_token", JWT_BEARER_GRANT, CLAIM_GRANT],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
       scopes_supported: [SCOPE],
       service_documentation: "https://github.com/bellman-sh/bellman",
+      // auth.md (ADR 0036): an agent registers by its human's email and polls
+      // /token while that human approves on the claim page.
+      agent_auth: {
+        skill: "https://bellman.sh/auth.md",
+        identity_endpoint: `${config.issuer}/agent/identity`,
+        claim_endpoint: `${config.issuer}/agent/identity/claim`,
+        register_uri: `${config.issuer}/agent/identity`,
+        claim_uri: `${config.issuer}/agent/identity/claim`,
+        identity_types_supported: ["service_auth"],
+      },
+    });
+  }
+
+  // ------------------------------------------- auth.md agent registration
+  if (path === "/agent/identity" || path === "/agent/identity/claim") {
+    if (method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return oauthError("invalid_request", "body must be JSON");
+    }
+    if (!isRecord(body)) return oauthError("invalid_request", "body must be a JSON object");
+    const now = Date.now();
+
+    if (path === "/agent/identity") {
+      if (body.type === "anonymous") return oauthError("anonymous_not_enabled", "only service_auth is offered");
+      if (body.type === "identity_assertion") return oauthError("issuer_not_enabled", "only service_auth is offered");
+      if (body.type !== "service_auth") return oauthError("invalid_request", "type must be service_auth");
+      const hint = typeof body.login_hint === "string" ? body.login_hint.trim().toLowerCase() : "";
+      const [local, domain, ...rest] = hint.split("@");
+      if (hint.length > 254 || !local || !domain || rest.length > 0) {
+        return oauthError("invalid_request", "login_hint must be the email of the person who will approve");
+      }
+      const claimToken = `clm_${randomId()}`;
+      const reg: AgentRegistration = {
+        registration_id: `reg_${randomId(16)}`,
+        login_hint: hint,
+        created_at: now,
+        expires_at: now + AGENT_REGISTRATION_TTL_MS,
+        last_poll_at: null,
+        attempt: newAttempt(now),
+        claimed: null,
+      };
+      // Same address rule as /register.
+      const admission = await config.store.admitAgentRegistration(
+        claimToken, reg, request.headers.get("cf-connecting-ip") ?? "unknown", now
+      );
+      if (admission !== "ok") return oauthError("rate_limited", "too many agent registrations — try later", 429);
+      return json({
+        registration_id: reg.registration_id,
+        registration_type: "service_auth",
+        claim_url: `${config.issuer}/agent/identity/claim`,
+        claim_token: claimToken,
+        claim_token_expires: new Date(reg.expires_at).toISOString(),
+        post_claim_scopes: [SCOPE],
+        claim: claimOffer(config.issuer, reg.attempt),
+      });
+    }
+
+    if (typeof body.claim_token !== "string" || typeof body.email !== "string") {
+      return oauthError("invalid_request", "claim_token and email are required");
+    }
+    const { verdict, reg } = await config.store.reissueAgentCode(body.claim_token, body.email, now);
+    if (verdict === "unknown") return oauthError("invalid_claim_token", "no registration holds that claim_token");
+    if (verdict === "expired") return oauthError("claim_expired", "the registration expired — register again", 410);
+    if (verdict === "claimed") return oauthError("claimed_or_in_flight", "the registration is already approved — poll /token");
+    if (verdict === "mismatch" || !reg) return oauthError("invalid_request", "email does not match the registration");
+    return json({
+      registration_id: reg.registration_id,
+      claim_attempt_id: reg.attempt.attempt_id,
+      status: "initiated",
+      expires_at: new Date(reg.expires_at).toISOString(),
+      claim_attempt: claimOffer(config.issuer, reg.attempt),
     });
   }
 

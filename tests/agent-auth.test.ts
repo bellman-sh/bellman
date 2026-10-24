@@ -16,7 +16,7 @@ import {
 } from "../src/oauth/agent-auth.js";
 import { MemoryAuthStore, REGISTRATION_WINDOW_MS } from "../src/oauth/storage.js";
 import { REFRESH_TOKEN_TTL_MS } from "../src/oauth/tokens.js";
-import { IDENTITY } from "./helpers/panel.js";
+import { IDENTITY, ISSUER, panelConfig, routeWith } from "./helpers/panel.js";
 
 const CLAIMED: AgentClaimed = {
   identity: IDENTITY,
@@ -198,5 +198,158 @@ describe("agent-auth storage", () => {
     expect(await store.getAgentGrant("reg_1", t + REFRESH_TOKEN_TTL_MS + 1)).toBeNull();
     await store.deleteAgentGrant("reg_1");
     expect(await store.getAgentGrant("reg_1", t)).toBeNull();
+  });
+});
+
+describe("agent registration endpoints", () => {
+  const setup = () => {
+    const config = panelConfig();
+    const route = routeWith(config);
+    const post = (path: string, body: unknown, ip = "203.0.113.9") =>
+      route(
+        new Request(`${ISSUER}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+          body: typeof body === "string" ? body : JSON.stringify(body),
+        })
+      );
+    const register = (hint: unknown = "jesse@example.dev", ip?: string) =>
+      post("/agent/identity", { type: "service_auth", login_hint: hint }, ip);
+    return { config, route, post, register };
+  };
+  const body = async (res: Response) => (await res.json()) as Record<string, any>;
+
+  test("metadata carries agent_auth", async () => {
+    const { route } = setup();
+    const meta = await body(await route(new Request(`${ISSUER}/.well-known/oauth-authorization-server`)));
+    expect(meta.grant_types_supported).toEqual([
+      "authorization_code",
+      "refresh_token",
+      "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      "urn:workos:agent-auth:grant-type:claim",
+    ]);
+    expect(meta.agent_auth).toEqual({
+      skill: "https://bellman.sh/auth.md",
+      identity_endpoint: `${ISSUER}/agent/identity`,
+      claim_endpoint: `${ISSUER}/agent/identity/claim`,
+      register_uri: `${ISSUER}/agent/identity`,
+      claim_uri: `${ISSUER}/agent/identity/claim`,
+      identity_types_supported: ["service_auth"],
+    });
+  });
+
+  test("anonymous and identity_assertion are not enabled", async () => {
+    const { post } = setup();
+    const anon = await post("/agent/identity", { type: "anonymous" });
+    expect(anon.status).toBe(400);
+    expect((await body(anon)).error).toBe("anonymous_not_enabled");
+    const asserted = await post("/agent/identity", { type: "identity_assertion" });
+    expect(asserted.status).toBe(400);
+    expect((await body(asserted)).error).toBe("issuer_not_enabled");
+  });
+
+  test("a bad body is invalid_request", async () => {
+    const { post, register, route } = setup();
+    for (const res of [
+      await post("/agent/identity", "not json"),
+      await post("/agent/identity", "[]"),
+      await post("/agent/identity", { type: "service_auth" }),
+      await post("/agent/identity", { type: "bogus", login_hint: "jesse@example.dev" }),
+      await register("no-at-sign"),
+      await register("a@b@c"),
+      await register("@example.dev"),
+      await register(`${"a".repeat(250)}@x.dev`),
+    ]) {
+      expect(res.status).toBe(400);
+      expect((await body(res)).error).toBe("invalid_request");
+    }
+    const get = await route(new Request(`${ISSUER}/agent/identity`));
+    expect(get.status).toBe(405);
+    expect(get.headers.get("allow")).toBe("POST");
+  });
+
+  test("login_hint is trimmed and lowercased", async () => {
+    const { post, register } = setup();
+    const reg = await body(await register(" Jesse@Example.dev "));
+    const res = await post("/agent/identity/claim", { claim_token: reg.claim_token, email: "jesse@example.dev" });
+    expect(res.status).toBe(200);
+  });
+
+  test("registration response shape", async () => {
+    const { register } = setup();
+    const res = await register();
+    expect(res.status).toBe(200);
+    const reg = await body(res);
+    expect(reg.registration_id).toMatch(/^reg_/);
+    expect(reg.registration_type).toBe("service_auth");
+    expect(reg.claim_url).toBe(`${ISSUER}/agent/identity/claim`);
+    expect(reg.claim_token).toMatch(/^clm_/);
+    expect(Date.parse(reg.claim_token_expires)).toBeGreaterThan(Date.now() + AGENT_REGISTRATION_TTL_MS - 60_000);
+    expect(reg.post_claim_scopes).toEqual(["bellman"]);
+    expect(reg.claim.user_code).toMatch(/^\d{6}$/);
+    expect(reg.claim.verification_uri.startsWith(`${ISSUER}/agent/claim?claim_attempt_token=`)).toBe(true);
+    expect(reg.claim.expires_in).toBe(600);
+    expect(reg.claim.interval).toBe(5);
+  });
+
+  test("reissue errors", async () => {
+    const { config, post, register } = setup();
+    const claim = (claim_token: unknown, email: unknown = "jesse@example.dev") =>
+      post("/agent/identity/claim", { claim_token, email });
+
+    const unknown = await claim("clm_nope");
+    expect(unknown.status).toBe(400);
+    expect((await body(unknown)).error).toBe("invalid_claim_token");
+
+    const reg = await body(await register());
+    const mismatch = await claim(reg.claim_token, "someone@else.dev");
+    expect(mismatch.status).toBe(400);
+    expect((await body(mismatch)).error).toBe("invalid_request");
+    const missing = await post("/agent/identity/claim", { claim_token: reg.claim_token });
+    expect((await body(missing)).error).toBe("invalid_request");
+
+    const token = new URL(reg.claim.verification_uri).searchParams.get("claim_attempt_token")!;
+    expect((await config.store.approveAgentClaim(token, reg.claim.user_code, CLAIMED, Date.now())).kind).toBe("approved");
+    const claimed = await claim(reg.claim_token);
+    expect(claimed.status).toBe(400);
+    expect((await body(claimed)).error).toBe("claimed_or_in_flight");
+
+    const later = await body(await register());
+    const real = Date.now;
+    Date.now = () => real() + AGENT_REGISTRATION_TTL_MS + 1;
+    try {
+      const expired = await claim(later.claim_token);
+      expect(expired.status).toBe(410);
+      expect((await body(expired)).error).toBe("claim_expired");
+    } finally {
+      Date.now = real;
+    }
+  });
+
+  test("reissue mints a new code and only it works", async () => {
+    const { config, post, register } = setup();
+    const reg = await body(await register());
+    const res = await post("/agent/identity/claim", { claim_token: reg.claim_token, email: "jesse@example.dev" });
+    expect(res.status).toBe(200);
+    const again = await body(res);
+    expect(again.registration_id).toBe(reg.registration_id);
+    expect(again.claim_attempt_id).toMatch(/^cla_/);
+    expect(again.status).toBe("initiated");
+    expect(again.expires_at).toBe(reg.claim_token_expires);
+    expect(again.claim_attempt.user_code).toMatch(/^\d{6}$/);
+    expect(again.claim_attempt.expires_in).toBe(600);
+    expect(again.claim_attempt.interval).toBe(5);
+    const token = (uri: string) => new URL(uri).searchParams.get("claim_attempt_token")!;
+    expect(await config.store.readAgentAttempt(token(reg.claim.verification_uri), Date.now())).toBeNull();
+    expect(await config.store.readAgentAttempt(token(again.claim_attempt.verification_uri), Date.now())).not.toBeNull();
+  });
+
+  test("the 21st registration from one IP is 429", async () => {
+    const { register } = setup();
+    for (let i = 0; i < AGENT_REGS_PER_HOUR; i++) expect((await register()).status).toBe(200);
+    const res = await register();
+    expect(res.status).toBe(429);
+    expect((await body(res)).error).toBe("rate_limited");
+    expect((await register("jesse@example.dev", "198.51.100.1")).status).toBe(200);
   });
 });

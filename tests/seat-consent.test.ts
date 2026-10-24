@@ -782,6 +782,16 @@ describe("the invitation link (ADR 0036)", () => {
     expect(page.headers.getSetCookie().join()).toContain(NONCE_COOKIE);
   });
 
+  it("sends no Referer from the link page, live or gone, since its URL holds a token that joins as the invite", async () => {
+    const link = await linkFor(NOBODY);
+    const live = await openLink(link);
+    await plans.deleteOrgInvite("org_acme", NOBODY, by);
+    const gone = await openLink(link);
+    const forged = await openLink(`${ISSUER}/invite/not.a.token`);
+    expect([live, gone, forged].map((r) => [r.status, r.headers.get("referrer-policy")]))
+      .toEqual([[200, "no-referrer"], [410, "no-referrer"], [410, "no-referrer"]]);
+  });
+
   it("escapes the org's name on the link page", async () => {
     await plans.updateOrg("org_acme", { name: "<b>Bold</b> & Co" }, by);
     const text = await (await openLink(await linkFor(NOBODY))).text();

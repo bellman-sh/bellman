@@ -1327,9 +1327,14 @@ export async function handleOAuth(
   // that the session's account is the one invited.
   const linkMatch = method === "GET" ? /^\/invite\/([^/]+)$/.exec(path) : null;
   if (linkMatch) {
+    // The page's own URL holds the token, which joins as the invite: no answer to it hands that on in a Referer.
+    const noReferrer = (res: Response): Response => {
+      res.headers.set("referrer-policy", "no-referrer");
+      return res;
+    };
     const panels = config.panelOrigins ?? [];
     if (panels.length === 0) {
-      return html(`<h1>No control panel configured</h1><p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`, 503);
+      return noReferrer(html(`<h1>No control panel configured</h1><p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`, 503));
     }
     const token = linkMatch[1];
     const claim = config.plans ? await verifyInviteLink(token, config.issuer, config.secret) : null;
@@ -1338,7 +1343,7 @@ export async function handleOAuth(
       : undefined;
     const org = invite ? await config.plans!.getOrg(invite.orgId) : undefined;
     if (!invite || !org) {
-      return html(`<h1>This invitation has expired or was withdrawn</h1><p>Ask the person who invited you to send it again.</p>`, 410);
+      return noReferrer(html(`<h1>This invitation has expired or was withdrawn</h1><p>Ask the person who invited you to send it again.</p>`, 410));
     }
     const nonce = randomId();
     const pending: SessionRequest = {
@@ -1356,7 +1361,7 @@ export async function handleOAuth(
       stateToken, org.requireSso ? [] : configured(config), true,
     ));
     page.headers.append("set-cookie", serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS));
-    return page;
+    return noReferrer(page);
   }
 
   // ------------------------------------------------------- /auth/session

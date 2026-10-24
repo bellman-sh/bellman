@@ -24,13 +24,20 @@ const PUBLIC_SENTENCE = "Questions sent here and the room's answers are public o
 
 const skill = (description: string) => ({ id: "ask", name: "Ask the room", description, tags: ["room"] });
 
+/**
+ * What a server's card says it accepts. `oauth` is false for the Node server, which has bearer keys only: a card
+ * must not advertise a scheme its `/a2a` refuses.
+ */
+export interface CardOptions { oauth: boolean }
+
+const BEARER = { httpAuthSecurityScheme: { description: "A Bellman key, sent as a bearer token.", scheme: "Bearer" } };
+
 /** The auth every card shares. The `oauth` scheme has no field for a resource, so its description carries it. */
-function security(origin: string) {
+function security(origin: string, { oauth }: CardOptions) {
+  if (!oauth) return { securitySchemes: { bearer: BEARER }, securityRequirements: [{ schemes: { bearer: { list: [] } } }] };
   return {
     securitySchemes: {
-      bearer: {
-        httpAuthSecurityScheme: { description: "A Bellman key, sent as a bearer token.", scheme: "Bearer" },
-      },
+      bearer: BEARER,
       oauth: {
         oauth2SecurityScheme: {
           description:
@@ -53,7 +60,7 @@ function security(origin: string) {
   };
 }
 
-function card(origin: string, name: string, description: string, ask: string, tenant?: string) {
+function card(origin: string, how: CardOptions, name: string, description: string, ask: string, tenant?: string) {
   const interfaces = [{ url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", ...(tenant === undefined ? {} : { tenant }) }];
   return {
     name,
@@ -61,17 +68,18 @@ function card(origin: string, name: string, description: string, ask: string, te
     supportedInterfaces: interfaces,
     version: PACKAGE_VERSION,
     capabilities: { streaming: true, pushNotifications: false, extendedAgentCard: false },
-    ...security(origin),
+    ...security(origin, how),
     defaultInputModes: ["text/plain"],
     defaultOutputModes: ["text/plain"],
     skills: [skill(ask)],
   };
 }
 
-/** A public room's card. `origin` is the Worker's own, which serves `/a2a`. */
-export const roomCard = (room: PublicRoomView, origin: string): object =>
+/** A public room's card. `origin` is the server's own, which serves `/a2a`; the Worker also takes OAuth, the default. */
+export const roomCard = (room: PublicRoomView, origin: string, how: CardOptions = { oauth: true }): object =>
   card(
     origin,
+    how,
     room.name,
     [room.purpose?.trim(), PUBLIC_SENTENCE].filter(Boolean).join(" "),
     "The room's members discuss your question and answer as one.",
@@ -82,6 +90,7 @@ export const roomCard = (room: PublicRoomView, origin: string): object =>
 export const bellmanCard = (origin: string): object =>
   card(
     origin,
+    { oauth: true },
     "Bellman",
     "Bellman is where people and their coding agents work together in shared rooms. Public rooms answer questions from outside agents.",
     `Name a public room in tenant to ask it. Public rooms are listed at ${ROOMS}.`,

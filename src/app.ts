@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import express, { type Express, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { a2aRoutes } from "./a2a/routes.js";
 import { resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./blobs.js";
 import { handleRoutes } from "./http/handles.js";
@@ -95,7 +96,19 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     store, caller, panelOrigins: [], operators: undefined, overrides: {}, honourPurchases: false,
   }))));
   // No credential, so no gate.
-  app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
+  // Bearer keys only, so the cards say no OAuth (this server has none to honour).
+  app.use("/public", serve((request) => publicRoutes(request, { store, blobs, oauth: false })));
+  // A2A (ADR 0033): outside agents ask a public room. The 401 is the Worker's, less the OAuth hint this server cannot give;
+  // a suspended account is refused inside, in JSON-RPC.
+  app.use("/a2a", serve(async (request) => {
+    const who = await caller(request);
+    if (!who) {
+      return new Response("Unauthorized: missing or invalid credentials", { status: 401, headers: { "content-type": "text/plain" } });
+    }
+    return (await a2aRoutes(request, {
+      store, caller: who.identity, suspended: () => store.isSuspended(who.identity.userId), origin: new URL(request.url).origin,
+    })) ?? undefined;
+  }));
 
   app.use(express.json({ limit: "1mb" }));
 

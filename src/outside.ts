@@ -1,5 +1,6 @@
 import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
+import { audit } from "./rooms.js";
 import { verbsOfRole } from "./roles.js";
 import { hostSeated, isActiveMember, isHostMember, isPublic, type BellmanStore } from "./store.js";
 import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
@@ -146,7 +147,14 @@ export async function askRoom(
     ...(input.contextId === undefined ? {} : { contextId: input.contextId }),
     now,
   });
-  return done.ok ? done : refuse(done.error);
+  if (!done.ok) return refuse(done.error);
+  // The room's org stream records the ask the way the room's own log does: the asker is `system` and the origin (the
+  // handle, else `visitor N`) is the label, so the account behind an outside caller never reaches the creator (D7).
+  // A room with no org has no stream, and `audit` writes nothing for it.
+  await audit(store, session, { userId: "system", orgId: null, plan: "free", role: "member", label: done.task.origin }, "outside_question", {
+    chars: input.text.length, task_id: done.task.id,
+  });
+  return done;
 }
 
 /** `units` is the seat's alone: it charges the answer to the room's month, in the answer's own write. */

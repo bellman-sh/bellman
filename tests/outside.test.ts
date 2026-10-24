@@ -418,6 +418,25 @@ describe("answering an outside question", () => {
       expect(await answers()).toHaveLength(1);
     });
 
+    it("a team room's audit records outside_question and sent_outside_answer", async () => {
+      const harness = (h = new Harness(store));
+      await store.createSession(roomWith(granting()));
+      const { task, ref } = await asked("what is this room for?");
+      const creator = await harness.connect(DEV_KEY.jesse);
+      const sent = await creator.call("bellman_send", {
+        session_id: PUB, member_id: "m_creator", type: "outside_answer", payload: { text: "a room to review code" }, ref_id: String(ref),
+      });
+      expect(sent.isError, sent.text).toBe(false);
+
+      const rows = (await store.auditForOrg("org_codenerd", 50)).filter((r) => r.sessionId === PUB);
+      expect(rows.map((r) => r.action)).toEqual(["outside_question", "sent_outside_answer"]);
+      expect(rows[0].detail).toEqual({ chars: "what is this room for?".length, task_id: task.id });
+      expect(rows[1].detail).toMatchObject({ chars: "a room to review code".length, ref_id: String(ref) });
+      // The room's side never learns who asked: the row names the asker as the room's own log does.
+      expect(JSON.stringify(rows[0])).not.toContain(asker.userId);
+      expect(JSON.stringify(rows[0])).not.toContain(asker.label);
+    });
+
     it("needs_input answers with INPUT_REQUIRED; a ref_id that is not a question is refused", async () => {
       const harness = (h = new Harness(store));
       await store.createSession(roomWith(granting()));

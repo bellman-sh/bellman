@@ -400,6 +400,44 @@ describe("the room routes over the Node server (#183)", () => {
   });
 });
 
+describe("A2A over the Node server (ADR 0033)", () => {
+  const rpc = (key: string | null, method: string, params: unknown) => fetch(`${base}/a2a`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "a2a-version": "1.0", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const ask = (tenant: string) => ({
+    tenant, configuration: { returnImmediately: true },
+    message: { messageId: "m1", role: "ROLE_USER", parts: [{ text: "What does this room review?" }] },
+  });
+
+  it("the Node app serves /a2a SendMessage with a bearer key", async () => {
+    await store.createSession(session({ id: "qs_http_a2a", manifest: roomManifest({ public: true }) }));
+    const res = await rpc("qk_dev_outsider", "SendMessage", ask("qs_http_a2a"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result?: { task: { id: string; status: { state: string } } } };
+    expect(body.result?.task.status.state).toBe("TASK_STATE_WORKING");
+    const got = await rpc("qk_dev_outsider", "GetTask", { tenant: "qs_http_a2a", id: body.result!.task.id });
+    expect(((await got.json()) as { result: { id: string } }).result.id).toBe(body.result!.task.id);
+  });
+
+  it("answers a request with no key as a plain 401, with no OAuth hint this server cannot honour", async () => {
+    const res = await rpc(null, "SendMessage", ask("qs_http_a2a"));
+    expect([res.status, res.headers.get("content-type")?.startsWith("text/plain"), res.headers.get("www-authenticate")]).toEqual([401, true, null]);
+    expect(await res.text()).toBe("Unauthorized: missing or invalid credentials");
+    expect((await rpc("qk_nobody", "ListTasks", {})).status).toBe(401);
+  });
+
+  it("serves a room card that offers the bearer scheme and no OAuth", async () => {
+    await store.createSession(session({ id: "qs_http_card", manifest: roomManifest({ public: true }) }));
+    const card = (await (await fetch(`${base}/public/rooms/qs_http_card/agent-card.json`)).json()) as {
+      securitySchemes: Record<string, unknown>; securityRequirements: unknown[];
+    };
+    expect(Object.keys(card.securitySchemes)).toEqual(["bearer"]);
+    expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
+  });
+});
+
 /**
  * The hosted seat's switch, over the wire: `createApp` hands its `features` to the tools it
  * serves, so the same request is refused by an app built with the seat off and served by one

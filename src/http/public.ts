@@ -35,6 +35,8 @@ import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, surfaceTa
 export interface PublicRouteDeps {
   store: BellmanStore;
   blobs: BlobStore;
+  /** Whether this server's `/a2a` takes OAuth, which a room card then says. The Worker does; the Node server, with bearer keys only, does not. */
+  oauth?: boolean;
 }
 
 /** `/public/rooms/:id`, then `/surface`, `/events`, `/agent-card.json` or `/blobs/:blobId`. */
@@ -141,7 +143,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       const name = heldName(session);
       const tenant = name !== null && (await deps.store.publicNameEntry(name))?.id === id ? name : id;
       return cardResponse(
-        roomCard({ tenant, name: session.manifest.room, purpose: session.manifest.purpose }, url.origin),
+        roomCard({ tenant, name: session.manifest.room, purpose: session.manifest.purpose }, url.origin, { oauth: deps.oauth ?? true }),
         request.headers.get("if-none-match"),
         OPEN,
       );

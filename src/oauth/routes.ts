@@ -28,11 +28,11 @@ import {
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
   AGENT_CODE_TTL_MS, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, CLAIM_GRANT, JWT_BEARER_GRANT,
-  newAttempt, type AgentAttempt, type AgentRegistration,
+  newAttempt, type AgentAttempt, type AgentRegistration, type ApproveVerdict,
 } from "./agent-auth.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
-  canonicalResource, randomId, signJwt, verifyJwt, verifyPkce, type Claims,
+  canonicalResource, randomId, sha256Base64url, signJwt, verifyJwt, verifyPkce, type Claims,
 } from "./tokens.js";
 
 /**
@@ -486,6 +486,8 @@ const UPGRADE_AUDIENCE = "bellman:upgrade-state";
 const SESSION_AUDIENCE = "bellman:session-state";
 /** A sign-in held at the invites page (ADR 0027): accepted by its answer route and nowhere else. */
 const INVITES_AUDIENCE = "bellman:invites-state";
+/** The claim page's form (ADR 0036): names the attempt and the session that saw the page. */
+const CLAIM_AUDIENCE = "bellman:claim-state";
 const SCOPE = "bellman";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -507,6 +509,60 @@ const claimOffer = (issuer: string, attempt: AgentAttempt) => ({
   verification_uri: verificationUri(issuer, attempt.attempt_token),
   interval: AGENT_POLL_INTERVAL_MS / 1000,
 });
+
+const claimSignin = (issuer: string, attemptToken: string) =>
+  `<a href="/auth/signin?return_to=${escape(encodeURIComponent(verificationUri(issuer, attemptToken)))}">`;
+
+/** The approve form, with a fresh `held` bound to this attempt and this session. */
+async function claimForm(config: OAuthConfig, attemptToken: string, sessionId: string, label: string, notice = ""): Promise<Response> {
+  const held = await signJwt(
+    { iss: config.issuer, aud: CLAIM_AUDIENCE, sub: attemptToken, sid: await sha256Base64url(sessionId), bellman: null as never },
+    config.secret,
+    STATE_TTL_SECONDS
+  );
+  return html(
+    `<h1>Approve an agent?</h1><p>Signed in as <b>${escape(label)}</b>.</p>` +
+      `<p>An agent asked to act as you on Bellman. Approving lets it start rooms and read and send in your rooms, ` +
+      `for 30 days or until an operator removes it. Approve only if you started this from your own agent just now.</p>` +
+      (notice ? `<p class="notice">${escape(notice)}</p>` : "") +
+      `<form class="sso" action="/agent/claim" method="post"><input type="hidden" name="held" value="${escape(held)}">` +
+      `<label for="code">Enter the 6-digit code your agent gave you.</label>` +
+      `<input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>` +
+      `<button class="btn" type="submit">Approve</button></form>` +
+      `<p>Not you? ${claimSignin(config.issuer, attemptToken)}Sign in with another account.</a></p>`
+  );
+}
+
+const claimNotice = (title: string, body: string, status = 200) => html(`<h1>${title}</h1><p>${body}</p>`, status);
+const CLAIM_INVALID = () => claimNotice("Agent approval", "This link isn't valid. Ask your agent for a new one.", 400);
+const CLAIM_EXPIRED = () => claimNotice("Agent approval", "This code has expired. Ask your agent for a new one.");
+
+async function claimVerdict(
+  verdict: ApproveVerdict, config: OAuthConfig, attemptToken: string, sessionId: string, label: string
+): Promise<Response> {
+  switch (verdict.kind) {
+    case "approved":
+      return claimNotice("Agent approved", "Approved. Your agent can continue.");
+    case "wrong_code":
+      return claimForm(config, attemptToken, sessionId, label,
+        `That code didn't match. You have ${verdict.left} ${verdict.left === 1 ? "try" : "tries"} left.`);
+    case "dead":
+      return claimNotice("Agent approval", "That code didn't match, and that was the last try. Ask your agent for a new code.");
+    case "wrong_account":
+      return claimNotice("Agent approval",
+        "This request is for a different account. Sign in with the account whose email address you gave your agent. " +
+          `${claimSignin(config.issuer, attemptToken)}Sign in with another account.</a>`);
+    case "reg_expired":
+      return claimNotice("Agent approval", "This request has expired. Ask your agent to start again.");
+    case "already":
+      return claimNotice("Agent approval", "This agent is already approved.");
+    // A held this server signed whose attempt is gone: superseded by a new code, killed by wrong
+    // codes, or swept. The person's next step is the same in every case.
+    case "unknown":
+    case "code_expired":
+      return CLAIM_EXPIRED();
+  }
+}
 
 const html = (body: string, status = 200) =>
   new Response(
@@ -633,7 +689,8 @@ function timingSafeEqual(a: string, b: string): boolean {
 function panelDestination(
   returnTo: string | undefined,
   panelOrigins: string[],
-  publicPageOrigins: readonly string[]
+  publicPageOrigins: readonly string[],
+  issuer: string
 ): string {
   const fallback = panelOrigins[0];
   if (!returnTo) return fallback;
@@ -649,7 +706,9 @@ function panelDestination(
   // origin + "/", so the second pass would rewrite the first pass's answer.
   // Returning the input makes it idempotent. The origin is what was validated;
   // the path and query are the destination's business.
-  return panelOrigins.includes(parsed.origin) || publicPageOrigins.includes(parsed.origin) ? returnTo : fallback;
+  // The agent claim page is this server's own, and the one page of it a sign-in comes back to.
+  const claimPage = parsed.origin === new URL(issuer).origin && parsed.pathname === "/agent/claim";
+  return claimPage || panelOrigins.includes(parsed.origin) || publicPageOrigins.includes(parsed.origin) ? returnTo : fallback;
 }
 
 /** Carried through the provider round trip when signing in to pay. */
@@ -911,7 +970,7 @@ async function completeSession(profile: ProviderProfile, pending: SessionRequest
   return ending(new Response(null, {
     status: 302,
     headers: {
-      location: panelDestination(pending.return_to, panels, config.publicPageOrigins ?? []),
+      location: panelDestination(pending.return_to, panels, config.publicPageOrigins ?? [], config.issuer),
       "set-cookie": serializeSessionCookie(id, secure, Math.floor(SESSION_TTL_MS / 1000)),
       "cache-control": "no-store",
       // This response's own URL holds the provider's authorization code, and it
@@ -1392,7 +1451,7 @@ export async function handleOAuth(
     // into a signed blob and discovering it after the provider round trip is a
     // worse error message for the same outcome.
     const pending: SessionRequest = {
-      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels, config.publicPageOrigins ?? []),
+      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels, config.publicPageOrigins ?? [], config.issuer),
       nonce,
     };
     const stateToken = await signJwt(
@@ -1431,7 +1490,7 @@ export async function handleOAuth(
     }
     const nonce = randomId();
     const pending: SessionRequest = {
-      return_to: panelDestination(undefined, panels, config.publicPageOrigins ?? []), nonce, invite: claim!,
+      return_to: panelDestination(undefined, panels, config.publicPageOrigins ?? [], config.issuer), nonce, invite: claim!,
     };
     const stateToken = await signJwt(
       { iss: config.issuer, sub: "session", aud: SESSION_AUDIENCE, bellman: pending as never }, config.secret, STATE_TTL_SECONDS,
@@ -1514,6 +1573,38 @@ export async function handleOAuth(
   // checked before anything is spent or applied, as the callback checked it. The page comes back with
   // what an answer did while an offer remains or the answer did not take; otherwise the sign-in
   // finishes as the callback would have.
+  // ------------------------------------------------ auth.md claim page (ADR 0036)
+  // A signed-in human approves an agent with the code it gave them. No csrfRefusal (D9): the form
+  // carries a `held` bound to the session that saw the page and spent by the first answer.
+  if (path === "/agent/claim") {
+    if (method !== "GET" && method !== "POST") {
+      return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST" } });
+    }
+    const caller = await sessionCaller(request, config);
+    const sessionId = readSessionCookie(request, new URL(config.issuer).protocol === "https:");
+    const now = Date.now();
+    if (method === "GET") {
+      if (!caller || !sessionId) {
+        return new Response(null, { status: 302, headers: { location: `/auth/signin?return_to=${encodeURIComponent(request.url)}` } });
+      }
+      const attemptToken = url.searchParams.get("claim_attempt_token") ?? "";
+      const reg = await config.store.readAgentAttempt(attemptToken, now);
+      if (!reg) return CLAIM_EXPIRED();
+      if (reg.claimed) return claimNotice("Agent approval", "This agent is already approved.");
+      return claimForm(config, attemptToken, sessionId, caller.identity.label);
+    }
+    const form = new URLSearchParams(await request.text());
+    const claims = await verifyJwt(form.get("held") ?? "", config.secret, { issuer: config.issuer, audience: CLAIM_AUDIENCE });
+    if (!claims || !caller || !sessionId || claims.sid !== (await sha256Base64url(sessionId))) return CLAIM_INVALID();
+    if (!(await config.store.spendOnce(claims.jti, claims.exp * 1000)).first) {
+      return claimNotice("Agent approval", "This form was already used. Open the link from your agent again.", 400);
+    }
+    const verdict = await config.store.approveAgentClaim(claims.sub, form.get("code") ?? "", {
+      identity: caller.identity, plan_source: caller.planSource, plan_key: caller.planKey, identity_keys: caller.identityKeys,
+    }, now);
+    return claimVerdict(verdict, config, claims.sub, sessionId, caller.identity.label);
+  }
+
   if (method === "POST" && path === "/auth/invites") {
     const form = new URLSearchParams(await request.text());
     const claims = await verifyJwt(form.get("held") ?? "", config.secret, { issuer: config.issuer, audience: INVITES_AUDIENCE });
@@ -2319,7 +2410,9 @@ export async function caller(
 async function sessionCaller(
   request: Request,
   config: OAuthConfig
-): Promise<{ identity: Identity; planSource: string; planKey?: string | null; subjectKey: string | null; via: "cookie" } | null> {
+): Promise<{
+  identity: Identity; planSource: string; planKey?: string | null; subjectKey: string | null; identityKeys: string[]; via: "cookie";
+} | null> {
   // The allowlist is what grants browser authentication at all. Without this a
   // deploy that forgot BELLMAN_PANEL_ORIGINS would still accept cookies while
   // serving no CORS — a session usable by anything that is not a browser.
@@ -2337,7 +2430,10 @@ async function sessionCaller(
   const subjectKey = immutableKeys(stored.identity_keys)[0] ?? null;
 
   if (now - replannedAt(stored) <= ACCESS_TOKEN_TTL_SECONDS * 1000) {
-    return { identity: stored.identity, planSource: stored.plan_source, planKey: stored.plan_key, subjectKey, via: "cookie" };
+    return {
+      identity: stored.identity, planSource: stored.plan_source, planKey: stored.plan_key, subjectKey,
+      identityKeys: stored.identity_keys, via: "cookie",
+    };
   }
 
   let current: Awaited<ReturnType<typeof replanOnRefresh>>;
@@ -2382,7 +2478,10 @@ async function sessionCaller(
     console.error("could not store a re-resolved panel session:", err);
   }
   if (!merged) return null;
-  return { identity: current.identity, planSource: current.source, planKey: current.key, subjectKey, via: "cookie" };
+  return {
+    identity: current.identity, planSource: current.source, planKey: current.key, subjectKey,
+    identityKeys: stored.identity_keys, via: "cookie",
+  };
 }
 
 async function issueTokens(

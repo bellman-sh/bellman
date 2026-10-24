@@ -16,7 +16,7 @@ import {
 } from "../src/oauth/agent-auth.js";
 import { MemoryAuthStore, REGISTRATION_WINDOW_MS } from "../src/oauth/storage.js";
 import { REFRESH_TOKEN_TTL_MS } from "../src/oauth/tokens.js";
-import { IDENTITY, ISSUER, panelConfig, routeWith } from "./helpers/panel.js";
+import { IDENTITY, ISSUER, panelConfig, routeWith, seedSession, withCookie } from "./helpers/panel.js";
 
 const CLAIMED: AgentClaimed = {
   identity: IDENTITY,
@@ -351,5 +351,147 @@ describe("agent registration endpoints", () => {
     expect(res.status).toBe(429);
     expect((await body(res)).error).toBe("rate_limited");
     expect((await register("jesse@example.dev", "198.51.100.1")).status).toBe(200);
+  });
+});
+
+describe("claim page", () => {
+  const KEYS = ["github:4242", "email:jesse@example.dev"];
+  const setup = async (keys = KEYS, label = IDENTITY.label) => {
+    const config = panelConfig();
+    const route = routeWith(config);
+    const sid = await seedSession(config, "sid", { identity: { ...IDENTITY, label }, identity_keys: keys });
+    const registered = (await (
+      await route(
+        new Request(`${ISSUER}/agent/identity`, {
+          method: "POST",
+          body: JSON.stringify({ type: "service_auth", login_hint: "jesse@example.dev" }),
+        })
+      )
+    ).json()) as Record<string, any>;
+    const page = new URL(registered.claim.verification_uri);
+    const pagePath = page.pathname + page.search;
+    const open = async (id = sid, path = pagePath) => route(withCookie(path, id));
+    const submit = (held: string, code: string, id = sid) =>
+      route(
+        withCookie("/agent/claim", id, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ held, code }).toString(),
+        })
+      );
+    return { config, route, sid, registered, pagePath, open, submit };
+  };
+  const heldIn = async (res: Response) => /name="held" value="([^"]+)"/.exec(await res.text())![1];
+  const wrong = (code: string) => String((Number(code) + 1) % 1_000_000).padStart(6, "0");
+
+  test("signed-out GET redirects to sign-in", async () => {
+    const { route, pagePath } = await setup();
+    const res = await route(new Request(`${ISSUER}${pagePath}`));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/auth/signin?return_to=${encodeURIComponent(`${ISSUER}${pagePath}`)}`);
+  });
+
+  test("return_to round-trips to the claim page", async () => {
+    const { route } = await setup();
+    const sealed = async (returnTo: string) => {
+      const chooser = await route(new Request(`${ISSUER}/auth/signin?return_to=${encodeURIComponent(returnTo)}`));
+      const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+      const payload = JSON.parse(Buffer.from(req.split(".")[1], "base64url").toString());
+      return payload.bellman.return_to as string;
+    };
+    expect(await sealed(`${ISSUER}/agent/claim?claim_attempt_token=x`)).toBe(`${ISSUER}/agent/claim?claim_attempt_token=x`);
+    for (const refused of [`${ISSUER}/agent/claimx`, `${ISSUER}/agent/identity`, `${ISSUER}/token`]) {
+      expect(await sealed(refused)).not.toBe(refused);
+    }
+  });
+
+  test("the page escapes the label and states the grant", async () => {
+    const { open } = await setup(KEYS, "<script>x</script>");
+    const res = await open();
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("<h1>Approve an agent?</h1>");
+    expect(text).toContain("Signed in as <b>&lt;script&gt;x&lt;/script&gt;</b>.");
+    expect(text).not.toContain("<script>x");
+    expect(text).toContain("for 30 days or until an operator removes it");
+    expect(text).toContain('autocomplete="one-time-code"');
+    expect(text).toContain("Not you?");
+  });
+
+  test("full ceremony", async () => {
+    const { config, registered, open, submit } = await setup();
+    const res = await submit(await heldIn(await open()), registered.claim.user_code);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Approved. Your agent can continue.");
+    const poll = await config.store.pollAgentClaim(registered.claim_token, Date.now());
+    expect(poll.kind).toBe("granted");
+  });
+
+  test("wrong code then right code approves", async () => {
+    const { registered, open, submit } = await setup();
+    const miss = await submit(await heldIn(await open()), wrong(registered.claim.user_code));
+    const text = await miss.text();
+    expect(text).toContain("That code didn't match. You have 4 tries left.");
+    const held = /name="held" value="([^"]+)"/.exec(text)![1];
+    expect(await (await submit(held, registered.claim.user_code)).text()).toContain("Approved.");
+  });
+
+  test("five wrong codes kill the attempt", async () => {
+    const { registered, open, submit } = await setup();
+    let held = await heldIn(await open());
+    for (let i = 4; i >= 1; i--) {
+      const text = await (await submit(held, wrong(registered.claim.user_code))).text();
+      expect(text).toContain(`You have ${i} ${i === 1 ? "try" : "tries"} left.`);
+      held = /name="held" value="([^"]+)"/.exec(text)![1];
+    }
+    expect(await (await submit(held, wrong(registered.claim.user_code))).text()).toContain("that was the last try");
+    expect(await (await open()).text()).toContain("This code has expired. Ask your agent for a new one.");
+  });
+
+  test("a superseded attempt answers code expired", async () => {
+    const { config, route, registered, open, submit } = await setup();
+    const held = await heldIn(await open());
+    const again = (await (
+      await route(
+        new Request(`${ISSUER}/agent/identity/claim`, {
+          method: "POST",
+          body: JSON.stringify({ claim_token: registered.claim_token, email: "jesse@example.dev" }),
+        })
+      )
+    ).json()) as Record<string, any>;
+    expect(await (await submit(held, registered.claim.user_code)).text()).toContain("This code has expired.");
+    const token = new URL(again.claim_attempt.verification_uri).searchParams.get("claim_attempt_token")!;
+    expect((await config.store.readAgentAttempt(token, Date.now()))!.attempt.failures).toBe(0);
+  });
+
+  test("the wrong account is refused", async () => {
+    const { registered, open, submit } = await setup(["github:4242", "email:other@example.dev"], "other@example.dev");
+    const text = await (await submit(await heldIn(await open()), registered.claim.user_code)).text();
+    expect(text).toContain("This request is for a different account.");
+    expect(text).not.toContain("jesse@example.dev");
+  });
+
+  test("a GitHub session with no email key is refused", async () => {
+    const { registered, open, submit } = await setup(["github:4242"], "octocat");
+    expect(await (await submit(await heldIn(await open()), registered.claim.user_code)).text()).toContain(
+      "This request is for a different account."
+    );
+  });
+
+  test("a replayed held is refused", async () => {
+    const { registered, open, submit } = await setup();
+    const held = await heldIn(await open());
+    await submit(held, wrong(registered.claim.user_code));
+    const res = await submit(held, registered.claim.user_code);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("This form was already used. Open the link from your agent again.");
+  });
+
+  test("a held from another session is refused", async () => {
+    const { config, registered, open, submit } = await setup();
+    const other = await seedSession(config, "sid2", { identity_keys: KEYS });
+    const res = await submit(await heldIn(await open()), registered.claim.user_code, other);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("This link isn't valid. Ask your agent for a new one.");
   });
 });

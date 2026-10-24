@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { bellmanCard, cardResponse } from "./a2a/cards.js";
 import { a2aRoutes } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
@@ -409,6 +410,11 @@ export default {
         honourPurchases: oauth?.honourPurchases,
       });
       if (handled) return handled;
+    }
+
+    // Bellman's own A2A card (ADR 0033): no credential, and nothing to configure.
+    if (request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+      return cardResponse(bellmanCard(url.origin), request.headers.get("if-none-match"), { "access-control-allow-origin": "*" });
     }
 
     if (oauth) {

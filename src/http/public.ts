@@ -4,7 +4,8 @@
  * byline when its creator signed it (bylines spec D4), its surface with the surface cursor as an
  * ETag, its log, and the bytes of a blob an item on its surface names. And `GET
  * /public/handles/:handle`: the public rooms a handle has signed (D5). And `GET /public/rooms`: the
- * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml and the directory at bellman.sh/r/. Nothing else.
+ * named public rooms, for the sitemap at bellman.sh/r/sitemap.xml and the directory at bellman.sh/r/. And `GET
+ * /public/rooms/:id/agent-card.json`, the room's A2A card (src/a2a/cards.ts). Nothing else.
  *
  * No credential is read here, by design. A cookie or a bearer changes nothing, so a member's
  * credential cannot open a private room through these paths, and every origin is answered
@@ -18,13 +19,14 @@
  * there, its own label, `host@bellman`, reading as an address too (`publicNames`). Runtime-free,
  * like rooms.ts beside it: a web Request in, a Response out, for both servers and the tests.
  */
+import { cardResponse, roomCard } from "../a2a/cards.js";
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { publicRoomUrl } from "../codes.js";
 import { handleFromSegment } from "../handles.js";
 import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
-import { PUBLIC_NAME, holdsName, roomNamed } from "../public-names.js";
+import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, sessionStatus } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 import { surfaceCursor } from "../surface.js";
@@ -35,8 +37,8 @@ export interface PublicRouteDeps {
   blobs: BlobStore;
 }
 
-/** `/public/rooms/:id`, then `/surface`, `/events` or `/blobs/:blobId`. */
-const PATH = /^\/public\/rooms\/([^/]+)(?:\/(surface|events)|\/blobs\/([^/]+))?$/;
+/** `/public/rooms/:id`, then `/surface`, `/events`, `/agent-card.json` or `/blobs/:blobId`. */
+const PATH = /^\/public\/rooms\/([^/]+)(?:\/(surface|events|agent-card\.json)|\/blobs\/([^/]+))?$/;
 
 /** `/public/handles/:handle`: a handle's signed public rooms (bylines spec D5). */
 const HANDLE_PAGE = /^\/public\/handles\/([^/]+)$/;
@@ -130,6 +132,20 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
     const session = PUBLIC_NAME.test(key) ? await roomNamed(deps.store, key) : await deps.store.getSession(key);
     if (!session || !isPublic(session)) return notFound("no such public room");
     const id = session.id;
+
+    if (part === "agent-card.json") {
+      // The A2A card (ADR 0033): a room that answers is public and open. Every other room got the 404 above, or gets
+      // it here in the same words, so a card says nothing about a room that is not one.
+      if (session.closed) return notFound("no such public room");
+      // The tenant `/a2a` takes: the name, if the index still gives it to this room, else the id.
+      const name = heldName(session);
+      const tenant = name !== null && (await deps.store.publicNameEntry(name))?.id === id ? name : id;
+      return cardResponse(
+        roomCard({ tenant, name: session.manifest.room, purpose: session.manifest.purpose }, url.origin),
+        request.headers.get("if-none-match"),
+        OPEN,
+      );
+    }
 
     if (blobId !== undefined) {
       // Only a blob an item on the surface names: one uploaded and never placed, or one whose

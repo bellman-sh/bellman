@@ -469,7 +469,8 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
     if (outcome === "full") return full(org, await deps.store.countOrgMembers(orgId), origin);
     return json(200, { member: memberView(changed, org) }, origin);
   } catch (err) {
-    console.error(`${request.method} ${path} failed:`, err);
+    // The key in a member's path may be an invitee's address, which stays out of the log (ADR 0036, D1).
+    console.error(`${request.method} ${path.replace(/^\/org\/members\/[^/]+/, "/org/members/:key")} failed:`, err);
     return problem(500, "internal", "the request failed on the server", origin);
   }
 }

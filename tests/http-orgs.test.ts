@@ -434,6 +434,19 @@ describe("invitations by link and email (ADR 0036)", () => {
     }
   });
 
+  it("logs a failed request on a member's path without the key, which may be an invitee's address", async () => {
+    await invite();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      vi.spyOn(store, "invitesFor").mockRejectedValueOnce(new Error("registry unreachable"));
+      expect((await resend("owner"))!.status).toBe(500);
+      expect(err).toHaveBeenCalled();
+      expect(err.mock.calls.flat().map(String).join(" ")).not.toMatch(/ana(%40|@)example\.com/);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it("mails nothing for a subject key, and answers its link for the admin to hand on", async () => {
     const body = await json(await invite("github:77"));
     expect([body.mailed, typeof body.link]).toEqual([false, "string"]);

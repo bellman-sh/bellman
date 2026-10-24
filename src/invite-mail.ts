@@ -1,6 +1,6 @@
 import { drawnOrgName } from "./orgs.js";
 import { signJwt, verifyJwt } from "./oauth/tokens.js";
-import { whyNotSent, type MailBinding } from "./reports.js";
+import type { MailBinding } from "./reports.js";
 import type { Org, OrgInvite } from "./types.js";
 
 /** Where an invitation comes from (ADR 0036, D1). */
@@ -80,7 +80,8 @@ export type InviteMailer = (to: string, org: Org, invite: OrgInvite, link: strin
 
 /**
  * Sends through the `send_email` binding. A missing binding or a failed send is logged once and answers false: the invite
- * is stored before this runs, and the admin holds the link to pass on by hand. The log names the org and when the invite was sent, never the address.
+ * is stored before this runs, and the admin holds the link to pass on by hand. The log names the org and when the invite was sent, never the address:
+ * a failed send by the binding's `code` alone, since its message may name the recipient.
  */
 export function inviteMailer(binding: MailBinding | undefined): InviteMailer {
   return async (to, org, invite, link) => {
@@ -96,7 +97,8 @@ export function inviteMailer(binding: MailBinding | undefined): InviteMailer {
       await binding.send({ from: INVITE_FROM, to, ...inviteMail(org, invite, link) });
       return true;
     } catch (err) {
-      console.error(`invite ${org.orgId} at ${invite.invitedAt}: the email was not sent (${whyNotSent(err)}); the admin has the link`);
+      const code = (err as { code?: unknown } | null)?.code;
+      console.error(`invite ${org.orgId} at ${invite.invitedAt}: the email was not sent (${typeof code === "string" ? code : "no code"}); the admin has the link`);
       return false;
     }
   };

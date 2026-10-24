@@ -83,6 +83,18 @@ describe("the address an invite is mailed to (ADR 0036, D1)", () => {
     ]) expect(isMailableAddress(bad), bad).toBe(false);
   });
 
+  it("logs a failed send by its code alone, since the binding's message may name the recipient", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing = { send: async () => { throw Object.assign(new Error("no route to ana@example.com"), { code: "E_DELIVERY" }); } };
+      expect(await inviteMailer(failing)("ana@example.com", org, invite, "L")).toBe(false);
+      expect(String(err.mock.calls[0][0])).toContain("E_DELIVERY");
+      expect(err.mock.calls.flat().join(" ")).not.toContain("ana@example.com");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it("is checked by the mailer, which sends nothing to anything else and logs without the address", async () => {
     const send = vi.fn(async () => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});

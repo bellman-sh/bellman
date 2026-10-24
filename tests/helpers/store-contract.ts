@@ -8293,14 +8293,20 @@ export function describeStoreContract(
           await store.recordSignIn("u_github_9", 1_000);
           await store.recordSignIn("u_github_3", 2_000);
           await store.recordSignIn("u_github_9", 5_000);
+          // A room created by a listed person: the Durable Objects registry keeps its index under `us:` as well, a
+          // number beside the sign-in record, and the list holds sign-in records alone (the review of #376).
+          await store.createSession(session({ id: "qs_by_nine", createdBy: "u_github_9" }));
+          // An id without the `u_` prefix (BELLMAN_USERS and grant-plan take any): counted, so listed too.
+          await store.recordSignIn("github:4242", 9_000);
 
           expect(await store.listUsers(10)).toEqual([
             { userId: "u_github_9", firstSeenAt: 1_000, lastSeenAt: 5_000 },
             { userId: "u_github_3", firstSeenAt: 2_000, lastSeenAt: 2_000 },
             { userId: "u_google_2", firstSeenAt: 2_000, lastSeenAt: 2_000 },
+            { userId: "github:4242", firstSeenAt: 9_000, lastSeenAt: 9_000 },
           ]);
           expect((await store.listUsers(1)).map((u) => u.userId)).toEqual(["u_github_9"]);
-          expect(await store.countUsers(), "the count is not a row").toBe(3);
+          expect(await store.countUsers(), "every counted person is listed").toBe(4);
         });
     });
   });

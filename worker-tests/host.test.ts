@@ -4,7 +4,9 @@ import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { HostDO } from "../src/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
-import type { SessionEvent } from "../src/types.js";
+import type { OutsideTask, SessionEvent } from "../src/types.js";
+import { answerQuestion, askRoom, questionsToAnswer } from "../src/outside.js";
+import type { StoredSession } from "../src/stored-session.js";
 import worker from "../src/worker.js";
 import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
@@ -486,4 +488,103 @@ it("a wake the seat is still handling when the room is purged puts nothing back 
   expect(await seatRows(host)).toEqual([]);
   expect(await runInDurableObject(host, (_i: HostDO, ctx) => ctx.storage.getAlarm())).toBeNull();
   expect(await hostSaid(store, id), "the answer found no room to land in").toEqual([]);
+});
+
+/** A public hosted room an outside caller (A2A) may ask, and the question asked: the seat is its voice. */
+async function askedPublicHosted(id: string) {
+  const store = new DurableObjectStore(env as never);
+  const m = { ...hosted(), public: true, room: "Open review", purpose: "Ask us" };
+  const now = Date.now();
+  await store.createSession(session({ id, manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], joinCodes: {},
+    hostUnitsPerMonth: 10, hostUnits: { month: monthKey(now), used: 0, wakes: [] }, lastTickAt: now, lastHostTickAt: now }));
+  const asked = await askRoom(store, id, { userId: "u_out", label: "out@elsewhere" }, { text: "What do you review?" });
+  if (!asked.ok) throw new Error(`ask refused: ${asked.error}`);
+  expect(asked.task.voice).toBe("seat");
+  const stub = env.SESSION.get(env.SESSION.idFromName(id));
+  const record = () => runInDurableObject(stub, (_i: SessionDO, ctx) => ctx.storage.get<StoredSession>("session"));
+  const task = async () => (await store.outsideTask(id, "u_out", asked.task.id)) as OutsideTask;
+  return { store, stub, host: env.HOST.get(env.HOST.idFromName(id)), task, record };
+}
+
+it("an outside question the seat is the voice of: the seat answers it through the room, charged, the question untrusted", async () => {
+  modelAnswers("We review parsers.");
+  const { store, host, task, record } = await askedPublicHosted("qs_outside_seat_answers");
+  await seatIdle(host);
+
+  expect(await task()).toMatchObject({ state: "TASK_STATE_COMPLETED", voice: "seat" });
+  expect((await task()).answers.map((a) => a.text)).toEqual(["We review parsers."]);
+  expect((await hostSaid(store, "qs_outside_seat_answers")).map((e) => e.type)).toEqual(["outside_answer"]);
+  expect((await record())!.hostUnits.used).toBe(1);
+  expect((await record())!.seatWaits).toEqual({});
+  const prompt = (JSON.parse(sentBodies[0]) as { messages: { content: string }[] }).messages[0].content;
+  expect(prompt).toContain("&quot;trust&quot;:&quot;untrusted&quot;");
+  expect(prompt).toContain("What do you review?");
+});
+
+it("a seat that passes hands the question to the members through the room, uncharged", async () => {
+  modelAnswers("PASS");
+  const { host, task, record } = await askedPublicHosted("qs_outside_seat_passes");
+  await seatIdle(host);
+
+  expect(await task()).toMatchObject({ state: "TASK_STATE_WORKING", voice: "members", seatDeadline: null });
+  expect((await record())!.hostUnits.used).toBe(0);
+  expect((await record())!.seatWaits).toEqual({});
+});
+
+const HANDED = "This outside question is now for the room's members to answer.";
+const handedNotices = async (store: DurableObjectStore, id: string) =>
+  (await store.eventsAfter(id, 0)).filter((e) => e.type === "outside_notice").map((e) => [e.refId, e.payload]);
+
+it("a seat that skips tells the members in the room's log, the creator's read notes the question, and its answer lands", async () => {
+  modelAnswers("PASS");
+  const id = "qs_outside_seat_skips_told";
+  const { store, host, task } = await askedPublicHosted(id);
+  await seatIdle(host);
+  const { id: taskId, questionCursors: [ref] } = await task();
+
+  expect(await handedNotices(store, id)).toEqual([[String(ref), { taskId, text: HANDED }]]);
+  const room = (await store.getSession(id))!;
+  const read = (await store.eventsAfter(id, 0)).filter((e) => e.type === "outside_question");
+  expect([...await questionsToAnswer(store, room, read, "m_creator")], "the creator is the voice").toEqual([ref]);
+  expect([...await questionsToAnswer(store, room, read, HOST_MEMBER_ID)], "the seat is not, any more").toEqual([]);
+  expect(await answerQuestion(store, id, { memberId: "m_creator" }, { refId: ref, text: "We review parsers." })).toMatchObject({ ok: true });
+});
+
+it("the room's alarm, handing a silent seat's question over, tells the members", async () => {
+  const held = modelHolds("Too late.");
+  const id = "qs_outside_seat_silent_told";
+  const { store, stub, host, task } = await askedPublicHosted(id);
+  await held.asked();
+  const { id: taskId, questionCursors: [ref] } = await task();
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<StoredSession>("session");
+    await ctx.storage.put("session", { ...s, seatWaits: { [taskId]: Date.now() - 1 } });
+  });
+  await runDurableObjectAlarm(stub);
+  expect(await handedNotices(store, id)).toEqual([[String(ref), { taskId, text: HANDED }]]);
+  held.release();
+  await seatIdle(host);
+});
+
+it("the room's alarm hands a silent seat's question to the members, and the seat's late answer is refused", async () => {
+  const held = modelHolds("Too late.");
+  const { store, stub, host, task, record } = await askedPublicHosted("qs_outside_seat_silent");
+  await held.asked();
+  const { id: taskId } = await task();
+
+  // The deadline passes while the model is still answering.
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<StoredSession>("session");
+    await ctx.storage.put("session", { ...s, seatWaits: { [taskId]: Date.now() - 1 } });
+  });
+  await runDurableObjectAlarm(stub);
+  expect(await task()).toMatchObject({ state: "TASK_STATE_WORKING", voice: "members", seatDeadline: null });
+  expect((await record())!.seatWaits).toEqual({});
+  expect(await runInDurableObject(stub, (_i: SessionDO, ctx) => ctx.storage.getAlarm()), "the room's other alarms are kept").not.toBeNull();
+
+  held.release();
+  await seatIdle(host);
+  expect(await task()).toMatchObject({ state: "TASK_STATE_WORKING", voice: "members" });
+  expect(await hostSaid(store, "qs_outside_seat_silent")).toEqual([]);
+  expect((await record())!.hostUnits.used).toBe(0);
 });

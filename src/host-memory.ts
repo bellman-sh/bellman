@@ -6,12 +6,13 @@
  * nothing from `cloudflare:workers`.
  */
 import {
-  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
+  ANTHROPIC_MESSAGES_URL, HOST_MEMBER_ID, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
 } from "./host.js";
 import type { MemoryStore } from "./store.js";
 import type { Plan } from "./types.js";
 import { keyedPlan } from "./auth.js";
+import { answerQuestion } from "./outside.js";
 
 /**
  * Which model the Node server's seat calls (M11), and the line it prints at startup to say
@@ -73,6 +74,8 @@ export class MemoryHost {
       save: async (id, record) => { this.#records.set(id, record); },
       plan: opts.plan ?? (async (userId) => keyedPlan(userId) ?? "free"),
       renew: (id, month, units) => store.renewHostAllowance(id, month, units),
+      answer: (id, refId, text, units, now) => answerQuestion(store, id, { memberId: HOST_MEMBER_ID }, { refId, text, units }, now),
+      seatSkipped: (id, taskId, why) => store.seatSkipped(id, taskId, why),
     };
   }
 

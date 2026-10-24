@@ -2,6 +2,8 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { bellmanCard, cardResponse } from "./a2a/cards.js";
+import { a2aRoutes, isA2aPath, v03CardTenant } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
 import { scimRoutes } from "./http/scim.js";
@@ -127,6 +129,8 @@ function oauthConfig(
   return {
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
+    // /a2a is a resource of its own (ADR 0033): a token names one, and each refuses the other's.
+    resources: [canonicalResource(`${origin}/mcp`), canonicalResource(`${origin}/a2a`)],
     secret: env.BELLMAN_TOKEN_SECRET,
     sealSecret: env.BELLMAN_SEAL_SECRET,
     store: new AuthStore(env.AUTH),
@@ -186,6 +190,9 @@ function unconfigured(env: WorkerEnv, oauth?: OAuthConfig): Response | undefined
  * between them: a copy hardened on one route and not the other leaves the
  * weaker one as the way in.
  *
+ * `resource` is the route being called, and an access token is taken only if it was minted for that one: an /mcp
+ * token is refused at /a2a and the other way round. A bearer key is not minted for anything and works on both.
+ *
  * The `env.BELLMAN_KEYS` test below is not a shortcut. resolveIdentity falls
  * back to the dev table (qk_dev_jesse: team plan, admin role) when it is handed
  * no key map, so it is never called without one. `unconfigured` refuses a
@@ -195,11 +202,14 @@ function unconfigured(env: WorkerEnv, oauth?: OAuthConfig): Response | undefined
 async function resolveCaller(
   request: Request,
   env: WorkerEnv,
-  oauth?: OAuthConfig
+  oauth: OAuthConfig | undefined,
+  resource: "/mcp" | "/a2a"
 ): Promise<Identity | null> {
   const header = request.headers.get("authorization") ?? undefined;
   const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
-  let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
+  let identity = oauth && bearer
+    ? await identityFromAccessToken(bearer, oauth, canonicalResource(`${oauth.issuer}${resource}`))
+    : null;
   if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
   return identity;
 }
@@ -212,7 +222,7 @@ async function resolveCaller(
  * sees the header, fails the token, and never falls through to a cookie.
  */
 async function roomCaller(request: Request, env: WorkerEnv, oauth?: OAuthConfig): Promise<RoomCaller | null> {
-  const identity = await resolveCaller(request, env, oauth);
+  const identity = await resolveCaller(request, env, oauth, "/mcp");
   if (identity) return { identity, via: "bearer" };
   if (!oauth) return null;
   const who = await caller(request, oauth);
@@ -309,8 +319,8 @@ export default {
 
     // The public reads (public rooms spec D3): no credential, so no caller is composed. Behind the
     // fail-closed guard the room routes share (plan ruling R7): a deploy that serves no room serves
-    // none in public either.
-    if (url.pathname === "/public" || url.pathname.startsWith("/public/")) {
+    // none in public either. A room's 0.3 A2A card is one, at /a2a/<room>/.well-known/agent-card.json.
+    if (url.pathname === "/public" || url.pathname.startsWith("/public/") || v03CardTenant(url.pathname) !== undefined) {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await publicRoutes(request, { store, blobs });
@@ -414,6 +424,11 @@ export default {
       if (handled) return handled;
     }
 
+    // Bellman's own A2A card (ADR 0033): no credential, and nothing to configure.
+    if (request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+      return cardResponse(bellmanCard(url.origin), request.headers.get("if-none-match"), { "access-control-allow-origin": "*" });
+    }
+
     if (oauth) {
       const handled = await handleOAuth(request, oauth);
       if (handled) return handled;
@@ -476,7 +491,7 @@ export default {
         return new Response("cursor must be a non-negative integer", { status: 400 });
       }
 
-      const identity = await resolveCaller(request, env, oauth);
+      const identity = await resolveCaller(request, env, oauth, "/mcp");
       if (!identity) return unauthorized(oauth);
       // A socket already open stays open (plan ruling R8); this refuses the next one. A registry that
       // cannot say is a 500 rather than workerd's error page, and opens no socket either.
@@ -512,6 +527,30 @@ export default {
       );
     }
 
+    // A2A (ADR 0033): an outside caller asks a public room. A bearer only, and no panel cookie: an access token
+    // minted for /a2a, or a bearer key. A signed-out request gets a plain HTTP 401 whose hint is /a2a's own
+    // resource metadata, and no JSON-RPC body: -32001 is TaskNotFound to an A2A client. A suspended account is
+    // refused inside, in JSON-RPC, so the refusal carries the request's id and a registry that cannot say is
+    // JSON-RPC's internal error. A room's 0.3 URL, /a2a/<room>, is the same endpoint and the same resource.
+    if (isA2aPath(url.pathname)) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const identity = await resolveCaller(request, env, oauth, "/a2a");
+      if (!identity) {
+        return new Response("Unauthorized: missing or invalid credentials", {
+          status: 401,
+          headers: { "content-type": "text/plain", ...(oauth ? unauthorizedHeaders(oauth, "/a2a") : {}) },
+        });
+      }
+      const handled = await a2aRoutes(request, {
+        store,
+        caller: identity,
+        suspended: () => suspended(identity.userId),
+        origin: url.origin,
+      });
+      if (handled) return handled;
+    }
+
     if (url.pathname !== "/mcp") {
       return new Response("Not found", { status: 404 });
     }
@@ -522,7 +561,7 @@ export default {
     const blocked = unconfigured(env, oauth);
     if (blocked) return blocked;
 
-    const identity = await resolveCaller(request, env, oauth);
+    const identity = await resolveCaller(request, env, oauth, "/mcp");
     if (!identity) return unauthorized(oauth);
 
     try {

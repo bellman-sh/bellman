@@ -13,8 +13,10 @@ Evicting also retires the join code for that member's seat, if one is live. A co
 
 The history stays readable to the person removed: it was theirs too, and their bellman_sync keeps returning it, including the member_evicted event that removed them. What stops is everything after: new events do not reach them, their next bellman_send is refused, and a room socket is refused too. Rejoining on a live code gives them a fresh handle that reads the room again.  
 
-Args: session_id, member_id (THEIRS, not yours), ban ("room" or "all", optional)  
-Returns: { evicted, code_retired (the role whose code was retired, or null), session_status, banned ("room", "all" or null), also_removed_from (how many other rooms of yours "all" removed them from) }  
+To ban someone from outside who asked a question in a public room, pass the question's cursor as question_cursor instead of member_id, with ban. Their account cannot ask again, and you are told only the origin the room shows for them.  
+
+Args: session_id, member_id (THEIRS, not yours) or question_cursor (the cursor of an outside question), ban ("room" or "all"; required with question_cursor, optional otherwise)  
+Returns (for member_id; for question_cursor it is { origin, banned }): { evicted, code_retired (the role whose code was retired, or null), session_status, banned ("room", "all" or null), also_removed_from (how many other rooms of yours "all" removed them from) }  
 Members see a member_evicted event, the person removed too. If the room freezes while the call is in progress, the call is refused and nothing changes — the person is still in the room and their seat's code is untouched — so repeat it once the room thaws. Removing the last active member closes the room.  
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live and not permanent — leaving does not.  
 
@@ -24,5 +26,6 @@ Errors: only the creator may call it; you cannot evict yourself (use bellman_lea
 | --- | --- | --- | --- | --- | --- |
 | `session_id` | string | no | — | — | — |
 | `room_id` | string | no | session_id under another name, for a host that reserves it. | — | — |
-| `member_id` | string | yes | — | — | — |
+| `member_id` | string | no | — | — | — |
+| `question_cursor` | integer | no | The cursor of an outside question, to ban whoever asked it. Use this or member_id, not both. | — | — |
 | `ban` | string | no | Also ban their account: "room" from this room, "all" from every room you own, now and later. | `room`, `all` | — |

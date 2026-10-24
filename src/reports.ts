@@ -29,7 +29,7 @@ export interface NewReport {
   creatorId: string;
   target: ReportTarget;
   /** Whom a member or message report is about (R12), so an operator can suspend the account; null for the room. */
-  subject: { memberId: string; userId: string; label: string } | null;
+  subject: { memberId: string; userId: string; label: string } | { questionCursor: number; origin: string; userId: string } | null;
   reason: ReportReason;
   note: string | null;
   reporterUserId: string;
@@ -172,7 +172,7 @@ export interface CreatorReportView {
   id: string;
   target: ReportTargetView;
   /** The member, or the message's sender: the id and label a creator can act on, and no user id. Null for the room. */
-  about: { member_id: string; label: string } | null;
+  about: { member_id: string; label: string } | { question_cursor: number; origin: string } | null;
   reason: ReportReason;
   note: string | null;
   /** ISO 8601, to the hour: the minutes, seconds and milliseconds are zero. A creator cannot match a report to one member's activity. */
@@ -186,7 +186,7 @@ export interface OperatorReportView {
   session_id: string;
   creator_id: string;
   target: ReportTargetView;
-  about: { member_id: string; user_id: string; label: string } | null;
+  about: { member_id: string; user_id: string; label: string } | { question_cursor: number; origin: string; user_id: string } | null;
   reason: ReportReason;
   note: string | null;
   filed_by: { user_id: string; label: string };
@@ -217,7 +217,9 @@ export function creatorReportView(r: Report): CreatorReportView {
   return {
     id: r.id,
     target: targetView(r.target),
-    about: r.subject ? { member_id: r.subject.memberId, label: r.subject.label } : null,
+    about: !r.subject ? null
+      : "questionCursor" in r.subject ? { question_cursor: r.subject.questionCursor, origin: r.subject.origin }
+      : { member_id: r.subject.memberId, label: r.subject.label },
     reason: r.reason,
     note: r.note,
     at: toTheHour(r.at),
@@ -231,7 +233,10 @@ export function operatorReportView(r: Report): OperatorReportView {
     session_id: r.sessionId,
     creator_id: r.creatorId,
     target: targetView(r.target),
-    about: r.subject ? { member_id: r.subject.memberId, user_id: r.subject.userId, label: r.subject.label } : null,
+    about: !r.subject ? null
+      : "questionCursor" in r.subject
+        ? { question_cursor: r.subject.questionCursor, origin: r.subject.origin, user_id: r.subject.userId }
+        : { member_id: r.subject.memberId, user_id: r.subject.userId, label: r.subject.label },
     reason: r.reason,
     note: r.note,
     filed_by: { user_id: r.reporterUserId, label: r.reporterLabel },

@@ -10,6 +10,7 @@ import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
+import { VOICE_NOTE, questionsToAnswer } from "../outside.js";
 import { isTopicRoom } from "../manifest.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../action-state.js";
 
@@ -300,11 +301,16 @@ If a room's creator has removed you, you still get the history up to and includi
       // answer is never a page (above).
       const more = status !== "closed" && read.length === SYNC_PAGE && (stopAt === undefined || cursor < stopAt);
 
+      // The outside questions this member is the voice of (D4): beside the envelope, from the server, as
+      // `trust` is, so it is never mistaken for the asker's words.
+      const toAnswer = await questionsToAnswer(s, answering, foreign, member_id);
+
       return ok(
         {
-          events: foreign.map((e) =>
-            untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))
-          ),
+          events: foreign.map((e) => ({
+            ...untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e)),
+            ...(toAnswer.has(e.cursor) ? { note: VOICE_NOTE } : {}),
+          })),
           cursor,
           session_status: status,
           // Only when true, as `removed` is below: a poll that read everything has the shape

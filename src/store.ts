@@ -1,6 +1,6 @@
 import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
@@ -27,6 +27,10 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
+import {
+  decideAnswer, decideAsk, decideCancel, endings, handedOverNotice,
+  type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason, type SeatDay,
+} from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -81,6 +85,19 @@ export interface PublicNameEntry {
 /** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
 export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
   a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
+
+/** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
+export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
+
+/**
+ * The task row as an append writes it: an `outside_question` adds its own cursor and an `outside_answer` its own entry,
+ * which only the store knows once the event is numbered. Any other event writes the row as given.
+ */
+export const taskWithEvent = (task: OutsideTask, event: SessionEvent): OutsideTask =>
+  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] }
+  : event.type === "outside_answer"
+    ? { ...task, answers: [...task.answers, { cursor: event.cursor, text: (event.payload as { text: string }).text, at: event.at }] }
+  : task;
 
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
@@ -565,6 +582,16 @@ export function clearSilence(s: StoredSession, now: number): Member[] {
 export type EventBody = Omit<SessionEvent, "cursor" | "at">;
 
 /** What a removal did, reported from inside the transaction that did it. */
+/** What `banAccount` is handed: the account and the label it was seen under, the scope, and who asks. */
+export interface AccountBanRequest {
+  userId: string;
+  label: string;
+  ban: BanScope;
+  now: number;
+  byUserId: string;
+  audit: readonly AuditEntry[];
+}
+
 export interface RemovalOutcome {
   refused: "not_found" | "closed" | "frozen" | "forbidden" | null;
   /** True only when THIS call recorded the member out. */
@@ -989,6 +1016,15 @@ export interface AppendExtras {
    * one stores a row without one, whatever the key held before (R20).
    */
   approvedBy?: ApprovedBy;
+  /**
+   * An outside caller's task (A2A), written in the event's own transaction: the row and the event commit together or
+   * not at all. For an `outside_question` the row is handed in WITHOUT this event's cursor, which the store assigns and
+   * appends (`taskWithEvent`); any other event writes the row as given. A row for a task of another room throws, so the
+   * append writes nothing. Used with `appendEvent`; not meaningful on `appendEventOnce`.
+   */
+  outsideTask?: OutsideTask;
+  /** The caller's standing in the room (context and visitor number), stored with the task. A repeat replaces the row. */
+  outsideCaller?: OutsideCaller;
 }
 
 /**
@@ -1632,6 +1668,47 @@ export interface BellmanStore {
    * method and not N `eventAt` reads from a handler.
    */
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
+  /** One outside task of this room, if `callerUserId` opened it. Another caller's, or none, answers undefined. */
+  outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined>;
+  /** One outside task of this room by its id, whoever opened it: for the creator's moderation, which reads the account behind a question. */
+  outsideTaskById(sessionId: string, taskId: string): Promise<OutsideTask | undefined>;
+  /**
+   * Ban an account that is not a member, as `removeMember`'s `ban` bans one that is: the same `bu:`/`bn:` rows and, for "all",
+   * the creator-wide ban, in one operation, guarded as an eviction is (closed, frozen, `byUserId` the room's creator). One ban per
+   * account, so a repeat writes nothing new and files no second audit row. No event: a public room's log is public.
+   */
+  banAccount(sessionId: string, req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }>;
+  /** This caller's tasks in this room, newest first. */
+  outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]>;
+  /**
+   * An outside caller asks the room (A2A): the follow-up rule, the open-task cap, the caller's context and visitor
+   * number, the `outside_question` and the task row, decided and written as one unit (`decideAsk` decides). Two asks
+   * therefore see each other: the cap and the numbers hold under concurrency. A room that is gone, frozen, or no longer
+   * public and open answers "not_found".
+   */
+  askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome>;
+  /**
+   * A member answers an outside question (A2A): who the voice is, whether the question is still open, the
+   * `outside_answer` and the task row's new state, decided and written as one unit (`decideAnswer` decides). Of two
+   * answers at once, one lands and the other finds the question answered. A room that is gone, frozen or closed
+   * answers "task_closed".
+   */
+  answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult>;
+  /**
+   * The asker withdraws an outside question (A2A): ends the task `TASK_STATE_CANCELED` with an
+   * `outside_notice`, in one unit with the decision (`decideCancel`). A racing answer therefore finds the task
+   * closed, and a cancel of an answered task is "not_cancelable". Another caller's task, a room gone or frozen:
+   * "task_not_found". Unpublishing, closing and the task's lifetime end open tasks in the same unit as their own
+   * write, with no call of this one.
+   */
+  cancelOutside(sessionId: string, req: CancelRequest): Promise<CancelResult>;
+  /**
+   * The hosted seat will not answer this outside task (A2A): hand the voice to the members and clear the deadline.
+   * Acts only while the task is still the seat's and WORKING, so a skip that arrives after the seat answered, or a
+   * second skip, changes nothing; the seat's answer after a skip finds itself not the voice. `reason` is for the log.
+   * The seat's silence past `seatDeadline` runs the same hand-off: the room's alarm in SessionDO, `sweep` here.
+   */
+  seatSkipped(sessionId: string, taskId: string, reason: string): Promise<void>;
   /**
    * Charge `bytes` to this room's blob total unless that would pass the
    * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
@@ -2005,6 +2082,19 @@ export interface BellmanStore {
   sweep(now: number): Promise<void>;
 }
 
+/**
+ * The seat's hand-off of an outside task to the members, in place. Only a task still the seat's and WORKING moves:
+ * a skip after the seat answered, or after an earlier hand-off, is a no-op (the ruling for the races between the seat's
+ * answer, its skip and its deadline). Both stores' rule; SessionDO applies it to the row it read in its transaction.
+ */
+export function handOff(task: OutsideTask, now: number): boolean {
+  if (task.voice !== "seat" || task.state !== "TASK_STATE_WORKING") return false;
+  task.voice = "members";
+  task.seatDeadline = null;
+  task.updatedAt = now;
+  return true;
+}
+
 function detach<T>(value: T): T {
   return structuredClone(value);
 }
@@ -2095,6 +2185,12 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /** Outside tasks by session then task id, callers by session then user, and the last visitor number: rows beside the record, as SessionDO keeps them. */
+  private outsideTasks = new Map<string, Map<string, OutsideTask>>();
+  private outsideCallerRows = new Map<string, Map<string, OutsideCaller>>();
+  private outsideVisitors = new Map<string, number>();
+  /** The seat's outside questions per UTC day, by session: `seatDay` on SessionDO's record. */
+  private seatDays = new Map<string, SeatDay>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
   /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
@@ -2672,6 +2768,8 @@ export class MemoryStore implements BellmanStore {
     s.joinCodes = {};
     // A hosted room gives its creator's slot back as it closes (I7), however it closes.
     if (s.manifest.host !== null) this.hostedOpen.get(s.createdBy)?.delete(s.id);
+    // Whatever a stranger is waiting on is told it will not come, in the turn the room closes (A2A).
+    this.endOutside(s, "closed", at);
   }
 
   /**
@@ -2735,6 +2833,7 @@ export class MemoryStore implements BellmanStore {
       this.byJoinCode.delete(rec.code);
       delete s.joinCodes[role];
     }
+    this.endOutside(s, "unpublished", at);
   }
 
   async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
@@ -2948,6 +3047,18 @@ export class MemoryStore implements BellmanStore {
     if (extras.stampActionRequest) {
       const stored = s as { lastActionRequestAt?: number };
       stored.lastActionRequestAt = Math.max(stored.lastActionRequestAt ?? 0, event.at);
+    }
+    if (extras.outsideTask !== undefined) {
+      const task = extras.outsideTask;
+      if (task.sessionId !== s.id) throw new Error(`Outside task ${task.id} belongs to ${task.sessionId}, not ${s.id}`);
+      const tasks = this.outsideTasks.get(s.id) ?? new Map<string, OutsideTask>();
+      tasks.set(task.id, detach(taskWithEvent(task, event)));
+      this.outsideTasks.set(s.id, tasks);
+    }
+    if (extras.outsideCaller !== undefined) {
+      const callers = this.outsideCallerRows.get(s.id) ?? new Map<string, OutsideCaller>();
+      callers.set(extras.outsideCaller.userId, detach(extras.outsideCaller));
+      this.outsideCallerRows.set(s.id, callers);
     }
     if (extras.surface !== undefined) {
       const rows = this.surfaces.get(s.id) ?? new Map<string, SurfaceRow>();
@@ -3164,6 +3275,111 @@ export class MemoryStore implements BellmanStore {
     if (!rows) return [];
     const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return detach(sorted);
+  }
+
+  async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
+    const task = this.outsideTasks.get(sessionId)?.get(taskId);
+    return task?.callerUserId === callerUserId ? detach(task) : undefined;
+  }
+
+  async outsideTaskById(sessionId: string, taskId: string): Promise<OutsideTask | undefined> {
+    return detach(this.outsideTasks.get(sessionId)?.get(taskId));
+  }
+
+  async banAccount(sessionId: string, req: AccountBanRequest): Promise<{ refused: RemovalOutcome["refused"] }> {
+    // No await from the reads to the writes, as removeMember has none.
+    const s = this.sessions.get(sessionId);
+    if (!s) return { refused: "not_found" };
+    if (s.closed) return { refused: "closed" };
+    if (s.frozenAt !== null) return { refused: "frozen" };
+    if (s.createdBy !== req.byUserId) return { refused: "forbidden" };
+    const banning = !this.isBanned(s.id, req.userId) ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now } : null;
+    const widening = req.ban === "all" && !this.bansCreatorWide(s.createdBy, req.userId)
+      ? { banId: newBanId(), userId: req.userId, label: req.label, at: req.now, sessionId: s.id }
+      : null;
+    if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
+    if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
+    if (banning) this.recordAudit(req.audit.filter((e) => e.orgId));
+    return { refused: null };
+  }
+
+  async outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]> {
+    const mine = [...(this.outsideTasks.get(sessionId)?.values() ?? [])].filter((t) => t.callerUserId === callerUserId);
+    return detach(mine.sort(newestTaskFirst));
+  }
+
+  async askOutside(sessionId: string, req: AskRequest): Promise<AskOutcome> {
+    // No await from the reads to the writes, the rule and the reason chargeBlobBytes and seatMember give.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null) return { ok: false, error: "not_found" };
+    const mine = [...(this.outsideTasks.get(sessionId)?.values() ?? [])].filter((t) => t.callerUserId === req.callerUserId);
+    const known = this.outsideCallerRows.get(sessionId)?.get(req.callerUserId);
+    const issued = this.outsideVisitors.get(sessionId) ?? 0;
+    const d = decideAsk(s, req, { mine, known, issued, seatDay: this.seatDays.get(sessionId) });
+    if (!d.ok) return d;
+    const event = this.appendNow(s, d.event);
+    this.applyExtras(s, event, { outsideTask: d.task, ...(d.standing === null ? {} : { outsideCaller: d.standing }) });
+    this.outsideVisitors.set(sessionId, d.issued);
+    if (d.seatDay !== null) this.seatDays.set(sessionId, d.seatDay);
+    this.wakeHost(s, event);
+    // The seat's own wake for the question (REPLIES_PER_QUESTION does not count it), as SessionDO queues it.
+    if (d.seatDay !== null) this.hostWoken({ sessionId, cause: "outside", cursor: event.cursor });
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  async answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult> {
+    // No await from the reads to the writes, as in askOutside.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null || s.closed) return { ok: false, error: "task_closed" };
+    const d = decideAnswer(s, this.outsideTasks.get(sessionId)?.get(req.taskId), req);
+    if (!d.ok) return d;
+    // The seat pays for its answer in the same turn. A meter that refuses leaves the seat no voice to answer with.
+    const charge = req.units === undefined ? null : decideHostCharge(s, req.units, req.now);
+    if (charge !== null && !charge.ok) return { ok: false, error: "not_the_voice" };
+    const event = this.appendNow(s, d.event);
+    this.applyExtras(s, event, { outsideTask: d.task });
+    if (charge !== null) {
+      s.hostUnits = charge.next;
+      s.members = s.members.map((m) => m.memberId === d.event.fromMemberId ? { ...m, lastSeenAt: req.now } : m);
+      this.recordAudit(hostSentEntries(s, d.event, req.now));
+    }
+    this.wakeHost(s, event);
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  async cancelOutside(sessionId: string, req: CancelRequest): Promise<CancelResult> {
+    // No await from the read to the write, as in askOutside.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null) return { ok: false, error: "task_not_found" };
+    const d = decideCancel(this.outsideTasks.get(sessionId)?.get(req.taskId), req);
+    if (!d.ok) return d;
+    const event = this.appendNow(s, d.event, req.now);
+    this.applyExtras(s, event, { outsideTask: d.task });
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  /**
+   * End every open outside task of a room for `reason`, each with its notice, in the caller's turn. Walked from a
+   * copy because `applyExtras` writes the map. Ending a task twice cannot happen: an ended task is no longer open.
+   */
+  private endOutside(s: Session, reason: EndReason, now: number): void {
+    const tasks = this.outsideTasks.get(s.id);
+    if (tasks === undefined) return;
+    for (const { task, event } of endings([...tasks.values()], reason, now)) {
+      this.applyExtras(s, this.appendNow(s, event, now), { outsideTask: task });
+    }
+  }
+
+  async seatSkipped(sessionId: string, taskId: string, _reason: string): Promise<void> {
+    const task = this.outsideTasks.get(sessionId)?.get(taskId);
+    if (task) this.handOver(sessionId, task, Date.now());
+  }
+
+  /** `handOff`, and the notice that tells the members (`handedOverNotice`) when the room takes events (SessionDO: the same). */
+  private handOver(sessionId: string, task: OutsideTask, now: number): void {
+    if (!handOff(task, now)) return;
+    const s = this.sessions.get(sessionId);
+    if (s && !s.closed && s.frozenAt === null) this.appendNow(s, handedOverNotice(task), now);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
@@ -4105,6 +4321,13 @@ export class MemoryStore implements BellmanStore {
       const sweep = sweepDueAt(s);
       if (sweep !== null && now >= sweep) await this.sweepBlobs(s.id);
     }
+    // The seat's silence on an outside question: past its deadline the members answer (SessionDO: the room's alarm).
+    for (const [sessionId, tasks] of this.outsideTasks) {
+      for (const t of tasks.values()) if (t.seatDeadline !== null && now >= t.seatDeadline) this.handOver(sessionId, t, now);
+    }
+    // A question nobody answered in OUTSIDE_TASK_TTL_MS fails (SessionDO: the same alarm). After the hand-off, so a task
+    // whose seat deadline and lifetime fall due together ends once, as expired.
+    for (const s of this.sessions.values()) if (s.frozenAt === null) this.endOutside(s, "expired", now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }
@@ -4209,6 +4432,9 @@ export class MemoryStore implements BellmanStore {
     this.roomBanned.delete(s.id);
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);
+    this.outsideTasks.delete(s.id);
+    this.outsideCallerRows.delete(s.id);
+    this.outsideVisitors.delete(s.id);
     this.sessions.delete(s.id);
   }
 

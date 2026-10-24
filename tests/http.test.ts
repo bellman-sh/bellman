@@ -400,6 +400,71 @@ describe("the room routes over the Node server (#183)", () => {
   });
 });
 
+describe("A2A over the Node server (ADR 0033)", () => {
+  const rpc = (key: string | null, method: string, params: unknown) => fetch(`${base}/a2a`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "a2a-version": "1.0", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const ask = (tenant: string) => ({
+    tenant, configuration: { returnImmediately: true },
+    message: { messageId: "m1", role: "ROLE_USER", parts: [{ text: "What does this room review?" }] },
+  });
+
+  it("the Node app serves /a2a SendMessage with a bearer key", async () => {
+    await store.createSession(session({ id: "qs_http_a2a", manifest: roomManifest({ public: true }) }));
+    const res = await rpc("qk_dev_outsider", "SendMessage", ask("qs_http_a2a"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result?: { task: { id: string; status: { state: string } } } };
+    expect(body.result?.task.status.state).toBe("TASK_STATE_WORKING");
+    const got = await rpc("qk_dev_outsider", "GetTask", { tenant: "qs_http_a2a", id: body.result!.task.id });
+    expect(((await got.json()) as { result: { id: string } }).result.id).toBe(body.result!.task.id);
+  });
+
+  it("answers a request with no key as a plain 401, with no OAuth hint this server cannot honour", async () => {
+    const res = await rpc(null, "SendMessage", ask("qs_http_a2a"));
+    expect([res.status, res.headers.get("content-type")?.startsWith("text/plain"), res.headers.get("www-authenticate")]).toEqual([401, true, null]);
+    expect(await res.text()).toBe("Unauthorized: missing or invalid credentials");
+    expect((await rpc("qk_nobody", "ListTasks", {})).status).toBe(401);
+  });
+
+  it("serves a room card that offers the bearer scheme and no OAuth", async () => {
+    await store.createSession(session({ id: "qs_http_card", manifest: roomManifest({ public: true }) }));
+    const card = (await (await fetch(`${base}/public/rooms/qs_http_card/agent-card.json`)).json()) as {
+      securitySchemes: Record<string, unknown>; securityRequirements: unknown[];
+    };
+    expect(Object.keys(card.securitySchemes)).toEqual(["bearer"]);
+    expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
+    // The 0.3 card, where a 0.3 resolver looks from the room's own URL, says the same: bearer and no OAuth, and no key needed to read it.
+    const old = await fetch(`${base}/a2a/qs_http_card/.well-known/agent-card.json`);
+    expect(old.status).toBe(200);
+    const v03 = (await old.json()) as { url: string; securitySchemes: Record<string, unknown>; security: unknown[] };
+    expect(v03.url).toBe(`${base}/a2a/qs_http_card`);
+    expect(Object.keys(v03.securitySchemes)).toEqual(["bearer"]);
+    expect(v03.security).toEqual([{ bearer: [] }]);
+    expect((await fetch(`${base}/a2a/qs_http_nope/.well-known/agent-card.json`)).status).toBe(404);
+  });
+
+  it("serves A2A 0.3 at the room's own URL, which its card lists, with a bearer key", async () => {
+    await store.createSession(session({ id: "qs_http_v03", manifest: roomManifest({ public: true }) }));
+    const card = (await (await fetch(`${base}/public/rooms/qs_http_v03/agent-card.json`)).json()) as { supportedInterfaces: { url: string; protocolVersion: string }[] };
+    const v03 = card.supportedInterfaces.find((face) => face.protocolVersion === "0.3")!;
+    expect(v03.url).toBe(`${base}/a2a/qs_http_v03`);
+    const post = (key: string | null) => fetch(v03.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "message/send",
+        params: { message: { kind: "message", messageId: "m1", role: "user", parts: [{ kind: "text", text: "Hello?" }] }, configuration: { blocking: false } },
+      }),
+    });
+    const body = (await (await post("qk_dev_outsider")).json()) as { result?: { kind: string; status: { state: string } } };
+    expect(body.result).toMatchObject({ kind: "task", status: { state: "working" } });
+    const none = await post(null);
+    expect([none.status, none.headers.get("www-authenticate")]).toEqual([401, null]);
+  });
+});
+
 /**
  * The hosted seat's switch, over the wire: `createApp` hands its `features` to the tools it
  * serves, so the same request is refused by an app built with the seat off and served by one

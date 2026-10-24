@@ -369,6 +369,8 @@ function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord
     save: async (_id, r) => { record = r; },
     plan: async (userId: string) => { seen.plans.push(userId); return over.plan ?? "max"; },
     renew: async (_id: string, month: string, units: number) => { seen.renewals.push([month, units]); },
+    answer: async () => { throw new Error("no outside wake in these cases"); },
+    seatSkipped: async () => { throw new Error("no outside wake in these cases"); },
   };
   return { driver, seen, record: () => record, bodies, numbered, room };
 }

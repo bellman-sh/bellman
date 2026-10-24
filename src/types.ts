@@ -127,7 +127,13 @@ export type EventType =
   /** A write to the room's working surface: an item, or its removal (#129). */
   | "surface"
   /** A proposal the server raises from the room's own thresholds (#66). Never sent by a member. */
-  | "housekeeping";
+  | "housekeeping"
+  /** A question an outside A2A caller put to a public room. Never sent by a member. */
+  | "outside_question"
+  /** A seat's reply to an outside question, sent with `bellman_send` under the `answer` verb. */
+  | "outside_answer"
+  /** The room-visible line for an outside task's cancel, expiry or room-closed: `{taskId, text}`. Never sent by a member. */
+  | "outside_notice";
 
 /**
  * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
@@ -136,9 +142,42 @@ export type EventType =
  * target must be one of these kinds: a notice is not something a member said. `satisfies` keeps each name an `EventType`.
  */
 export const SEND_KINDS = [
-  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface",
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface", "outside_answer",
 ] as const satisfies readonly EventType[];
 export type SendKind = (typeof SEND_KINDS)[number];
+
+export type OutsideTaskState =
+  | "TASK_STATE_WORKING" | "TASK_STATE_INPUT_REQUIRED" | "TASK_STATE_COMPLETED"
+  | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED";
+
+/** One A2A task an outside caller opened against a public room. */
+export interface OutsideTask {
+  id: string;
+  contextId: string;
+  sessionId: string;
+  callerUserId: string;
+  /** "handle" or "visitor N", fixed at the first ask. */
+  origin: string;
+  state: OutsideTaskState;
+  /** The tier that answers, fixed at ask (spec D3). */
+  voice: "seat" | "members";
+  /** Every outside_question event for this task. */
+  questionCursors: number[];
+  answers: { cursor: number; text: string; at: number }[];
+  createdAt: number;
+  updatedAt: number;
+  seatDeadline: number | null;
+  /** Why the task ended, in words for the caller (A2A `status.message`): null until an ending sets it. */
+  statusMessage: string | null;
+}
+
+/** What a room keeps of one outside caller: the context their tasks share, and their visitor number when they have no handle. */
+export interface OutsideCaller {
+  userId: string;
+  contextId: string;
+  /** The room's count of handle-less callers at their first ask; null for a caller with a handle. */
+  visitor: number | null;
+}
 
 /** What a housekeeping proposal is about (#66). */
 export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
@@ -587,7 +626,8 @@ export type Verb =
   | "revoke"
   | "request_actions"
   | "respond_actions"
-  | "write_surface";
+  | "write_surface"
+  | "answer";
 
 export type PresetName = "pair" | "swarm" | "review" | "social" | "topic";
 

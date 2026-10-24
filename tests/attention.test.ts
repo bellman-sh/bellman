@@ -47,6 +47,6 @@ describe("attention", () => {
    */
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))
-      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping"]));
+      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping", "outside_question", "outside_notice", "outside_answer"]));
   });
 });

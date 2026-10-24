@@ -27,7 +27,7 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
 import type { AuditIntent } from "../store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -75,9 +75,12 @@ export interface InviteView {
   user_id: string | null;
   /** The role the grant will carry if the person accepts. */
   role: Role;
-  status: "invited";
+  /** `expired` once its fourteen days have passed (ADR 0036, D3): it seats nobody, and the admin resends or withdraws it. */
+  status: "invited" | "expired";
   invited_at: string;
   invited_by: string;
+  /** Null for a seat on an address the org no longer owns by its form, which does not lapse. */
+  expires_at: string | null;
 }
 
 const iso = (at: number): string => new Date(at).toISOString();
@@ -99,10 +102,11 @@ export function memberView(grant: PlanGrant, org: Org): MemberView {
   };
 }
 
-export function inviteView(invite: OrgInvite): InviteView {
+export function inviteView(invite: OrgInvite, now = Date.now()): InviteView {
   return {
-    key: invite.key, user_id: userIdForKey(invite.key), role: invite.role, status: "invited",
+    key: invite.key, user_id: userIdForKey(invite.key), role: invite.role, status: inviteLive(invite, now) ? "invited" : "expired",
     invited_at: iso(invite.invitedAt), invited_by: invite.invitedBy,
+    expires_at: Number.isFinite(invite.expiresAt) ? iso(invite.expiresAt) : null,
   };
 }
 
@@ -314,9 +318,9 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
         // A seat on an address the org no longer owns by its form takes no effect until the person accepts it
         // (ADR 0027), so it is listed as the invite it now is; it still holds its seat, and DELETE removes it.
         const listed = grants.map((grant) => isUnownedSeat(grant, org)
-          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt })
+          ? inviteView({ orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt, expiresAt: Infinity })
           : memberView(grant, org));
-        return json(200, { members: [...listed, ...invites.map(inviteView)] }, origin);
+        return json(200, { members: [...listed, ...invites.map((invite) => inviteView(invite))] }, origin);
       }
       const body = await readBody(request, origin);
       if (body instanceof Response) return body;
@@ -353,7 +357,8 @@ export async function orgRoutes(request: Request, deps: OrgRouteDeps): Promise<R
       // or a refusal from, and that becomes their grant only when they accept it at a sign-in. Whether the
       // key holds another org's grant is not asked here, so an invite says nothing of the person to the admin.
       if (!ownsByForm(org, body.key)) {
-        const invite: OrgInvite = { orgId, key: body.key, role, invitedBy: identity.userId, invitedAt: Date.now() };
+        const now = Date.now();
+        const invite: OrgInvite = { orgId, key: body.key, role, invitedBy: identity.userId, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
         const invited = await deps.store.putOrgInvite(invite, intent);
         if (invited === "exists") {
           return problem(409, "exists", "that key is already invited; withdraw it with DELETE /org/members/:key to change the role", origin);

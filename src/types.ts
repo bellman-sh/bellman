@@ -456,6 +456,8 @@ export interface OrgInvite {
   /** The admin who offered the seat; the grant names them as `grantedBy` when it is taken. */
   invitedBy: string;
   invitedAt: number;
+  /** When it stops being an offer (ADR 0036, D3); the row stays for the roster until withdrawn or renewed. */
+  expiresAt: number;
 }
 
 /**

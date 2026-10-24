@@ -2,13 +2,13 @@
  * The org routes (orgs spec, D6), driven as the Worker drives them: a Request in, a Response out,
  * over a MemoryStore, with the org created the way the operator's route creates it.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_ORG_WRITE_BYTES, orgRoutes, type OrgRouteDeps } from "../src/http/orgs.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DNS_JSON } from "../src/oauth/dns.js";
 import { scimIntent } from "../src/grant-audit.js";
 import { ssoUserId } from "../src/oauth/providers.js";
-import { policyView } from "../src/orgs.js";
+import { INVITE_TTL_MS, policyView } from "../src/orgs.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { MemoryStore } from "../src/store.js";
@@ -174,13 +174,23 @@ describe("GET /org/members", () => {
     await store.claimDomain("org_acme", "acme.test", "tok", 1, { actorUserId: "u_op" });
     await store.verifyDomain("org_acme", "acme.test", 2, { actorUserId: "u_op" });
     await store.putGrantIfOwned({ ...ownerGrant, key: "email:bo@acme.test", role: "member", source: "org" }, "org_acme", { actorUserId: "u_github_1" });
-    await store.putOrgInvite({ orgId: "org_acme", key: "github:9", role: "admin", invitedBy: "u_github_1", invitedAt: 2 }, { actorUserId: "u_github_1" });
+    await store.putOrgInvite({ orgId: "org_acme", key: "github:9", role: "admin", invitedBy: "u_github_1", invitedAt: 2, expiresAt: Date.now() + INVITE_TTL_MS }, { actorUserId: "u_github_1" });
     const res = (await call("admin-2", "/org/members"))!;
     expect([res.status, await res.json()]).toEqual([200, { members: [
       { key: "github:1", user_id: "u_github_1", role: "admin", plan: "team", source: "operator", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: true, status: "member" },
       { key: "email:bo@acme.test", user_id: null, role: "member", plan: "team", source: "org", granted_at: "1970-01-01T00:00:00.001Z", expires_at: null, owner: false, status: "member" },
-      { key: "github:9", user_id: "u_github_9", role: "admin", status: "invited", invited_at: "1970-01-01T00:00:00.002Z", invited_by: "u_github_1" },
+      { key: "github:9", user_id: "u_github_9", role: "admin", status: "invited", invited_at: "1970-01-01T00:00:00.002Z", invited_by: "u_github_1", expires_at: expect.any(String) },
     ] }]);
+  });
+
+  it("lists an expired invite as expired, with its expiry, so the admin can resend or withdraw it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(1_000_000);
+    await call("owner", "/org/members", "POST", { key: "github:9", role: "member" });
+    vi.setSystemTime(1_000_000 + INVITE_TTL_MS + 1);
+    const { members } = await json(await call("owner", "/org/members")) as { members: { key: string; status: string; expires_at: string }[] };
+    const row = members.find((m) => m.key === "github:9")!;
+    expect([row.status, row.expires_at]).toEqual(["expired", new Date(1_000_000 + INVITE_TTL_MS).toISOString()]);
+    vi.useRealTimers();
   });
 
   it("shows an admin their own org and never another, and refuses a member, a free admin and an org with no record", async () => {
@@ -224,7 +234,7 @@ describe("POST /org/members", () => {
       const res = (await add("owner", { key, role: "member" }))!;
       expect([res.status, await res.json()], key).toEqual([202, { member: {
         key, user_id: /^(github|google):\d+$/.test(key) ? `u_${key.replace(":", "_")}` : null, role: "member", status: "invited",
-        invited_at: expect.any(String), invited_by: "u_github_1",
+        invited_at: expect.any(String), invited_by: "u_github_1", expires_at: expect.any(String),
       } }]);
     }
     for (const key of keys.slice(0, -1)) expect(await store.getGrant(key), key).toBeUndefined();
@@ -343,7 +353,7 @@ describe("DELETE /org/members/:key", () => {
 
   it("withdraws an invite, once, recording the admin who did", async () => {
     await call("owner", "/org/members", "POST", { key: "google:118", role: "member" });
-    await store.putOrgInvite({ orgId: "org_b", key: "google:118", role: "member", invitedBy: "u_github_2", invitedAt: 3 }, { actorUserId: "u_github_2" });
+    await store.putOrgInvite({ orgId: "org_b", key: "google:118", role: "member", invitedBy: "u_github_2", invitedAt: 3, expiresAt: Date.now() + INVITE_TTL_MS }, { actorUserId: "u_github_2" });
     expect((await call("admin-2", "/org/members/google%3A118", "DELETE"))!.status).toBe(204);
     expect(await store.listOrgInvites("org_acme", 10)).toEqual([]);
     expect(await store.listOrgInvites("org_b", 10)).toEqual([expect.objectContaining({ key: "google:118" })]);

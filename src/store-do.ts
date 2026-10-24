@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -4001,14 +4001,14 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async listOrgInvites(orgId: string, limit: number): Promise<OrgInvite[]> {
-    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()];
+    return [...(await this.ctx.storage.list<OrgInvite>({ prefix: orgInvitesPrefix(orgId), limit })).values()].map(liftInvite);
   }
 
   /** One prefix read per key, each bounded as an org's listing is: a key many orgs invited cannot make a sign-in read without end. */
   async invitesFor(keys: string[]): Promise<OrgInvite[]> {
     const found: OrgInvite[] = [];
     for (const key of new Set(keys)) {
-      found.push(...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values());
+      found.push(...[...(await this.ctx.storage.list<OrgInvite>({ prefix: keyInvitesPrefix(key), limit: MAX_PENDING_INVITES })).values()].map(liftInvite));
     }
     return found;
   }
@@ -4038,7 +4038,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       if (!org) return "gone" as const;
       const unique = [...new Set([subjectKey, ...keys])];
       const inviteRows = unique.map((key) => inviteKeysFor({ orgId, key }));
-      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg)))).find((i) => i !== undefined);
+      const invite = (await Promise.all(inviteRows.map(([byOrg]) => txn.get<OrgInvite>(byOrg))))
+        .find((i): i is OrgInvite => i !== undefined && inviteLive(liftInvite(i), now));
       const stored = await Promise.all(unique.map((key) => txn.get<PlanGrant>(grantKey(key))));
       const grants = stored.filter((g): g is PlanGrant => g !== undefined && !lapsed(g, now));
       // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.

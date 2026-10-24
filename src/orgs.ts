@@ -1,7 +1,7 @@
 import { isOrgId } from "./grant-index.js";
 import { domainOf } from "./oauth/dns.js";
 import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
-import { DEFAULT_POLICY, type Capability, type Org, type OrgPolicy, type PlanGrant, type Role } from "./types.js";
+import { DEFAULT_POLICY, type Capability, type Org, type OrgInvite, type OrgPolicy, type PlanGrant, type Role } from "./types.js";
 
 /**
  * What the org routes share (orgs spec, D6, D7): the rules a body is read by and the shape an org
@@ -23,6 +23,17 @@ export const MAX_SEATS = 100_000;
 // ponytail: pending invites an org holds at once, the bound the roster is read with, so `GET /org/members`
 // lists every one. An invite takes no seat, so without it an admin could fill the registry; raise it with paging.
 export const MAX_PENDING_INVITES = 200;
+
+/** How long an invite stays an offer (ADR 0036, D3). */
+export const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** The invite as the code reads it: a row written before `expiresAt` lapses fourteen days after it was made. */
+export function liftInvite(invite: OrgInvite): OrgInvite {
+  return { ...invite, expiresAt: invite.expiresAt ?? invite.invitedAt + INVITE_TTL_MS };
+}
+
+/** Whether an invite is still an offer at `now`: the one rule the stores and the routes ask. */
+export const inviteLive = (invite: OrgInvite, now: number): boolean => invite.expiresAt > now;
 
 /**
  * Whether the org owns this key by its form (ADR 0027), so seating it takes effect without the

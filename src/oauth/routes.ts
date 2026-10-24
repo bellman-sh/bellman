@@ -4,7 +4,7 @@ import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, inviteLive, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
@@ -928,19 +928,19 @@ const subjectOf = (profile: ProviderProfile): string => `${profile.provider}:${p
  * its place, read as the invite it would be; but no offer an org made by the time the person last declined
  * it, while one made since shows. Most specific key first, as `firstGrant` picks a grant, and one an org.
  */
-async function offersFor(plans: PlanStore, keys: string[], subjectKey: string): Promise<OrgInvite[]> {
+async function offersFor(plans: PlanStore, keys: string[], subjectKey: string, now: number): Promise<OrgInvite[]> {
   const [invites, grants, declined] = await Promise.all([
     plans.invitesFor(keys), Promise.all(keys.map((key) => plans.getGrant(key))), plans.declinedOrgs(subjectKey),
   ]);
   const seats: OrgInvite[] = [];
   for (const grant of grants) {
     if (grant?.orgId && isUnownedSeat(grant, await plans.getOrg(grant.orgId))) {
-      seats.push({ orgId: grant.orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt });
+      seats.push({ orgId: grant.orgId, key: grant.key, role: grant.role, invitedBy: grant.grantedBy, invitedAt: grant.grantedAt, expiresAt: Infinity });
     }
   }
   const declinedAt = new Map(declined.map((d) => [d.orgId, d.at]));
   const seen = new Set<string>();
-  return [...invites, ...seats].filter((offer) =>
+  return [...invites.filter((invite) => inviteLive(invite, now)), ...seats].filter((offer) =>
     offer.invitedAt > (declinedAt.get(offer.orgId) ?? -Infinity) && !seen.has(offer.orgId) && Boolean(seen.add(offer.orgId)));
 }
 
@@ -957,7 +957,7 @@ async function invitesHeld(
   if (!config.plans || profile.provider === "sso") return undefined;
   let offers: OrgInvite[];
   try {
-    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile));
+    offers = await offersFor(config.plans, grantKeys(identityKeys(profile)), subjectOf(profile), Date.now());
   } catch (err) {
     console.error("could not read a sign-in's invites:", err);
     return undefined;
@@ -1030,7 +1030,7 @@ async function acceptInvite(plans: PlanStore, profile: ProviderProfile, keys: st
  * invited were one person's. Only an org that made this sign-in an offer is declined, or named.
  */
 async function declineInvite(plans: PlanStore, keys: string[], subjectKey: string, orgId: string): Promise<{ declined: boolean; notice: Notice }> {
-  const offered = (await offersFor(plans, keys, subjectKey)).some((offer) => offer.orgId === orgId);
+  const offered = (await offersFor(plans, keys, subjectKey, Date.now())).some((offer) => offer.orgId === orgId);
   const org = offered ? await plans.getOrg(orgId) : undefined;
   if (!org) return { declined: false, notice: { lead: "That invitation is no longer open." } };
   await plans.declineOrg(subjectKey, orgId, Date.now());
@@ -1053,7 +1053,7 @@ async function answeredAlready(
     for (const cookie of settled.cookies) res.headers.append("set-cookie", cookie);
     return res;
   }
-  if (settled?.redrawn) return invitesPage(held, await offersFor(config.plans!, keys, subjectKey), config, exp);
+  if (settled?.redrawn) return invitesPage(held, await offersFor(config.plans!, keys, subjectKey, Date.now()), config, exp);
   if (settled) return html(`<h1>That sign-in has ended</h1><p>Start it again.</p>`, 400);
   return html(
     `<h1>Your answer is on its way</h1><p>It was sent once already. Continue when it has been saved.</p>` +
@@ -1393,7 +1393,7 @@ export async function handleOAuth(
       notice = answer.notice;
       stay = !answer.declined;
     }
-    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey);
+    const remaining = choice === "continue" ? [] : await offersFor(plans, keys, subjectKey, Date.now());
     const redrawn = stay || remaining.length > 0;
     const res = redrawn
       ? await invitesPage(held, remaining, config, claims.exp, notice)

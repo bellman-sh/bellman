@@ -18,6 +18,7 @@ import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
+import { INVITE_TTL_MS } from "../src/orgs.js";
 import { brief, manifestFixture, member as seatOf, session } from "./helpers/fixtures.js";
 import { Harness } from "./helpers/harness.js";
 
@@ -223,6 +224,18 @@ describe("the invites page (ADR 0027)", () => {
     expect(first.identity).toMatchObject({ orgId: null, plan: "free" });
     expect(await plans.invitesFor(["github:4242"])).toEqual([expect.objectContaining({ orgId: "org_acme" })]);
     expect((await signIn("continue")).page).toContain("Acme");
+  });
+
+  it("offers no expired invite at a sign-in, and keeps the row for the admin", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(1_000_000);
+    await seat(ACME_ADMIN, "github:4242");
+    vi.setSystemTime(1_000_000 + INVITE_TTL_MS + 1);
+    const { identity, page } = await signIn("continue");
+    expect([page, identity?.orgId]).toEqual([null, null]);
+    const roster = await (await orgRoutes(new Request(`${ISSUER}/org/members`, { headers: { authorization: "Bearer x" } }),
+      { store: plans, caller: async () => ({ identity: ACME_ADMIN, via: "bearer" }), panelOrigins: [PANEL] }))!.json() as { members: { key: string; status: string }[] };
+    expect(roster.members.find((m) => m.key === "github:4242")?.status).toBe("expired");
+    vi.useRealTimers();
   });
 
   it("escapes the org's name, which is its admin's text", async () => {

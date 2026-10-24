@@ -4,7 +4,7 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
-import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -3674,7 +3674,7 @@ export class MemoryStore implements BellmanStore {
     const pending = this.invites.get(invite.orgId) ?? new Map<string, OrgInvite>();
     if (pending.has(invite.key)) return "exists";
     if (pending.size >= MAX_PENDING_INVITES) return "limit";
-    pending.set(invite.key, detach(invite));
+    pending.set(invite.key, detach(liftInvite(invite)));
     this.invites.set(invite.orgId, pending);
     this.recordAudit([orgEventEntry(invite.orgId, "member_invited", { key: invite.key, role: invite.role }, audit, invite.invitedAt)]);
     return "invited";
@@ -3704,7 +3704,7 @@ export class MemoryStore implements BellmanStore {
     if (!org) return "gone";
     const unique = [...new Set([subjectKey, ...keys])];
     const pending = this.invites.get(orgId);
-    const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined);
+    const invite = unique.map((key) => pending?.get(key)).find((i) => i !== undefined && inviteLive(i, now));
     const grants = unique.map((key) => this.liveGrant(key)).filter((g): g is PlanGrant => g !== undefined);
     // An unowned seat, in this org or any other, holds nothing: this org's are the offer and move, and another's is no grant.
     const unowned = grants.filter((g) => isUnownedSeat(g, g.orgId === null ? undefined : this.orgs.get(g.orgId)));

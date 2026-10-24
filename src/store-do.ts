@@ -7,11 +7,11 @@ import {
 import { MAX_PENDING_INVITES, isUnownedSeat, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
-  SessionEvent, SurfaceRow,
+  SessionEvent, SurfaceRow, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import type {
@@ -91,6 +91,9 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/** One row per outside task, `ot:<taskId>`, and one per outside caller, `oc:<user>` (A2A). The user segment is percent-encoded, for `userPrefix`'s reason. */
+const OUTSIDE_TASK_PREFIX = "ot:";
+const OUTSIDE_CALLER_PREFIX = "oc:";
 /**
  * One row per ban, `bn:<banId>` (abuse protections spec, section 1), and a row from the person to
  * their ban's id, `bu:<user>`, so a seating asks one `get` and not a listing. The user segment is
@@ -291,6 +294,15 @@ async function extraRows(
 
   const puts: Record<string, unknown> = {};
   const deletes: string[] = [];
+  if (extras.outsideTask !== undefined) {
+    const task = extras.outsideTask;
+    // Thrown inside the transaction, so the event, its cursor and every other row of this append roll back with it.
+    if (task.sessionId !== s.id) throw new Error(`Outside task ${task.id} belongs to ${task.sessionId}, not ${s.id}`);
+    puts[`${OUTSIDE_TASK_PREFIX}${task.id}`] = { ...task, questionCursors: [...task.questionCursors, event.cursor] };
+  }
+  if (extras.outsideCaller !== undefined) {
+    puts[`${OUTSIDE_CALLER_PREFIX}${encodeURIComponent(extras.outsideCaller.userId)}`] = extras.outsideCaller;
+  }
   let surfaceCursor = s.surfaceCursor ?? 0;
   if (extras.surface !== undefined) {
     const key = surfaceKey(extras.surface.key);
@@ -2388,6 +2400,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async surfaceOf(): Promise<SurfaceRow[]> {
     const map = await this.ctx.storage.list<SurfaceRow>({ prefix: SURFACE_PREFIX });
     return [...map.values()];
+  }
+
+  async outsideTask(callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
+    const task = await this.ctx.storage.get<OutsideTask>(`${OUTSIDE_TASK_PREFIX}${taskId}`);
+    return task?.callerUserId === callerUserId ? task : undefined;
+  }
+
+  /**
+   * ponytail: every task row of the room, filtered to the caller. A room holds a caller's three open
+   * tasks and whatever they closed in the week before the sweep; if rooms outgrow that, key the rows by caller.
+   */
+  async outsideTasksOf(callerUserId: string): Promise<OutsideTask[]> {
+    const all = await this.ctx.storage.list<OutsideTask>({ prefix: OUTSIDE_TASK_PREFIX });
+    return [...all.values()].filter((t) => t.callerUserId === callerUserId).sort(newestTaskFirst);
+  }
+
+  async outsideCallers(): Promise<OutsideCaller[]> {
+    return [...(await this.ctx.storage.list<OutsideCaller>({ prefix: OUTSIDE_CALLER_PREFIX })).values()];
   }
 
   /**
@@ -5537,6 +5567,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
     return this.session(sessionId).surfaceOf();
+  }
+
+  async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
+    return this.session(sessionId).outsideTask(callerUserId, taskId);
+  }
+
+  async outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]> {
+    return this.session(sessionId).outsideTasksOf(callerUserId);
+  }
+
+  async outsideCallers(sessionId: string): Promise<OutsideCaller[]> {
+    return this.session(sessionId).outsideCallers();
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {

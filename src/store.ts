@@ -1,6 +1,6 @@
 import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
+  RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
@@ -78,6 +78,9 @@ export interface PublicNameEntry {
 /** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
 export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
   a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
+
+/** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
+export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
 
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
@@ -986,6 +989,15 @@ export interface AppendExtras {
    * one stores a row without one, whatever the key held before (R20).
    */
   approvedBy?: ApprovedBy;
+  /**
+   * An outside caller's task (A2A), written in the event's own transaction: the row and the `outside_question` that
+   * asks it commit together or not at all. `questionCursors` is handed in WITHOUT this event's cursor, which the
+   * store assigns, and the store appends it. A row for a task of another room throws, so the append writes nothing.
+   * Used with `appendEvent`; not meaningful on `appendEventOnce`.
+   */
+  outsideTask?: OutsideTask;
+  /** The caller's standing in the room (context and visitor number), stored with the task. A repeat replaces the row. */
+  outsideCaller?: OutsideCaller;
 }
 
 /**
@@ -1629,6 +1641,12 @@ export interface BellmanStore {
    * method and not N `eventAt` reads from a handler.
    */
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
+  /** One outside task of this room, if `callerUserId` opened it. Another caller's, or none, answers undefined. */
+  outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined>;
+  /** This caller's tasks in this room, newest first. */
+  outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]>;
+  /** Every outside caller this room has heard from, for the next visitor number and a caller's context. */
+  outsideCallers(sessionId: string): Promise<OutsideCaller[]>;
   /**
    * Charge `bytes` to this room's blob total unless that would pass the
    * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
@@ -2059,6 +2077,9 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /** Outside tasks by session then task id, and outside callers by session then user: rows beside the record, as SessionDO keeps them. */
+  private outsideTasks = new Map<string, Map<string, OutsideTask>>();
+  private outsideCallerRows = new Map<string, Map<string, OutsideCaller>>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
   /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
@@ -2913,6 +2934,18 @@ export class MemoryStore implements BellmanStore {
       const stored = s as { lastActionRequestAt?: number };
       stored.lastActionRequestAt = Math.max(stored.lastActionRequestAt ?? 0, event.at);
     }
+    if (extras.outsideTask !== undefined) {
+      const task = extras.outsideTask;
+      if (task.sessionId !== s.id) throw new Error(`Outside task ${task.id} belongs to ${task.sessionId}, not ${s.id}`);
+      const tasks = this.outsideTasks.get(s.id) ?? new Map<string, OutsideTask>();
+      tasks.set(task.id, detach({ ...task, questionCursors: [...task.questionCursors, event.cursor] }));
+      this.outsideTasks.set(s.id, tasks);
+    }
+    if (extras.outsideCaller !== undefined) {
+      const callers = this.outsideCallerRows.get(s.id) ?? new Map<string, OutsideCaller>();
+      callers.set(extras.outsideCaller.userId, detach(extras.outsideCaller));
+      this.outsideCallerRows.set(s.id, callers);
+    }
     if (extras.surface !== undefined) {
       const rows = this.surfaces.get(s.id) ?? new Map<string, SurfaceRow>();
       const verdict = applySurfaceWrite(rows.get(extras.surface.key), event, extras.surface, extras.approvedBy);
@@ -3128,6 +3161,20 @@ export class MemoryStore implements BellmanStore {
     if (!rows) return [];
     const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return detach(sorted);
+  }
+
+  async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
+    const task = this.outsideTasks.get(sessionId)?.get(taskId);
+    return task?.callerUserId === callerUserId ? detach(task) : undefined;
+  }
+
+  async outsideTasksOf(sessionId: string, callerUserId: string): Promise<OutsideTask[]> {
+    const mine = [...(this.outsideTasks.get(sessionId)?.values() ?? [])].filter((t) => t.callerUserId === callerUserId);
+    return detach(mine.sort(newestTaskFirst));
+  }
+
+  async outsideCallers(sessionId: string): Promise<OutsideCaller[]> {
+    return detach([...(this.outsideCallerRows.get(sessionId)?.values() ?? [])]);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
@@ -4060,6 +4107,8 @@ export class MemoryStore implements BellmanStore {
     this.roomBanned.delete(s.id);
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);
+    this.outsideTasks.delete(s.id);
+    this.outsideCallerRows.delete(s.id);
     this.sessions.delete(s.id);
   }
 

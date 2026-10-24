@@ -169,6 +169,14 @@ export interface OutsideTask {
   seatDeadline: number | null;
 }
 
+/** What a room keeps of one outside caller: the context their tasks share, and their visitor number when they have no handle. */
+export interface OutsideCaller {
+  userId: string;
+  contextId: string;
+  /** The room's count of handle-less callers at their first ask; null for a caller with a handle. */
+  visitor: number | null;
+}
+
 /** What a housekeeping proposal is about (#66). */
 export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
 

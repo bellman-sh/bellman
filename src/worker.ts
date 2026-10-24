@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { a2aRoutes } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
 import { scimRoutes } from "./http/scim.js";
@@ -498,6 +499,23 @@ export default {
           headers: { upgrade: "websocket", "x-bellman-members": memberIds.join(",") },
         })
       );
+    }
+
+    // A2A (ADR 0033): an outside caller asks a public room. A bearer only, as /mcp takes it, and no panel cookie: a
+    // signed-out request gets /mcp's 401 and its resource-metadata hint. A suspended account is refused inside, in
+    // JSON-RPC, so the refusal carries the request's id and a registry that cannot say is JSON-RPC's internal error.
+    if (url.pathname === "/a2a") {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const identity = await resolveCaller(request, env, oauth);
+      if (!identity) return unauthorized(oauth);
+      const handled = await a2aRoutes(request, {
+        store,
+        caller: identity,
+        suspended: () => suspended(identity.userId),
+        origin: url.origin,
+      });
+      if (handled) return handled;
     }
 
     if (url.pathname !== "/mcp") {

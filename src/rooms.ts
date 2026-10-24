@@ -359,8 +359,9 @@ export const cutAtFor = (handles: readonly Member[]): number | undefined =>
   cutFor(handles) === undefined ? undefined : Math.max(...handles.map((m) => m.leftAt ?? 0));
 
 /**
- * The surface as a member reads it (#129, D7): every row in an envelope, and
- * the cursor of the last change.
+ * The surface as a member reads it (#129, D7): the rows the member may see, and
+ * the cursor of the last change. Search reads it this way; a window read cuts the rows inside the
+ * room's object (`surfaceWindow`) and carries one page.
  *
  * `cut` is a removed member's cursor (#113): such a member reads its history
  * up to the `member_evicted` event that removed it and nothing after, so rows

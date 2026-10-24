@@ -34,8 +34,8 @@ Args:
 
 You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes) }, cursor }
-surface is the room's working surface in full; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.
+Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, cursor }
+surface is the room's working surface's front window; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join, read again here so a policy tightened since the preview still binds), "your org's policy forbids granting ... to peers" (policy).`,

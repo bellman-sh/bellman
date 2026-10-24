@@ -348,7 +348,7 @@ async function extraRows(
  * ponytail: one list of the room's `sf:` rows per write that needs a slot (a card written without a
  * placement), in the append's own transaction so two such writes cannot take one slot. A write with a
  * placement, a removal, a connector and a shape read nothing here; the dash's drag writes are all of those.
- * A room is held to 64 rows by `writeSurface`, so the list is small; the upgrade is a row of the taken
+ * A room is held to 1,000 rows by `writeSurface`, so the list stays bounded; the upgrade is a row of the taken
  * cells beside the surface cursor, if a room ever outgrows that.
  *
  * An idempotent replay never gets here: `appendEventOnce` returns the original event before it, and takes

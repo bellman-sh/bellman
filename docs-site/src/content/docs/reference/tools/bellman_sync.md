@@ -13,7 +13,7 @@ Args:
   - session_id, member_id: your handles  
   - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)  
   - wait_seconds (0-25): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.  
-  - surface (boolean, default false): also return the room's working surface in full — every item in an untrusted envelope. Use it after a restart, or when you want the current state without replaying the log.  
+  - surface (boolean, default false): also return the room's working surface: its front window (frame 1, or the newest items) with frames[] and next; bellman_surface reads further. Use it after a restart, or when you want the current state without replaying the log.  
 
 Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, more?, surface_cursor?, surface?, removed?, outstanding? }  
 more: true means this page was full (at most 50 events): call again at once with the returned cursor for the rest.  

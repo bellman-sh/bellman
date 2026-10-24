@@ -487,7 +487,7 @@ const UPGRADE_AUDIENCE = "bellman:upgrade-state";
 const SESSION_AUDIENCE = "bellman:session-state";
 /** A sign-in held at the invites page (ADR 0027): accepted by its answer route and nowhere else. */
 const INVITES_AUDIENCE = "bellman:invites-state";
-/** The claim page's form (ADR 0036): names the attempt and the session that saw the page. */
+/** The claim page's form (ADR 0037): names the attempt and the session that saw the page. */
 const CLAIM_AUDIENCE = "bellman:claim-state";
 const SCOPE = "bellman";
 
@@ -1204,7 +1204,7 @@ export async function handleOAuth(
       token_endpoint_auth_methods_supported: ["none"],
       scopes_supported: [SCOPE],
       service_documentation: "https://github.com/bellman-sh/bellman",
-      // auth.md (ADR 0036): an agent registers by its human's email and polls
+      // auth.md (ADR 0037): an agent registers by its human's email and polls
       // /token while that human approves on the claim page.
       agent_auth: {
         skill: "https://bellman.sh/auth.md",
@@ -1574,7 +1574,7 @@ export async function handleOAuth(
   // checked before anything is spent or applied, as the callback checked it. The page comes back with
   // what an answer did while an offer remains or the answer did not take; otherwise the sign-in
   // finishes as the callback would have.
-  // ------------------------------------------------ auth.md claim page (ADR 0036)
+  // ------------------------------------------------ auth.md claim page (ADR 0037)
   // A signed-in human approves an agent with the code it gave them. No csrfRefusal (D9): the form
   // carries a `held` bound to the session that saw the page and spent by the first answer.
   if (path === "/agent/claim") {

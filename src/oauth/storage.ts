@@ -424,7 +424,7 @@ export async function clientCount(
 export interface Reclaimed {
   clients: number;
   buckets: number;
-  /** Agent registration, attempt and grant records past their expiry (ADR 0036). */
+  /** Agent registration, attempt and grant records past their expiry (ADR 0037). */
   agent: number;
   /**
    * The pass examined everything, so reclaiming nothing really does mean there
@@ -532,7 +532,7 @@ export interface AuthStorage {
   deleteSession(id: string): Promise<void>;
 
   /**
-   * The auth.md agent registration (ADR 0036). Each method is one read-decide-write
+   * The auth.md agent registration (ADR 0037). Each method is one read-decide-write
    * unit, under the rule admitRegistration states: nothing else may run between
    * the read and the write. The decisions themselves live in agent-auth.ts.
    */

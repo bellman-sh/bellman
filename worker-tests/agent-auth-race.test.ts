@@ -1,5 +1,5 @@
 /**
- * AuthDO's agent claim methods (ADR 0036), held open in workerd the way auth-race.test.ts holds
+ * AuthDO's agent claim methods (ADR 0037), held open in workerd the way auth-race.test.ts holds
  * the client registry: a poll parked between reading a registration and writing its
  * last_poll_at back must not overwrite an approval that ran in the gap, and two polls on one
  * claimed registration must not both be granted. Each method is one transaction; these

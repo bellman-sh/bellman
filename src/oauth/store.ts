@@ -43,7 +43,7 @@ const COUNT = CLIENT_COUNT_KEY;
 /** Where each bounded sweep stopped, so the next pass does not re-read page one. */
 const CLIENT_CURSOR_KEY = "clients:cursor";
 const REG_CURSOR_KEY = "regs:cursor";
-/** The auth.md agent registration's records (ADR 0036): see the agent methods below. */
+/** The auth.md agent registration's records (ADR 0037): see the agent methods below. */
 const AGENT_REG = "agentreg:";
 const AGENT_ATTEMPT = "agentattempt:";
 const AGENT_GRANT = "agentgrant:";
@@ -467,7 +467,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * The auth.md agent registration (ADR 0036). Each method is one transaction, for
+   * The auth.md agent registration (ADR 0037). Each method is one transaction, for
    * admitRegistration's reason: the decision in agent-auth.ts and the write it
    * leads to are one unit, so a poll and an approval cannot both act on the same
    * read. worker-tests/agent-auth-race.test.ts holds calls at that point.

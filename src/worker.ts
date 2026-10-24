@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "./a2a/cards.js";
+import { SERVER_CARD_CORS, SERVER_CARD_PATH, serverCard } from "./server-card.js";
 import { a2aRoutes, isA2aPath, v03CardTenant } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
@@ -427,6 +428,17 @@ export default {
     // Bellman's own A2A card (ADR 0033): no credential, and nothing to configure.
     if (request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
       return cardResponse(bellmanCard(url.origin), request.headers.get("if-none-match"), { "access-control-allow-origin": "*" });
+    }
+
+    // Bellman's MCP Server Card (SEP-2127), where the spec reserves it: the MCP endpoint's URL plus /server-card.
+    if (url.pathname === SERVER_CARD_PATH) {
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: SERVER_CARD_CORS });
+      if (request.method === "GET") {
+        return cardResponse(serverCard(url.origin), request.headers.get("if-none-match"), {
+          ...SERVER_CARD_CORS,
+          "content-type": "application/mcp-server-card+json",
+        });
+      }
     }
 
     if (oauth) {

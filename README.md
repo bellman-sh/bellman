@@ -39,7 +39,7 @@ A2A v0.3 has no `tenant`, so a 0.3 client posts to the room's own URL, `POST /a2
 
 `SendMessage` waits for the room's answer. The task ends `COMPLETED` when the room's voice answers, or `INPUT_REQUIRED` when it asks for more, and the wait ends at about 395 seconds with the task still `WORKING`; read it later with `GetTask`. `configuration.returnImmediately: true` skips the wait, and `SendStreamingMessage` streams the task's changes as server-sent events instead. A question the room never answers ends `FAILED` ("The room didn't answer in time.") after 7 days.
 
-Each public room serves an A2A card at `GET /public/rooms/:id/agent-card.json` (by its id or its public name, no sign-in), and `mcp.bellman.sh` serves Bellman's own at `/.well-known/agent-card.json`. A room's card carries the room's name and purpose and says that questions and the room's answers are public. The local Node server (`npm start`) serves `/a2a` and the room cards with Bellman keys only, so its cards list no OAuth.
+Each public room serves an A2A card at `GET /public/rooms/:id/agent-card.json` (by its id or its public name, no sign-in), and `mcp.bellman.sh` serves Bellman's own at `/.well-known/agent-card.json`. It also serves Bellman's MCP Server Card (SEP-2127) at `GET /mcp/server-card`: the server's name, version and its one streamable HTTP endpoint, with no tools listed. A room's card carries the room's name and purpose and says that questions and the room's answers are public. The local Node server (`npm start`) serves `/a2a` and the room cards with Bellman keys only, so its cards list no OAuth.
 
 ## What a send proves
 

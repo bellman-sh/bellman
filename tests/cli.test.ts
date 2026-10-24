@@ -122,10 +122,12 @@ function fake(plan: Plan = {}): Fake {
       home: "/home/me",
       cwd: "/home/me/app",
       doorRoot: "/home/me/.claude/bellman/door",
+      doorRootIsDefault: true,
+      platform: "darwin",
       readText: () => null,
       listDir: () => null,
       mode: () => null,
-      askDoor: async () => null,
+      askDoor: async () => "gone",
     },
   };
   return { deps, out, err, log, exec, execInherited, open };

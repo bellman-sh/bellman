@@ -256,7 +256,9 @@ export function browserOpener(platform: NodeJS.Platform, launch: Launch = spawn)
  * warning node prints for arguments passed alongside `shell`.
  */
 function runSync(command: string, args: string[], stdio: "pipe" | "inherit"): { status: number | null; stdout: string } {
-  const options = { encoding: "utf8", stdio } as const;
+  // A captured command is a question (npm view, claude --version) and gets 15 s; a killed child has status null, which
+  // callers read as a failure. The install, on the terminal's own stdio, has no limit.
+  const options = { encoding: "utf8", stdio, ...(stdio === "pipe" ? { timeout: 15_000 } : {}) } as const;
   const done =
     process.platform === "win32"
       ? spawnSync([command, ...args].join(" "), { ...options, shell: true })
@@ -285,6 +287,8 @@ function realDeps(): CliDeps {
       home: homedir(),
       cwd: process.cwd(),
       doorRoot: doorRoot(),
+      doorRootIsDefault: process.env.BELLMAN_DOOR_ROOT === undefined,
+      platform: process.platform,
       readText: (path) => {
         try {
           return readFileSync(path, "utf8");

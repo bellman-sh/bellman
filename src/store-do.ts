@@ -55,7 +55,10 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
 import { decideApproval } from "./proposal.js";
-import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest } from "./outside.js";
+import {
+  decideAnswer, decideAsk, decideCancel, endings, nextLapse,
+  type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason,
+} from "./outside.js";
 import { presetInNewWords } from "./presets.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
@@ -144,6 +147,11 @@ const ABANDONED_HANDLER = "abandoned";
  * derived like heartbeat's from the record's `seatWaits`: never stored under `due:`. See derivedDue().
  */
 const SEAT_HANDLER = "seat";
+/**
+ * An outside task's lifetime (A2A, `OUTSIDE_TASK_TTL_MS`): derived from the record's `outsideExpiryAt`, never stored
+ * under `due:`, for the reason SEAT_HANDLER gives. `#expireOutsideIfDue` consumes it, and always moves it on or clears it.
+ */
+const EXPIRY_HANDLER = "expiry";
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -1728,17 +1736,26 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   async closeSession(): Promise<void> {
     let released = false;
+    let events: SessionEvent[] = [];
+    let members: readonly Member[] = [];
     await this.ctx.storage.transaction(async (txn) => {
+      events = [];
       const s = await this.stored(txn);
       if (!s) return;
+      members = s.members;
       // A hosted room's slot goes back with the close, in its transaction (I7).
       const intents = hostedReleaseIntents(s);
       released = intents.length > 0;
       const rows = released ? await this.driver.enqueue(txn, intents) : {};
       // `closedAt` once (#65): the window starts at the first close, and a second one
       // does not move it.
-      await putRows(txn, { ...memberRows(s, { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }), ...rows });
+      const now = Date.now();
+      // The room's open outside tasks end with it, in this transaction (A2A): a stranger is not left waiting on a closed room.
+      const end = await this.#endOutside(txn, s, "closed", now);
+      await putRows(txn, { ...memberRows(s, { ...end.session, closed: true, closedAt: s.closedAt ?? now }), ...rows });
+      events = end.events;
     });
+    for (const event of events) this.#wake(event, members);
     // The purge is due from the close, and the alarm may be pointing at an abandonment
     // time months off: nothing else re-arms it for a room with no code to retire and
     // no audit row to queue. See derivedDue().
@@ -1766,18 +1783,26 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async closeSessionIfEmpty(): Promise<boolean> {
     let released = false;
+    let events: SessionEvent[] = [];
+    let members: readonly Member[] = [];
     const closed = await this.ctx.storage.transaction(async (txn) => {
+      events = [];
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
       if (s.members.some(isActivePerson)) return false;
+      members = s.members;
       // A hosted room's slot goes back with the close, in its transaction (I7).
       const intents = hostedReleaseIntents(s);
       released = intents.length > 0;
       const rows = released ? await this.driver.enqueue(txn, intents) : {};
-      await putRows(txn, { ...memberRows(s, { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }), ...rows });
+      const now = Date.now();
+      const end = await this.#endOutside(txn, s, "closed", now);
+      await putRows(txn, { ...memberRows(s, { ...end.session, closed: true, closedAt: s.closedAt ?? now }), ...rows });
+      events = end.events;
       return true;
     });
+    for (const event of events) this.#wake(event, members);
     // After the commit, never inside the closure (see stored()), and for closeSession's reason.
     if (closed) await this.driver.reArm();
     if (released) await this.driver.deliverNow();
@@ -1832,16 +1857,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * by the `enqueue` `clearJoinCodes` uses and delivered once it has committed.
    */
   async unpublishSession(at: number): Promise<void> {
+    let events: SessionEvent[] = [];
+    let members: readonly Member[] = [];
     const dropped = await this.ctx.storage.transaction(async (txn) => {
+      events = [];
       const s = await this.stored(txn);
       if (!s || s.unpublishedAt != null) return false;
+      members = s.members;
       const permanent = Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt === null);
       const rows = await this.driver.enqueue(txn, permanent.map(([, rec]) => dropCodeIntent(rec.code)));
       const joinCodes = { ...s.joinCodes };
       for (const [role] of permanent) delete joinCodes[role];
-      await putRows(txn, { ...memberRows(s, { ...s, unpublishedAt: at, joinCodes }), ...rows });
+      // A room that went private answers nobody, so what strangers are waiting on ends with it, in this transaction (A2A).
+      const end = await this.#endOutside(txn, s, "unpublished", Date.now());
+      await putRows(txn, { ...memberRows(s, { ...end.session, unpublishedAt: at, joinCodes }), ...rows });
+      events = end.events;
       return permanent.length > 0;
     });
+    for (const event of events) this.#wake(event, members);
     if (dropped) await this.driver.deliverNow();
   }
 
@@ -2434,6 +2467,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async askOutside(req: AskRequest): Promise<AskOutcome> {
     let broughtForward = false as boolean;
     let wakesSeat = false as boolean;
+    let expires = false as boolean;
     // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
     let members: readonly Member[] = [];
     let appended: SessionEvent | null = null;
@@ -2441,6 +2475,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
       broughtForward = false;
       wakesSeat = false;
+      expires = false;
       appended = null;
       const s = await this.stored(txn);
       if (!s || s.frozenAt !== null) return { ok: false, error: "not_found" };
@@ -2458,13 +2493,20 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // The seat as voice: its day's count, its deadline on the record and its wake, in this transaction. The wake's
       // enqueue arms the alarm for the queue, and alarm()'s closing reArm() then finds the deadline, which `seatWaits`
       // derives: nothing here sets the alarm to it, so nothing pulls back an earlier time.
-      const seat = d.seatDay === null ? {} : {
-        session: { ...s, seatDay: d.seatDay, seatWaits: { ...s.seatWaits, [task.id]: task.seatDeadline as number } },
-        ...await this.driver.enqueue(txn, [hostWakeIntent(s.id, "outside", event.cursor)]),
+      const seat = d.seatDay === null ? {} : await this.driver.enqueue(txn, [hostWakeIntent(s.id, "outside", event.cursor)]);
+      // The task's lifetime on the record (`outsideExpiryAt`): a lower bound on the soonest any open task lapses, so
+      // the alarm is derived from one number and not from a read of every task row. Only ever brought earlier here.
+      const lapse = nextLapse([task]);
+      expires = lapse !== null && lapse < (s.outsideExpiryAt ?? Infinity);
+      const session = d.seatDay === null && !expires ? undefined : {
+        ...s,
+        ...(d.seatDay === null ? {} : { seatDay: d.seatDay, seatWaits: { ...s.seatWaits, [task.id]: task.seatDeadline as number } }),
+        ...(expires ? { outsideExpiryAt: lapse } : {}),
       };
       wakesSeat = d.seatDay !== null;
       broughtForward = await this.#writeEvent(txn, s, event, {
         ...seat,
+        ...(session === undefined ? {} : { session }),
         [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task,
         ...(d.standing === null ? {} : { [callerKey]: d.standing }),
         ...(d.issued === issued ? {} : { [OUTSIDE_VISITORS_KEY]: d.issued }),
@@ -2475,7 +2517,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const event = appended as SessionEvent | null;
     if (event !== null) {
       this.#wake(event, members);
-      if (broughtForward) await this.driver.reArm();
+      if (broughtForward || expires) await this.driver.reArm();
       // Last, as appendEvent's: nobody woken above waits on the seat's delivery.
       if (wakesSeat) await this.driver.deliverNow();
     }
@@ -2529,6 +2571,93 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (audited) await this.driver.deliverNow();
     }
     return result;
+  }
+
+  /**
+   * `BellmanStore.cancelOutside`: the asker withdraws a question. The task row, its `outside_notice` and the seat's
+   * deadline off the record are ONE transaction, and the row is read in it, so a racing answer finds the task canceled
+   * (`decideAnswer` maps that to "task_closed") and a cancel that finds the answer in first is "not_cancelable".
+   */
+  async cancelOutside(req: CancelRequest): Promise<CancelResult> {
+    let appended: SessionEvent | null = null;
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<CancelResult>(async (txn) => {
+      appended = null;
+      const s = await this.stored(txn);
+      if (!s || s.frozenAt !== null) return { ok: false, error: "task_not_found" };
+      members = s.members;
+      const key = `${OUTSIDE_TASK_PREFIX}${req.taskId}`;
+      const d = decideCancel(await txn.get<OutsideTask>(key), req);
+      if (!d.ok) return d;
+      const event: SessionEvent = { ...d.event, cursor: await this.nextCursor(txn), at: Date.now() };
+      const { [req.taskId]: _canceled, ...seatWaits } = s.seatWaits ?? {};
+      await this.#writeEvent(txn, s, event, {
+        ...(s.seatWaits?.[req.taskId] === undefined ? {} : { session: { ...s, seatWaits } }),
+        [key]: d.task,
+      });
+      appended = event;
+      return { ok: true, task: d.task };
+    });
+    const event = appended as SessionEvent | null;
+    if (event !== null) this.#wake(event, members);
+    return result;
+  }
+
+  /**
+   * End the room's open outside tasks for `reason`, inside the caller's transaction: each task's row and its
+   * `outside_notice` are written here, and the tasks' entries leave `seatWaits` and `outsideExpiryAt` moves to the next
+   * lapse among those left. The record is NOT written: it answers the session as it should now stand, and the caller
+   * puts it with its own change (`memberRows(s, end.session)`), which is how a close and its cancels commit as one.
+   * `s` is the session as the caller reads it in this transaction. The notices are "system" events, which keep no
+   * books, so writing them against `s` cannot overwrite what the caller writes. The caller wakes `events` once it commits.
+   *
+   * Idempotent: an ended task is no longer open, so a second close or a retried transaction ends nothing again.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #endOutside(
+    txn: DurableObjectTransaction, s: StoredSession, reason: EndReason, now: number,
+  ): Promise<{ session: StoredSession; events: SessionEvent[] }> {
+    const rows = [...(await txn.list<OutsideTask>({ prefix: OUTSIDE_TASK_PREFIX })).values()];
+    const ended = endings(rows, reason, now);
+    const events: SessionEvent[] = [];
+    for (const { task, event } of ended) {
+      const notice: SessionEvent = { ...event, cursor: await this.nextCursor(txn), at: now };
+      await this.#writeEvent(txn, s, notice, { [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task });
+      events.push(notice);
+    }
+    const gone = new Set(ended.map(({ task }) => task.id));
+    const waits = Object.entries(s.seatWaits ?? {});
+    const kept = waits.filter(([taskId]) => !gone.has(taskId));
+    const lapse = nextLapse(rows.filter((t) => !gone.has(t.id)));
+    const session = kept.length === waits.length && (s.outsideExpiryAt ?? null) === lapse ? s : {
+      ...s,
+      ...(kept.length === waits.length ? {} : { seatWaits: Object.fromEntries(kept) }),
+      outsideExpiryAt: lapse,
+    };
+    return { session, events };
+  }
+
+  /**
+   * An outside task's lifetime (EXPIRY_HANDLER): every open task idle for `OUTSIDE_TASK_TTL_MS` fails, in one
+   * transaction with the notices, and `outsideExpiryAt` moves to the next lapse or clears, which moves the derived time
+   * on. A closed or frozen room has nothing to end, and derives no name for it either.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #expireOutsideIfDue(now: number): Promise<void> {
+    let events: SessionEvent[] = [];
+    let members: readonly Member[] = [];
+    await this.ctx.storage.transaction(async (txn) => {
+      events = [];
+      const s = await this.stored(txn);
+      if (!s || s.closed || s.frozenAt !== null || typeof s.outsideExpiryAt !== "number" || now < s.outsideExpiryAt) return;
+      members = s.members;
+      const end = await this.#endOutside(txn, s, "expired", now);
+      await putRows(txn, memberRows(s, end.session));
+      events = end.events;
+    });
+    for (const event of events) this.#wake(event, members);
   }
 
   /**
@@ -2907,6 +3036,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
         if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
         if (name === SEAT_HANDLER) await this.#seatSilenceIfDue(now);
+        if (name === EXPIRY_HANDLER) await this.#expireOutsideIfDue(now);
       } catch (error) {
         // The runtime retries a throwing alarm a few times and then leaves it with nothing armed
         // (a read of the room arms it again: getSession), and it says nothing of which object it
@@ -2983,6 +3113,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // Consumed by #seatSilenceIfDue, which removes every entry it finds due, so the time moves on.
     const waits = Object.values(s.seatWaits ?? {});
     if (waits.length > 0) due.set(SEAT_HANDLER, Math.min(...waits));
+    // An open outside task's lifetime. Not in a frozen room (a freeze costs nobody their question's time: the thaw
+    // re-arms), and consumed by #expireOutsideIfDue, which moves the number on or clears it.
+    if (typeof s.outsideExpiryAt === "number" && s.frozenAt === null) due.set(EXPIRY_HANDLER, s.outsideExpiryAt);
     return due;
   }
 
@@ -3026,8 +3159,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // The cursor is read in the transaction that writes the event (see nextCursor), and
     // every write is to this object's own storage, so a transaction is enough and no
     // outbox is needed for the event.
+    let notices: SessionEvent[] = [];
     const event = await this.ctx.storage.transaction<SessionEvent>(async (txn) => {
       const rows = await this.driver.enqueue(txn, intents);
+      // The room's open outside tasks end with it, notices first so `session_expired` is the last thing in the log (A2A).
+      const end = await this.#endOutside(txn, s, "closed", now);
+      notices = end.events;
       const expired: SessionEvent = {
         cursor: await this.nextCursor(txn),
         type: "session_expired",
@@ -3039,10 +3176,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         at: now,
       };
       await this.#writeEvent(txn, s, expired, {
-        session: { ...s, closed: true, closedAt: s.closedAt ?? now, joinCodes: {} }, ...rows,
+        session: { ...end.session, closed: true, closedAt: s.closedAt ?? now, joinCodes: {} }, ...rows,
       });
       return expired;
     });
+    for (const notice of notices) this.#wake(notice, s.members);
     this.#wake(event);
     // The purge is due from the close (#65). The alarm that reaches here re-arms on its
     // way out, and a read that finds the room abandoned does not, so the close does.
@@ -5743,6 +5881,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult> {
     return this.session(sessionId).answerOutside(req);
+  }
+
+  async cancelOutside(sessionId: string, req: CancelRequest): Promise<CancelResult> {
+    return this.session(sessionId).cancelOutside(req);
   }
 
   async seatSkipped(sessionId: string, taskId: string, reason: string): Promise<void> {

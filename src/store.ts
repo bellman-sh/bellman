@@ -24,7 +24,10 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
-import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type SeatDay } from "./outside.js";
+import {
+  decideAnswer, decideAsk, decideCancel, endings,
+  type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason, type SeatDay,
+} from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -1671,6 +1674,14 @@ export interface BellmanStore {
    */
   answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult>;
   /**
+   * The asker withdraws an outside question (A2A): ends the task `TASK_STATE_CANCELED` with an
+   * `outside_notice`, in one unit with the decision (`decideCancel`). A racing answer therefore finds the task
+   * closed, and a cancel of an answered task is "not_cancelable". Another caller's task, a room gone or frozen:
+   * "task_not_found". Unpublishing, closing and the task's lifetime end open tasks in the same unit as their own
+   * write, with no call of this one.
+   */
+  cancelOutside(sessionId: string, req: CancelRequest): Promise<CancelResult>;
+  /**
    * The hosted seat will not answer this outside task (A2A): hand the voice to the members and clear the deadline.
    * Acts only while the task is still the seat's and WORKING, so a skip that arrives after the seat answered, or a
    * second skip, changes nothing; the seat's answer after a skip finds itself not the voice. `reason` is for the log.
@@ -2703,6 +2714,8 @@ export class MemoryStore implements BellmanStore {
     s.joinCodes = {};
     // A hosted room gives its creator's slot back as it closes (I7), however it closes.
     if (s.manifest.host !== null) this.hostedOpen.get(s.createdBy)?.delete(s.id);
+    // Whatever a stranger is waiting on is told it will not come, in the turn the room closes (A2A).
+    this.endOutside(s, "closed", at);
   }
 
   /**
@@ -2766,6 +2779,7 @@ export class MemoryStore implements BellmanStore {
       this.byJoinCode.delete(rec.code);
       delete s.joinCodes[role];
     }
+    this.endOutside(s, "unpublished", at);
   }
 
   async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
@@ -3256,6 +3270,29 @@ export class MemoryStore implements BellmanStore {
     }
     this.wakeHost(s, event);
     return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  async cancelOutside(sessionId: string, req: CancelRequest): Promise<CancelResult> {
+    // No await from the read to the write, as in askOutside.
+    const s = this.sessions.get(sessionId);
+    if (!s || s.frozenAt !== null) return { ok: false, error: "task_not_found" };
+    const d = decideCancel(this.outsideTasks.get(sessionId)?.get(req.taskId), req);
+    if (!d.ok) return d;
+    const event = this.appendNow(s, d.event, req.now);
+    this.applyExtras(s, event, { outsideTask: d.task });
+    return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  /**
+   * End every open outside task of a room for `reason`, each with its notice, in the caller's turn. Walked from a
+   * copy because `applyExtras` writes the map. Ending a task twice cannot happen: an ended task is no longer open.
+   */
+  private endOutside(s: Session, reason: EndReason, now: number): void {
+    const tasks = this.outsideTasks.get(s.id);
+    if (tasks === undefined) return;
+    for (const { task, event } of endings([...tasks.values()], reason, now)) {
+      this.applyExtras(s, this.appendNow(s, event, now), { outsideTask: task });
+    }
   }
 
   async seatSkipped(sessionId: string, taskId: string, _reason: string): Promise<void> {
@@ -4096,6 +4133,9 @@ export class MemoryStore implements BellmanStore {
     for (const tasks of this.outsideTasks.values()) {
       for (const t of tasks.values()) if (t.seatDeadline !== null && now >= t.seatDeadline) handOff(t, now);
     }
+    // A question nobody answered in OUTSIDE_TASK_TTL_MS fails (SessionDO: the same alarm). After the hand-off, so a task
+    // whose seat deadline and lifetime fall due together ends once, as expired.
+    for (const s of this.sessions.values()) if (s.frozenAt === null) this.endOutside(s, "expired", now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }

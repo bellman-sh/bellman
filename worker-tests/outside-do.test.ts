@@ -2,9 +2,9 @@
  * An outside caller's question, against the storage that makes it one write (A2A, Task 2): `askOutside` decides and
  * writes the event, the task row, the caller's standing and the visitor counter in one `ctx.storage.transaction`.
  */
-import { it, expect, afterEach } from "vitest";
-import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { answerQuestion, askRoom, type AskRequest } from "../src/outside.js";
+import { it, expect, afterEach, vi } from "vitest";
+import { env, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import { answerQuestion, askRoom, cancelOutsideTask, OUTSIDE_TASK_TTL_MS, type AskRequest } from "../src/outside.js";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
@@ -133,4 +133,93 @@ it("two role holders answering at once: one answer event, one winner, and the ro
   const row = await store.outsideTask(ID, "u_1", asked.task.id);
   expect(row).toMatchObject({ state: "TASK_STATE_COMPLETED" });
   expect(row?.answers).toEqual([{ cursor: events[0].cursor, text: (events[0].payload as { text: string }).text, at: events[0].at }]);
+});
+
+const notices = async (store: DurableObjectStore) =>
+  (await store.eventsAfter(ID, 0)).filter((e) => e.type === "outside_notice").map((e) => e.payload);
+const alarmAt = () => runInDurableObject(stubOf(ID), (i: SessionDO) =>
+  (i as unknown as { ctx: { storage: { getAlarm(): Promise<number | null> } } }).ctx.storage.getAlarm());
+
+const record = () => runInDurableObject(stubOf(ID), (_i: SessionDO, state) =>
+  state.storage.get<{ seatWaits?: Record<string, number>; outsideExpiryAt?: number | null }>("session"));
+
+it("an unanswered task fails after OUTSIDE_TASK_TTL_MS", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(publicRoom());
+  const now = Date.now();
+  const young = await askRoom(store, ID, { userId: "u_new", label: "n@x" }, { text: "recent" }, now);
+  // Asked more than the lifetime ago: the ask arms the alarm, and a past alarm fires by itself, so nothing here calls it.
+  const old = await askRoom(store, ID, { userId: "u_old", label: "o@x" }, { text: "ancient" }, now - OUTSIDE_TASK_TTL_MS - 1);
+  if (!young.ok || !old.ok) throw new Error("refused");
+
+  await vi.waitFor(async () => expect((await store.outsideTask(ID, "u_old", old.task.id))?.state).toBe("TASK_STATE_FAILED"));
+
+  expect(await store.outsideTask(ID, "u_old", old.task.id)).toMatchObject({ statusMessage: "The room didn't answer in time.", seatDeadline: null });
+  expect(await store.outsideTask(ID, "u_new", young.task.id), "a recent task is left open").toMatchObject({ state: "TASK_STATE_WORKING" });
+  expect(await notices(store)).toEqual([{ taskId: old.task.id, text: "The room didn't answer in time." }]);
+  expect((await record())?.outsideExpiryAt, "the next lapse is the recent task's").toBe(young.task.updatedAt + OUTSIDE_TASK_TTL_MS);
+});
+
+it("the expiry alarm ends the lapsed task and leaves the seat's deadline and the alarm alone", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(publicRoom());
+  const asked = await askRoom(store, ID, { userId: "u_old", label: "o@x" }, { text: "q" });
+  if (!asked.ok) throw new Error("refused");
+  const wait = Date.now() + 60 * 60_000;
+  const lapsed = Date.now() - OUTSIDE_TASK_TTL_MS - 1;
+  await runInDurableObject(stubOf(ID), async (_i: SessionDO, state) => {
+    const rec = (await state.storage.get<Record<string, unknown>>("session"))!;
+    await state.storage.put("session", { ...rec, seatWaits: { other: wait }, outsideExpiryAt: lapsed + OUTSIDE_TASK_TTL_MS });
+    const key = `ot:${asked.task.id}`;
+    await state.storage.put(key, { ...(await state.storage.get<object>(key)), updatedAt: lapsed });
+  });
+
+  await runDurableObjectAlarm(stubOf(ID));
+
+  expect(await store.outsideTask(ID, "u_old", asked.task.id)).toMatchObject({ state: "TASK_STATE_FAILED", statusMessage: "The room didn't answer in time." });
+  expect(await notices(store)).toEqual([{ taskId: asked.task.id, text: "The room didn't answer in time." }]);
+  expect(await record(), "the seat's wait stays, and nothing is left to expire").toMatchObject({ seatWaits: { other: wait }, outsideExpiryAt: null });
+  const next = await alarmAt();
+  expect(next, "the alarm is still armed for what is owed").not.toBeNull();
+  expect(next).toBeLessThanOrEqual(wait);
+  await runDurableObjectAlarm(stubOf(ID));
+  expect(await notices(store), "fires once").toHaveLength(1);
+});
+
+it("caller cancel, unpublish and close each end open tasks, with the notice, in storage", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(publicRoom());
+  const ask = async (n: number) => {
+    const r = await askRoom(store, ID, { userId: `u_${n}`, label: `${n}@x` }, { text: "q" });
+    if (!r.ok) throw new Error("refused");
+    return r.task;
+  };
+  const [a, b, c] = [await ask(1), await ask(2), await ask(3)];
+
+  expect(await cancelOutsideTask(store, ID, "u_2", a.id), "someone else's").toEqual({ ok: false, error: "task_not_found" });
+  expect(await cancelOutsideTask(store, ID, "u_1", a.id)).toMatchObject({ ok: true, task: { state: "TASK_STATE_CANCELED" } });
+  expect(await cancelOutsideTask(store, ID, "u_1", a.id)).toEqual({ ok: false, error: "not_cancelable" });
+  expect(await answerQuestion(store, ID, { memberId: "m_creator" }, { refId: a.questionCursors[0], text: "late" })).toEqual({ ok: false, error: "task_closed" });
+  await store.unpublishSession(ID, Date.now());
+  expect(await store.outsideTask(ID, "u_2", b.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: "The room went private." });
+  expect(await store.outsideTask(ID, "u_3", c.id)).toMatchObject({ state: "TASK_STATE_CANCELED", seatDeadline: null });
+  expect(await notices(store)).toEqual([
+    { taskId: a.id, text: "The asker canceled this question." },
+    { taskId: b.id, text: "The room went private." },
+    { taskId: c.id, text: "The room went private." },
+  ]);
+});
+
+it("closing the room ends its open tasks with the room's words", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(publicRoom());
+  const asked = await askRoom(store, ID, { userId: "u_1", label: "1@x" }, { text: "q" });
+  if (!asked.ok) throw new Error("refused");
+
+  await store.closeSession(ID);
+
+  expect(await store.outsideTask(ID, "u_1", asked.task.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: "The room closed.", seatDeadline: null });
+  expect(await notices(store)).toEqual([{ taskId: asked.task.id, text: "The room closed." }]);
+  await store.closeSession(ID);
+  expect(await notices(store), "a second close ends nothing again").toHaveLength(1);
 });

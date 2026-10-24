@@ -167,6 +167,8 @@ export interface OutsideTask {
   createdAt: number;
   updatedAt: number;
   seatDeadline: number | null;
+  /** Why the task ended, in words for the caller (A2A `status.message`): null until an ending sets it. */
+  statusMessage: string | null;
 }
 
 /** What a room keeps of one outside caller: the context their tasks share, and their visitor number when they have no handle. */

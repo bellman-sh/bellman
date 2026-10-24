@@ -31,7 +31,7 @@ export const outsideTask = (store: BellmanStore, sessionId: string, callerUserId
 export const outsideTasksOf = (store: BellmanStore, sessionId: string, callerUserId: string): Promise<OutsideTask[]> =>
   store.outsideTasksOf(sessionId, callerUserId);
 
-const isOpen = (t: OutsideTask): boolean => t.state === "TASK_STATE_WORKING" || t.state === "TASK_STATE_INPUT_REQUIRED";
+export const isOpen = (t: OutsideTask): boolean => t.state === "TASK_STATE_WORKING" || t.state === "TASK_STATE_INPUT_REQUIRED";
 
 /** What `askOutside` is handed: the caller, what they asked, and the handle they sign in under, if any. */
 export type AskRequest = { callerUserId: string; handle: string | undefined; text: string; taskId?: string; contextId?: string; now: number };
@@ -103,6 +103,7 @@ export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "un
     : {
       id: crypto.randomUUID(), contextId, sessionId: room.id, callerUserId: req.callerUserId, origin,
       state: "TASK_STATE_WORKING", ...voice, questionCursors: [], answers: [], createdAt: req.now, updatedAt: req.now,
+      statusMessage: null,
     };
   return {
     ok: true, task, issued, seatDay: seat ? { day: today, count: spent + 1 } : null,
@@ -222,3 +223,62 @@ export async function answerQuestion(
     ...(input.units === undefined ? {} : { units: input.units }),
   });
 }
+
+/** Why an open task ends, and the words the caller and the room are given for it. */
+export type EndReason = "canceled" | "expired" | "unpublished" | "closed";
+const ENDINGS: Record<EndReason, { state: "TASK_STATE_CANCELED" | "TASK_STATE_FAILED"; text: string }> = {
+  canceled: { state: "TASK_STATE_CANCELED", text: "The asker canceled this question." },
+  expired: { state: "TASK_STATE_FAILED", text: "The room didn't answer in time." },
+  unpublished: { state: "TASK_STATE_CANCELED", text: "The room went private." },
+  closed: { state: "TASK_STATE_CANCELED", text: "The room closed." },
+};
+
+/** The task as an ending leaves it, and the `outside_notice` that says so. The seat has no deadline on a task that is over. */
+export function endTask(task: OutsideTask, reason: EndReason, now: number): { task: OutsideTask; event: Omit<SessionEvent, "cursor" | "at"> } {
+  const { state, text } = ENDINGS[reason];
+  return {
+    task: { ...task, state, statusMessage: text, seatDeadline: null, updatedAt: now },
+    event: { type: "outside_notice", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: { taskId: task.id, text }, refId: null },
+  };
+}
+
+/** When a task with no activity lapses: `OUTSIDE_TASK_TTL_MS` after the last thing that happened to it. */
+const lapsesAt = (t: OutsideTask): number => t.updatedAt + OUTSIDE_TASK_TTL_MS;
+
+/**
+ * Every open task of `tasks` ended for `reason`; for "expired", those whose time has come and no others. Oldest question
+ * first, so the notices come in the order the questions did whatever order the store listed the rows in.
+ */
+export const endings = (tasks: readonly OutsideTask[], reason: EndReason, now: number) =>
+  tasks
+    .filter((t) => isOpen(t) && (reason !== "expired" || now >= lapsesAt(t)))
+    .sort((a, b) => a.questionCursors[0] - b.questionCursors[0])
+    .map((t) => endTask(t, reason, now));
+
+/** The soonest an open task of `tasks` lapses, or null when none is open. */
+export const nextLapse = (tasks: readonly OutsideTask[]): number | null => {
+  const times = tasks.filter(isOpen).map(lapsesAt);
+  return times.length === 0 ? null : Math.min(...times);
+};
+
+/** What `cancelOutside` is handed. */
+export type CancelRequest = { callerUserId: string; taskId: string; now: number };
+export type CancelError = "task_not_found" | "not_cancelable";
+export type CancelResult = { ok: true; task: OutsideTask } | { ok: false; error: CancelError };
+export type CancelDecision = { ok: false; error: CancelError } | { ok: true; task: OutsideTask; event: Omit<SessionEvent, "cursor" | "at"> };
+
+/**
+ * The decisions of a cancel that depend on the task row, which each store reads in the unit that writes the result
+ * (as `decideAnswer` does), so a racing answer finds the task canceled and an answer that landed first finds the
+ * cancel "not_cancelable". Only the asker may cancel: a task that is another's reads as one that does not exist.
+ */
+export function decideCancel(task: OutsideTask | undefined, req: CancelRequest): CancelDecision {
+  if (!task || task.callerUserId !== req.callerUserId) return { ok: false, error: "task_not_found" };
+  if (!isOpen(task)) return { ok: false, error: "not_cancelable" };
+  return { ok: true, ...endTask(task, "canceled", req.now) };
+}
+
+/** The asker cancels their own open task (A2A `CancelTask`). The cancel and its notice commit as one unit in the store. */
+export const cancelOutsideTask = (
+  store: BellmanStore, sessionId: string, callerUserId: string, taskId: string, now: number = Date.now(),
+): Promise<CancelResult> => store.cancelOutside(sessionId, { callerUserId, taskId, now });

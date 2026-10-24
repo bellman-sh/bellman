@@ -94,6 +94,13 @@ export interface StoredSession extends Omit<Session, "events"> {
    */
   seatWaits?: Record<string, number>;
   /**
+   * The soonest an open outside task (A2A) can expire: a lower bound on `updatedAt + OUTSIDE_TASK_TTL_MS` over the
+   * room's open tasks, so the alarm can derive its time without listing the task rows. An ask sets it when it is
+   * the soonest; the expiry handler, when it fires, ends what is due and writes the real next time (null when
+   * nothing is open). A task answered or canceled early leaves it standing: the firing finds nothing and clears it.
+   */
+  outsideExpiryAt?: number | null;
+  /**
    * The last `seq` the room gave a member, so the next seat takes the one after it (ADR
    * 0019). The Durable Objects record keeps it, because the members who have left are rows
    * it does not read on every call; MemoryStore counts the members it keeps instead.

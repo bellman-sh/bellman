@@ -6,7 +6,9 @@ import { VERBS, builtinPresets, resolveManifest, PRESET_NAMES } from "../src/man
 import { verbsOfRole } from "../src/roles.js";
 import { pairUp } from "./helpers/flows.js";
 import { Harness } from "./helpers/harness.js";
-import { answerQuestion, askRoom, isVoice, outsideTask, outsideTasksOf, type AskInput, type Caller } from "../src/outside.js";
+import {
+  answerQuestion, askRoom, cancelOutsideTask, isVoice, outsideTask, outsideTasksOf, OUTSIDE_TASK_TTL_MS, type AskInput, type Caller,
+} from "../src/outside.js";
 import { evictMember } from "../src/rooms.js";
 import { MemoryStore } from "../src/store.js";
 import type { Identity, RoomManifest, Session } from "../src/types.js";
@@ -431,5 +433,152 @@ describe("answering an outside question", () => {
       const out = await send(String(ref), { text: "which repo?", needs_input: true });
       expect(out.data).toMatchObject({ state: "TASK_STATE_INPUT_REQUIRED" });
     });
+  });
+});
+
+describe("endings: cancel, expiry, room unpublished or closed", () => {
+  const PUB = "qs_endings";
+  const asker: Caller = { userId: "u_out1", label: "out1@elsewhere" };
+  const stranger: Caller = { userId: "u_out2", label: "out2@elsewhere" };
+  const COPY = {
+    expired: "The room didn't answer in time.", unpublished: "The room went private.",
+    closed: "The room closed.", canceled: "The asker canceled this question.",
+  };
+  let store: MemoryStore;
+
+  const ask = async (who = asker, text = "what is this room for?", now?: number) => {
+    const r = await askRoom(store, PUB, who, { text }, now);
+    if (!r.ok) throw new Error("ask refused");
+    return r.task;
+  };
+  const notices = async () => (await store.eventsAfter(PUB, 0)).filter((e) => e.type === "outside_notice");
+  const row = async (who: Caller, id: string) => (await outsideTask(store, PUB, who.userId, id))!;
+
+  beforeEach(async () => {
+    store = new MemoryStore();
+    await store.createSession(session({
+      id: PUB, manifest: roomManifest({ public: true, room: "Open review", purpose: "Ask us" }), members: [member()],
+    }));
+  });
+
+  it("caller cancels an open task", async () => {
+    const task = await ask();
+
+    const r = await cancelOutsideTask(store, PUB, asker.userId, task.id);
+
+    expect(r).toMatchObject({ ok: true, task: { id: task.id, state: "TASK_STATE_CANCELED", statusMessage: COPY.canceled, seatDeadline: null } });
+    expect(await row(asker, task.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: COPY.canceled });
+    expect(await notices()).toMatchObject([{ fromMemberId: "system", payload: { taskId: task.id, text: COPY.canceled } }]);
+  });
+
+  it("a task waiting on INPUT_REQUIRED can be canceled too", async () => {
+    const task = await ask();
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: task.questionCursors[0], text: "which repo?", needsInput: true });
+
+    expect(await cancelOutsideTask(store, PUB, asker.userId, task.id)).toMatchObject({ ok: true, task: { state: "TASK_STATE_CANCELED" } });
+  });
+
+  it("cancel on a completed task is not_cancelable, and writes nothing", async () => {
+    const task = await ask();
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: task.questionCursors[0], text: "a room to review code" });
+
+    expect(await cancelOutsideTask(store, PUB, asker.userId, task.id)).toEqual({ ok: false, error: "not_cancelable" });
+    expect(await cancelOutsideTask(store, PUB, asker.userId, task.id), "and again").toEqual({ ok: false, error: "not_cancelable" });
+    expect(await notices()).toEqual([]);
+    expect((await row(asker, task.id)).state).toBe("TASK_STATE_COMPLETED");
+  });
+
+  it("another caller's task, and a task that does not exist, are both task_not_found", async () => {
+    const task = await ask();
+
+    expect(await cancelOutsideTask(store, PUB, stranger.userId, task.id)).toEqual({ ok: false, error: "task_not_found" });
+    expect(await cancelOutsideTask(store, PUB, asker.userId, "nope")).toEqual({ ok: false, error: "task_not_found" });
+    expect((await row(asker, task.id)).state).toBe("TASK_STATE_WORKING");
+    expect(await notices()).toEqual([]);
+  });
+
+  it("a cancel before an answer closes the task to the answer, and a cancel after one is not_cancelable", async () => {
+    const [a, b] = [await ask(), await ask(asker, "another")];
+    await cancelOutsideTask(store, PUB, asker.userId, a.id);
+
+    expect(await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: a.questionCursors[0], text: "late" })).toEqual({ ok: false, error: "task_closed" });
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: b.questionCursors[0], text: "in time" });
+    expect(await cancelOutsideTask(store, PUB, asker.userId, b.id)).toEqual({ ok: false, error: "not_cancelable" });
+    expect((await store.eventsAfter(PUB, 0)).filter((e) => e.type === "outside_answer")).toHaveLength(1);
+  });
+
+  it('unpublishing cancels every open task with "The room went private."', async () => {
+    const [a, b, c] = [await ask(), await ask(stranger), await ask(asker, "done")];
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: c.questionCursors[0], text: "answered" });
+
+    await store.unpublishSession(PUB, 5);
+
+    for (const [who, t] of [[asker, a], [stranger, b]] as const) {
+      expect(await row(who, t.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: COPY.unpublished, seatDeadline: null });
+    }
+    expect(await row(asker, c.id), "an answered task is left as it was").toMatchObject({ state: "TASK_STATE_COMPLETED", statusMessage: null });
+    expect((await notices()).map((e) => e.payload)).toEqual([
+      { taskId: a.id, text: COPY.unpublished }, { taskId: b.id, text: COPY.unpublished },
+    ]);
+  });
+
+  it('closing the room cancels open tasks with "The room closed."', async () => {
+    const [a, b] = [await ask(), await ask(stranger)];
+
+    await store.closeSession(PUB);
+
+    for (const [who, t] of [[asker, a], [stranger, b]] as const) {
+      expect(await row(who, t.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: COPY.closed });
+    }
+    expect((await notices()).map((e) => e.payload)).toEqual([{ taskId: a.id, text: COPY.closed }, { taskId: b.id, text: COPY.closed }]);
+    await store.closeSession(PUB);
+    expect(await notices(), "a second close ends nothing again").toHaveLength(2);
+  });
+
+  it("the room closing when its last member leaves ends the open tasks too", async () => {
+    const task = await ask();
+
+    expect(await store.closeSessionIfEmpty(PUB), "a member is still in").toBe(false);
+    expect((await row(asker, task.id)).state).toBe("TASK_STATE_WORKING");
+    await store.updateMember(PUB, "m_creator", { leftAt: 9 });
+    expect(await store.closeSessionIfEmpty(PUB)).toBe(true);
+
+    expect(await row(asker, task.id)).toMatchObject({ state: "TASK_STATE_CANCELED", statusMessage: COPY.closed });
+  });
+
+  it("an unanswered task fails OUTSIDE_TASK_TTL_MS after its last activity, with the room's words", async () => {
+    const t0 = Date.now();
+    const task = await ask(asker, "q", t0);
+    await store.sweep(t0 + OUTSIDE_TASK_TTL_MS - 1);
+    expect((await row(asker, task.id)).state, "not yet").toBe("TASK_STATE_WORKING");
+
+    await store.sweep(t0 + OUTSIDE_TASK_TTL_MS);
+
+    expect(await row(asker, task.id)).toMatchObject({ state: "TASK_STATE_FAILED", statusMessage: COPY.expired });
+    expect((await notices()).map((e) => e.payload)).toEqual([{ taskId: task.id, text: COPY.expired }]);
+    await store.sweep(t0 + OUTSIDE_TASK_TTL_MS * 2);
+    expect(await notices(), "fails once").toHaveLength(1);
+  });
+
+  it("activity moves the expiry: a follow-up gives the task a fresh lifetime", async () => {
+    const t0 = Date.now();
+    const task = await ask(asker, "q", t0);
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: task.questionCursors[0], text: "which repo?", needsInput: true }, t0 + 1000);
+    await askRoom(store, PUB, asker, { text: "the site", taskId: task.id }, t0 + OUTSIDE_TASK_TTL_MS - 1);
+
+    await store.sweep(t0 + OUTSIDE_TASK_TTL_MS + 5);
+
+    expect((await row(asker, task.id)).state).toBe("TASK_STATE_WORKING");
+  });
+
+  it("expiry leaves a task that was already answered alone", async () => {
+    const t0 = Date.now();
+    const task = await ask(asker, "q", t0);
+    await answerQuestion(store, PUB, { memberId: "m_creator" }, { refId: task.questionCursors[0], text: "done" }, t0 + 5);
+
+    await store.sweep(t0 + OUTSIDE_TASK_TTL_MS * 3);
+
+    expect(await row(asker, task.id)).toMatchObject({ state: "TASK_STATE_COMPLETED", statusMessage: null });
+    expect(await notices()).toEqual([]);
   });
 });

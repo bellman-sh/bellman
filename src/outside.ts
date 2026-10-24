@@ -257,6 +257,40 @@ export function endTask(task: OutsideTask, reason: EndReason, now: number): { ta
   };
 }
 
+/**
+ * The `outside_notice` that tells the room a question is now its members' to answer, appended with the hand-off
+ * (`handOff`) in both stores. Its ref is the question's cursor, the one an `outside_answer` names.
+ */
+export const handedOverNotice = (task: OutsideTask): Omit<SessionEvent, "cursor" | "at"> => ({
+  type: "outside_notice", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+  payload: { taskId: task.id, text: "This outside question is now for the room's members to answer." },
+  refId: String(task.questionCursors.at(-1)),
+});
+
+/** What a member's read of an outside question it is to answer adds to it (D4). */
+export const VOICE_NOTE = "You're expected to answer this. Use bellman_send type \"outside_answer\" with ref_id set to this question's cursor.";
+
+/**
+ * The cursors among `events` of the outside questions `memberId` is to answer now: the voice of the task, which is
+ * open on that question (`decideAnswer`'s test). Read as the task stands, so a question the seat handed over is noted
+ * from then on, and an answered or ended one is not.
+ */
+export async function questionsToAnswer(
+  store: BellmanStore,
+  session: Pick<Session, "id" | "members" | "manifest" | "creator">,
+  events: readonly SessionEvent[],
+  memberId: string,
+): Promise<Set<number>> {
+  const due = new Set<number>();
+  for (const e of events) {
+    const taskId = e.type === "outside_question" ? (e.payload as { taskId?: unknown }).taskId : undefined;
+    if (typeof taskId !== "string") continue;
+    const task = await store.outsideTaskById(session.id, taskId);
+    if (task?.state === "TASK_STATE_WORKING" && task.questionCursors.at(-1) === e.cursor && isVoice(session, task, memberId)) due.add(e.cursor);
+  }
+  return due;
+}
+
 /** When a task with no activity lapses: `OUTSIDE_TASK_TTL_MS` after the last thing that happened to it. */
 const lapsesAt = (t: OutsideTask): number => t.updatedAt + OUTSIDE_TASK_TTL_MS;
 

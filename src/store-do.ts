@@ -56,7 +56,7 @@ import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
 import { decideApproval } from "./proposal.js";
 import {
-  decideAnswer, decideAsk, decideCancel, endings, nextLapse,
+  decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse,
   type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason,
 } from "./outside.js";
 import { presetInNewWords } from "./presets.js";
@@ -2695,48 +2695,74 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * `BellmanStore.seatSkipped`: the task row's hand-off (`handOff`) and its deadline off the record, in ONE
-   * transaction, so it serialises with the seat's answer: whichever lands second finds the other's row. Acts on a frozen
-   * or closed room too, since it writes no event; it only says who may answer.
+   * `BellmanStore.seatSkipped`: the task row's hand-off (`handOff`), its deadline off the record and the notice that
+   * tells the members (`handedOverNotice`), in ONE transaction, so it serialises with the seat's answer: whichever lands
+   * second finds the other's row. A frozen or closed room takes the hand-off without the notice, as it takes no event.
    */
   async seatSkipped(taskId: string, reason: string): Promise<void> {
+    let notice: SessionEvent | null = null;
+    let members: readonly Member[] = [];
     const moved = await this.ctx.storage.transaction<boolean>(async (txn) => {
+      notice = null;
       const s = await this.stored(txn);
       if (!s) return false;
+      members = s.members;
       const key = `${OUTSIDE_TASK_PREFIX}${taskId}`;
       const task = await txn.get<OutsideTask>(key);
       const handed = task !== undefined && handOff(task, Date.now());
-      if (handed) await txn.put(key, task);
+      let rec = s;
       if (s.seatWaits?.[taskId] !== undefined) {
         const { [taskId]: _gone, ...seatWaits } = s.seatWaits;
-        await putRows(txn, memberRows(s, { ...s, seatWaits }));
+        rec = { ...s, seatWaits };
       }
+      if (handed && !s.closed && s.frozenAt === null) {
+        const now = Date.now();
+        notice = { ...handedOverNotice(task), cursor: await this.nextCursor(txn), at: now };
+        await this.#writeEvent(txn, s, notice, { ...(rec === s ? {} : { session: rec }), [key]: task });
+        return true;
+      }
+      if (handed) await txn.put(key, task);
+      if (rec !== s) await putRows(txn, memberRows(s, rec));
       return handed;
     });
+    if (notice) this.#wake(notice, members);
     if (moved) console.log(`seat handed outside task ${taskId} to the members: ${reason}`);
   }
 
   /**
    * The seat's silence (SEAT_HANDLER): every outside task whose `seatWaits` deadline has passed goes to the members,
-   * in one transaction, and leaves `seatWaits`, which moves the derived time on. `handOff` skips a task the seat has
+   * with the notice that tells them (as `seatSkipped`), in one transaction, and leaves `seatWaits`, which moves the derived time on. `handOff` skips a task the seat has
    * answered since; its entry goes all the same.
    *
    * `#private`, for the reason #purgeIfDue gives.
    */
   async #seatSilenceIfDue(now: number): Promise<void> {
+    let events: SessionEvent[] = [];
+    let members: readonly Member[] = [];
     await this.ctx.storage.transaction(async (txn) => {
+      events = [];
       const s = await this.stored(txn);
       if (!s?.seatWaits) return;
       const due = Object.entries(s.seatWaits).filter(([, at]) => now >= at).map(([taskId]) => taskId);
       if (due.length === 0) return;
+      members = s.members;
+      const tells = !s.closed && s.frozenAt === null;
       for (const taskId of due) {
         const key = `${OUTSIDE_TASK_PREFIX}${taskId}`;
         const task = await txn.get<OutsideTask>(key);
-        if (task !== undefined && handOff(task, now)) await txn.put(key, task);
+        if (task === undefined || !handOff(task, now)) continue;
+        if (!tells) {
+          await txn.put(key, task);
+          continue;
+        }
+        const notice: SessionEvent = { ...handedOverNotice(task), cursor: await this.nextCursor(txn), at: now };
+        await this.#writeEvent(txn, s, notice, { [key]: task });
+        events.push(notice);
       }
       const seatWaits = Object.fromEntries(Object.entries(s.seatWaits).filter(([taskId]) => !due.includes(taskId)));
       await putRows(txn, memberRows(s, { ...s, seatWaits }));
     });
+    for (const event of events) this.#wake(event, members);
   }
 
   /**

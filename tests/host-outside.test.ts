@@ -10,6 +10,7 @@ import { SEAT_OUTSIDE_DAILY_CAP, SEAT_SILENCE_MS, answerQuestion, askRoom, outsi
 import { monthKey } from "../src/stored-session.js";
 import type { OutsideTask } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { DEV_KEY, Harness } from "./helpers/harness.js";
 
 const PUB = "qs_hosted_public";
 const DAY = Date.UTC(2026, 9, 23, 12, 0, 0);
@@ -131,6 +132,68 @@ describe("the hand-off to the members", () => {
     const r = await answerQuestion(store, PUB, creator, { refId: task.questionCursors[0], text: "me first" });
     expect(r).toEqual({ ok: false, error: "not_the_voice" });
     expect((await answerQuestion(store, PUB, seat, { refId: task.questionCursors[0], text: "parsers" })).ok).toBe(true);
+  });
+});
+
+describe("the members are told when an outside question becomes theirs", () => {
+  const HANDED = "This outside question is now for the room's members to answer.";
+  const NOTE = "You're expected to answer this. Use bellman_send type \"outside_answer\" with ref_id set to this question's cursor.";
+  let store: MemoryStore;
+  beforeEach(async () => {
+    store = new MemoryStore();
+    await room(store);
+  });
+  const notices = async () => (await store.eventsAfter(PUB, 0)).filter((e) => e.type === "outside_notice");
+
+  it("the seat skipping appends an outside_notice, its ref the question's cursor", async () => {
+    const task = await asked(store, 1);
+    await store.seatSkipped(PUB, task.id, "the model failed");
+    expect((await notices()).map((e) => [e.fromMemberId, e.refId, e.payload])).toEqual([
+      ["system", String(task.questionCursors[0]), { taskId: task.id, text: HANDED }],
+    ]);
+    await store.seatSkipped(PUB, task.id, "again");
+    expect(await notices(), "a second skip hands nothing over").toHaveLength(1);
+  });
+
+  it("the seat's silence appends the same notice", async () => {
+    const task = await asked(store, 1);
+    await store.sweep(DAY + SEAT_SILENCE_MS);
+    expect((await notices()).map((e) => [e.refId, e.payload])).toEqual([[String(task.questionCursors[0]), { taskId: task.id, text: HANDED }]]);
+  });
+
+  it("a skip after the seat answered appends nothing", async () => {
+    const task = await asked(store, 1);
+    expect((await answerQuestion(store, PUB, seat, { refId: task.questionCursors[0], text: "parsers" })).ok).toBe(true);
+    await store.seatSkipped(PUB, task.id, "late");
+    expect(await notices()).toEqual([]);
+  });
+
+  it("the voice's sync notes the question it is to answer, and a member who is not the voice sees no note", async () => {
+    const h = new Harness(store);
+    try {
+      (store as unknown as { sessions: Map<string, { members: unknown[] }> }).sessions.get(PUB)!.members
+        .push(member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead", seq: 3, publicNumber: 3 }));
+      const jesse = await h.connect(DEV_KEY.jesse);
+      const peer = await h.connect(DEV_KEY.peer);
+      const task = await asked(store, 1);
+      const ref = task.questionCursors[0];
+      const questionOf = async (who: typeof jesse, memberId: string) => {
+        const out = await who.call("bellman_sync", { session_id: PUB, member_id: memberId });
+        expect(out.isError, out.text).toBe(false);
+        return (out.data.events as { data: { type: string }; note?: string }[]).find((e) => e.data.type === "outside_question")!;
+      };
+
+      expect((await questionOf(jesse, "m_creator")).note, "the seat is the voice").toBeUndefined();
+      await store.seatSkipped(PUB, task.id, "the model failed");
+      expect((await questionOf(jesse, "m_creator")).note).toBe(NOTE);
+      expect((await questionOf(peer, "m_peer")).note, "the creator answers, as no role holds answer").toBeUndefined();
+
+      const sent = await jesse.call("bellman_send", { session_id: PUB, member_id: "m_creator", type: "outside_answer", ref_id: String(ref), payload: { text: "we review parsers" } });
+      expect(sent.isError, sent.text).toBe(false);
+      expect((await questionOf(jesse, "m_creator")).note, "an answered question is not noted").toBeUndefined();
+    } finally {
+      await h.close();
+    }
   });
 });
 

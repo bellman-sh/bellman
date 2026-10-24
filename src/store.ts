@@ -25,7 +25,7 @@ import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
 import {
-  decideAnswer, decideAsk, decideCancel, endings,
+  decideAnswer, decideAsk, decideCancel, endings, handedOverNotice,
   type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason, type SeatDay,
 } from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
@@ -3336,7 +3336,14 @@ export class MemoryStore implements BellmanStore {
 
   async seatSkipped(sessionId: string, taskId: string, _reason: string): Promise<void> {
     const task = this.outsideTasks.get(sessionId)?.get(taskId);
-    if (task) handOff(task, Date.now());
+    if (task) this.handOver(sessionId, task, Date.now());
+  }
+
+  /** `handOff`, and the notice that tells the members (`handedOverNotice`) when the room takes events (SessionDO: the same). */
+  private handOver(sessionId: string, task: OutsideTask, now: number): void {
+    if (!handOff(task, now)) return;
+    const s = this.sessions.get(sessionId);
+    if (s && !s.closed && s.frozenAt === null) this.appendNow(s, handedOverNotice(task), now);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
@@ -4169,8 +4176,8 @@ export class MemoryStore implements BellmanStore {
       if (sweep !== null && now >= sweep) await this.sweepBlobs(s.id);
     }
     // The seat's silence on an outside question: past its deadline the members answer (SessionDO: the room's alarm).
-    for (const tasks of this.outsideTasks.values()) {
-      for (const t of tasks.values()) if (t.seatDeadline !== null && now >= t.seatDeadline) handOff(t, now);
+    for (const [sessionId, tasks] of this.outsideTasks) {
+      for (const t of tasks.values()) if (t.seatDeadline !== null && now >= t.seatDeadline) this.handOver(sessionId, t, now);
     }
     // A question nobody answered in OUTSIDE_TASK_TTL_MS fails (SessionDO: the same alarm). After the hand-off, so a task
     // whose seat deadline and lifetime fall due together ends once, as expired.

@@ -5,7 +5,7 @@ import type { HostDO } from "../src/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
 import type { OutsideTask, SessionEvent } from "../src/types.js";
-import { askRoom } from "../src/outside.js";
+import { answerQuestion, askRoom, questionsToAnswer } from "../src/outside.js";
 import type { StoredSession } from "../src/stored-session.js";
 import worker from "../src/worker.js";
 import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
@@ -529,6 +529,41 @@ it("a seat that passes hands the question to the members through the room, uncha
   expect(await task()).toMatchObject({ state: "TASK_STATE_WORKING", voice: "members", seatDeadline: null });
   expect((await record())!.hostUnits.used).toBe(0);
   expect((await record())!.seatWaits).toEqual({});
+});
+
+const HANDED = "This outside question is now for the room's members to answer.";
+const handedNotices = async (store: DurableObjectStore, id: string) =>
+  (await store.eventsAfter(id, 0)).filter((e) => e.type === "outside_notice").map((e) => [e.refId, e.payload]);
+
+it("a seat that skips tells the members in the room's log, the creator's read notes the question, and its answer lands", async () => {
+  modelAnswers("PASS");
+  const id = "qs_outside_seat_skips_told";
+  const { store, host, task } = await askedPublicHosted(id);
+  await seatIdle(host);
+  const { id: taskId, questionCursors: [ref] } = await task();
+
+  expect(await handedNotices(store, id)).toEqual([[String(ref), { taskId, text: HANDED }]]);
+  const room = (await store.getSession(id))!;
+  const read = (await store.eventsAfter(id, 0)).filter((e) => e.type === "outside_question");
+  expect([...await questionsToAnswer(store, room, read, "m_creator")], "the creator is the voice").toEqual([ref]);
+  expect([...await questionsToAnswer(store, room, read, HOST_MEMBER_ID)], "the seat is not, any more").toEqual([]);
+  expect(await answerQuestion(store, id, { memberId: "m_creator" }, { refId: ref, text: "We review parsers." })).toMatchObject({ ok: true });
+});
+
+it("the room's alarm, handing a silent seat's question over, tells the members", async () => {
+  const held = modelHolds("Too late.");
+  const id = "qs_outside_seat_silent_told";
+  const { store, stub, host, task } = await askedPublicHosted(id);
+  await held.asked();
+  const { id: taskId, questionCursors: [ref] } = await task();
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<StoredSession>("session");
+    await ctx.storage.put("session", { ...s, seatWaits: { [taskId]: Date.now() - 1 } });
+  });
+  await runDurableObjectAlarm(stub);
+  expect(await handedNotices(store, id)).toEqual([[String(ref), { taskId, text: HANDED }]]);
+  held.release();
+  await seatIdle(host);
 });
 
 it("the room's alarm hands a silent seat's question to the members, and the seat's late answer is refused", async () => {

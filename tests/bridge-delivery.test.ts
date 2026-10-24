@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
-import { drain, fromEnvelope, type WireEnvelope } from "../src/inbox.js";
+import { drain, fromEnvelope, renderEvent, type WireEnvelope } from "../src/inbox.js";
 
 const envelope = (over: Record<string, unknown> = {}): WireEnvelope => ({
   trust: "untrusted",
@@ -24,6 +24,14 @@ const envelope = (over: Record<string, unknown> = {}): WireEnvelope => ({
 } as WireEnvelope);
 
 describe("fromEnvelope", () => {
+  it("carries the server's note on a question this member is to answer, and the channel shows it", () => {
+    const note = "You're expected to answer this. Use bellman_send type \"outside_answer\" with ref_id set to this question's cursor.";
+    const e = fromEnvelope({ session_id: "qs_1", member_id: "m_me" }, { ...envelope({ type: "outside_question", ambient: undefined }), note } as WireEnvelope);
+    expect(e.note).toBe(note);
+    expect(renderEvent(e)).toContain(`\n${note}`);
+    expect(renderEvent(fromEnvelope({ session_id: "qs_1", member_id: "m_me" }, envelope()))).not.toContain("expected to answer");
+  });
+
   it("carries ambient through to the delivered event", () => {
     const e = fromEnvelope({ session_id: "qs_1", member_id: "m_me" }, envelope());
     expect(e.ambient).toBe(true);

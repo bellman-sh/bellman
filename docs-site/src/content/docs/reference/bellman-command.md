@@ -1,9 +1,9 @@
 ---
 title: The bellman command
-description: bellman update, bellman feature-request and bellman version, from the npm package.
+description: bellman update, bellman doctor, bellman feature-request and bellman version, from the npm package.
 ---
 
-`bellman` is a command you run in a terminal. It is not one of the tools your agent calls. It updates the npm package, opens the feature-request form on GitHub, and prints the installed version.
+`bellman` is a command you run in a terminal. It is not one of the tools your agent calls. It updates the npm package, says what Claude Code on your machine runs of Bellman, opens the feature-request form on GitHub, and prints the installed version.
 
 The npm package, `@bellman-sh/mcp-server`, puts `bellman` on your PATH, and the installer at `https://bellman.sh/install.sh` installs that package. The Claude Code plugin does not, so a machine with only the plugin has no `bellman` command. To take the plugin's next release, run `claude plugin update bellman@bellman`.
 
@@ -14,6 +14,7 @@ Usage: bellman <command>
 
   feature-request [words...]  open the feature-request form on GitHub; the words become its title
   update [--check]            install the latest release from npm; --check only reports
+  doctor                      say what Claude Code here runs of Bellman, and how to fix what is off
   version                     print the installed version (also --version, -v)
   help                        print this text (also --help, -h)
 ```
@@ -58,6 +59,31 @@ On a clone or a project dependency `update` already runs nothing, so `--check` c
 `update` takes `--check` and nothing else. Any other argument is refused, not skipped, because `bellman update --chek` is a typo for the safe option and read as a plain `update` it would install. The refusal is `bellman: update does not take --chek`, followed by the usage, on stderr, and the exit code is 1.
 
 It also exits 1 when it cannot ask npm for the latest version, because npm is missing or you are offline. If the install itself fails, it exits with npm's own status.
+
+## `bellman doctor`
+
+Run `bellman doctor` when Bellman in Claude Code is not what you expect: the mod shows nothing, an update changed nothing, or a session never hears its room. It reads and asks, and changes nothing. Each line is `ok`, `note`, or `fix`, and each `fix` is followed by the commands that fix it:
+
+```text
+fix   The bellman package is 0.4.0; the latest is 0.5.0.
+        $ bellman update
+ok    One local bridge: MCP server "bellman" in ~/.claude.json (user scope).
+fix   The bellman marketplace is not added, so bellman-mod is not installed.
+        $ claude plugin marketplace add bellman-sh/bellman
+        $ claude plugin install bellman-mod@bellman
+ok    The door 2437.sock answers: channel delivery, 2 seats, signed in.
+ok    Claude Code is 2.1.310 (bellman-mod was written for 2.1.301; a build without mods skips it quietly).
+```
+
+It checks, in this order:
+
+- **The package.** This install's version against npm's latest.
+- **The bridges Claude Code starts in this folder.** The plugin, and any MCP server that runs Bellman in `~/.claude.json` (user or local scope) or `.mcp.json` (project scope). None means rooms reach no session. More than one means every session runs that many bridges, and it prints how to remove the extra servers. A server with a `url` talks to the hosted server directly, with no local bridge, so the mod and the Stop hook see nothing through it.
+- **The plugin and the mod.** Whether the bellman marketplace is added, whether each plugin is installed and enabled, and whether it is behind npm.
+- **The doors.** Whether the door folder is closed to other users, which bridges answer on it, their delivery, their seats, and whether each holds a sign-in. A socket nothing answers on was left by a bridge that has exited.
+- **Claude Code.** Its build against the one the mod was written for.
+
+It exits 1 when there is something to fix and 0 otherwise. It reads Claude Code's own files, whose shapes are not a published API, so a file it cannot read is treated as absent. `doctor` takes no arguments.
 
 ## `bellman feature-request`
 

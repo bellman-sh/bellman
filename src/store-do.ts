@@ -4,7 +4,7 @@ import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
-import { MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "./store.js";
@@ -4029,6 +4029,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return outcome;
   }
 
+  async #renewOrgInviteTxn(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const [byOrg, byKey] = inviteKeysFor({ orgId, key });
+      const found = await txn.get<OrgInvite>(byOrg);
+      if (!found) return "missing" as const;
+      const renewed: OrgInvite = { ...found, invitedBy, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
+      const rows = await this.driver.enqueue(txn, this.#auditIntents([orgEventEntry(orgId, "invite_resent", { key }, audit, now)]));
+      await txn.put<unknown>({ [byOrg]: renewed, [byKey]: renewed, ...rows });
+      return renewed;
+    });
+  }
+
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    const outcome = await this.#renewOrgInviteTxn(orgId, key, invitedBy, now, audit);
+    if (outcome !== "missing") await this.driver.deliverNow();
+    return outcome;
+  }
+
   /** The offer, the switch, every key's grant and the seats are read in the transaction that writes the grant (ADR 0027). */
   async #acceptOrgInviteTxn(
     orgId: string, keys: string[], subjectKey: string, now: number, audit: AuditIntent,
@@ -6029,6 +6047,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {
     return this.registry.deleteOrgInvite(orgId, key, audit);
+  }
+
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    return this.registry.renewOrgInvite(orgId, key, invitedBy, now, audit);
   }
 
   async acceptOrgInvite(

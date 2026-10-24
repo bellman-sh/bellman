@@ -5205,6 +5205,24 @@ export function describeStoreContract(
         expect((await store.listOrgInvites("org_acme", 10)).map((i) => i.expiresAt)).toEqual([7 + INVITE_TTL_MS, 7 + INVITE_TTL_MS]);
       });
 
+      it("renews an invite: a new time, a fresh fourteen days, this admin, both rows, and a row in the stream", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);
+        const renewed = await store.renewOrgInvite("org_acme", "github:9", "u_github_7", 500, by);
+        expect(renewed).toMatchObject({ key: "github:9", role: "member", invitedAt: 500, expiresAt: 500 + INVITE_TTL_MS, invitedBy: "u_github_7" });
+        expect(await store.invitesFor(["github:9"])).toEqual([renewed]);
+        expect(await store.listOrgInvites("org_acme", 10)).toEqual([renewed]);
+        expect(await store.acceptOrgInvite("org_acme", ["github:9"], "github:9", 501, by)).toBe("joined");
+        expect(await orgEvents()).toEqual(["member_invited", "invite_resent"]);
+      });
+
+      it("renews nothing that is not there: no invite under the key, or another org's", async () => {
+        await seated();
+        await store.putOrgInvite(invite("github:9"), by);
+        expect(await store.renewOrgInvite("org_acme", "github:8", "u_github_1", 500, by)).toBe("missing");
+        expect(await store.renewOrgInvite("org_b", "github:9", "u_github_1", 500, by)).toBe("missing");
+      });
+
       it("seats nobody for an expired invite and keeps its row for the roster (ADR 0036, D3)", async () => {
         await seated();
         await store.putOrgInvite(invite("github:9", { expiresAt: 100 }), by);

@@ -4,7 +4,7 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
-import { MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat } from "./orgs.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1936,6 +1936,11 @@ export interface BellmanStore {
   /** An admin's withdrawal of one invite: both rows, and `invite_withdrawn` in the org's stream. */
   deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing">;
   /**
+   * Resend (ADR 0036, D4): the row rewritten with `invitedAt: now`, `expiresAt: now + INVITE_TTL_MS`, `invitedBy`;
+   * the role stands. One `invite_resent` row `{ key }`.
+   */
+  renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing">;
+  /**
    * A Join (ADR 0027), ONE operation, so a withdrawal that lands first means no seat. The org's offer
    * to one of the sign-in's `keys`, an invite or an admin's seat on an address the org no longer owns
    * by its form (`isUnownedSeat`), becomes the grant of `subjectKey`: team, the offer's role, `source:
@@ -3688,6 +3693,16 @@ export class MemoryStore implements BellmanStore {
   async invitesFor(keys: string[]): Promise<OrgInvite[]> {
     const orgIds = [...this.invites.keys()].sort();
     return detach([...new Set(keys)].flatMap((key) => orgIds.flatMap((orgId) => this.invites.get(orgId)?.get(key) ?? [])));
+  }
+
+  async renewOrgInvite(orgId: string, key: string, invitedBy: string, now: number, audit: AuditIntent): Promise<OrgInvite | "missing"> {
+    const pending = this.invites.get(orgId);
+    const found = pending?.get(key);
+    if (!pending || !found) return "missing";
+    const renewed: OrgInvite = { ...found, invitedBy, invitedAt: now, expiresAt: now + INVITE_TTL_MS };
+    pending.set(key, renewed);
+    this.recordAudit([orgEventEntry(orgId, "invite_resent", { key }, audit, now)]);
+    return detach(renewed);
   }
 
   async deleteOrgInvite(orgId: string, key: string, audit: AuditIntent): Promise<"deleted" | "missing"> {

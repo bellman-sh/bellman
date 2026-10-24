@@ -1,5 +1,5 @@
 /**
- * The hash chain over an org's stream (ADR 0033), inside a real AuditDO: a row edited or
+ * The hash chain over an org's stream (ADR 0035), inside a real AuditDO: a row edited or
  * deleted in the table behind the store's back is the break `verifyAudit` reports.
  */
 import { afterEach, expect, it } from "vitest";

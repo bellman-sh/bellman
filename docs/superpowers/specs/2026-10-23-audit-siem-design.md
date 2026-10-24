@@ -1,6 +1,6 @@
 # Audit for a SIEM: tamper evidence, retention, and a signed sink
 
-**Issue:** #58. **Builds on:** `docs/superpowers/specs/2026-10-09-audit-trail-design.md` (D1–D12 shipped: the stream, the page, the export). **ADR:** 0033.
+**Issue:** #58. **Builds on:** `docs/superpowers/specs/2026-10-09-audit-trail-design.md` (D1–D12 shipped: the stream, the page, the export). **ADR:** 0035.
 
 The audit trail spec ended with a list of what it did not do and left to #58: stream to a SIEM, sign or chain rows, set and sweep a retention window. #61 then made the first of those a requirement rather than an option: once operator reads are audited to a customer's stream, "an audit entry an operator can delete is not an audit entry", so the stream needs tamper evidence a customer can check from a copy they hold.
 
@@ -120,7 +120,7 @@ pumpAuditSink(orgId, now: number): Promise<AuditSinkStatus | undefined>   // one
 ## D5. Docs and the ADR
 
 - The guide's "The audit log" section gains "Tamper evidence" (the hash, verify, what a break means), "Retention" (the floor, the sweep row, the anchor) and "Streaming to a SIEM" (the sink, the signature with a verification snippet, the idempotency key, what `detail` carries, dead and resume).
-- ADR 0033 records the three decisions and the two refusals (retention lives with the stream, not the org; the sweep does not wait for the sink).
+- ADR 0035 records the three decisions and the two refusals (retention lives with the stream, not the org; the sweep does not wait for the sink).
 - No tool changes: `bellman_audit` is untouched, so `docs:gen` and `extension/manifest.json` are not.
 
 ## Security

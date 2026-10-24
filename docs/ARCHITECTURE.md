@@ -625,7 +625,7 @@ Why the split is shaped that way:
   delivery marks in `delivered`), so one query serves the panel's filters, paging and export.
   Each row is hash-chained to the one before it in `append`'s transaction; the object's one alarm
   runs the daily retention sweep and the org's SIEM sink, whose URL, secret and cursor live in
-  its KV beside the retention window (ADR 0033).
+  its KV beside the retention window (ADR 0035).
 - **`HostDO`, one per hosted seat,** because a model call takes seconds and the
   room's object must never wait on one: the room stays a record of events, and
   the seat that calls the model is an object of its own, keyed by the room's

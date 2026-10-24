@@ -154,7 +154,7 @@ it("moves the whole stream or none of it when an insert fails past its first bat
 });
 
 /**
- * A table from before the chain (ADR 0033) has no prev_hash or hash column. The next wake
+ * A table from before the chain (ADR 0035) has no prev_hash or hash column. The next wake
  * adds them: the rows it held read back unhashed, and the first row appended after them
  * starts the chain from an empty prev_hash.
  */

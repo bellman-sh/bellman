@@ -1,5 +1,5 @@
 /**
- * The sink inside a real AuditDO (ADR 0033, D3): setting one and appending arms the object's own
+ * The sink inside a real AuditDO (ADR 0035, D3): setting one and appending arms the object's own
  * alarm, the alarm posts one signed batch, and a refusal backs the next attempt off.
  */
 import { afterEach, expect, it, vi } from "vitest";

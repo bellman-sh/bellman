@@ -5996,7 +5996,7 @@ export function describeStoreContract(
       expect(b.hash).toBe(chainHash(b.seq, a.hash!, stripSeq(b)));
     });
 
-    // ---------------------------------------------------------- verifying the chain (ADR 0033)
+    // ---------------------------------------------------------- verifying the chain (ADR 0035)
     const chainRow = (at: number): AuditEntry => ({ at, orgId: "org_a", sessionId: "qs_1", actorUserId: "u_a", action: "sent_message", detail: { at } });
 
     it("verifyAudit over an intact stream is ok and counts every hashed row", async () => {
@@ -6013,7 +6013,7 @@ export function describeStoreContract(
       expect(await store.verifyAudit("org_a")).toEqual({ ok: true, from_seq: 0, through_seq: 0, checked: 0, unhashed: 0, anchor: NO_ANCHOR });
     });
 
-    // ---------------------------------------------------------- retention and the sweep (ADR 0033, D2)
+    // ---------------------------------------------------------- retention and the sweep (ADR 0035, D2)
     describe("retention", () => {
       const by = { actorUserId: "u_admin", actorOrgId: "org_a" };
       const day = (n: number) => Date.parse("2026-03-01T00:00:00Z") + n * 24 * 3_600_000;

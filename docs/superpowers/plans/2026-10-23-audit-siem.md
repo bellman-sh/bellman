@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Cloudflare Durable Objects (SQL + KV storage, `nodejs_compat`), vitest (`tests/`) and `@cloudflare/vitest-pool-workers` (`worker-tests/`).
 
-**Spec:** `docs/superpowers/specs/2026-10-23-audit-siem-design.md` (ADR: `docs/adr/0033-audit-tamper-evidence-and-sink.md`).
+**Spec:** `docs/superpowers/specs/2026-10-23-audit-siem-design.md` (ADR: `docs/adr/0035-audit-tamper-evidence-and-sink.md`).
 
 ## Global Constraints
 

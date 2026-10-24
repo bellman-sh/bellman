@@ -4801,12 +4801,12 @@ const AUDIT_SCHEMA = [
   "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
 ];
 
-/** The chain anchor a sweep left (ADR 0033, D2): the newest deleted row's seq and hash, so the chain survives the sweep. */
+/** The chain anchor a sweep left (ADR 0035, D2): the newest deleted row's seq and hash, so the chain survives the sweep. */
 const anchorOf = (storage: DurableObjectStorage): ChainAnchor => storage.kv.get<ChainAnchor>("chain_anchor") ?? NO_ANCHOR;
 
 /**
  * Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next.
- * An appended row is chained (ADR 0033): prev_hash is the newest row's hash, the sweep's anchor when
+ * An appended row is chained (ADR 0035): prev_hash is the newest row's hash, the sweep's anchor when
  * there is no row, "" when the newest predates the chain, and hash is `chainHash` over the seq the
  * insert gave it. A moved row is left unhashed, as it was.
  */
@@ -4824,10 +4824,10 @@ function insertAuditRow(storage: DurableObjectStorage, e: AuditEntry, seq: numbe
   return got;
 }
 
-/** The `settings` row (ADR 0033): the window, in days, or null for none, and the org the stream belongs to. */
+/** The `settings` row (ADR 0035): the window, in days, or null for none, and the org the stream belongs to. */
 interface AuditRetention { retentionDays: number | null; orgId: string }
 
-/** The columns ADR 0033 added, for a table created before them. */
+/** The columns ADR 0035 added, for a table created before them. */
 const AUDIT_ADDED_COLUMNS = ["prev_hash", "hash"];
 
 /** How many KV rows the move holds in memory at once, whatever the stream's size. */
@@ -5017,7 +5017,7 @@ export class AuditDO extends DurableObject {
     return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
   }
 
-  /** Walks the chain a page at a time from the anchor a sweep left (ADR 0033), or from `from`. */
+  /** Walks the chain a page at a time from the anchor a sweep left (ADR 0035), or from `from`. */
   async verify(from?: number): Promise<AuditVerification> {
     const walk = chainWalk(anchorOf(this.ctx.storage), from);
     let next = from ?? 0;
@@ -5029,7 +5029,7 @@ export class AuditDO extends DurableObject {
     }
   }
 
-  /** The org's window and sink (ADR 0033), both unset until an admin sets them. */
+  /** The org's window and sink (ADR 0035), both unset until an admin sets them. */
   async settings(): Promise<AuditSettings> {
     const kv = this.ctx.storage.kv;
     const sink = kv.get<AuditSink>("sink") ?? null;

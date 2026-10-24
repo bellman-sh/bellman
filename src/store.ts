@@ -1897,9 +1897,9 @@ export interface BellmanStore {
   queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
   /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
   auditFacets(orgId: string): Promise<AuditFacets>;
-  /** Walks the chain from the anchor, or from `from` taking that row's prev_hash on trust (ADR 0033, D1). */
+  /** Walks the chain from the anchor, or from `from` taking that row's prev_hash on trust (ADR 0035, D1). */
   verifyAudit(orgId: string, from?: number): Promise<AuditVerification>;
-  /** The org's retention window and sink (ADR 0033): both unset until an admin sets them. */
+  /** The org's retention window and sink (ADR 0035): both unset until an admin sets them. */
   auditSettings(orgId: string): Promise<AuditSettings>;
   /** Sets or clears the window (D2) and records `audit_retention_set` by the caller; the sweep is the store's own alarm. */
   setAuditRetention(orgId: string, days: number | null, audit: AuditIntent): Promise<AuditSettings>;

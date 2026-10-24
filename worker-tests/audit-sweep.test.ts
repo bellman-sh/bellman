@@ -1,5 +1,5 @@
 /**
- * Retention inside a real AuditDO (ADR 0033, D2): setting a window arms the object's own alarm,
+ * Retention inside a real AuditDO (ADR 0035, D2): setting a window arms the object's own alarm,
  * the alarm runs the sweep and re-dates itself a day ahead, and clearing the window disarms it.
  */
 import { afterEach, expect, it } from "vitest";

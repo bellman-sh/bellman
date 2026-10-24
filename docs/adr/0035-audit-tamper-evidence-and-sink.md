@@ -1,4 +1,4 @@
-# ADR 0033 — Audit tamper evidence and delivery: a hash chain, org-set retention, a signed sink
+# ADR 0035 — Audit tamper evidence and delivery: a hash chain, org-set retention, a signed sink
 
 **Date:** 2026-10-23 · **Status:** accepted · **Closes:** #58 · **Spec:** `docs/superpowers/specs/2026-10-23-audit-siem-design.md` · **Plan:** `docs/superpowers/plans/2026-10-23-audit-siem.md`
 

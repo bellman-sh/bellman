@@ -1,6 +1,6 @@
 /**
  * The audit stream's tamper evidence, retention and sink: the pure parts (audit for a SIEM
- * spec, ADR 0033). Runtime-free, so both stores run the same rules and vitest can test them
+ * spec, ADR 0035). Runtime-free, so both stores run the same rules and vitest can test them
  * without `cloudflare:workers`. The stores own the storage; this module owns what to write.
  */
 import { createHash } from "node:crypto";
@@ -168,7 +168,7 @@ export async function deliverBatch(post: typeof fetch, sink: AuditSink, orgId: s
   }
 }
 
-/** The `audit_sink_dead` row's detail (ADR 0033, D3). */
+/** The `audit_sink_dead` row's detail (ADR 0035, D3). */
 export const deadDetail = (sink: AuditSink) => ({ url: sink.url, failing_since: new Date(sink.failingSince ?? 0).toISOString(), last_error: sink.lastError });
 
 export function retentionDaysOf(value: unknown): number | null | "invalid" {

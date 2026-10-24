@@ -63,7 +63,7 @@ export function auditRows(parties: (string | null)[], facts: AuditFacts, actor: 
 
 /**
  * An entry with its place in its org's stream: the cursor `before` and `through` count in (D6),
- * and its link in the chain (ADR 0033): `hash` over seq, `prevHash` and the record, both null on
+ * and its link in the chain (ADR 0035): `hash` over seq, `prevHash` and the record, both null on
  * a row from before the chain.
  */
 export type SeqEntry = AuditEntry & { seq: number; hash: string | null; prevHash: string | null };
@@ -262,7 +262,7 @@ export function auditRefusal(identity: Identity): string | null {
   return null;
 }
 
-/** One row as the panel and an export read it (D7); the sink posts the same shape (ADR 0033). A row from before D2 says it recorded no crossing. */
+/** One row as the panel and an export read it (D7); the sink posts the same shape (ADR 0035). A row from before D2 says it recorded no crossing. */
 export interface AuditEntryView {
   seq: number;
   at: string;
@@ -274,7 +274,7 @@ export interface AuditEntryView {
   crossing: "internal" | "cross_org" | null;
   direction: "outbound" | "inbound" | null;
   detail: Record<string, unknown>;
-  /** The row's link in the chain (ADR 0033); null on a row from before it. `GET /audit/verify` walks them. */
+  /** The row's link in the chain (ADR 0035); null on a row from before it. `GET /audit/verify` walks them. */
   hash: string | null;
 }
 

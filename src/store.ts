@@ -26,6 +26,7 @@ import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
+import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed } from "./frames.js";
 import { decideApproval } from "./proposal.js";
 import {
   decideAnswer, decideAsk, decideCancel, endings, handedOverNotice,
@@ -809,15 +810,47 @@ export interface ProposalApproval {
  * What `approveProposal` did. `appended` carries the response and the card's `surface` event, which is null when
  * the seat applied none (R13). `replayed` carries the response the key named and the card that call wrote, read by
  * the cursor the key's record holds, so it is null exactly when the first call wrote none. `stale`, `answered`,
- * `conflict` and `frozen` wrote nothing at all, not even a record.
+ * `conflict` and `frozen` wrote nothing at all, not even a record. `carried` is the events of the cards an
+ * approved locked frame move carried, after the card's (surface frames spec, D2); `refused` is a card the frame
+ * rules refuse where the approval writes (an overlap, a missing or full frame), and it too writes nothing.
  */
 export type ApprovalWrite =
-  | { outcome: "appended"; event: SessionEvent; written: SessionEvent | null }
+  | { outcome: "appended"; event: SessionEvent; written: SessionEvent | null; carried: SessionEvent[] }
   | { outcome: "replayed"; event: SessionEvent; written: SessionEvent | null }
   | { outcome: "stale"; cursor: number }
   | { outcome: "answered"; by: string }
   | { outcome: "conflict" }
-  | { outcome: "frozen" };
+  | { outcome: "frozen" }
+  | { outcome: "refused"; reason: string };
+
+/** What `appendSurface` did: `appendEventOnce`'s outcomes, the events a locked move carried, and a refusal. */
+export type SurfaceAppend =
+  | { outcome: "appended"; event: SessionEvent; carried: SessionEvent[] }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "conflict" }
+  | { outcome: "frozen" }
+  | { outcome: "refused"; reason: string };
+
+/**
+ * The `surface` event a locked move owes each card it carries (lead ruling L2): the mover's, with no `refId`, its payload
+ * the card's full item, so every reader of a `surface` event and `restore` read it as any other version.
+ */
+export const carriedEvent = (mover: EventBody, write: SurfaceWrite): EventBody => ({
+  type: "surface", fromMemberId: mover.fromMemberId, fromUserId: mover.fromUserId, fromLabel: mover.fromLabel,
+  payload: write.item, refId: null,
+});
+
+/**
+ * The carried event as the row's own writer (L2), handed to the row rule in place of the event: the row keeps
+ * who wrote it and the event says who moved it. `createdAt` needs nothing here, since a carried card keeps its
+ * kind, and the approver is handed back beside it as `approvedBy`.
+ */
+export const asRowWriter = (event: SessionEvent, row: SurfaceRow): SessionEvent =>
+  ({ ...event, fromMemberId: row.byMemberId, fromLabel: row.byLabel });
+
+/** The event a placed write is appended as: the caller's, with the item placement gave it when that differs. */
+export const placedEvent = (e: EventBody, asked: SurfaceWrite, placed: Extract<Placed, { ok: true }>): EventBody =>
+  placed.write.item === asked.item || placed.write.item === null ? e : { ...e, payload: placed.write.item };
 
 /**
  * What `setJoinCode` did, which a boolean could not say once the write became
@@ -1007,6 +1040,9 @@ export interface AppendExtras {
    * An item that arrives with no placement is placed first, from the rows the room holds (withPlacement,
    * surface.ts), and the event is appended with the placement the row takes. Both stores do it in the append,
    * before the event is built, and neither does it on a replay.
+   *
+   * A frame write, or a write into a frame (`isFrameWrite`, frames.ts), goes through `appendSurface`, which
+   * places it among the frames; `appendEvent` and `appendEventOnce` throw `FRAME_WRITE_PATH` for one.
    */
   surface?: SurfaceWrite;
   /**
@@ -1583,6 +1619,25 @@ export interface BellmanStore {
    * (or reports `conflict` for a key reused for other content), whatever the room has become since.
    */
   idempotencyRecord(sessionId: string, memberId: string, key: string): Promise<IdempotencyRecord | null>;
+  /**
+   * Append a surface write placed among the room's frames (surface frames spec, D2): the path of every surface
+   * write. It is `appendEventOnce` when `key` is a string and `appendEvent` when it is null, with three
+   * differences. The placement step is `placeSurfaceWrite` (frames.ts) over the rows listed in the same operation,
+   * so two writes that meet are placed one after the other. A refusal (an overlap, a missing or full frame)
+   * answers `refused` with the reason and writes nothing, not even the key's record, so a retry runs again. And
+   * the cards a locked frame's move carries are appended as `surface` events at the cursors after `e`'s, one per
+   * row in key order, each authored by the mover; each row keeps its writer, `createdAt` and approver, and only
+   * its placement changes (lead ruling L2).
+   *
+   * A replay returns the original event and applies nothing, as `appendEventOnce`'s does; the key check precedes
+   * the frozen check. The key's record holds `e`'s cursor. `extras.approvedBy` is stamped on `e`'s row alone.
+   */
+  appendSurface(
+    sessionId: string,
+    e: EventBody,
+    extras: { surface: SurfaceWrite; approvedBy?: ApprovedBy },
+    key: string | null,
+  ): Promise<SurfaceAppend>;
   /**
    * Approve a proposal (topic rooms spec, D2; plan R12): append `e`, the maintainer's `action_response`, and, when
    * `decideApproval` says `apply`, the card's `surface` event and row after it, in the same operation. The card is
@@ -2904,6 +2959,7 @@ export class MemoryStore implements BellmanStore {
     e: Omit<SessionEvent, "cursor" | "at">,
     extras: AppendExtras = {}
   ): Promise<SessionEvent | null> {
+    if (extras.surface !== undefined && isFrameWrite(extras.surface)) throw new Error(FRAME_WRITE_PATH);
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     if (s.frozenAt !== null) return null;
@@ -3085,6 +3141,7 @@ export class MemoryStore implements BellmanStore {
     key: string,
     extras: AppendExtras = {}
   ): Promise<EventWrite> {
+    if (extras.surface !== undefined && isFrameWrite(extras.surface)) throw new Error(FRAME_WRITE_PATH);
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
 
@@ -3145,6 +3202,63 @@ export class MemoryStore implements BellmanStore {
     return record ? { ...record } : null;
   }
 
+  async appendSurface(
+    sessionId: string,
+    e: EventBody,
+    extras: { surface: SurfaceWrite; approvedBy?: ApprovedBy },
+    key: string | null,
+  ): Promise<SurfaceAppend> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`Unknown session ${sessionId}`);
+
+    // Synchronous from the key check to the last row, for appendEventOnce's reason, and so the rows placement
+    // reads are the rows the write lands among: of two frames that meet, the second reads the first.
+    const storageKey = key === null ? null : idempotencyKey(e.fromMemberId, key);
+    const print = fingerprint(e);
+    const seen = this.keys.get(sessionId);
+    const record = storageKey === null ? undefined : seen?.get(storageKey);
+    if (record) {
+      if (record.print !== print) return { outcome: "conflict" };
+      const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (!original) throw new Error(`Idempotency record for ${sessionId} names missing cursor ${record.cursor}`);
+      return { outcome: "replayed", event: detach(original) };
+    }
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+
+    const rows = this.surfaces.get(sessionId) ?? new Map<string, SurfaceRow>();
+    const placed = placeSurfaceWrite([...rows.values()], extras.surface);
+    if (!placed.ok) return { outcome: "refused", reason: placed.reason };
+    const { event, carried } = this.surfaceNow(s, placedEvent(e, extras.surface, placed), placed, extras.approvedBy, Date.now());
+    if (storageKey !== null) {
+      const map = seen ?? new Map<string, IdempotencyRecord>();
+      map.set(storageKey, { cursor: event.cursor, print });
+      this.keys.set(sessionId, map);
+    }
+    return { outcome: "appended", event: detach(event), carried: carried.map(detach) };
+  }
+
+  /**
+   * A placed surface write appended: its event and row, then each carried card's event at the next cursor and
+   * its row, which keeps its writer and approver (L2). No awaits, for appendEvent's reason.
+   */
+  private surfaceNow(
+    s: Session,
+    e: EventBody,
+    placed: Extract<Placed, { ok: true }>,
+    approvedBy: ApprovedBy | undefined,
+    at: number,
+  ): { event: SessionEvent; carried: SessionEvent[] } {
+    const event = this.appendNow(s, e, at);
+    this.applyExtras(s, event, { surface: placed.write, approvedBy });
+    const carried = placed.carried.map((write) => {
+      const row = this.surfaces.get(s.id)!.get(write.key)!;
+      const ev = this.appendNow(s, carriedEvent(e, write), at);
+      this.applyExtras(s, asRowWriter(ev, row), { surface: write, approvedBy: row.approvedBy });
+      return ev;
+    });
+    return { event, carried };
+  }
+
   async approveProposal(
     sessionId: string,
     e: EventBody,
@@ -3194,8 +3308,12 @@ export class MemoryStore implements BellmanStore {
     if (decided.kind === "answered") return { outcome: "answered", by: decided.by };
     if (decided.kind === "stale") return { outcome: "stale", cursor: decided.cursor };
 
-    // One clock for both events, as the Durable Objects store stamps them. An `action_response` is never a reply
-    // to the host (`isReplyToHost` reads a message or a progress event), so neither event wakes it.
+    // The card is placed among the frames before anything is appended, so a refusal writes neither event.
+    const placed = decided.kind === "apply" && write !== null ? placeSurfaceWrite([...(this.surfaces.get(sessionId)?.values() ?? [])], write) : null;
+    if (placed !== null && !placed.ok) return { outcome: "refused", reason: placed.reason };
+
+    // One clock for every event, as the Durable Objects store stamps them. An `action_response` is never a reply
+    // to the host (`isReplyToHost` reads a message or a progress event), so no event here wakes it.
     const at = Date.now();
     const response = this.appendNow(s, e, at);
     // Written once the card's cursor is known, so a retry finds both.
@@ -3205,9 +3323,9 @@ export class MemoryStore implements BellmanStore {
       map.set(keyed.storageKey, { cursor: response.cursor, print: keyed.print, ...(applied === undefined ? {} : { applied }) });
       this.keys.set(sessionId, map);
     };
-    if (decided.kind === "record" || write === null) {
+    if (placed === null || write === null || decided.kind !== "apply") {
       remember();
-      return { outcome: "appended", event: detach(response), written: null };
+      return { outcome: "appended", event: detach(response), written: null, carried: [] };
     }
 
     // The card is the proposer's, as a surface event's author is its row's author everywhere (R18). It carries no
@@ -3216,13 +3334,12 @@ export class MemoryStore implements BellmanStore {
       type: "surface", fromMemberId: request.fromMemberId, fromUserId: request.fromUserId, fromLabel: request.fromLabel,
       payload: write.item ?? { key: write.key, remove: true }, refId: null,
     };
-    // Surface placement's step, before the event is numbered: an item the proposer left unplaced takes the next
-    // free slot, and the event carries the placement the row will (R19).
-    const placed = this.placed(s, draft, { surface: write });
-    const card = this.appendNow(s, placed.e, at);
+    // Placed among the frames above, before the response was numbered: an item the proposer left unplaced takes
+    // the next free slot, and the card's event carries the placement the row will (R19), then the cards a locked
+    // move carried.
+    const { event: card, carried } = this.surfaceNow(s, placedEvent(draft, write, placed), placed, decided.approvedBy, at);
     remember(card.cursor);
-    this.applyExtras(s, card, { surface: placed.extras.surface, approvedBy: decided.approvedBy });
-    return { outcome: "appended", event: detach(response), written: detach(card) };
+    return { outcome: "appended", event: detach(response), written: detach(card), carried: carried.map(detach) };
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

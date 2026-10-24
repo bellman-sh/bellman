@@ -402,7 +402,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       let written: { write: SurfaceWrite; approved: number } | null = null;
       let replayed = false;
       if (approval) {
-        // One call writes the response and the card, or neither (plan R12). Four of its outcomes refuse and write
+        // One call writes the response and the card, or neither (plan R12). Five of its outcomes refuse and write
         // nothing, and the other two read as an ordinary send's do. A seat that cannot apply is not a refusal: its
         // response is recorded alone and `written` stays null.
         const outcome = await s.approveProposal(session_id, draft, idempotency_key ?? null, approval);
@@ -413,6 +413,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (outcome.outcome === "answered") return fail(alreadyAnswered(String(approval.requestCursor), outcome.by));
         if (outcome.outcome === "conflict") return keyReused();
         if (outcome.outcome === "frozen") return fail(FROZEN);
+        if (outcome.outcome === "refused") return fail(outcome.reason);
         event = outcome.event;
         replayed = outcome.outcome === "replayed";
         if (outcome.written !== null) {

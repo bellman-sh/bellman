@@ -11,13 +11,14 @@ import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, newestTaskFirst, taskWithEvent,
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
-  SessionEvent, SurfaceRow, OutsideCaller, OutsideTask,
+  SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
 } from "./types.js";
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
-  AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome,
+  AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend,
 } from "./store.js";
+import { asRowWriter, carriedEvent, placedEvent } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
@@ -55,7 +56,8 @@ import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } fr
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
-import { applySurfaceWrite, needsPlacement, withPlacement } from "./surface.js";
+import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
+import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed } from "./frames.js";
 import { decideApproval } from "./proposal.js";
 import {
   decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse,
@@ -362,6 +364,60 @@ async function placedAppend(
   const rows = [...(await txn.list<SurfaceRow>({ prefix: SURFACE_PREFIX })).values()];
   const surface = withPlacement(rows, extras.surface);
   return surface === extras.surface ? { e, extras } : { e: { ...e, payload: surface.item }, extras: { ...extras, surface } };
+}
+
+/** The room's surface rows by key, listed in the caller's transaction: what `placeSurfaceWrite` places among. */
+async function surfaceRowsIn(txn: DurableObjectTransaction): Promise<Map<string, SurfaceRow>> {
+  return new Map([...(await txn.list<SurfaceRow>({ prefix: SURFACE_PREFIX })).values()].map((r) => [r.key, r]));
+}
+
+/**
+ * What a placed surface write owes (surface frames spec, D2), for the caller's one put: its event at `cursor`,
+ * each carried card's event at the cursors after it, authored by the mover, and their rows. The books (#66) are
+ * folded over `before` (the events the caller numbered ahead of this one) and then these, in cursor order, and
+ * `extraRows` runs per event in cursor order, threading the session each returns. A carried row keeps its writer
+ * and approver (lead ruling L2), so its rule is handed the event as that writer and the row's own approver.
+ *
+ * A free function, for `extraRows`'s reason: a writing helper on the class would answer RPC.
+ *
+ * ponytail: one `txn.get` per carried row inside `extraRows`, beside the list the placement already read; a locked
+ * move of the item cap's 1,000 cards reads each twice in one transaction. The upgrade is handing `extraRows` the row.
+ */
+async function placedSurfaceRows(
+  txn: DurableObjectTransaction,
+  s: StoredSession,
+  before: readonly SessionEvent[],
+  e: EventBody,
+  placed: Extract<Placed, { ok: true }>,
+  approvedBy: ApprovedBy | undefined,
+  rows: ReadonlyMap<string, SurfaceRow>,
+  cursor: number,
+  at: number,
+): Promise<{ event: SessionEvent; carried: SessionEvent[]; events: SessionEvent[]; session: StoredSession; puts: Record<string, unknown>; deletes: string[] }> {
+  const event: SessionEvent = { ...e, cursor, at };
+  const carried = placed.carried.map((write, i): SessionEvent => ({ ...carriedEvent(e, write), cursor: cursor + 1 + i, at }));
+  const events = [...before, event, ...carried];
+  let session = events.reduce<StoredSession>((draft, ev) => {
+    const books = noteAppend(draft, ev);
+    return books === draft ? draft : { ...draft, ...books };
+  }, s);
+  const writes: [SessionEvent, AppendExtras][] = [
+    [event, { surface: placed.write, approvedBy }],
+    ...placed.carried.map((write, i): [SessionEvent, AppendExtras] => {
+      const row = rows.get(write.key)!;
+      return [asRowWriter(carried[i], row), { surface: write, approvedBy: row.approvedBy }];
+    }),
+  ];
+  const puts: Record<string, unknown> = {};
+  const deletes: string[] = [];
+  for (const [ev, extras] of writes) {
+    const owed = await extraRows(txn, session, ev, extras);
+    const { session: next, ...rest } = owed.puts;
+    Object.assign(puts, rest);
+    deletes.push(...owed.deletes);
+    if (next !== undefined) session = next as StoredSession;
+  }
+  return { event, carried, events, session, puts, deletes };
 }
 
 /**
@@ -2018,6 +2074,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     e: Omit<SessionEvent, "cursor" | "at">,
     extras: AppendExtras = {},
   ): Promise<SessionEvent | null> {
+    if (extras.surface !== undefined && isFrameWrite(extras.surface)) throw new Error(FRAME_WRITE_PATH);
     let broughtForward = false as boolean;
     let wakesHost = false;
     // The rows this transaction read, for the wake's read_context rule.
@@ -2141,6 +2198,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     key: string,
     extras: AppendExtras = {},
   ): Promise<EventWrite> {
+    if (extras.surface !== undefined && isFrameWrite(extras.surface)) throw new Error(FRAME_WRITE_PATH);
     let broughtForward = false as boolean;
     let wakesHost = false;
     // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
@@ -2224,6 +2282,66 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /**
+   * `BellmanStore.appendSurface` (surface frames spec, D2), in `approveProposal`'s shape: one transaction; the key
+   * before the frozen check; the room's `sf:` rows listed and the write placed among them by `placeSurfaceWrite`;
+   * a refusal returned before anything is written, the key's record included; then the write's event and each
+   * carried card's at the cursors after it, the books and `extraRows` folded over them in cursor order, and one
+   * `putRows` with the key's record. The wakes come after the commit, one event at a time in cursor order, and the
+   * alarm is re-armed when the books brought a due time forward. A `surface` event is never a reply to the host
+   * (`isReplyToHost` reads a message or a progress event), so no wake row is queued.
+   */
+  async appendSurface(
+    e: EventBody,
+    extras: { surface: SurfaceWrite; approvedBy?: ApprovedBy },
+    key: string | null,
+  ): Promise<SurfaceAppend> {
+    let broughtForward = false as boolean;
+    // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<SurfaceAppend>(async (txn) => {
+      // Assigned again if the runtime runs this closure again, as in approveProposal.
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+
+      const keyed = key === null ? null : { storageKey: idempotencyKey(e.fromMemberId, key), print: fingerprint(e) };
+      if (keyed !== null) {
+        const record = await txn.get<IdempotencyRecord>(keyed.storageKey);
+        if (record) {
+          if (record.print !== keyed.print) return { outcome: "conflict" };
+          const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+          if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+          return { outcome: "replayed", event: original };
+        }
+      }
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+
+      const rows = await surfaceRowsIn(txn);
+      const placed = placeSurfaceWrite([...rows.values()], extras.surface);
+      if (!placed.ok) return { outcome: "refused", reason: placed.reason };
+      const at = Date.now();
+      const out = await placedSurfaceRows(
+        txn, s, [], placedEvent(e, extras.surface, placed), placed, extras.approvedBy, rows, await this.nextCursor(txn), at,
+      );
+      await putRows(txn, {
+        ...Object.fromEntries(out.events.map((ev) => [eventKey(ev.cursor), ev])),
+        cursor: out.events[out.events.length - 1].cursor,
+        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: out.event.cursor, print: keyed.print } satisfies IdempotencyRecord }),
+        ...asRows(s, { ...out.puts, session: out.session === s ? undefined : out.session }),
+      });
+      for (const gone of out.deletes) await txn.delete(gone);
+      broughtForward = out.session !== s && (bringsForward(s, out.session, at) || tickBroughtForward(s, out.session));
+      return { outcome: "appended", event: out.event, carried: out.carried };
+    });
+    if (result.outcome === "appended") {
+      for (const ev of [result.event, ...result.carried]) this.#wake(ev, members);
+      if (broughtForward) await this.driver.reArm();
+    }
+    return result;
+  }
+
   /** `BellmanStore.idempotencyRecord`: one `get`, with no transaction, because it reads one row and writes nothing. */
   async idempotencyRecord(memberId: string, key: string): Promise<IdempotencyRecord | null> {
     return (await this.ctx.storage.get<IdempotencyRecord>(idempotencyKey(memberId, key))) ?? null;
@@ -2293,32 +2411,37 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (decided.kind === "answered") return { outcome: "answered", by: decided.by };
       if (decided.kind === "stale") return { outcome: "stale", cursor: decided.cursor };
 
+      // Placed among the frames before anything is numbered, so a refusal writes neither event.
+      const applying = decided.kind === "apply" && write !== null ? write : null;
+      const rows = applying === null ? new Map<string, SurfaceRow>() : await surfaceRowsIn(txn);
+      const placed = applying === null ? null : placeSurfaceWrite([...rows.values()], applying);
+      if (placed !== null && !placed.ok) return { outcome: "refused", reason: placed.reason };
+
       const at = Date.now();
       const response: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at };
       let card: SessionEvent | null = null;
-      let extras: AppendExtras = {};
-      if (decided.kind === "apply" && write !== null) {
+      let carried: SessionEvent[] = [];
+      let events = [response];
+      // The books (#66) for each event, folded over the record in cursor order, as `removeMember` folds them; with a
+      // card, `placedSurfaceRows` folds them over the response and every surface event.
+      const books = noteAppend(s, response);
+      let kept: StoredSession = books === s ? s : { ...s, ...books };
+      let owed = { puts: {} as Record<string, unknown>, deletes: [] as string[] };
+      if (decided.kind === "apply" && applying !== null && placed !== null) {
         // The proposer's, as a surface event's author is its row's author everywhere (R18), with no `refId`: nothing
         // reads one off a `surface` event, and the response and the card are adjacent (R30).
         const draft: EventBody = {
           type: "surface", fromMemberId: request.fromMemberId, fromUserId: request.fromUserId, fromLabel: request.fromLabel,
-          payload: write.item ?? { key: write.key, remove: true }, refId: null,
+          payload: applying.item ?? { key: applying.key, remove: true }, refId: null,
         };
-        // Surface placement's step, before the event is numbered: an item the proposer left unplaced takes the next
-        // free slot, and the event carries the placement the row will (R19).
-        const placed = await placedAppend(txn, draft, { surface: write });
-        card = { ...placed.e, cursor: response.cursor + 1, at };
-        extras = { surface: placed.extras.surface, approvedBy: decided.approvedBy };
+        // Surface placement's step, before the card is numbered: an item the proposer left unplaced takes the next
+        // free slot, and the event carries the placement the row will (R19); a locked move's cards follow it.
+        const out = await placedSurfaceRows(
+          txn, s, [response], placedEvent(draft, applying, placed), placed, decided.approvedBy, rows, response.cursor + 1, at,
+        );
+        ({ event: card, carried, events, session: kept } = out);
+        owed = out;
       }
-      const events = card === null ? [response] : [response, card];
-      // The books (#66) for each event, folded over the record in cursor order, as `removeMember` folds them.
-      const kept = events.reduce<StoredSession>((draft, ev) => {
-        const books = noteAppend(draft, ev);
-        return books === draft ? draft : { ...draft, ...books };
-      }, s);
-      const owed = card === null
-        ? { puts: {} as Record<string, unknown>, deletes: [] as string[] }
-        : await extraRows(txn, kept, card, extras);
       await putRows(txn, {
         ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
         cursor: events[events.length - 1].cursor,
@@ -2327,15 +2450,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
             cursor: response.cursor, print: keyed.print, ...(card === null ? {} : { applied: card.cursor }),
           } satisfies IdempotencyRecord,
         }),
-        ...asRows(s, { ...owed.puts, session: owed.puts.session ?? (kept === s ? undefined : kept) }),
+        ...asRows(s, { ...owed.puts, session: kept === s ? undefined : kept }),
       });
       for (const gone of owed.deletes) await txn.delete(gone);
       broughtForward = kept !== s && (bringsForward(s, kept, at) || tickBroughtForward(s, kept));
-      return { outcome: "appended", event: response, written: card };
+      return { outcome: "appended", event: response, written: card, carried };
     });
     if (result.outcome === "appended") {
       this.#wake(result.event, members);
       if (result.written !== null) this.#wake(result.written, members);
+      for (const ev of result.carried) this.#wake(ev, members);
       // After the wake, as appendEvent does it: reArm() reads the record the approval landed in.
       if (broughtForward) await this.driver.reArm();
     }
@@ -6138,6 +6262,15 @@ export class DurableObjectStore implements BellmanStore {
 
   async approveProposal(sessionId: string, e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite> {
     return this.session(sessionId).approveProposal(e, key, approval);
+  }
+
+  async appendSurface(
+    sessionId: string,
+    e: EventBody,
+    extras: { surface: SurfaceWrite; approvedBy?: ApprovedBy },
+    key: string | null,
+  ): Promise<SurfaceAppend> {
+    return this.session(sessionId).appendSurface(e, extras, key);
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

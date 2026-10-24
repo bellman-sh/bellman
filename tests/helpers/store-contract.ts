@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest } from "../../src/store.js";
+import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { actionStates } from "../../src/action-state.js";
 import { resolveManifest } from "../../src/manifest.js";
@@ -3149,6 +3149,102 @@ export function describeStoreContract(
           expect(await placements(id), "the removed card stays removed, and c keeps slot 0").toEqual({ c: { x: 0, y: 0 } });
         });
       });
+
+      describe("appendSurface (surface frames spec, D2)", () => {
+        const item = (key: string, over: Partial<SurfaceItem> = {}): SurfaceItem =>
+          ({ key, kind: "text", title: null, body: "x", ends: null, placement: null, blob: null, shape: null, ...over });
+        const frameItem = (key: string, placement: { x: number; y: number; w: number; h: number }, locked = true): SurfaceItem =>
+          item(key, { kind: "frame", title: key, body: null, placement, locked });
+        const put = (id: string, i: SurfaceItem, key: string | null = null, frame?: number) =>
+          store.appendSurface(id, wrote(i), { surface: { key: i.key, item: i, ...(frame === undefined ? {} : { frame }) } }, key);
+        const room = async () => { const s = session({}); await store.createSession(s); return s.id; };
+
+        it("appends the event and its row, keyed or not, and replays a key with what it wrote", async () => {
+          const id = await room();
+          const first = await put(id, item("a"), "k1");
+          expect(first).toMatchObject({ outcome: "appended", carried: [] });
+          expect(await put(id, item("a"), "k1")).toEqual({ outcome: "replayed", event: (first as { event: SessionEvent }).event });
+          expect(await put(id, item("a", { body: "other" }), "k1")).toEqual({ outcome: "conflict" });
+          expect((await put(id, item("b"))).outcome).toBe("appended");
+          expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["a", "b"]);
+        });
+
+        it("refuses an overlapping frame and writes nothing: no event, no row, no key record", async () => {
+          const id = await room();
+          await put(id, frameItem("one", { x: 0, y: 0, w: 1000, h: 1000 }));
+          const tail = await store.recentEvents(id, 1);
+          expect(await put(id, frameItem("two", { x: 500, y: 0, w: 1000, h: 1000 }), "k2")).toEqual({
+            outcome: "refused", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+          });
+          expect(await store.recentEvents(id, 1)).toEqual(tail);
+          expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["one"]);
+          expect(await store.idempotencyRecord(id, "m_creator", "k2")).toBeNull();
+        });
+
+        // Review Focus 4.
+        it("lands one of two overlapping frame writes that meet, and refuses the other naming it", async () => {
+          const id = await room();
+          const outs = await Promise.all([
+            put(id, frameItem("left", { x: 0, y: 0, w: 1000, h: 1000 })),
+            put(id, frameItem("right", { x: 500, y: 0, w: 1000, h: 1000 })),
+          ]);
+          expect(outs.map((o) => o.outcome).sort()).toEqual(["appended", "refused"]);
+          expect((await store.surfaceOf(id)).filter((r) => r.kind === "frame")).toHaveLength(1);
+        });
+
+        it("places a card in frame N inside the transaction, and refuses a frame that has no room", async () => {
+          const id = await room();
+          await put(id, frameItem("f", { x: 1000, y: 0, w: 1480, h: 520 }));
+          await put(id, item("a"), null, 1);
+          expect((await store.surfaceOf(id)).find((r) => r.key === "a")!.placement).toEqual({ x: 1040, y: 40 });
+          expect(await put(id, item("b"), null, 2)).toEqual({ outcome: "refused", reason: 'surface text "b": frame 2 does not exist: this room has 1 frame' });
+        });
+
+        it("moves a locked frame and its cards in one append, one event per row at consecutive cursors", async () => {
+          const id = await room();
+          await put(id, frameItem("f", { x: 0, y: 0, w: 1000, h: 1000 }));
+          await put(id, item("b", { placement: { x: 40, y: 40 } }));
+          await put(id, item("a", { placement: { x: 400, y: 40 } }));
+          const out = await put(id, frameItem("f", { x: 2000, y: 0, w: 1000, h: 1000 })) as Extract<SurfaceAppend, { outcome: "appended" }>;
+          expect(out.carried.map((e) => [e.cursor - out.event.cursor, (e.payload as SurfaceItem).key])).toEqual([[1, "a"], [2, "b"]]);
+          expect(Object.fromEntries((await store.surfaceOf(id)).map((r) => [r.key, r.placement]))).toEqual({
+            f: { x: 2000, y: 0, w: 1000, h: 1000 }, a: { x: 2400, y: 40 }, b: { x: 2040, y: 40 },
+          });
+          expect(await cursorOf(id)).toBe(out.carried[1].cursor);
+        });
+
+        // Lead ruling L2: moving a frame is not authoring its cards.
+        it("keeps a carried card's writer and approver on the row, while the carried event is the mover's", async () => {
+          const id = await room();
+          await put(id, frameItem("f", { x: 0, y: 0, w: 1000, h: 1000 }));
+          const card = item("a", { placement: { x: 40, y: 40 } });
+          const written = await store.appendSurface(id, { ...wrote(card), fromMemberId: "m_ada", fromUserId: "u_ada", fromLabel: "ada@lovelace" }, {
+            surface: { key: "a", item: card }, approvedBy: { memberId: "m_maint", label: "maint@codenerd" },
+          }, null);
+          const before = (await store.surfaceOf(id)).find((r) => r.key === "a")!;
+          const moved = frameItem("f", { x: 2000, y: 0, w: 1000, h: 1000 });
+          const out = await store.appendSurface(id, { ...wrote(moved), fromMemberId: "m_mover", fromUserId: "u_mover", fromLabel: "mover@codenerd" }, {
+            surface: { key: "f", item: moved },
+          }, null) as Extract<SurfaceAppend, { outcome: "appended" }>;
+          expect(written.outcome).toBe("appended");
+          expect(out.carried.map((e) => [e.fromMemberId, e.fromLabel, e.refId])).toEqual([["m_mover", "mover@codenerd", null]]);
+          expect(out.carried[0].payload).toEqual({ ...card, placement: { x: 2040, y: 40 } });
+          const after = (await store.surfaceOf(id)).find((r) => r.key === "a")!;
+          expect(after).toMatchObject({
+            byMemberId: "m_ada", byLabel: "ada@lovelace", approvedBy: { memberId: "m_maint", label: "maint@codenerd" },
+            createdAt: before.createdAt, cursor: out.carried[0].cursor, placement: { x: 2040, y: 40 },
+          });
+        });
+
+        it("answers frozen for a frozen room, and appendEvent refuses a frame write outright", async () => {
+          const id = await room();
+          await expect(store.appendEvent(id, wrote(frameItem("f", { x: 0, y: 0, w: 10, h: 10 })), {
+            surface: { key: "f", item: frameItem("f", { x: 0, y: 0, w: 10, h: 10 }) },
+          })).rejects.toThrow("goes through appendSurface");
+          await store.freezeSession(id, Date.now());
+          expect(await put(id, item("a"))).toEqual({ outcome: "frozen" });
+        });
+      });
     });
 
     /**
@@ -3360,6 +3456,42 @@ export function describeStoreContract(
         const out = landed(await approve(id, request, { write: writeOf(unplaced) }));
         expect((await store.surfaceOf(id))[0].placement).toEqual({ x: 0, y: 0 });
         expect(out.written!.payload).toMatchObject({ key: "tools", placement: { x: 0, y: 0 } });
+      });
+
+      // Surface frames (D8): a proposed frame is held to the frame rules where the approval writes.
+      describe("a proposed frame", () => {
+        const frame = (key: string, x: number): SurfaceItem => ({
+          key, kind: "frame", title: key, body: null, ends: null, placement: { x, y: 0, w: 1000, h: 1000 }, blob: null, shape: null, locked: true,
+        });
+        const placedBy = (id: string, i: SurfaceItem) => store.appendSurface(id, {
+          type: "surface", fromMemberId: MAINT.memberId, fromUserId: MAINT.userId, fromLabel: MAINT.label, payload: i, refId: null,
+        }, { surface: { key: i.key, item: i } }, null);
+        const baseOf = async (id: string) => surfaceCursor((await store.getSession(id))!);
+
+        it("refuses an approved frame that would overlap another, and appends neither the response nor the card", async () => {
+          const id = await room();
+          await placedBy(id, frame("one", 0));
+          const base = await baseOf(id);
+          const request = (await proposed(id, frame("two", 500), base))!;
+          const before = await events(id);
+          expect(await approve(id, request, { base, write: { key: "two", item: frame("two", 500) } })).toEqual({
+            outcome: "refused", reason: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+          });
+          expect(await events(id)).toEqual(before);
+          expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["one"]);
+        });
+
+        it("carries the cards of an approved locked move, one event each after the card's cursor", async () => {
+          const id = await room();
+          await placedBy(id, frame("f", 0));
+          await placedBy(id, { ...card(), placement: { x: 40, y: 40 } });
+          const base = await baseOf(id);
+          const request = (await proposed(id, frame("f", 2000), base))!;
+          const out = landed(await approve(id, request, { base, write: { key: "f", item: frame("f", 2000) } }));
+          expect(out.carried.map((e) => [e.cursor - out.written!.cursor, (e.payload as SurfaceItem).key])).toEqual([[1, "tools"]]);
+          expect((await store.surfaceOf(id)).find((r) => r.key === "tools")!.placement).toEqual({ x: 2040, y: 40 });
+          expect(await baseOf(id)).toBe(out.carried[0].cursor);
+        });
       });
 
       // What the store's docs promise beyond the cases above.

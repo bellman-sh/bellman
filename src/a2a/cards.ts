@@ -4,8 +4,9 @@
  * `defaultInputModes`, `defaultOutputModes`, `skills`), and so are the fields an `AuthorizationCodeOAuthFlow` requires
  * (`authorizationUrl`, `tokenUrl`, `scopes`). Runtime-free, like the public routes that serve them.
  *
- * A card claims only what is built: the 1.0 JSON-RPC interface, streaming, no push, no extended card.
- * The 0.3 interface (Task 12) goes in `interfaces` in `card`, beside the 1.0 one; 0.3 has no `tenant`, so its url names the room.
+ * A card claims only what is built: the 1.0 JSON-RPC interface, and for a room the 0.3 one, streaming, no push, no
+ * extended card. 0.3 has no `tenant`, so a room's 0.3 interface is its own URL, `/a2a/<tenant>`. The card stays in 1.0's
+ * shape, with none of 0.3's top-level fields: its `securitySchemes` would have to be 0.3's, which 1.0 clients do not read.
  */
 import { PACKAGE_VERSION } from "../ui/assets.js";
 
@@ -61,7 +62,12 @@ function security(origin: string, { oauth }: CardOptions) {
 }
 
 function card(origin: string, how: CardOptions, name: string, description: string, ask: string, tenant?: string) {
-  const interfaces = [{ url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", ...(tenant === undefined ? {} : { tenant }) }];
+  const interfaces = tenant === undefined
+    ? [{ url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }]
+    : [
+      { url: `${origin}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", tenant },
+      { url: `${origin}/a2a/${encodeURIComponent(tenant)}`, protocolBinding: "JSONRPC", protocolVersion: "0.3" },
+    ];
   return {
     name,
     description,

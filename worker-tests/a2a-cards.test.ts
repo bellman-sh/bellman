@@ -75,8 +75,11 @@ describe("agent cards", () => {
     expect(body.name).toBe("Migration review");
     expect(body.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(body.description).toBe(`${PURPOSE} Questions sent here and the room's answers are public on the room's page.`);
-    // Only the 1.0 interface: Task 12 adds the 0.3 one.
-    expect(body.supportedInterfaces).toEqual([{ url: `${ORIGIN}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", tenant: NAME }]);
+    // The 1.0 interface first, then 0.3's: it has no tenant, so its url names the room.
+    expect(body.supportedInterfaces).toEqual([
+      { url: `${ORIGIN}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0", tenant: NAME },
+      { url: `${ORIGIN}/a2a/${NAME}`, protocolBinding: "JSONRPC", protocolVersion: "0.3" },
+    ]);
     expect(body.capabilities).toEqual({ streaming: true, pushNotifications: false, extendedAgentCard: false });
     expect(body.defaultInputModes).toEqual(["text/plain"]);
     expect(body.defaultOutputModes).toEqual(["text/plain"]);
@@ -103,14 +106,29 @@ describe("agent cards", () => {
   it("the card's tenant is the public name, or the room id when it has none, and SendMessage takes either", async () => {
     await seed(NAMED, {}, NAME);
     await seed(PLAIN);
-    const jwt = await signJwt(
-      { iss: ORIGIN, sub: "u_alice", aud: canonicalResource(`${ORIGIN}/a2a`),
-        bellman: { userId: "u_alice", orgId: null, plan: "free", role: "member", label: "u_alice@example.dev" }, plan_source: "default" },
+    const jwtFor = (userId: string) => signJwt(
+      { iss: ORIGIN, sub: userId, aud: canonicalResource(`${ORIGIN}/a2a`),
+        bellman: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default" },
       SECRET, ACCESS_TOKEN_TTL_SECONDS,
     );
+    // Two accounts, so no room holds more of one caller's open questions than it allows.
+    const jwt = await jwtFor("u_alice");
+    const jwt03 = await jwtFor("u_carol");
     for (const [key, want] of [[NAME, NAME], [NAMED, NAME], [PLAIN, PLAIN]] as const) {
-      const { supportedInterfaces: [face] } = await card(`/public/rooms/${key}/agent-card.json`);
+      const { supportedInterfaces: [face, v03] } = await card(`/public/rooms/${key}/agent-card.json`);
       expect(face.tenant).toBe(want);
+      // The 0.3 interface's url is the same room, asked in 0.3 (no A2A-Version header, as a2a-sdk 0.3 sends).
+      expect(v03.url).toBe(`${ORIGIN}/a2a/${want}`);
+      const old = await (await worker.fetch(new Request(v03.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${jwt03}` },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "message/send",
+          params: { message: { kind: "message", messageId: crypto.randomUUID(), role: "user", parts: [{ kind: "text", text: "Hello?" }] }, configuration: { blocking: false } },
+        }),
+      }), oauthEnv, ctx)).json() as any;
+      expect(old.error, JSON.stringify(old)).toBeUndefined();
+      expect(old.result).toMatchObject({ kind: "task", status: { state: "working" } });
       const res = await worker.fetch(new Request(face.url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${jwt}`, "a2a-version": "1.0" },

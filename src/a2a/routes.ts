@@ -8,6 +8,10 @@
  *
  * `SendMessage` waits for the answer unless `returnImmediately` says not to, and the two streams send each change as it
  * happens; all three follow the task with `follow`, below, and stop at `BLOCK_CAP_MS`.
+ *
+ * A2A v0.3 has no `tenant`, so a room's own URL, `/a2a/<tenant>`, names it, and is served as 0.3 (Task 12): the 0.3
+ * method names, parts and settings are translated onto the same v1.0 handlers, and their answers back into 0.3's
+ * shapes. Nothing is decided twice, so every rule above holds there too.
  */
 import { BANNED } from "../bans.js";
 import { askRoom, cancelOutsideTask, MAX_OPEN_OUTSIDE_TASKS, outsideTask, outsideTasksOf, type AskError } from "../outside.js";
@@ -47,7 +51,8 @@ const TOO_LONG = `The question is too long. Keep it under ${MAX_PAYLOAD_CHARS.to
 const OVER = "That task is already over. Read it with GetTask.";
 const PUSH = "Push notifications aren't supported. Read the answer with GetTask.";
 const NO_EXTENDED_CARD = "This agent has no extended card.";
-const VERSION = "This endpoint speaks A2A 1.0. Send A2A-Version: 1.0.";
+const VERSION = "This endpoint speaks A2A 1.0. Send A2A-Version: 1.0. For A2A 0.3, post to the room's own URL, /a2a/<room>, which its card lists.";
+const VERSION_03 = "This URL speaks A2A 0.3. For A2A 1.0, post to /a2a and name the room in tenant.";
 /** The longest tenant looked up: no room id or public name comes near it, so a longer one is no room without a read. */
 const MAX_TENANT_CHARS = 200;
 
@@ -339,8 +344,84 @@ const PUSH_METHODS = new Set([
   "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig", "ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig",
 ]);
 
+/** 0.3's method names (spec 0.3, section 7), as the v1.0 methods that serve them. Only these are methods at a 0.3 URL. */
+const V03_METHODS = new Map([
+  ["message/send", "SendMessage"], ["message/stream", "SendStreamingMessage"], ["tasks/get", "GetTask"],
+  ["tasks/cancel", "CancelTask"], ["tasks/resubscribe", "SubscribeToTask"],
+  ["tasks/pushNotificationConfig/set", "CreateTaskPushNotificationConfig"], ["tasks/pushNotificationConfig/get", "GetTaskPushNotificationConfig"],
+  ["tasks/pushNotificationConfig/list", "ListTaskPushNotificationConfigs"], ["tasks/pushNotificationConfig/delete", "DeleteTaskPushNotificationConfig"],
+  ["agent/getAuthenticatedExtendedCard", "GetExtendedAgentCard"],
+]);
+
+/** A room's 0.3 URL: one path segment under `/a2a`, the room's tenant. */
+const V03_PATH = /^\/a2a\/([^/]+)$/;
+/** Whether a path is `/a2a` or a room's 0.3 URL: one endpoint, and one OAuth resource, `/a2a`. */
+export const isA2aPath = (path: string) => path === "/a2a" || V03_PATH.test(path);
+
+/**
+ * 0.3 params as v1.0's: the room from the URL (over any `tenant` in the body), a text part as v1.0's and any other kind
+ * as a part with no text, so a message with no text part is refused as v1.0 refuses one, and `blocking` as its inverse,
+ * `returnImmediately`. `id` and `historyLength` are named alike in both.
+ */
+function fromV03(p: Params, tenant: string): Params {
+  const msg = p.message as { parts?: unknown } | null | undefined;
+  const parts = msg && typeof msg === "object" && Array.isArray(msg.parts)
+    ? { message: { ...msg, parts: msg.parts.map((part: { kind?: unknown; text?: unknown } | null) => part?.kind === "text" ? { text: part.text } : {}) } }
+    : {};
+  const config = configOf(p);
+  const blocking = field(config, "blocking", isBoolean, "true or false");
+  return { ...p, tenant, ...parts, ...(blocking === undefined ? {} : { configuration: { ...config, returnImmediately: !blocking } }) };
+}
+
+type V1Message = Record<string, unknown> & { role: string; parts: { text: string }[] };
+type V1Status = Record<string, unknown> & { state: string; message?: V1Message };
+type V1Task = Record<string, unknown> & { status: V1Status; history?: V1Message[] };
+
+/** `TASK_STATE_INPUT_REQUIRED` as `input-required`. */
+const v03State = (state: string) => state.replace(/^TASK_STATE_/, "").toLowerCase().replace(/_/g, "-");
+const v03Message = (m: V1Message) =>
+  ({ kind: "message", ...m, role: m.role === "ROLE_USER" ? "user" : "agent", parts: m.parts.map((part) => ({ kind: "text", text: part.text })) });
+const v03Status = (s: V1Status) => ({ ...s, state: v03State(s.state), ...(s.message ? { message: v03Message(s.message) } : {}) });
+const v03Task = (t: V1Task) => ({ kind: "task", ...t, status: v03Status(t.status), ...(t.history ? { history: t.history.map(v03Message) } : {}) });
+
+/**
+ * A v1.0 result in 0.3's shape: 0.3 sends the task or message itself, not wrapped, and a status change as a
+ * `status-update` that says whether it is the last (the stream closes on any state but working).
+ */
+function v03Result(result: Record<string, unknown>): object {
+  if (result.task) return v03Task(result.task as V1Task);
+  if (result.message) return v03Message(result.message as V1Message);
+  const update = result.statusUpdate as { taskId: string; contextId: string; status: V1Status } | undefined;
+  if (!update) return v03Task(result as V1Task); // GetTask and CancelTask answer with the task itself
+  const status = v03Status(update.status);
+  return { kind: "status-update", taskId: update.taskId, contextId: update.contextId, status, final: status.state !== "working" };
+}
+const v03Rpc = (body: { result?: Record<string, unknown> }) => (body.result ? { ...body, result: v03Result(body.result) } : body);
+
+/** A v1.0 handler's answer in 0.3's shapes: the JSON-RPC body, or each event of a stream. Errors pass as they are. */
+async function toV03(res: Response): Promise<Response> {
+  const headers = new Headers(res.headers);
+  headers.delete("content-length");
+  if (!res.headers.get("content-type")?.startsWith("text/event-stream") || !res.body) {
+    return new Response(JSON.stringify(v03Rpc(await res.json())), { status: res.status, headers });
+  }
+  const text = new TextDecoder();
+  const bytes = new TextEncoder();
+  let held = "";
+  return new Response(res.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, out) {
+      held += text.decode(chunk, { stream: true });
+      const events = held.split("\n\n");
+      held = events.pop() ?? "";
+      for (const e of events) out.enqueue(bytes.encode(`${e.startsWith("data: ") ? `data: ${JSON.stringify(v03Rpc(JSON.parse(e.slice(6))))}` : e}\n\n`));
+    },
+  })), { status: res.status, headers });
+}
+
 export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Response | null> {
-  if (new URL(request.url).pathname !== "/a2a") return null;
+  const path = new URL(request.url).pathname;
+  const room03 = V03_PATH.exec(path)?.[1];
+  if (path !== "/a2a" && room03 === undefined) return null;
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
 
   let body: unknown;
@@ -351,11 +432,15 @@ export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Respon
   }
   const req = parseRpc(body);
   if ("error" in req) return rpcError(req.error.id, req.error.code, req.error.message);
-  const { id, method } = req;
+  const { id } = req;
 
-  // ADR 0033: an absent or empty A2A-Version is to go to the 0.3 handler (Task 12); until it lands, it is read as 1.0.
+  // ADR 0033: an absent or empty A2A-Version is 0.3, served only at a room's own URL; /a2a speaks 1.0 alone.
   const version = request.headers.get("a2a-version")?.trim() ?? "";
-  if (version !== "" && version !== "1.0") return rpcError(id, A2A_ERRORS.versionNotSupported.code, VERSION);
+  if (room03 === undefined ? version !== "1.0" : version !== "" && version !== "0.3") {
+    return rpcError(id, A2A_ERRORS.versionNotSupported.code, room03 === undefined ? VERSION : VERSION_03);
+  }
+  const method = room03 === undefined ? req.method : V03_METHODS.get(req.method);
+  if (method === undefined) return rpcError(id, A2A_ERRORS.methodNotFound.code, A2A_ERRORS.methodNotFound.message);
 
   if (PUSH_METHODS.has(method)) return rpcError(id, A2A_ERRORS.pushNotSupported.code, PUSH);
   if (method === "GetExtendedAgentCard") return rpcError(id, A2A_ERRORS.extendedCardNotConfigured.code, NO_EXTENDED_CARD);
@@ -368,7 +453,10 @@ export async function a2aRoutes(request: Request, deps: A2aDeps): Promise<Respon
   }
   try {
     if (await deps.suspended()) return refused(id, "SUSPENDED", SUSPENDED);
-    return await handler(id, params as Params, deps, request.signal);
+    if (room03 === undefined) return await handler(id, params as Params, deps, request.signal);
+    let tenant = room03;
+    try { tenant = decodeURIComponent(room03); } catch { /* not percent-encoding: no room has this name, so NO_ROOM */ }
+    return await toV03(await handler(id, fromV03(params as Params, tenant), deps, request.signal));
   } catch (err) {
     if (err instanceof BadParams) return rpcError(id, A2A_ERRORS.invalidParams.code, err.message);
     console.error(`A2A ${method} failed:`, err);

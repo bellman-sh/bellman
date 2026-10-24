@@ -436,6 +436,25 @@ describe("A2A over the Node server (ADR 0033)", () => {
     expect(Object.keys(card.securitySchemes)).toEqual(["bearer"]);
     expect(card.securityRequirements).toEqual([{ schemes: { bearer: { list: [] } } }]);
   });
+
+  it("serves A2A 0.3 at the room's own URL, which its card lists, with a bearer key", async () => {
+    await store.createSession(session({ id: "qs_http_v03", manifest: roomManifest({ public: true }) }));
+    const card = (await (await fetch(`${base}/public/rooms/qs_http_v03/agent-card.json`)).json()) as { supportedInterfaces: { url: string; protocolVersion: string }[] };
+    const v03 = card.supportedInterfaces.find((face) => face.protocolVersion === "0.3")!;
+    expect(v03.url).toBe(`${base}/a2a/qs_http_v03`);
+    const post = (key: string | null) => fetch(v03.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "message/send",
+        params: { message: { kind: "message", messageId: "m1", role: "user", parts: [{ kind: "text", text: "Hello?" }] }, configuration: { blocking: false } },
+      }),
+    });
+    const body = (await (await post("qk_dev_outsider")).json()) as { result?: { kind: string; status: { state: string } } };
+    expect(body.result).toMatchObject({ kind: "task", status: { state: "working" } });
+    const none = await post(null);
+    expect([none.status, none.headers.get("www-authenticate")]).toEqual([401, null]);
+  });
 });
 
 /**

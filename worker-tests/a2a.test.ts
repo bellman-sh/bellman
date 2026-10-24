@@ -153,8 +153,8 @@ describe("/a2a", () => {
     const task = res.result.task;
     expect(task).toMatchObject({ id: expect.any(String), contextId: expect.any(String), status: { state: "TASK_STATE_WORKING" } });
     expect(task.history).toMatchObject([{ role: "ROLE_USER", parts: [{ text: "Is the review open?" }] }]);
-    // The room by its id answers as by its name; no A2A-Version header is read as 1.0.
-    const byId = await json(await rpc("u_alice", "GetTask", { tenant: ROOM, id: task.id }, {}));
+    // The room by its id answers as by its name.
+    const byId = await json(await rpc("u_alice", "GetTask", { tenant: ROOM, id: task.id }));
     expect(byId.result).toMatchObject({ id: task.id, contextId: task.contextId });
   });
 
@@ -272,10 +272,14 @@ describe("/a2a", () => {
     });
   });
 
-  // ADR 0033 ruling (a): an absent or empty A2A-Version is 0.3, for the compat handler (Task 12); until it lands, 1.0.
-  it.skip("empty A2A-Version is versionNotSupported", async () => {
+  // ADR 0033 ruling (a): an absent or empty A2A-Version is 0.3, which a room's own URL serves (Task 12); /a2a is 1.0 only.
+  it("empty A2A-Version is versionNotSupported", async () => {
     await seedPublic();
     expect((await json(await rpc("u_alice", "SendMessage", ask(NAME), { "a2a-version": "" }))).error?.code).toBe(-32009);
+    const absent = await json(await rpc("u_alice", "SendMessage", ask(NAME), {}));
+    expect(absent.error?.code).toBe(-32009);
+    expect(absent.error?.message).toContain("0.3");
+    expect(await questionsIn(ROOM)).toEqual([]);
   });
 
   it("an explicit unsupported A2A-Version is versionNotSupported", async () => {

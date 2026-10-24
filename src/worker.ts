@@ -3,7 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "./a2a/cards.js";
-import { a2aRoutes } from "./a2a/routes.js";
+import { a2aRoutes, isA2aPath } from "./a2a/routes.js";
 import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
 import { scimRoutes } from "./http/scim.js";
@@ -519,8 +519,8 @@ export default {
     // minted for /a2a, or a bearer key. A signed-out request gets a plain HTTP 401 whose hint is /a2a's own
     // resource metadata, and no JSON-RPC body: -32001 is TaskNotFound to an A2A client. A suspended account is
     // refused inside, in JSON-RPC, so the refusal carries the request's id and a registry that cannot say is
-    // JSON-RPC's internal error.
-    if (url.pathname === "/a2a") {
+    // JSON-RPC's internal error. A room's 0.3 URL, /a2a/<room>, is the same endpoint and the same resource.
+    if (isA2aPath(url.pathname)) {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const identity = await resolveCaller(request, env, oauth, "/a2a");

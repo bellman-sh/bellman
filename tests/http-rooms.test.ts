@@ -683,6 +683,29 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(body.items.map((i) => [i.data.key, i.data.placement])).toEqual([["plan", { x: 0, y: 0 }], ["risks", { x: 360, y: 0 }]]);
   });
 
+  // Surface frames spec, R21: an overlap is a conflict, and the route answers it in the words the tool does.
+  it("answers 409 for a frame that overlaps one already on the surface, naming that frame", async () => {
+    const frame = (x: number) => ({ kind: "frame", title: "F", placement: { x, y: 0, w: 1480, h: 520 } });
+    expect((await put(DEV_KEY.jesse, "one", frame(0)))!.status).toBe(200);
+    const res = (await put(DEV_KEY.jesse, "two", frame(1000)))!;
+    expect(res.status).toBe(409);
+    expect(await bodyOf(res)).toEqual({
+      error: "conflict",
+      error_description: 'surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap',
+    });
+    expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["one"]);
+  });
+
+  it("answers 400 for a card naming a frame the room does not have", async () => {
+    const res = (await put(DEV_KEY.jesse, "a", { kind: "text", body: "x", frame: 1 }))!;
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toEqual({
+      error: "invalid",
+      error_description: 'surface text "a": frame 1 does not exist: this room has no frames',
+    });
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
   // Both transports call writeSurface, so the route takes an html page because the tool does (#185).
   it("places an html page through the route, and a member's read gives it back as kind html with that body", async () => {
     const page = "<!doctype html><p>hi</p>";

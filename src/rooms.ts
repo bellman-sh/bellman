@@ -25,7 +25,7 @@ import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
   JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
-  type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
+  type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { cardResult, messageResult, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
@@ -34,6 +34,7 @@ import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
+import { MAX_FRAMES } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -1062,6 +1063,16 @@ export async function resolveSurfaceWrite(
         `this room's surface already holds 1,000 items; remove one with { key, remove: true } before adding "${write.key}".`,
       );
     }
+    // A frame key already on the surface is a rewrite and passes; a key that is not a frame yet is a new frame.
+    if (
+      write.item.kind === "frame" && byKey.get(write.key)?.kind !== "frame" &&
+      rows.filter((r) => r.kind === "frame").length >= MAX_FRAMES
+    ) {
+      return refuse(
+        "conflict",
+        `this room's surface already holds ${MAX_FRAMES} frames; remove one with { key, remove: true } before adding frame "${write.key}".`,
+      );
+    }
     if (write.item.kind === "connector" && write.item.ends !== null) {
       for (const end of [write.item.ends.from, write.item.ends.to]) {
         const target = byKey.get(end);
@@ -1150,6 +1161,9 @@ async function restoreVersion(
   });
 }
 
+/** The refusal `placeSurfaceWrite` gives a card naming a frame that is not there (`noSuchFrame`); the others are conflicts. */
+const MISSING_FRAME = / frame \d+ does not exist: this room has /;
+
 /**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
@@ -1166,8 +1180,11 @@ async function restoreVersion(
  * and a connector can name a key removed a millisecond earlier. Both are
  * courtesy bounds — a 65th row costs nothing and a dangling connector is a
  * state the spec declares a reader handles — so neither moves into the store.
+ * The 100-frame cap is read with the item cap and is the same kind of bound.
  * The verb guard, the frozen guard and the row's write are not courtesies, and
- * each is where it has to be.
+ * each is where it has to be. Neither is the placement among frames: the append
+ * is `appendSurface`, which places the write inside the store's own transaction
+ * and refuses an overlap, a full frame or a missing frame there, writing nothing.
  *
  * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
  * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
@@ -1222,7 +1239,7 @@ export async function writeSurface(
     payload: write.item ?? { key: write.key, remove: true },
     refId: null,
   };
-  const extras: AppendExtras = {
+  const extras: Parameters<BellmanStore["appendSurface"]>[2] = {
     surface: write,
     // The seat that restores a version approves it, whoever wrote it (D5).
     ...(restored === null ? {} : { approvedBy: { memberId: me.memberId, label: me.label } }),
@@ -1234,24 +1251,21 @@ export async function writeSurface(
   // so each restorer's keys are their own (R23); the refusal below still names the key as the caller wrote it.
   const key = restored === null || !idempotencyKey ? idempotencyKey : `${memberId}:${idempotencyKey}`;
 
-  let event: SessionEvent;
-  let replayed = false;
-  if (key) {
-    const w = await store.appendEventOnce(sessionId, draft, key, extras);
-    if (w.outcome === "conflict") {
-      return refuse(
-        "conflict",
-        `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
-      );
-    }
-    if (w.outcome === "frozen") return refuse("frozen", FROZEN);
-    event = w.event;
-    replayed = w.outcome === "replayed";
-  } else {
-    const appended = await store.appendEvent(sessionId, draft, extras);
-    if (!appended) return refuse("frozen", FROZEN);
-    event = appended;
+  // One call for the keyed and the unkeyed write: the store places the write among the frames inside its own
+  // transaction, so an overlap or a full or missing frame is refused there and nothing is written.
+  const appended = await store.appendSurface(sessionId, draft, extras, key ?? null);
+  if (appended.outcome === "conflict") {
+    return refuse(
+      "conflict",
+      `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
+    );
   }
+  if (appended.outcome === "frozen") return refuse("frozen", FROZEN);
+  // A missing frame is the writer's mistake (`invalid`); an overlap and a frame with no free slot are the room's
+  // state meeting the write (`conflict`).
+  if (appended.outcome === "refused") return refuse(MISSING_FRAME.test(appended.reason) ? "invalid" : "conflict", appended.reason);
+  const event = appended.event;
+  const replayed = appended.outcome === "replayed";
 
   // Nothing below happens twice: a replay's original call did it.
   if (!replayed) {

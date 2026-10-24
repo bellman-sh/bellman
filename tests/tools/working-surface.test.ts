@@ -1031,3 +1031,26 @@ describe("shape items (#197)", () => {
     }
   });
 });
+
+describe("frames through bellman_send (surface frames spec, D2, D8)", () => {
+  const frameOf = (key: string, x: number, extra: Record<string, unknown> = {}) =>
+    ({ key, kind: "frame", title: key, placement: { x, y: 0, w: 1480, h: 520 }, ...extra });
+
+  it("writes a frame, puts a card in it by number, and refuses an overlap naming the frame it hits", async () => {
+    const p = await pairUp(h);
+    expect((await write(p, frameOf("intro", 0))).isError).toBe(false);
+    expect((await write(p, { key: "a", kind: "text", body: "x", frame: 1 })).isError).toBe(false);
+    expect((await h.store.surfaceOf(p.sessionId)).find((r) => r.key === "a")!.placement).toEqual({ x: 40, y: 40 });
+    await refusedWith(p, frameOf("next", 1000), 'surface frame "next" would overlap frame 1 ("intro"): frames may touch but not overlap');
+  });
+
+  it("refuses the 101st frame and lets a frame already on the surface be rewritten", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < 100; i++) {
+      const f = { key: `f${i}`, kind: "frame" as const, title: "F", body: null, ends: null, placement: { x: i * 2000, y: 0, w: 1000, h: 1000 }, blob: null, shape: null, locked: true };
+      await h.store.appendSurface(p.sessionId, { type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse", payload: f, refId: null }, { surface: { key: f.key, item: f } }, null);
+    }
+    await refusedWith(p, frameOf("f100", 500_000), 'this room\'s surface already holds 100 frames; remove one with { key, remove: true } before adding frame "f100".');
+    expect((await write(p, { ...frameOf("f0", 0), title: "Renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } })).isError).toBe(false);
+  });
+});

@@ -289,6 +289,27 @@ describe("a proposal whose card cannot be written when it is approved", () => {
     expect(out.text).toContain('connector "link" names "a", which is not on the surface');
   });
 
+  // Surface frames spec, D8: a frame needs no source, and an approval places it among the frames already there.
+  it("places a proposed frame at approval, and refuses one that overlaps a frame already there with nothing appended", async () => {
+    const r = await topicRoom(h);
+    const frame = (key: string, x: number) => ({ key, kind: "frame", title: key, placement: { x, y: 0, w: 1480, h: 520 } });
+    const one = await propose(r, { item: frame("one", 0) });
+    const two = await propose(r, { item: frame("two", 1000) });
+    expect(one.isError, one.text).toBe(false);
+    expect(two.isError, two.text).toBe(false);
+
+    const placed = await answer(r, one.data.cursor);
+    expect(placed.isError, placed.text).toBe(false);
+    expect((await rowsOf(r)).map((x) => [x.key, x.kind, x.byMemberId])).toEqual([["one", "frame", r.contributorId]]);
+
+    const before = (await eventsOf(r)).length;
+    const out = await answer(r, two.data.cursor);
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('surface frame "two" would overlap frame 1 ("one"): frames may touch but not overlap');
+    expect((await eventsOf(r)).length).toBe(before);
+    expect((await rowsOf(r)).map((x) => x.key)).toEqual(["one"]);
+  });
+
   // ADR 0022: the refusal comes before the minute's count, so the approver keeps the place the refused answer did not use.
   it("spends no place of the send limit when it is refused", async () => {
     const r = await topicRoom(h);

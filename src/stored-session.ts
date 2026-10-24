@@ -81,6 +81,19 @@ export interface StoredSession extends Omit<Session, "events"> {
    */
   blobBytes?: number;
   /**
+   * Outside questions (A2A) the hosted seat was made the voice of on one UTC day, the count
+   * `decideAsk` holds under `SEAT_OUTSIDE_DAILY_CAP`. Read and moved in the ask's own
+   * transaction. Absent until the seat is first chosen; a day other than today counts as 0.
+   */
+  seatDay?: { day: string; count: number };
+  /**
+   * The seat's open outside questions: task id to the deadline past which the members answer
+   * instead (`SEAT_SILENCE_MS`). Kept on the record so the alarm can derive its earliest
+   * without listing the task rows. An entry leaves when the seat answers or hands off, or
+   * when the deadline handler runs.
+   */
+  seatWaits?: Record<string, number>;
+  /**
    * The last `seq` the room gave a member, so the next seat takes the one after it (ADR
    * 0019). The Durable Objects record keeps it, because the members who have left are rows
    * it does not read on every call; MemoryStore counts the members it keeps instead.

@@ -20,7 +20,7 @@ import type {
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
-  decideBlobCharge, decideHostCharge, departures, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
+  decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
   isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
   stampSeen,
 } from "./store.js";
@@ -139,6 +139,11 @@ const HEARTBEAT_HANDLER = "heartbeat";
  * rollback strands nothing. See derivedDue().
  */
 const ABANDONED_HANDLER = "abandoned";
+/**
+ * The alarm handler that hands an outside question (A2A) the seat stayed silent on to the members. A name only,
+ * derived like heartbeat's from the record's `seatWaits`: never stored under `due:`. See derivedDue().
+ */
+const SEAT_HANDLER = "seat";
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -2428,12 +2433,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async askOutside(req: AskRequest): Promise<AskOutcome> {
     let broughtForward = false as boolean;
+    let wakesSeat = false as boolean;
     // The rows this transaction read, for the wake's read_context rule, as in appendEvent.
     let members: readonly Member[] = [];
     let appended: SessionEvent | null = null;
     const result = await this.ctx.storage.transaction<AskOutcome>(async (txn) => {
       // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
       broughtForward = false;
+      wakesSeat = false;
       appended = null;
       const s = await this.stored(txn);
       if (!s || s.frozenAt !== null) return { ok: false, error: "not_found" };
@@ -2443,12 +2450,21 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const callerKey = `${OUTSIDE_CALLER_PREFIX}${encodeURIComponent(req.callerUserId)}`;
       const known = await txn.get<OutsideCaller>(callerKey);
       const issued = (await txn.get<number>(OUTSIDE_VISITORS_KEY)) ?? 0;
-      const d = decideAsk(s, req, { mine, known, issued });
+      const d = decideAsk(s, req, { mine, known, issued, seatDay: s.seatDay });
       if (!d.ok) return d;
 
       const event: SessionEvent = { ...d.event, cursor: await this.nextCursor(txn), at: Date.now() };
       const task = taskWithEvent(d.task, event);
+      // The seat as voice: its day's count, its deadline on the record and its wake, in this transaction. The wake's
+      // enqueue arms the alarm for the queue, and alarm()'s closing reArm() then finds the deadline, which `seatWaits`
+      // derives: nothing here sets the alarm to it, so nothing pulls back an earlier time.
+      const seat = d.seatDay === null ? {} : {
+        session: { ...s, seatDay: d.seatDay, seatWaits: { ...s.seatWaits, [task.id]: task.seatDeadline as number } },
+        ...await this.driver.enqueue(txn, [hostWakeIntent(s.id, "outside", event.cursor)]),
+      };
+      wakesSeat = d.seatDay !== null;
       broughtForward = await this.#writeEvent(txn, s, event, {
+        ...seat,
         [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task,
         ...(d.standing === null ? {} : { [callerKey]: d.standing }),
         ...(d.issued === issued ? {} : { [OUTSIDE_VISITORS_KEY]: d.issued }),
@@ -2460,6 +2476,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (event !== null) {
       this.#wake(event, members);
       if (broughtForward) await this.driver.reArm();
+      // Last, as appendEvent's: nobody woken above waits on the seat's delivery.
+      if (wakesSeat) await this.driver.deliverNow();
     }
     return result;
   }
@@ -2471,20 +2489,36 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async answerOutside(req: AnswerRequest): Promise<AnswerResult> {
     let broughtForward = false as boolean;
+    let audited = false as boolean;
     let members: readonly Member[] = [];
     let appended: SessionEvent | null = null;
     const result = await this.ctx.storage.transaction<AnswerResult>(async (txn) => {
       broughtForward = false;
+      audited = false;
       appended = null;
       const s = await this.stored(txn);
       if (!s || s.frozenAt !== null || s.closed) return { ok: false, error: "task_closed" };
       members = s.members;
       const d = decideAnswer(s, await txn.get<OutsideTask>(`${OUTSIDE_TASK_PREFIX}${req.taskId}`), req);
       if (!d.ok) return d;
+      // The seat pays for its answer in this write, as appendHostEvent's: the charge, its stamp and its audit row. A
+      // meter that refuses leaves the seat no voice to answer with.
+      const charge = req.units === undefined ? null : decideHostCharge(s, req.units, req.now);
+      if (charge !== null && !charge.ok) return { ok: false, error: "not_the_voice" };
 
       const event: SessionEvent = { ...d.event, cursor: await this.nextCursor(txn), at: Date.now() };
       const task = taskWithEvent(d.task, event);
-      broughtForward = await this.#writeEvent(txn, s, event, { [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task });
+      const { [task.id]: _answered, ...seatWaits } = s.seatWaits ?? {};
+      const intents = charge === null ? [] : hostSentEntries(s, d.event, req.now).map(auditIntent);
+      audited = intents.length > 0;
+      const seat = charge === null ? {} : {
+        session: {
+          ...s, seatWaits, hostUnits: charge.next,
+          members: s.members.map((m) => m.memberId === d.event.fromMemberId ? { ...m, lastSeenAt: req.now } : m),
+        },
+        ...(audited ? await this.driver.enqueue(txn, intents) : {}),
+      };
+      broughtForward = await this.#writeEvent(txn, s, event, { ...seat, [`${OUTSIDE_TASK_PREFIX}${task.id}`]: task });
       appended = event;
       return { ok: true, task };
     });
@@ -2492,8 +2526,54 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (event !== null) {
       this.#wake(event, members);
       if (broughtForward) await this.driver.reArm();
+      if (audited) await this.driver.deliverNow();
     }
     return result;
+  }
+
+  /**
+   * `BellmanStore.seatSkipped`: the task row's hand-off (`handOff`) and its deadline off the record, in ONE
+   * transaction, so it serialises with the seat's answer: whichever lands second finds the other's row. Acts on a frozen
+   * or closed room too, since it writes no event; it only says who may answer.
+   */
+  async seatSkipped(taskId: string, reason: string): Promise<void> {
+    const moved = await this.ctx.storage.transaction<boolean>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return false;
+      const key = `${OUTSIDE_TASK_PREFIX}${taskId}`;
+      const task = await txn.get<OutsideTask>(key);
+      const handed = task !== undefined && handOff(task, Date.now());
+      if (handed) await txn.put(key, task);
+      if (s.seatWaits?.[taskId] !== undefined) {
+        const { [taskId]: _gone, ...seatWaits } = s.seatWaits;
+        await putRows(txn, memberRows(s, { ...s, seatWaits }));
+      }
+      return handed;
+    });
+    if (moved) console.log(`seat handed outside task ${taskId} to the members: ${reason}`);
+  }
+
+  /**
+   * The seat's silence (SEAT_HANDLER): every outside task whose `seatWaits` deadline has passed goes to the members,
+   * in one transaction, and leaves `seatWaits`, which moves the derived time on. `handOff` skips a task the seat has
+   * answered since; its entry goes all the same.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #seatSilenceIfDue(now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s?.seatWaits) return;
+      const due = Object.entries(s.seatWaits).filter(([, at]) => now >= at).map(([taskId]) => taskId);
+      if (due.length === 0) return;
+      for (const taskId of due) {
+        const key = `${OUTSIDE_TASK_PREFIX}${taskId}`;
+        const task = await txn.get<OutsideTask>(key);
+        if (task !== undefined && handOff(task, now)) await txn.put(key, task);
+      }
+      const seatWaits = Object.fromEntries(Object.entries(s.seatWaits).filter(([taskId]) => !due.includes(taskId)));
+      await putRows(txn, memberRows(s, { ...s, seatWaits }));
+    });
   }
 
   /**
@@ -2826,6 +2906,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (name === HOUSEKEEP_HANDLER) await this.#housekeepIfDue(now);
         if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
         if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
+        if (name === SEAT_HANDLER) await this.#seatSilenceIfDue(now);
       } catch (error) {
         // The runtime retries a throwing alarm a few times and then leaves it with nothing armed
         // (a read of the room arms it again: getSession), and it says nothing of which object it
@@ -2899,6 +2980,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (tick !== null) due.set(HEARTBEAT_HANDLER, tick);
     const housekeeping = nextHousekeepAt(s, Date.now());
     if (housekeeping !== null) due.set(HOUSEKEEP_HANDLER, housekeeping);
+    // Consumed by #seatSilenceIfDue, which removes every entry it finds due, so the time moves on.
+    const waits = Object.values(s.seatWaits ?? {});
+    if (waits.length > 0) due.set(SEAT_HANDLER, Math.min(...waits));
     return due;
   }
 
@@ -5659,6 +5743,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult> {
     return this.session(sessionId).answerOutside(req);
+  }
+
+  async seatSkipped(sessionId: string, taskId: string, reason: string): Promise<void> {
+    return this.session(sessionId).seatSkipped(taskId, reason);
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {

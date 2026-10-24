@@ -1,7 +1,7 @@
 import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
 import { verbsOfRole } from "./roles.js";
-import { isActiveMember, isHostMember, isPublic, type BellmanStore } from "./store.js";
+import { hostSeated, isActiveMember, isHostMember, isPublic, type BellmanStore } from "./store.js";
 import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 
 /** Outside callers (A2A) of a public room: the limits, asking and answering. The task row's type is `OutsideTask`, in types.ts. */
@@ -46,7 +46,14 @@ export type AskRows = {
   known: OutsideCaller | undefined;
   /** The last visitor number this room handed out. */
   issued: number;
+  /** How many outside questions the seat was made the voice of, on the day it names. */
+  seatDay: SeatDay | undefined;
 };
+
+/** One UTC day's count of outside questions given to the seat. */
+export type SeatDay = { day: string; count: number };
+/** The UTC calendar day a time falls in, as the seat's daily count keys it. */
+export const utcDay = (now: number): string => new Date(now).toISOString().slice(0, 10);
 
 export type AskDecision =
   | { ok: false; error: AskError }
@@ -58,16 +65,19 @@ export type AskDecision =
     standing: OutsideCaller | null;
     /** The visitor counter to write. */
     issued: number;
+    /** The seat's day count to write when the seat is the voice, or null when the members are. */
+    seatDay: SeatDay | null;
     event: Omit<SessionEvent, "cursor" | "at">;
   };
 
 /**
  * The decisions of an ask that depend on rows another ask can change: whether the room is still open, the
- * follow-up rule, the open-task cap, the caller's context and their visitor number. Pure, and shared by both stores,
+ * follow-up rule, the open-task cap, the caller's context, their visitor number, and the voice: the room's seat while
+ * it has one and its day's count is under `SEAT_OUTSIDE_DAILY_CAP`, else the members. Pure, and shared by both stores,
  * as `decideApproval` is: each runs it over rows it read in the unit that writes the result, so two asks cannot both
  * pass a check the first one's write would have failed.
  */
-export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "unpublishedAt">, req: AskRequest, rows: AskRows): AskDecision {
+export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "unpublishedAt" | "members">, req: AskRequest, rows: AskRows): AskDecision {
   if (!isPublic(room) || room.closed) return { ok: false, error: "not_found" };
   const named = req.taskId === undefined ? undefined : rows.mine.find((t) => t.id === req.taskId);
   if (req.taskId !== undefined) {
@@ -83,14 +93,19 @@ export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "un
   const issued = visitor !== null && visitor !== known?.visitor ? visitor : rows.issued;
   const contextId = known?.contextId ?? crypto.randomUUID();
   const origin = req.handle ?? `visitor ${visitor}`;
+  // Each ask, a follow-up too, picks its voice afresh: the seat's day may have filled, or the seat left, since the last.
+  const today = utcDay(req.now);
+  const spent = rows.seatDay?.day === today ? rows.seatDay.count : 0;
+  const seat = room.manifest.host !== null && hostSeated(room) && spent < SEAT_OUTSIDE_DAILY_CAP;
+  const voice = { voice: seat ? "seat" : "members", seatDeadline: seat ? req.now + SEAT_SILENCE_MS : null } as const;
   const task: OutsideTask = named
-    ? { ...named, state: "TASK_STATE_WORKING", updatedAt: req.now }
+    ? { ...named, ...voice, state: "TASK_STATE_WORKING", updatedAt: req.now }
     : {
       id: crypto.randomUUID(), contextId, sessionId: room.id, callerUserId: req.callerUserId, origin,
-      state: "TASK_STATE_WORKING", voice: "members", questionCursors: [], answers: [], createdAt: req.now, updatedAt: req.now, seatDeadline: null,
+      state: "TASK_STATE_WORKING", ...voice, questionCursors: [], answers: [], createdAt: req.now, updatedAt: req.now,
     };
   return {
-    ok: true, task, issued,
+    ok: true, task, issued, seatDay: seat ? { day: today, count: spent + 1 } : null,
     standing: known && visitor === known.visitor ? null : { userId: req.callerUserId, contextId, visitor },
     event: { type: "outside_question", fromMemberId: "system", fromUserId: "system", fromLabel: origin, payload: { taskId: task.id, text: req.text }, refId: null },
   };
@@ -105,7 +120,8 @@ export function decideAsk(room: Pick<Session, "id" | "closed" | "manifest" | "un
  * follow-up rule or the open-task cap, the context, the visitor number) and writes the question and the task row, all in
  * the one transaction, so concurrent asks see each other and neither the question nor the row exists without the other.
  *
- * Every task is answered by the members for now (`voice: "members"`, no `seatDeadline`).
+ * The store also picks the voice there (see `decideAsk`). A seat that is the voice is woken in the same unit, and hands
+ * the question to the members (`seatSkipped`) when it cannot answer or stays silent past `seatDeadline`.
  */
 export async function askRoom(
   store: BellmanStore,
@@ -132,12 +148,13 @@ export async function askRoom(
   return done.ok ? done : refuse(done.error);
 }
 
-export type AnswerInput = { refId: number; text: string; needsInput?: boolean };
+/** `units` is the seat's alone: it charges the answer to the room's month, in the answer's own write. */
+export type AnswerInput = { refId: number; text: string; needsInput?: boolean; units?: number };
 export type AnswerError = "not_a_question" | "not_the_voice" | "already_answered" | "task_closed";
 export type AnswerResult = { ok: true; task: OutsideTask } | { ok: false; error: AnswerError };
 
 /** What `answerOutside` is handed: the question answered, the task it belongs to, and who answers with what. */
-export type AnswerRequest = { taskId: string; refId: number; memberId: string; text: string; needsInput: boolean; now: number };
+export type AnswerRequest = { taskId: string; refId: number; memberId: string; text: string; needsInput: boolean; now: number; units?: number };
 
 /**
  * Whether this member is the voice that answers this task, at this moment:
@@ -200,5 +217,8 @@ export async function answerQuestion(
   const asked = await store.eventAt(sessionId, input.refId);
   const taskId = asked?.type === "outside_question" ? (asked.payload as { taskId?: unknown }).taskId : undefined;
   if (typeof taskId !== "string") return { ok: false, error: "not_a_question" };
-  return store.answerOutside(sessionId, { taskId, refId: input.refId, memberId: member.memberId, text: input.text, needsInput: input.needsInput === true, now });
+  return store.answerOutside(sessionId, {
+    taskId, refId: input.refId, memberId: member.memberId, text: input.text, needsInput: input.needsInput === true, now,
+    ...(input.units === undefined ? {} : { units: input.units }),
+  });
 }

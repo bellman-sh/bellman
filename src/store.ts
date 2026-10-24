@@ -24,7 +24,7 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { decideApproval } from "./proposal.js";
-import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest } from "./outside.js";
+import { decideAnswer, decideAsk, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type SeatDay } from "./outside.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
@@ -1671,6 +1671,13 @@ export interface BellmanStore {
    */
   answerOutside(sessionId: string, req: AnswerRequest): Promise<AnswerResult>;
   /**
+   * The hosted seat will not answer this outside task (A2A): hand the voice to the members and clear the deadline.
+   * Acts only while the task is still the seat's and WORKING, so a skip that arrives after the seat answered, or a
+   * second skip, changes nothing; the seat's answer after a skip finds itself not the voice. `reason` is for the log.
+   * The seat's silence past `seatDeadline` runs the same hand-off: the room's alarm in SessionDO, `sweep` here.
+   */
+  seatSkipped(sessionId: string, taskId: string, reason: string): Promise<void>;
+  /**
    * Charge `bytes` to this room's blob total unless that would pass the
    * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
    * plan that made it. The read and the write are one operation, for
@@ -2012,6 +2019,19 @@ export interface BellmanStore {
   sweep(now: number): Promise<void>;
 }
 
+/**
+ * The seat's hand-off of an outside task to the members, in place. Only a task still the seat's and WORKING moves:
+ * a skip after the seat answered, or after an earlier hand-off, is a no-op (the ruling for the races between the seat's
+ * answer, its skip and its deadline). Both stores' rule; SessionDO applies it to the row it read in its transaction.
+ */
+export function handOff(task: OutsideTask, now: number): boolean {
+  if (task.voice !== "seat" || task.state !== "TASK_STATE_WORKING") return false;
+  task.voice = "members";
+  task.seatDeadline = null;
+  task.updatedAt = now;
+  return true;
+}
+
 function detach<T>(value: T): T {
   return structuredClone(value);
 }
@@ -2104,6 +2124,8 @@ export class MemoryStore implements BellmanStore {
   private outsideTasks = new Map<string, Map<string, OutsideTask>>();
   private outsideCallerRows = new Map<string, Map<string, OutsideCaller>>();
   private outsideVisitors = new Map<string, number>();
+  /** The seat's outside questions per UTC day, by session: `seatDay` on SessionDO's record. */
+  private seatDays = new Map<string, SeatDay>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
   /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
@@ -3204,12 +3226,15 @@ export class MemoryStore implements BellmanStore {
     const mine = [...(this.outsideTasks.get(sessionId)?.values() ?? [])].filter((t) => t.callerUserId === req.callerUserId);
     const known = this.outsideCallerRows.get(sessionId)?.get(req.callerUserId);
     const issued = this.outsideVisitors.get(sessionId) ?? 0;
-    const d = decideAsk(s, req, { mine, known, issued });
+    const d = decideAsk(s, req, { mine, known, issued, seatDay: this.seatDays.get(sessionId) });
     if (!d.ok) return d;
     const event = this.appendNow(s, d.event);
     this.applyExtras(s, event, { outsideTask: d.task, ...(d.standing === null ? {} : { outsideCaller: d.standing }) });
     this.outsideVisitors.set(sessionId, d.issued);
+    if (d.seatDay !== null) this.seatDays.set(sessionId, d.seatDay);
     this.wakeHost(s, event);
+    // The seat's own wake for the question (REPLIES_PER_QUESTION does not count it), as SessionDO queues it.
+    if (d.seatDay !== null) this.hostWoken({ sessionId, cause: "outside", cursor: event.cursor });
     return { ok: true, task: detach(taskWithEvent(d.task, event)) };
   }
 
@@ -3219,10 +3244,23 @@ export class MemoryStore implements BellmanStore {
     if (!s || s.frozenAt !== null || s.closed) return { ok: false, error: "task_closed" };
     const d = decideAnswer(s, this.outsideTasks.get(sessionId)?.get(req.taskId), req);
     if (!d.ok) return d;
+    // The seat pays for its answer in the same turn. A meter that refuses leaves the seat no voice to answer with.
+    const charge = req.units === undefined ? null : decideHostCharge(s, req.units, req.now);
+    if (charge !== null && !charge.ok) return { ok: false, error: "not_the_voice" };
     const event = this.appendNow(s, d.event);
     this.applyExtras(s, event, { outsideTask: d.task });
+    if (charge !== null) {
+      s.hostUnits = charge.next;
+      s.members = s.members.map((m) => m.memberId === d.event.fromMemberId ? { ...m, lastSeenAt: req.now } : m);
+      this.recordAudit(hostSentEntries(s, d.event, req.now));
+    }
     this.wakeHost(s, event);
     return { ok: true, task: detach(taskWithEvent(d.task, event)) };
+  }
+
+  async seatSkipped(sessionId: string, taskId: string, _reason: string): Promise<void> {
+    const task = this.outsideTasks.get(sessionId)?.get(taskId);
+    if (task) handOff(task, Date.now());
   }
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
@@ -4053,6 +4091,10 @@ export class MemoryStore implements BellmanStore {
       }
       const sweep = sweepDueAt(s);
       if (sweep !== null && now >= sweep) await this.sweepBlobs(s.id);
+    }
+    // The seat's silence on an outside question: past its deadline the members answer (SessionDO: the room's alarm).
+    for (const tasks of this.outsideTasks.values()) {
+      for (const t of tasks.values()) if (t.seatDeadline !== null && now >= t.seatDeadline) handOff(t, now);
     }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);

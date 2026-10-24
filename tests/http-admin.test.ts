@@ -3,7 +3,7 @@
  * BELLMAN_OPERATORS lists, over a bearer token and never a cookie, as /admin/handles is (ADR 0021).
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { MAX_REPORTS_LISTED, type OAuthConfig } from "../src/oauth/routes.js";
+import { MAX_ACCOUNTS_LISTED, MAX_REPORTS_LISTED, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import type { Report } from "../src/reports.js";
 import { MemoryStore } from "../src/store.js";
@@ -74,6 +74,52 @@ describe("/admin/suspensions/:userId", () => {
     expect((await send("POST", "/admin/suspensions/u_peer", { cookie: `${COOKIE}=${sid}`, origin: PANEL }, { note: "x" })).status).toBe(401);
     expect((await send("POST", "/admin/suspensions/u_peer", {}, { note: "x" })).status).toBe(401);
     expect(await store.isSuspended("u_peer")).toBe(false);
+  });
+});
+
+describe("/admin/accounts", () => {
+  const seed = async () => {
+    await store.recordSignIn("u_google_2", Date.UTC(2026, 9, 3));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 1));
+    await store.recordSignIn("u_github_9", Date.UTC(2026, 9, 20));
+  };
+
+  it("lists accounts by first sign-in, with the total, an id and two dates each and nothing else", async () => {
+    await seed();
+    const res = await send("GET", "/admin/accounts", await bearer(OPERATOR));
+    expect([res.status, await res.json()]).toEqual([200, {
+      total: 2,
+      accounts: [
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-20T00:00:00.000Z" },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z" },
+      ],
+    }]);
+    const one = await (await send("GET", "/admin/accounts?limit=1", await bearer(OPERATOR))).json() as { total: number; accounts: unknown[] };
+    expect([one.total, one.accounts.length]).toEqual([2, 1]);
+  });
+
+  it("takes a limit of 1 to MAX_ACCOUNTS_LISTED and nothing else", async () => {
+    const auth = await bearer(OPERATOR);
+    for (const limit of ["0", "-1", "1.5", "abc", "", String(MAX_ACCOUNTS_LISTED + 1), "01"]) {
+      expect((await send("GET", `/admin/accounts?limit=${limit}`, auth)).status, limit).toBe(400);
+    }
+    expect((await send("GET", `/admin/accounts?limit=${MAX_ACCOUNTS_LISTED}`, auth)).status).toBe(200);
+  });
+
+  it("lets no one else read it, takes GET alone, and answers 501 with no plan store", async () => {
+    await seed();
+    for (const operators of [undefined, new Set<string>()]) {
+      const closed = routeWith(panelConfig({ plans: store, operators }));
+      expect((await send("GET", "/admin/accounts", await bearer(OPERATOR), undefined, closed)).status).toBe(403);
+    }
+    expect((await send("GET", "/admin/accounts", await bearer(TEAM_ADMIN, "operator"))).status).toBe(403);
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
+    expect((await send("GET", "/admin/accounts", { cookie: `${COOKIE}=${sid}`, origin: PANEL })).status).toBe(401);
+    expect((await send("GET", "/admin/accounts", {})).status).toBe(401);
+    const post = await send("POST", "/admin/accounts", await bearer(OPERATOR));
+    expect([post.status, post.headers.get("allow")]).toEqual([405, "GET"]);
+    const bare = routeWith(panelConfig({ plans: undefined, operators: new Set([OPERATOR.userId]) }));
+    expect((await send("GET", "/admin/accounts", await bearer(OPERATOR), undefined, bare)).status).toBe(501);
   });
 });
 

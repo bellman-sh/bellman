@@ -8285,6 +8285,23 @@ export function describeStoreContract(
 
           expect(await store.countUsers()).toBe(1);
         });
+
+        // The operator's GET /admin/accounts. Signed in out of order, so the order it answers in is first sign-in's.
+        it("lists people by first sign-in, ties by id, a later sign-in moving only lastSeenAt, cut at the limit", async () => {
+          expect(await store.listUsers(10)).toEqual([]);
+          await store.recordSignIn("u_google_2", 2_000);
+          await store.recordSignIn("u_github_9", 1_000);
+          await store.recordSignIn("u_github_3", 2_000);
+          await store.recordSignIn("u_github_9", 5_000);
+
+          expect(await store.listUsers(10)).toEqual([
+            { userId: "u_github_9", firstSeenAt: 1_000, lastSeenAt: 5_000 },
+            { userId: "u_github_3", firstSeenAt: 2_000, lastSeenAt: 2_000 },
+            { userId: "u_google_2", firstSeenAt: 2_000, lastSeenAt: 2_000 },
+          ]);
+          expect((await store.listUsers(1)).map((u) => u.userId)).toEqual(["u_github_9"]);
+          expect(await store.countUsers(), "the count is not a row").toBe(3);
+        });
     });
   });
 }

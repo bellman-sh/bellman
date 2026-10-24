@@ -116,7 +116,7 @@ export type PlanStore = Pick<
   | "invitesFor" | "acceptOrgInvite" | "declineOrg" | "declinedOrgs"
   | "countCreatesThisMonth"
   | "releaseHandleNamed" | "handleHolders" | "sessionsJoinedBy" | "membersOfUser"
-  | "recordSignIn"
+  | "recordSignIn" | "countUsers" | "listUsers"
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
 >;
@@ -126,6 +126,10 @@ export type PlanStore = Pick<
 // once: only then does an open report fall past it, and an operator that far behind wants a cursor on the queue. The route
 // takes no limit: whatever it asks the store for is this number.
 export const MAX_REPORTS_LISTED = 200;
+
+// ponytail: a thousand accounts a read, and no cursor: the store sorts every record to answer, and the first thousand
+// by first sign-in is the read this was built for. A cursor on first sign-in when the list outgrows it.
+export const MAX_ACCOUNTS_LISTED = 1000;
 
 export type PlanSource = "operator" | "grant" | "default";
 
@@ -2192,6 +2196,32 @@ export async function handleOAuth(
     }
 
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST, DELETE" } });
+  }
+
+  // ----------------------------------------------------- /admin/accounts
+  // The operator lists who has signed in, first sign-in first: `?limit=` from 1 to MAX_ACCOUNTS_LISTED, 50 when absent.
+  // A record is an id and two dates, and that is all this answers: no label, no email, no room. It is the first route
+  // to answer rows of accounts, which #259 kept out of /operator/stats; #61 decides where such reads live next. On
+  // /admin/handles' gate, in the order every operator route takes: the gate, the method, the plan store, the query.
+  if (path === "/admin/accounts") {
+    const gate = await operatorGate(request, config, "listing accounts");
+    if (gate instanceof Response) return gate;
+    if (method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const raw = new URL(request.url).searchParams.get("limit");
+    const limit = raw === null ? 50 : /^[1-9]\d{0,3}$/.test(raw) ? Number(raw) : NaN;
+    if (!(limit <= MAX_ACCOUNTS_LISTED)) {
+      return oauthError("invalid_request", `limit must be a whole number from 1 to ${MAX_ACCOUNTS_LISTED}`);
+    }
+    const [total, users] = await Promise.all([config.plans.countUsers(), config.plans.listUsers(limit)]);
+    return json({
+      total,
+      accounts: users.map((u) => ({
+        user_id: u.userId,
+        first_seen_at: new Date(u.firstSeenAt).toISOString(),
+        last_seen_at: new Date(u.lastSeenAt).toISOString(),
+      })),
+    });
   }
 
   // ------------------------------------------------------ /admin/handles

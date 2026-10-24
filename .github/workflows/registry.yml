@@ -1,0 +1,47 @@
+name: MCP Registry
+
+# Lists Bellman in the official MCP Registry (registry.modelcontextprotocol.io)
+# as sh.bellman/bellman, pointing at the hosted server, mcp.bellman.sh/mcp.
+#
+# The listing is the remote only. The npm package is not in server.json: it
+# carries four bins and none named for the package, so the `npx
+# @bellman-sh/mcp-server` a registry client would run starts nothing.
+#
+# The sh.bellman namespace is proved by DNS: an Ed25519 public key in a TXT
+# record on the bellman.sh apex, and its private key (hex) in the
+# MCP_PRIVATE_KEY secret. Separate from publish.yml because the listing needs
+# nothing npm ships, and a manual run here must not run npm publish again.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The registry refuses a version it already holds, so server.json takes
+      # package.json's version rather than keeping one of its own to forget.
+      - name: Set server.json version from package.json
+        run: |
+          set -eu
+          v="$(node -p "require('./package.json').version")"
+          jq --arg v "$v" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+          echo "listing version $v"
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      # The key arrives through the environment, never interpolated into the
+      # script, so it cannot reach the log as part of a command line.
+      - name: Authenticate as bellman.sh
+        env:
+          MCP_PRIVATE_KEY: ${{ secrets.MCP_PRIVATE_KEY }}
+        run: ./mcp-publisher login dns --domain bellman.sh --private-key "$MCP_PRIVATE_KEY"
+
+      - run: ./mcp-publisher publish

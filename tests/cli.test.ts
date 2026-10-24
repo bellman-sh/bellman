@@ -117,6 +117,16 @@ function fake(plan: Plan = {}): Fake {
       err.push(line);
       log.push(`err ${line}`);
     },
+    // tests/doctor.test.ts drives doctor; here it only has to be routed to, with nothing on disk.
+    doctor: {
+      home: "/home/me",
+      cwd: "/home/me/app",
+      doorRoot: "/home/me/.claude/bellman/door",
+      readText: () => null,
+      listDir: () => null,
+      mode: () => null,
+      askDoor: async () => null,
+    },
   };
   return { deps, out, err, log, exec, execInherited, open };
 }

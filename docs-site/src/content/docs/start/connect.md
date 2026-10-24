@@ -86,7 +86,7 @@ The package puts four commands on your PATH:
 | `bellman-channel` | The bridge, which Claude Code spawns. |
 | `bellman-stop-hook` | The Stop hook, for delivery without channels. [Messages and delivery](/guides/messages/#the-npm-package-with-the-stop-hook) has the setup. |
 | `bellman-claude` | The launcher that starts Claude Code with the channel loaded. |
-| `bellman` | The command line: update, feature-request, version. See [the bellman command](/reference/bellman-command/). |
+| `bellman` | The command line: update, doctor, feature-request, version. See [the bellman command](/reference/bellman-command/). |
 
 There is no key to set. On the first launch after you install it, the bridge registers itself with Bellman, opens a browser to sign you in, and caches the result under `~/.config/bellman/`. Every launch after that is silent. A machine with no browser needs a key instead; [Troubleshooting](/help/troubleshooting/#signing-in) has the options.
 

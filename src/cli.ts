@@ -4,6 +4,7 @@
  *
  *   bellman feature-request [words...]   open the feature-request form on GitHub, the words as its title
  *   bellman update [--check]             install the latest release from npm; --check only reports
+ *   bellman doctor                       what Claude Code here runs of Bellman, and the fix for each thing off (src/doctor.ts)
  *   bellman version | help
  *
  * `run` is the whole command and does nothing by itself. Every side effect (spawning npm, opening a
@@ -12,9 +13,12 @@
  * entry point, which is what keeps an import from a test inert.
  */
 import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { askDoor, doctor, type DoctorDeps } from "./doctor.js";
+import { doorRoot } from "./door.js";
 import { compareVersions, VERSION } from "./version.js";
 
 const PACKAGE = "@bellman-sh/mcp-server";
@@ -29,6 +33,7 @@ const USAGE = [
   "",
   "  feature-request [words...]  open the feature-request form on GitHub; the words become its title",
   "  update [--check]            install the latest release from npm; --check only reports",
+  "  doctor                      say what Claude Code here runs of Bellman, and how to fix what is off",
   "  version                     print the installed version (also --version, -v)",
   "  help                        print this text (also --help, -h)",
 ];
@@ -87,6 +92,8 @@ export interface CliDeps {
   packageRoot: string;
   out(line: string): void;
   err(line: string): void;
+  /** What `doctor` reads beyond the above (src/doctor.ts). */
+  doctor: Omit<DoctorDeps, "version" | "exec" | "out">;
 }
 
 /** The command, as an exit code. Everything it does to the world goes through `deps`. */
@@ -108,6 +115,9 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
       return featureRequest(args, deps);
     case "update":
       return update(args, deps);
+    case "doctor":
+      if (args.length > 0) return usageError(`doctor does not take ${args.join(" ")}`, deps);
+      return doctor({ ...deps.doctor, version: deps.version, exec: deps.exec, out: deps.out });
     default:
       return usageError(`unknown command "${command}"`, deps);
   }
@@ -271,6 +281,33 @@ function realDeps(): CliDeps {
     packageRoot: dirname(fileURLToPath(new URL("../package.json", import.meta.url))),
     out: (line) => console.log(line),
     err: (line) => console.error(line),
+    doctor: {
+      home: homedir(),
+      cwd: process.cwd(),
+      doorRoot: doorRoot(),
+      readText: (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      listDir: (path) => {
+        try {
+          return readdirSync(path);
+        } catch {
+          return null;
+        }
+      },
+      mode: (path) => {
+        try {
+          return statSync(path).mode;
+        } catch {
+          return null;
+        }
+      },
+      askDoor,
+    },
   };
 }
 

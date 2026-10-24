@@ -4,7 +4,7 @@
  * button here reads again, opens a link through the host, or moves the view.
  */
 import { artifactFrame } from "./artifact.js";
-import { centerOf, fit, layout, zoomAbout, type Box, type Line, type Transform } from "./canvas-layout.js";
+import { borderPoint, centerOf, fit, layout, zoomAbout, type Box, type Line, type Transform } from "./canvas-layout.js";
 import { el, relative, seatsLine, text } from "./shared.js";
 import type { SurfaceItemWire, SurfaceResult, Untrusted } from "./types.js";
 
@@ -111,10 +111,23 @@ function renderLines(lines: readonly Line[]): SVGSVGElement {
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "lines");
   svg.setAttribute("overflow", "visible");
+  // One arrowhead, drawn at each line's end: a connector reads from its `from` to its `to`.
+  const defs = document.createElementNS(SVG, "defs");
+  const marker = document.createElementNS(SVG, "marker");
+  for (const [name, value] of [["id", "bellman-arrow"], ["viewBox", "0 0 10 10"], ["refX", "10"], ["refY", "5"], ["markerWidth", "8"], ["markerHeight", "8"], ["orient", "auto-start-reverse"]]) {
+    marker.setAttribute(name, value);
+  }
+  const head = document.createElementNS(SVG, "path");
+  head.setAttribute("d", "M0,0 L10,5 L0,10 z");
+  marker.append(head);
+  defs.append(marker);
+  svg.append(defs);
   for (const l of lines) {
-    const a = centerOf(l.from);
-    const b = centerOf(l.to);
+    // The line runs border to border, so its arrowhead and its label sit in the gap: cards are drawn over the lines.
+    const a = borderPoint(l.from, centerOf(l.to));
+    const b = borderPoint(l.to, centerOf(l.from));
     const line = document.createElementNS(SVG, "line");
+    line.setAttribute("marker-end", "url(#bellman-arrow)");
     line.setAttribute("x1", String(a.x));
     line.setAttribute("y1", String(a.y));
     line.setAttribute("x2", String(b.x));

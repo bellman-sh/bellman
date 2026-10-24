@@ -4,7 +4,7 @@
  * exist; fit and zoom as arithmetic.
  */
 import { describe, it, expect } from "vitest";
-import { FIT_MARGIN, GRID, ZOOM, centerOf, clampZoom, fit, gridSlot, layout, zoomAbout, type Box } from "../src/canvas-layout.js";
+import { FIT_MARGIN, GRID, ZOOM, borderPoint, centerOf, clampZoom, fit, gridSlot, layout, zoomAbout, type Box } from "../src/canvas-layout.js";
 import { surfaceFixture } from "./fixtures.js";
 import type { SurfaceItemWire, Untrusted } from "../src/types.js";
 
@@ -87,5 +87,21 @@ describe("fit and zoom", () => {
     expect(z.ty + 100 * z.k).toBeCloseTo(130);
     expect(zoomAbout(t, 50, { x: 0, y: 0 }).k).toBe(ZOOM.max);
     expect(clampZoom(0.001)).toBe(ZOOM.min);
+  });
+});
+
+// A connector's arrowhead sits where its line meets the target card's border: a card is drawn over the
+// lines, so a line that ran to the card's centre would hide its own arrowhead.
+describe("borderPoint", () => {
+  const target: Box = { key: "b", x: 400, y: 0, w: 320, h: 200 };
+  it("meets the side facing the line", () => {
+    expect(borderPoint(target, { x: 0, y: 100 })).toEqual({ x: 400, y: 100 });
+    expect(borderPoint(target, { x: 560, y: 1000 })).toEqual({ x: 560, y: 200 });
+  });
+  it("meets the nearer side on a slant, the corner on the diagonal, and the centre from the centre", () => {
+    const slant = borderPoint(target, { x: 160, y: -140 });
+    expect([slant.x, slant.y]).toEqual([400, 4]);
+    expect(borderPoint(target, { x: 240, y: -100 })).toEqual({ x: 400, y: 0 });
+    expect(borderPoint(target, centerOf(target))).toEqual(centerOf(target));
   });
 });

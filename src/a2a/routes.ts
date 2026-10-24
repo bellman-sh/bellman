@@ -225,8 +225,13 @@ function stream(id: RpcId, deps: A2aDeps, task: OutsideTask, first: object, sign
   }), { headers: SSE });
 }
 
-/** Ask the room, or say why not: the task and how the caller wants it, or the response that refuses. */
-async function ask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response | { task: OutsideTask; historyLength?: number; immediate: boolean }> {
+/** One SSE event, then close: the shape a streaming caller reads, for an answer that never streams. */
+function singleEvent(id: RpcId, result: object): Response {
+  return new Response(`data: ${JSON.stringify({ jsonrpc: "2.0", id, result })}\n\n`, { headers: SSE });
+}
+
+/** Ask the room, or say why not: the task and how the caller wants it, or the response that refuses. `streaming` says the caller asked for `text/event-stream`, so a refusal arrives as one event, not JSON. */
+async function ask(id: RpcId, p: Params, deps: A2aDeps, streaming = false): Promise<Response | { task: OutsideTask; historyLength?: number; immediate: boolean }> {
   const msg = p.message as { parts?: unknown; taskId?: unknown; contextId?: unknown } | undefined;
   if (!msg || typeof msg !== "object" || !Array.isArray(msg.parts)) throw new BadParams("`message` must be a Message with a `parts` list.");
   const taskId = field(msg as Params, "taskId", isString, "a string");
@@ -244,7 +249,8 @@ async function ask(id: RpcId, p: Params, deps: A2aDeps): Promise<Response | { ta
   }
 
   if (p.tenant === undefined || p.tenant === "") {
-    return rpcResult(id, { message: { messageId: crypto.randomUUID(), role: "ROLE_AGENT", parts: [{ text: NO_TENANT }] } });
+    const refusal = { message: { messageId: crypto.randomUUID(), role: "ROLE_AGENT", parts: [{ text: NO_TENANT }] } };
+    return streaming ? singleEvent(id, refusal) : rpcResult(id, refusal);
   }
   if (typeof p.tenant !== "string" || p.tenant.length > MAX_TENANT_CHARS) return rpcError(id, A2A_ERRORS.invalidParams.code, NO_ROOM);
   const asked = await askRoom(deps.store, p.tenant, { userId: deps.caller.userId, label: deps.caller.label }, {
@@ -264,7 +270,7 @@ async function sendMessage(id: RpcId, p: Params, deps: A2aDeps, signal: AbortSig
 
 /** `returnImmediately` does nothing here: a stream always reports as it goes (spec 3.2.2). */
 async function sendStreamingMessage(id: RpcId, p: Params, deps: A2aDeps, signal: AbortSignal): Promise<Response> {
-  const asked = await ask(id, p, deps);
+  const asked = await ask(id, p, deps, true);
   if (asked instanceof Response) return asked;
   return stream(id, deps, asked.task, await a2aTask(deps.store, asked.task, asked.historyLength), signal);
 }

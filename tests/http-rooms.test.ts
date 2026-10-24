@@ -568,7 +568,7 @@ describe("GET /rooms/:id/surface", () => {
     await placeThroughTool("b", { kind: "text", body: "after" });
     await store.addMember(ROOM, member({ memberId: "m_peer2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }));
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   it("answers one 404 for a stranger and an unknown room", async () => {
@@ -614,7 +614,7 @@ describe("GET /rooms/:id/surface", () => {
     await store.updateMember(ROOM, "m_peer", { leftAt: Date.now() });
     await placeThroughTool("b", { kind: "text", body: "after" });
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   // Removed, back on a fresh handle, removed again: the person read the open feed in between, so the cut is the
@@ -627,7 +627,7 @@ describe("GET /rooms/:id/surface", () => {
     await evictThroughTool("m_peer2");
     await placeThroughTool("c", { kind: "text", body: "third" });
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
-    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+    expect(body.items.map((i) => i.data.key).sort()).toEqual(["a", "b"]);
   });
 
   it("refuses without a credential, with CORS on the refusal, and answers 405 to a method it does not take", async () => {
@@ -680,7 +680,7 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(res.status, await res.clone().text()).toBe(200);
     }
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string; placement: unknown } }[] };
-    expect(body.items.map((i) => [i.data.key, i.data.placement])).toEqual([["plan", { x: 0, y: 0 }], ["risks", { x: 360, y: 0 }]]);
+    expect(Object.fromEntries(body.items.map((i) => [i.data.key, i.data.placement]))).toEqual({ plan: { x: 0, y: 0 }, risks: { x: 360, y: 0 } });
   });
 
   // Surface frames spec, R21: an overlap is a conflict, and the route answers it in the words the tool does.

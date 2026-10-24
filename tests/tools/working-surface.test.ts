@@ -200,7 +200,7 @@ describe("writing an item", () => {
     expect(read.isError, read.text).toBe(false);
     const asRead = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items
       .map((i) => i.data);
-    expect(asRead.map((i) => i.key)).toEqual(["arch", "box", "c1", "plan", "pr"]);
+    expect(asRead.map((i) => i.key).sort()).toEqual(["arch", "box", "c1", "plan", "pr"]);
     const item = (key: string) => asRead.find((i) => i.key === key)!;
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
@@ -492,7 +492,8 @@ describe("bellman_sync and the surface", () => {
       cursor: number; items: { trust: string; origin: { memberId: string }; data: { key: string } }[];
     };
     expect(surface.cursor).toBe(out.data.surface_cursor);
-    expect(surface.items.map((i) => i.data.key)).toEqual(["plan", "pr"]);
+    // Newest first (D5), and two writes in one millisecond tie by key, so the order is not pinned here.
+    expect(surface.items.map((i) => i.data.key).sort()).toEqual(["plan", "pr"]);
     for (const item of surface.items) {
       expect(item.trust).toBe("untrusted");
       expect(item.origin.memberId).toBe(p.creatorMemberId);
@@ -616,7 +617,7 @@ describe("bellman_sync and the surface", () => {
 
     const asked = await poll(p, { surface: true });
     expect(asked.data.removed).toBe(true);
-    expect(asked.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(asked.data.surface).toEqual({ cursor: 0, items: [], frames: [], window: "newest", next: null });
     expect(asked.data.surface_cursor, "surface_cursor, surface asked for").toBeUndefined();
   });
 });
@@ -658,6 +659,22 @@ describe("joining a room with a surface", () => {
     expect(flat).not.toContain(BODY);
   });
 
+  // R19: the front window's index, and the frames by number, key and count, never by title.
+  it("lists the frames without their titles, and indexes only the front window", async () => {
+    const room = await roomWithSurface();
+    const send = (payload: Record<string, unknown>) =>
+      room.creator.call("bellman_send", { session_id: room.sessionId, member_id: room.memberId, type: "surface", payload });
+    expect((await send({ key: "intro", kind: "frame", title: "Secret plan", placement: { x: 5000, y: 0, w: 1480, h: 520 } })).isError).toBe(false);
+    expect((await send({ key: "inside", kind: "text", body: "x", frame: 1 })).isError).toBe(false);
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: room.joinCode });
+    expect(preview.isError, preview.text).toBe(false);
+    const surface = preview.data.surface as { items: { key: string }[]; frames: unknown[] };
+    expect(surface.frames).toEqual([{ number: 1, key: "intro", count: 1 }]);
+    expect(JSON.stringify(preview.data)).not.toContain("Secret plan");
+    expect(surface.items.map((i) => i.key)).toEqual(["inside"]);
+  });
+
   it("hands a member the items in envelopes on confirm", async () => {
     const room = await roomWithSurface();
     const joiner = await h.connect(DEV_KEY.peer);
@@ -683,11 +700,11 @@ describe("joining a room with a surface", () => {
     });
     const joiner = await h.connect(DEV_KEY.peer);
     const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
-    expect(preview.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(preview.data.surface).toEqual({ cursor: 0, items: [], frames: [] });
     const confirmed = await joiner.call("bellman_confirm", {
       connect_token: String(preview.data.connect_token), brief: brief(),
     });
-    expect(confirmed.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(confirmed.data.surface).toEqual({ cursor: 0, items: [], frames: [], window: "newest", next: null });
   });
 });
 

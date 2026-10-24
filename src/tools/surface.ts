@@ -4,7 +4,8 @@ import { fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, soleSeat, yourSeats } from "../projections.js";
-import { cutFor, handlesOf, memberLog, readSurface, searchLog, searchSurface } from "../rooms.js";
+import { cutFor, handlesOf, memberLog, readSurfaceWindow, searchLog, searchSurface } from "../rooms.js";
+import { QUERY_WITH_WINDOW, parseWindow, type Window } from "../frames.js";
 import { SEARCH_IN, checkQuery } from "../search.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
@@ -30,6 +31,8 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
         ...RoomRefShape,
         query: z.string().optional().describe("Words to search for: every one must appear, in any case. 3 to 200 characters. Without it the tool reads the whole surface."),
         in: z.enum(SEARCH_IN).optional().describe('"cards" (the default) searches the surface\'s items; "messages" searches the room\'s messages. Only with query.'),
+        window: z.string().optional(),
+        next: z.string().optional(),
       },
       annotations: {
         // A read, and not the liveness signal bellman_sync is: the canvas polls
@@ -58,6 +61,7 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
       // no seat is answered as today whatever it asks. The answer is pointers and a count, with
       // no surface, so the App shows its text and no canvas (R17).
       if (args.query !== undefined) {
+        if (args.window !== undefined || args.next !== undefined) return fail(QUERY_WITH_WINDOW);
         const checked = checkQuery(args.query);
         if (!checked.ok) return fail(checked.reason);
         const scope = args.in ?? "cards";
@@ -69,7 +73,16 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
         return ok({ query: args.query, in: scope, total, results }, UNTRUSTED_PREAMBLE);
       }
       if (args.in !== undefined) return fail(IN_NEEDS_QUERY);
-      const surface = await readSurface(s, session, cutFor(mine));
+      // A window (surface frames spec, D5; R12): none is the front, which is never refused.
+      let window: Window | undefined;
+      if (args.window !== undefined) {
+        const parsed = parseWindow(args.window, "tool");
+        if (!parsed.ok) return fail(parsed.reason);
+        window = parsed.window;
+      }
+      const read = await readSurfaceWindow(s, session, { window, next: args.next }, cutFor(mine));
+      if (!read.ok) return fail(read.reason);
+      const surface = read.block;
       return ok(
         {
           session_id: session.id,

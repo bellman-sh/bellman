@@ -5,10 +5,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { pairVerbs } from "../helpers/fixtures.js";
+import { brief, pairVerbs } from "../helpers/fixtures.js";
 import { pairUp, seatAgain, startRoom, type PairedSession } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE, roomPreview } from "../../src/projections.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
+import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_TOOL } from "../../src/frames.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -149,5 +150,104 @@ describe("bellman_surface", () => {
 
     expect(doc).toContain("your_seats[]");
     expect(doc).toContain("null when you hold several");
+  });
+});
+
+/** `n` text cards appended through the store with placements far from any frame (R23): only the read is under test. */
+const seed = async (p: PairedSession, n: number) => {
+  for (let i = 0; i < n; i++) {
+    const item = {
+      key: `s${String(i).padStart(3, "0")}`, kind: "text" as const, title: null, body: "x", ends: null,
+      placement: { x: 100_000 + (i % 10) * 400, y: 100_000 + Math.floor(i / 10) * 300 }, blob: null, shape: null,
+    };
+    await h.store.appendEvent(p.sessionId, {
+      type: "surface", fromMemberId: p.creatorMemberId, fromUserId: p.creator.identity.userId, fromLabel: p.creator.identity.label,
+      payload: item, refId: null,
+    }, { surface: { key: item.key, item } });
+  }
+};
+
+describe("bellman_surface reads a window (surface frames spec, D5)", () => {
+  const read = (p: PairedSession, args: Record<string, unknown> = {}) => p.joiner.call("bellman_surface", { session_id: p.sessionId, ...args });
+  const surfaceOf = (out: { data: Record<string, unknown> }) => out.data.surface as { items: { data: { key: string } }[]; frames: { number: number; key: string; title: string; count: number }[]; window: string; next: string | null };
+
+  // Review Focus 5.
+  it("answers a small room with no frames whole, as today, with frames [], window newest and next null", async () => {
+    const p = await pairUp(h);
+    await write(p, { key: "a", kind: "text", body: "x" });
+    await write(p, { key: "b", kind: "text", body: "y" });
+    await write(p, { key: "line", kind: "connector", ends: { from: "a", to: "b" } });
+    const s = surfaceOf(await read(p));
+    expect(s.items.map((i) => i.data.key).sort()).toEqual(["a", "b", "line"]);
+    expect([s.frames, s.window, s.next]).toEqual([[], "newest", null]);
+  });
+
+  it("answers frame 1 with no window once the room has a frame, and every frame with its count", async () => {
+    const p = await pairUp(h);
+    await write(p, { key: "intro", kind: "frame", title: "Start here", placement: { x: 0, y: 0, w: 1480, h: 520 } });
+    await write(p, { key: "a", kind: "text", body: "x", frame: 1 });
+    await write(p, { key: "loose", kind: "text", body: "y" });
+    const s = surfaceOf(await read(p));
+    expect([s.window, s.items.map((i) => i.data.key)]).toEqual(["frame:1", ["a"]]);
+    expect(s.frames).toEqual([expect.objectContaining({ number: 1, key: "intro", title: "Start here", locked: true, count: 1 })]);
+    expect(surfaceOf(await read(p, { window: "unframed" })).items.map((i) => i.data.key)).toEqual(["loose"]);
+  });
+
+  it("pages newest at 64 and reads the rest with next alone", async () => {
+    const p = await pairUp(h);
+    await seed(p, 70);
+    const first = surfaceOf(await read(p, { window: "newest" }));
+    const second = surfaceOf(await read(p, { next: first.next }));
+    expect([first.items.length, second.items.length, second.next]).toEqual([64, 6, null]);
+    expect(new Set([...first.items, ...second.items].map((i) => i.data.key)).size).toBe(70);
+  });
+
+  it("refuses region, a bad window, next beside a window, a token it did not write, query beside a window, and a frame that does not exist", async () => {
+    const p = await pairUp(h);
+    const refused = async (args: Record<string, unknown>, text: string) => {
+      const out = await read(p, args);
+      expect([out.isError, out.text]).toEqual([true, `Error: ${text}`]);
+    };
+    await refused({ window: "region:0,0,10,10" }, WINDOW_REFUSAL_TOOL);
+    await refused({ window: "frame:0" }, WINDOW_REFUSAL_TOOL);
+    await refused({ window: "newest", next: "abc" }, NEXT_ALONE);
+    await refused({ next: "abc" }, NEXT_REFUSAL);
+    await refused({ query: "retry", window: "newest" }, QUERY_WITH_WINDOW);
+    await refused({ window: "frame:1" }, "frame 1 does not exist: this room has no frames");
+  });
+
+  // R17: the cut.
+  it("ranks the frames a removed member may see, so an edit after its cut moves the next frame up for it", async () => {
+    const p = await pairUp(h);
+    await write(p, { key: "a", kind: "frame", title: "A", placement: { x: 0, y: 0, w: 1000, h: 1000 } });
+    await write(p, { key: "b", kind: "frame", title: "B", placement: { x: 2000, y: 0, w: 1000, h: 1000 } });
+    expect((await p.creator.call("bellman_evict", { session_id: p.sessionId, member_id: p.joinerMemberId })).isError).toBe(false);
+    await write(p, { key: "a", kind: "frame", title: "A, renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } });
+    const s = surfaceOf(await read(p));
+    expect([s.window, s.frames.map((f) => [f.number, f.key])]).toEqual(["frame:1", [[1, "b"]]]);
+  });
+
+  it("gives bellman_sync surface: true the front window, frames and all", async () => {
+    const p = await pairUp(h);
+    await write(p, { key: "intro", kind: "frame", title: "Start here", placement: { x: 0, y: 0, w: 1480, h: 520 } });
+    const out = await p.joiner.call("bellman_sync", { session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0, surface: true });
+    expect(out.isError, out.text).toBe(false);
+    const s = surfaceOf(out);
+    expect([s.window, s.frames.length]).toEqual(["frame:1", 1]);
+  });
+
+  it("gives bellman_confirm's surface its frames, window and next", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const { started, sessionId, memberId } = await startRoom(creator);
+    await creator.call("bellman_send", {
+      session_id: sessionId, member_id: memberId, type: "surface",
+      payload: { key: "intro", kind: "frame", title: "Start here", placement: { x: 0, y: 0, w: 1480, h: 520 } },
+    });
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+    const confirmed = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+    const s = surfaceOf(confirmed);
+    expect([s.window, s.frames.map((f) => f.key), s.next]).toEqual(["frame:1", ["intro"], null]);
   });
 });

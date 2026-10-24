@@ -18,7 +18,7 @@ import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend,
 } from "./store.js";
-import { asRowWriter, carriedEvent, placedEvent } from "./store.js";
+import { asRowWriter, carriedEvent, placedEvent, windowUnderCut } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
@@ -57,7 +57,7 @@ import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHouseke
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
-import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed } from "./frames.js";
+import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "./frames.js";
 import { decideApproval } from "./proposal.js";
 import {
   decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse,
@@ -2567,6 +2567,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async surfaceOf(): Promise<SurfaceRow[]> {
     const map = await this.ctx.storage.list<SurfaceRow>({ prefix: SURFACE_PREFIX });
     return [...map.values()];
+  }
+
+  /** One page of a window (lead ruling L1): every row is read here, and only the page goes back over RPC. */
+  async surfaceWindow(
+    asked: { window?: Window; next?: string },
+    opts: { cut?: number },
+  ): Promise<{ ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string }> {
+    const s = await this.stored();
+    return windowUnderCut(await this.surfaceOf(), s?.surfaceCursor ?? 0, asked, opts.cut);
   }
 
   async outsideTask(callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {
@@ -6291,6 +6300,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
     return this.session(sessionId).surfaceOf();
+  }
+
+  async surfaceWindow(
+    sessionId: string,
+    asked: { window?: Window; next?: string },
+    opts: { cut?: number },
+  ): Promise<{ ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string }> {
+    return this.session(sessionId).surfaceWindow(asked, opts);
   }
 
   async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {

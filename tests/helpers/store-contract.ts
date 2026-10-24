@@ -23,6 +23,7 @@ import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
+import { SURFACE_PAGE } from "../../src/frames.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
@@ -3243,6 +3244,54 @@ export function describeStoreContract(
           })).rejects.toThrow("goes through appendSurface");
           await store.freezeSession(id, Date.now());
           expect(await put(id, item("a"))).toEqual({ outcome: "frozen" });
+        });
+      });
+
+      // Lead ruling L1: a window is paged inside the room's object, so a read carries one page across RPC.
+      describe("surfaceWindow (surface frames spec, D5)", () => {
+        const item = (key: string, placement: { x: number; y: number; w?: number; h?: number } | null, over: Partial<SurfaceItem> = {}): SurfaceItem =>
+          ({ key, kind: "text", title: null, body: "x", ends: null, placement, blob: null, shape: null, ...over });
+        const put = (id: string, i: SurfaceItem) => store.appendSurface(id, wrote(i), { surface: { key: i.key, item: i } }, null);
+        const room = async () => { const s = session({}); await store.createSession(s); return s.id; };
+        const keys = (read: Awaited<ReturnType<BellmanStore["surfaceWindow"]>>) => (read.ok ? read.page.items.map((r) => r.key) : read.reason);
+
+        it("answers frame 1 at the front of a room with frames, with every frame and the record's cursor", async () => {
+          const id = await room();
+          await put(id, item("f", { x: 0, y: 0, w: 1000, h: 1000 }, { kind: "frame", title: "F", body: null, locked: true }));
+          await put(id, item("in", { x: 40, y: 40 }));
+          await put(id, item("out", { x: 5000, y: 0 }));
+          const read = await store.surfaceWindow(id, {}, {});
+          expect(keys(read)).toEqual(["in"]);
+          expect(read).toMatchObject({ ok: true, cursor: await cursorOf(id), page: { window: "frame:1", next: null, frames: [{ number: 1, key: "f", count: 1 }] } });
+          expect(keys(await store.surfaceWindow("qs_nobody", {}, {}))).toEqual([]);
+        });
+
+        it("pages at SURFACE_PAGE items and continues from next", async () => {
+          const id = await room();
+          for (let i = 0; i < SURFACE_PAGE + 3; i++) await put(id, item(`k${String(i).padStart(3, "0")}`, { x: i * 400, y: 0 }));
+          const first = await store.surfaceWindow(id, { window: { kind: "newest" } }, {});
+          if (!first.ok) throw new Error(first.reason);
+          expect(first.page.items).toHaveLength(SURFACE_PAGE);
+          const second = await store.surfaceWindow(id, { next: first.page.next! }, {});
+          expect(second).toMatchObject({ ok: true, page: { window: "newest", next: null } });
+          expect(new Set([...keys(first), ...keys(second)]).size).toBe(SURFACE_PAGE + 3);
+        });
+
+        it("hides the rows past a removed member's cut before ranking, and answers the cursor of what it is shown", async () => {
+          const id = await room();
+          await put(id, item("a", { x: 0, y: 0, w: 1000, h: 1000 }, { kind: "frame", title: "A", body: null, locked: true }));
+          const b = await put(id, item("b", { x: 2000, y: 0, w: 1000, h: 1000 }, { kind: "frame", title: "B", body: null, locked: true }));
+          const cut = (b as Extract<SurfaceAppend, { outcome: "appended" }>).event.cursor;
+          await put(id, item("a", { x: 0, y: 0, w: 1000, h: 1000 }, { kind: "frame", title: "A, renamed", body: null, locked: true }));
+          const read = await store.surfaceWindow(id, {}, { cut });
+          expect(read).toMatchObject({ ok: true, cursor: cut, page: { window: "frame:1", frames: [{ number: 1, key: "b" }] } });
+          expect(await store.surfaceWindow(id, {}, {})).toMatchObject({ ok: true, page: { frames: [{ key: "a" }, { key: "b" }] } });
+        });
+
+        it("refuses what readWindow refuses", async () => {
+          const id = await room();
+          expect(await store.surfaceWindow(id, { window: { kind: "frame", frame: 1 } }, {})).toEqual({ ok: false, reason: "frame 1 does not exist: this room has no frames" });
+          expect(await store.surfaceWindow(id, { next: "abc" }, {})).toMatchObject({ ok: false });
         });
       });
     });

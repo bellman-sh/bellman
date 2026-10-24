@@ -131,7 +131,12 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
       // The index, not the items (#129, D7/D9): a code holder who never joins
       // is shown that the room keeps a plan and a diagram, not their contents —
       // the line that keeps joiners' briefs out of this preview.
-      const index = surfaceIndex(await s.surfaceOf(session.id));
+      // The front window's index, and its frames by number, key and count (surface frames spec, R19): a frame's
+      // title is prose, so the preview never carries one.
+      const front = await s.surfaceWindow(session.id, {}, {});
+      if (!front.ok) throw new Error(`the front of the surface was refused: ${front.reason}`);
+      const index = surfaceIndex(front.page.items);
+      const frames = front.page.frames.map(({ number, key, count }) => ({ number, key, count }));
 
       return ok(
         {
@@ -148,7 +153,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
             { memberId: creator.memberId, label: creator.label },
             creatorBrief
           ),
-          surface: { cursor: surfaceCursor(session), items: index },
+          surface: { cursor: surfaceCursor(session), items: index, frames },
         },
         UNTRUSTED_PREAMBLE +
           "\n\nShow this preview to your human before calling bellman_confirm — confirming ships YOUR brief to the room."

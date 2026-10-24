@@ -26,7 +26,7 @@ import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
-import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed } from "./frames.js";
+import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Placed, type Window, type WindowPage } from "./frames.js";
 import { decideApproval } from "./proposal.js";
 import {
   decideAnswer, decideAsk, decideCancel, endings, handedOverNotice,
@@ -847,6 +847,23 @@ export const carriedEvent = (mover: EventBody, write: SurfaceWrite): EventBody =
  */
 export const asRowWriter = (event: SessionEvent, row: SurfaceRow): SessionEvent =>
   ({ ...event, fromMemberId: row.byMemberId, fromLabel: row.byLabel });
+
+/**
+ * `surfaceWindow`'s rule, which both stores apply to the rows they hold: the cut first, then the window over
+ * what is left, and the cursor `surfaceAt` gives for that cut.
+ */
+export function windowUnderCut(
+  rows: readonly SurfaceRow[],
+  recordCursor: number,
+  asked: { window?: Window; next?: string },
+  cut: number | undefined,
+): { ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string } {
+  const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
+  const read = readWindow(visible, asked);
+  if (!read.ok) return read;
+  const cursor = cut === undefined ? recordCursor : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
+  return { ok: true, page: read.page, cursor };
+}
 
 /** The event a placed write is appended as: the caller's, with the item placement gave it when that differs. */
 export const placedEvent = (e: EventBody, asked: SurfaceWrite, placed: Extract<Placed, { ok: true }>): EventBody =>
@@ -1723,6 +1740,17 @@ export interface BellmanStore {
    * method and not N `eventAt` reads from a handler.
    */
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
+  /**
+   * One page of a window of the surface (surface frames spec, D5; lead ruling L1): `readWindow` over the rows
+   * a member may see, run where the rows are, so a read carries at most `SURFACE_PAGE` items across RPC and
+   * not every row. `cut` is a removed member's (#113), applied before any rank or page; `cursor` is then the
+   * last change among the rows it is shown, and without one the record's surface cursor, as `surfaceAt` says.
+   */
+  surfaceWindow(
+    sessionId: string,
+    asked: { window?: Window; next?: string },
+    opts: { cut?: number },
+  ): Promise<{ ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string }>;
   /** One outside task of this room, if `callerUserId` opened it. Another caller's, or none, answers undefined. */
   outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined>;
   /** One outside task of this room by its id, whoever opened it: for the creator's moderation, which reads the account behind a question. */
@@ -3392,6 +3420,16 @@ export class MemoryStore implements BellmanStore {
     if (!rows) return [];
     const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return detach(sorted);
+  }
+
+  async surfaceWindow(
+    sessionId: string,
+    asked: { window?: Window; next?: string },
+    opts: { cut?: number },
+  ): Promise<{ ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string }> {
+    const s = this.sessions.get(sessionId) as { surfaceCursor?: number } | undefined;
+    const rows = [...(this.surfaces.get(sessionId)?.values() ?? [])];
+    return detach(windowUnderCut(rows, s?.surfaceCursor ?? 0, asked, opts.cut));
   }
 
   async outsideTask(sessionId: string, callerUserId: string, taskId: string): Promise<OutsideTask | undefined> {

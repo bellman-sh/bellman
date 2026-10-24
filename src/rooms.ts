@@ -34,7 +34,7 @@ import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
-import { MAX_FRAMES } from "./frames.js";
+import { MAX_FRAMES, frameNumbers, type FrameEntry, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -391,10 +391,43 @@ export async function surfaceAt(
   return { cursor, rows: visible };
 }
 
-/** The surface as a member reads it: `surfaceAt`'s rows, each in its untrusted envelope. */
-export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number) {
-  const { cursor, rows } = await surfaceAt(store, session, cut);
-  return { cursor, items: rows.map(surfaceItem) };
+/** One window of the surface as a member reads it (surface frames spec, D5): the page's rows in envelopes, every frame, and where to go on. */
+export type SurfaceBlock = {
+  cursor: number;
+  items: ReturnType<typeof surfaceItem>[];
+  frames: FrameEntry[];
+  window: string;
+  next: string | null;
+  slots?: Record<string, { x: number; y: number }>;
+};
+
+/**
+ * A window of the surface under `cut`, as `surfaceAt` would cut it. The store pages it where the rows are
+ * (lead ruling L1), so this projects one page and never every row.
+ */
+export async function readSurfaceWindow(
+  store: BellmanStore,
+  session: StoredSession,
+  asked: { window?: Window; next?: string },
+  cut?: number,
+): Promise<{ ok: true; block: SurfaceBlock } | { ok: false; reason: string }> {
+  const read = await store.surfaceWindow(session.id, asked, { cut });
+  if (!read.ok) return read;
+  const { page, cursor } = read;
+  return {
+    ok: true,
+    block: {
+      cursor, items: page.items.map(surfaceItem), frames: page.frames, window: page.window, next: page.next,
+      ...(page.slots === undefined ? {} : { slots: page.slots }),
+    },
+  };
+}
+
+/** The front of the surface: frame 1 when the member sees a frame, else the newest. Asked for nothing, it is never refused. */
+export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
+  const read = await readSurfaceWindow(store, session, {}, cut);
+  if (!read.ok) throw new Error(`the front of the surface was refused: ${read.reason}`);
+  return read.block;
 }
 
 /** A public room's page link, or null for a private room (room search spec, R11). */
@@ -419,7 +452,8 @@ export async function searchSurface(
 ): Promise<{ cursor: number; total: number; results: CardResult[] }> {
   const { cursor, rows } = await surfaceAt(store, session, cut);
   const { total, results } = searchCards(rows, words);
-  return { cursor, total, results: results.map((hit) => cardResult(hit, cardUrl(session, hit.row.key))) };
+  const frames = frameNumbers(rows);
+  return { cursor, total, results: results.map((hit) => cardResult(hit, cardUrl(session, hit.row.key), frames.get(hit.row.key) ?? null)) };
 }
 
 /**

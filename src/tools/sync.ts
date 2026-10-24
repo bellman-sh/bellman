@@ -367,7 +367,8 @@ If a room's creator has removed you, you still get the history up to and includi
           ...(cut !== undefined && !more ? { removed: true as const } : {}),
           // Last, after the fields that say whether the feed has ended: `removed` is
           // the one field a client must never miss, and `surface` is the one block
-          // that can be large (64 items of up to 8,000 characters), so a read that
+          // that can be large (a window of at most SURFACE_PAGE, 64, items of up to
+          // 8,000 characters, and the connectors joining them), so a read that
           // is cut short loses the block and not the flag.
           //
           // Only when nonzero, as `outstanding` and `removed` are: a room with

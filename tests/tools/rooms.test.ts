@@ -11,7 +11,7 @@ import { pairUp, seatAgain, startRoom } from "../helpers/flows.js";
 import { ROOM_TAIL, UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
-import { ROOMS_LIMIT } from "../../src/tools/rooms.js";
+import { ROOMS_LIMIT, WINDOW_LIMIT } from "../../src/tools/rooms.js";
 import { session } from "../helpers/fixtures.js";
 import { roomsFixture } from "../../ui/test/fixtures.js";
 
@@ -175,6 +175,28 @@ describe("bellman_rooms", () => {
     expect(answered.isError, answered.text).toBe(false);
     const [done] = await roomsOf(p.joiner);
     expect(seat(done, p.creatorMemberId)).toMatchObject({ status: "working", status_source: "presence", needs_you: false });
+  });
+
+  // The window is read once per room per listing, so it is capped: a request further back than the cap stops counting.
+  it("reads no more than WINDOW_LIMIT events of a room's request window", async () => {
+    const p = await pairUp(h);
+    const asked = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, type: "action_request", payload: { action: "deploy" },
+    });
+    expect(asked.isError, asked.text).toBe(false);
+    for (let i = 0; i < WINDOW_LIMIT + 10; i++) {
+      await h.store.appendEvent(p.sessionId, {
+        type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null,
+      });
+    }
+    const reads: number[] = [];
+    const recent = h.store.recentEvents.bind(h.store);
+    vi.spyOn(h.store, "recentEvents").mockImplementation(async (id, n) => { reads.push(n); return recent(id, n); });
+
+    const [room] = await roomsOf(p.joiner);
+    expect(Math.max(...reads)).toBe(WINDOW_LIMIT);
+    const lead = room.members.find((m) => m.member_id === p.creatorMemberId) as unknown as Record<string, unknown>;
+    expect(lead.needs_you).toBe(false);
   });
 
   it("names the newest event, or null for a room nothing has happened in", async () => {

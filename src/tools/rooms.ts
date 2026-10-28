@@ -17,6 +17,15 @@ import { APP_UI_META } from "../ui/resource.js";
  */
 export const ROOMS_LIMIT = 50;
 
+/**
+ * The most events one room's request window reads per listing (#432). `bellman_sync` reads one room's window
+ * per poll; this listing reads one per room, up to `ROOMS_LIMIT`, every 15 seconds from the monitor. Uncapped, a
+ * public topic room kept a week's log in every listing: a joiner holding a proposal open and sending at its limit
+ * grows that past 60,000 events. Past the cap a request older than the newest `WINDOW_LIMIT` events stops
+ * counting toward `needs_you`, so a busy room under-reports rather than costs.
+ */
+export const WINDOW_LIMIT = 1024;
+
 export function registerRooms(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
     "bellman_rooms",
@@ -64,7 +73,7 @@ Closed rooms, and rooms you left or were removed from, are not listed. Peer-writ
         const [connected, tail, window] = await Promise.all([
           s.connectedMembers(id),
           s.recentEvents(id, ROOM_TAIL),
-          live ? requestWindow(s, id, now - ttl) : Promise.resolve([]),
+          live ? requestWindow(s, id, now - ttl, WINDOW_LIMIT) : Promise.resolve([]),
         ]);
         // Both are suffixes of the log, so the longer one holds the other.
         const events = window.length > tail.length ? window : tail;

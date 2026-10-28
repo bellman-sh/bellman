@@ -61,19 +61,19 @@ beforeEach(() => {
 const call = async (path: string, init?: RequestInit) =>
   (await handleOAuth(new Request(`${ISSUER}${path}`, init), config))!;
 
-async function registerClient(redirects = [REDIRECT]): Promise<string> {
+async function registerClient(redirects = [REDIRECT], name = "Claude"): Promise<string> {
   const res = await call("/register", {
     method: "POST",
-    body: JSON.stringify({ client_name: "Claude", redirect_uris: redirects }),
+    body: JSON.stringify({ client_name: name, redirect_uris: redirects }),
   });
   return ((await res.json()) as { client_id: string }).client_id;
 }
 
 /** Walk authorize → provider → callback and return the authorization code. */
-async function authorizeThrough(provider: "github" | "google", clientId: string, state = "st-1") {
+async function authorizeThrough(provider: "github" | "google", clientId: string, state = "st-1", redirect = REDIRECT) {
   const challenge = await sha256Base64url(VERIFIER);
   const chooser = await call(
-    `/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}` +
+    `/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirect)}` +
       `&code_challenge=${challenge}&code_challenge_method=S256&state=${state}&resource=${encodeURIComponent(RESOURCE)}`
   );
   const req = decodeURIComponent(
@@ -81,7 +81,8 @@ async function authorizeThrough(provider: "github" | "google", clientId: string,
   );
   const handoff = await call(`/authorize/${provider}?req=${encodeURIComponent(req)}`);
   const callback = await call(`/callback/${provider}?code=upstream-code&state=${encodeURIComponent(req)}`);
-  const target = new URL(callback.headers.get("location")!);
+  // A page rather than a redirect (OpenClaw's) leaves the target bare.
+  const target = new URL(callback.headers.get("location") ?? redirect);
   return { chooser, handoff, callback, target, code: target.searchParams.get("code") ?? "" };
 }
 
@@ -351,6 +352,34 @@ describe("the full flow", () => {
  * Plans are runtime data now: a stored grant decides what a signed-in human
  * gets, and the operator's BELLMAN_USERS still outranks it.
  */
+describe("OpenClaw on another machine", () => {
+  const LOOPBACK = "http://127.0.0.1:8989/oauth/callback";
+
+  it("gets a page with the way back and the code to finish by hand, and the code redeems", async () => {
+    const clientId = await registerClient([LOOPBACK], "OpenClaw MCP");
+    const { callback } = await authorizeThrough("github", clientId, "st-oc", LOOPBACK);
+
+    expect(callback.status).toBe(200);
+    const page = await callback.text();
+    const back = new URL(/href="([^"]+)">Return to OpenClaw/.exec(page)![1].replaceAll("&amp;", "&"));
+    expect(back.origin + back.pathname).toBe(LOOPBACK);
+    expect(back.searchParams.get("state")).toBe("st-oc");
+    const code = back.searchParams.get("code")!;
+    expect(page).toContain(`openclaw mcp login &lt;name&gt; --code ${code}`);
+
+    const { res } = await exchange(clientId, code, { redirect_uri: LOOPBACK });
+    expect(res.status).toBe(200);
+  });
+
+  it("is redirected as usual to an https callback, and so is any other client on loopback", async () => {
+    const https = await registerClient([REDIRECT], "OpenClaw MCP");
+    expect((await authorizeThrough("github", https)).callback.status).toBe(302);
+
+    const other = await registerClient([LOOPBACK], "Codex");
+    expect((await authorizeThrough("github", other, "st-1", LOOPBACK)).callback.status).toBe(302);
+  });
+});
+
 describe("plan resolution", () => {
   const grant = (over: Record<string, unknown> = {}) => ({
     key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,

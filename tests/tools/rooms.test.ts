@@ -11,7 +11,7 @@ import { pairUp, seatAgain, startRoom } from "../helpers/flows.js";
 import { ROOM_TAIL, UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
-import { ROOMS_LIMIT, WINDOW_LIMIT } from "../../src/tools/rooms.js";
+import { ROOMS_LIMIT, WINDOW_LIMIT } from "../../src/rooms.js";
 import { session } from "../helpers/fixtures.js";
 import { roomsFixture } from "../../ui/test/fixtures.js";
 

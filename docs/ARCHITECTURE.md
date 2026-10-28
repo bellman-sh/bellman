@@ -218,7 +218,11 @@ change, and release a person's public handle, `PUT`/`DELETE
 unsign it (ADR 0021), `PUT /rooms/:id/host` for a hosted room's creator to
 change what its host is told to ask (the host reads the manifest on every wake,
 so its next question uses the new text), `PUT /rooms/:id/view` for a public
-room's creator to choose whether its page opens on the canvas or as a page, and
+room's creator to choose whether its page opens on the canvas or as a page,
+`GET /me/rooms` for the open rooms a person sits in, exactly as `bellman_rooms`
+returns them (`liveRooms` builds both), and `POST /rooms/:id/codes` to mint a
+join code through `issueInvite`, the operation `bellman_invite` calls (#434;
+desktop apps use both, with an OAuth bearer), and
 `GET /audit` and `GET /audit/export` for an org
 admin's read of the org's audit stream (dash#11), beside the blob routes
 (#183). The routes authenticate through the same composed caller the blob

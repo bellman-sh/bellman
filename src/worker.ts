@@ -9,6 +9,7 @@ import { auditRoutes } from "./http/audit.js";
 import { orgRoutes } from "./http/orgs.js";
 import { scimRoutes } from "./http/scim.js";
 import { handleRoutes } from "./http/handles.js";
+import { meRoutes } from "./http/me.js";
 import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
@@ -375,6 +376,14 @@ export default {
         linkSecret: env.BELLMAN_TOKEN_SECRET,
         mail: mailInvite,
       });
+      if (handled) return handled;
+    }
+
+    // The rooms a person sits in, with their seats (#434): on the room routes' rules and behind the same guard.
+    if (url.pathname === "/me/rooms" || url.pathname === "/me/rooms/") {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await meRoutes(request, { store, caller: who, panelOrigins: oauth?.panelOrigins ?? [] });
       if (handled) return handled;
     }
 

@@ -23,17 +23,18 @@ import {
   sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
 import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
+import { joinUrl } from "../codes.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
-  auditEntries, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
+  auditEntries, issueInvite, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
   sessionStatus, writeSurface, type RoomFailure, type SurfaceBlock,
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
-import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
+import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
 import type { Identity, Member, SessionEvent } from "../types.js";
@@ -76,10 +77,14 @@ const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
 const VIEW = /^\/rooms\/([^/]+)\/view$/;
 const HOST = /^\/rooms\/([^/]+)\/host$/;
+const CODES = /^\/rooms\/([^/]+)\/codes$/;
 
 // ponytail: 4 KB, not tuned. A text of at most 300 characters is under 2 KB even with every character written as
 // a six-byte \uXXXX escape, so this leaves room for the braces and for the whitespace that trimming removes.
 export const MAX_HOST_INSTRUCTIONS_BYTES = 4096;
+
+// ponytail: 1 KB, not tuned. The body is a member id and a role key, each a few dozen characters.
+export const MAX_CODE_BYTES = 1024;
 
 // ponytail: 256 bytes, not tuned. The body is one of two short strings, {"view":"canvas"} at its longest, which is 17
 // bytes, so this leaves room for the whitespace a client adds and no more.
@@ -232,6 +237,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (hostRoute) {
       if (request.method !== "PUT") return methodNotAllowed("PUT", origin);
       return await writeHostInstructions(request, hostRoute[1], origin, deps);
+    }
+    const codes = CODES.exec(path);
+    if (codes) {
+      if (request.method !== "POST") return methodNotAllowed("POST", origin);
+      return await mintCode(request, codes[1], origin, deps);
     }
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
@@ -822,6 +832,54 @@ async function writeHostInstructions(request: Request, sessionId: string, origin
   if (set.ok) return json(200, { instructions: set.instructions }, origin);
   if (set.reason === "not_found") return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   return problem(409, set.reason, set.reason === "closed" ? "the room is closed" : "this room has no hosted seat to instruct", origin);
+}
+
+/**
+ * Mint a join code for a role (`POST /rooms/:id/codes`, #434), for the panel and desktop apps: `issueInvite`,
+ * the operation `bellman_invite` runs, so the seat named by `member_id` needs `invite`, and `revoke` as well to
+ * replace a live code. 401 with no caller and the CSRF check for a cookie, then the length (413) and the body
+ * (400), which is `{ member_id, role? }` and nothing else. A code minted here always expires: a permanent code is
+ * a public room's link, which `bellman_invite` makes, and a role whose live code is permanent is refused with a
+ * 409 rather than replaced, so an app cannot retire the link on a page by asking for a code to hand one person.
+ *
+ * The answer is 201 with `{ join_code, join_url, expires_at, role, replaced_previous }`; a refusal takes the
+ * status `STATUS` gives its code.
+ */
+async function mintCode(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const tooLong = lengthRefusal(request, MAX_CODE_BYTES, "a code request", origin);
+  if (tooLong) return tooLong;
+
+  const body: unknown = await request.json().catch(() => null);
+  const fields = typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+  const { member_id: memberId, role } = fields ?? {};
+  if (
+    !fields || Object.keys(fields).some((k) => k !== "member_id" && k !== "role")
+    || typeof memberId !== "string" || (role !== undefined && typeof role !== "string")
+  ) {
+    return problem(400, "invalid_request", 'send {"member_id": your seat in the room, "role": optional, the role to seat}', origin);
+  }
+
+  // Behind the admission, so it tells a stranger nothing: a caller with no handle in the room goes on to
+  // `issueInvite`, which refuses them as `bellman_invite` does.
+  const session = await deps.store.getSession(sessionId);
+  const seated = session !== undefined && (await handlesOf(deps.store, session, who.identity)).length > 0;
+  const live = seated ? session.joinCodes[role ?? session.manifest.defaultRole] : undefined;
+  if (live && live.expiresAt === null && codeIsLive(live, Date.now())) {
+    return problem(409, "permanent_code", "this role's code is the room's public link; change it with bellman_invite", origin);
+  }
+  const r = await issueInvite(deps.store, who.identity, sessionId, memberId, role);
+  if (!r.ok) return problem(STATUS[r.code], r.code, r.reason, origin);
+  return json(201, {
+    join_code: r.value.code,
+    join_url: joinUrl(r.value.code),
+    expires_at: r.value.expiresAt === null ? null : new Date(r.value.expiresAt).toISOString(),
+    role: r.value.role,
+    replaced_previous: r.value.replacedPrevious,
+  }, origin);
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */

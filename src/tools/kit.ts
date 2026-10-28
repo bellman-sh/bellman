@@ -125,15 +125,22 @@ export const ActionResponseShape = z.object({
  * `status` (#432) is the one exception to that list, and it stays inside the
  * invariant: it says what the seat was doing at `at`. The read that shows it
  * (`seatStatusOf`) gates it on live presence and carries the report's time beside it.
+ *
+ * A status with no note is a status change, which the Claude Code hooks send: it answers no tick, so
+ * `bellman_send` credits no report for it (`isReport`).
  */
 export const ProgressShape = z.strictObject({
-  note: z.string().min(1).max(500),
+  note: z.string().min(1).max(500).optional(),
   step: z.string().max(40).optional(),
   eta_seconds: z.number().int().nonnegative().max(86_400).optional(),
   status: z.enum(SEAT_STATUSES, {
     error: (iss) => `status ${JSON.stringify(iss.input)} is not one of ${SEAT_STATUSES.join(", ")}`,
   }).optional(),
-});
+}).refine((p) => p.note !== undefined || p.status !== undefined, { message: "a note, a status, or both" });
+
+/** Whether a progress payload answers the tick: one with a note does, a status change alone does not. */
+export const isReport = (payload: unknown): boolean =>
+  typeof (payload as { note?: unknown } | null)?.note === "string";
 
 /** An answer to an outside question: its text, and whether it asks the caller for more. */
 export const OutsideAnswerShape = z.object({

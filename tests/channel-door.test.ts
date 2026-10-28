@@ -245,6 +245,17 @@ describe("the bridge's door, as the process opens it", () => {
     expect(existsSync(door)).toBe(false);
   });
 
+  // #432: the hooks run beside the bridge, under its parent (this test, here), and find the door by their parents' pids.
+  it("links its door for its parent's pid, answers through the link, and takes the link with it when it exits", async () => {
+    const scratch = scratchDir();
+    const bridge = await open(scratch, { key: DEV_KEY.jesse });
+    const link = join(scratch, `owner-${process.pid}.sock`);
+
+    expect((await get(link, "/status")).status).toBe(200);
+    expect(await bridge.stop()).toBe(0);
+    expect(existsSync(link)).toBe(false);
+  });
+
   // The door is an aid to the session's Bellman server, which is this process: not being able to make one costs the
   // mod its view of the room, and must cost the session nothing.
   it("carries on without a door when it cannot make one, says why, and still exits cleanly", async () => {

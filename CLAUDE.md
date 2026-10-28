@@ -39,9 +39,9 @@ producing bugs. Read it before changing how the pieces fit together.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
-- `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` — the Claude Code client side.
+- `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.
 - `src/door.ts` / `src/door-protocol.ts` — the bridge's door: a Unix socket per bridge that the mod in the
-  same session reads (five routes, one write: a decline). The protocol file is runtime-free and shared
+  same session reads (six routes, two writes: a decline, and a seat status the plugin's hooks set). The protocol file is runtime-free and shared
   with the mod.
 - `mod/` — `bellman-mod`, the second plugin in the marketplace: a Claude Code mod, a hooks module.
   `mod/src/` is the wiring, `mod/hooks/register.mjs` the bundle that runs, `mod/tests/` the kit tests. It
@@ -49,8 +49,8 @@ producing bugs. Read it before changing how the pieces fit together.
 - `src/mod/` — the mod's runtime-free logic, vitest-tested and bundled in.
 - `src/worker.ts` — Workers entry. `src/index.ts` + `src/app.ts` — the Node one.
 - `extension/` — the Claude Desktop `.mcpb` bundle: its manifest, and the script that packs it.
-- `plugin/` — the Claude Code plugin: the bridge in hook delivery (`.mcp.json`), the Stop hook
-  (`hooks/hooks.json`), the two skills, and `bridge/`, the bundles those two run.
+- `plugin/` — the Claude Code plugin: the bridge in hook delivery (`.mcp.json`), the Stop and
+  status hooks (`hooks/hooks.json`), the two skills, and `bridge/`, the bundles those run.
   `.claude-plugin/marketplace.json` at the root lists it.
 - `docs-site/` — docs.bellman.sh, an Astro Starlight site with its own `package.json` and lockfile.
   Pages are Markdown in `src/content/docs/`; `reference/tools/` and `reference/bridge-tools.md` are

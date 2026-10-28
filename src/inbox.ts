@@ -261,7 +261,7 @@ export function readMemberships(dir: string): Membership[] {
 // Process ancestry
 // ---------------------------------------------------------------------------
 
-function parentPid(pid: number): number | undefined {
+export function parentPid(pid: number): number | undefined {
   try {
     const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
       encoding: "utf8",

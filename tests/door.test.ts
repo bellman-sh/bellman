@@ -56,6 +56,7 @@ function source(over: Partial<DoorSource> = {}): DoorSource {
     readRooms: vi.fn(async () => ({ status: 200, body: { rooms: [] } })),
     readSurface: vi.fn(async () => ({ status: 200, body: { session_id: "qs_room1", room: {}, surface: { cursor: 0, items: [] } } })),
     decline: vi.fn(async () => ({ status: 200, body: { cursor: 12 } })),
+    setStatus: vi.fn(async () => ({ status: 200, body: { sent: 1 } })),
     ...over,
   };
 }
@@ -430,6 +431,31 @@ const DECLINE = "/rooms/qs_room1/decline";
 const declineWith = (socketPath: string, body: string, sent: Sent = {}) => post(socketPath, DECLINE, { body, ...sent });
 const BAD_REQUEST = { error: "bad_request" };
 
+const SEAT_STATUS = "/seats/status";
+
+// #432: the Claude Code hooks set every seat's status through the door's second write.
+describe("a seat status", () => {
+  it("hands the bridge the status from a body of exactly { status }, and answers as it did", async () => {
+    const setStatus = vi.fn(async () => ({ status: 200, body: { sent: 2 } }));
+    const door = await start("12.sock", source({ setStatus }));
+    const ok = await post(door.path, SEAT_STATUS, { body: '{"status":"idle"}' });
+    expect(ok).toMatchObject({ status: 200, type: "application/json" });
+    expect(JSON.parse(ok.body)).toEqual({ sent: 2 });
+    expect(setStatus).toHaveBeenLastCalledWith("idle");
+  });
+
+  it("refuses any other body or type with a 400, and asks the bridge nothing", async () => {
+    const setStatus = vi.fn(async () => ({ status: 200, body: { sent: 0 } }));
+    const door = await start("12.sock", source({ setStatus }));
+    for (const body of ['{"status":"busy"}', '{"status":"idle","note":"x"}', "{}", '"idle"', "[]", "not json", "x".repeat(2048)]) {
+      expect((await post(door.path, SEAT_STATUS, { body })).status, body.slice(0, 30)).toBe(400);
+    }
+    expect((await post(door.path, SEAT_STATUS, { body: '{"status":"idle"}', type: "text/plain" })).status).toBe(400);
+    expect((await get(door.path, SEAT_STATUS)).status).toBe(404);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+});
+
 describe("the rooms, the canvas and a decline", () => {
   it("serves /rooms from readRooms, with the status and body it gave", async () => {
     const rooms = { rooms: [{ session_id: "qs_room1", status: "active" }] };
@@ -554,7 +580,7 @@ describe("the rooms, the canvas and a decline", () => {
     }
   });
 
-  it("allows a POST on the decline route and on no other path, and no other method anywhere", async () => {
+  it("allows a POST on the decline and seat-status routes and on no other path, and no other method anywhere", async () => {
     const src = source();
     const door = await start("11.sock", src);
     const paths = ["/status", "/rooms", "/rooms/qs_room1/events", "/rooms/qs_room1/surface", "/rooms/qs_room1", "/", "/elsewhere"];
@@ -564,7 +590,7 @@ describe("the rooms, the canvas and a decline", () => {
       expect(JSON.parse(res.body), `POST ${path}`).toEqual({ error: "method_not_allowed" });
     }
     for (const method of ["PUT", "PATCH", "DELETE"]) {
-      for (const path of [...paths, DECLINE]) {
+      for (const path of [...paths, DECLINE, SEAT_STATUS]) {
         const res = await request(method, door.path, path, { body: '{"ref_id":"5"}' });
         expect(res.status, `${method} ${path}`).toBe(405);
       }

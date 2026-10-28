@@ -551,6 +551,26 @@ describe("the room routes, against the real tools", () => {
     expect((await mine.answers()).map((e) => e.ref_id)).toEqual([one, two]);
   });
 
+  // #432: the Claude Code hooks set a seat's status through the door. One status-only progress per seat, and only when
+  // it changes, so a turn that ends idle in every room twice in a row sends nothing the second time.
+  it("sets every seat's status with a status-only progress, and sends nothing when it has not changed", async () => {
+    const { bridge, asked, room } = await roomBridge();
+    const [one, two] = [await room(), await room()];
+    const before = asked.length;
+
+    expect(await bridge.setStatus("idle")).toEqual({ status: 200, body: { sent: 2 } });
+    const sends = asked.slice(before);
+    expect(sends.map((c) => c.arguments).sort((a, b) => String(a!.session_id).localeCompare(String(b!.session_id)))).toEqual(
+      [one, two].map((r) => ({ session_id: r.sessionId, member_id: r.memberId, type: "progress", payload: { status: "idle" } }))
+        .sort((a, b) => a.session_id.localeCompare(b.session_id)),
+    );
+    expect(sends.every((c) => c.name === "bellman_send")).toBe(true);
+
+    expect(await bridge.setStatus("idle")).toEqual({ status: 200, body: { sent: 0 } });
+    expect(asked).toHaveLength(before + 2);
+    expect(await bridge.setStatus("working")).toEqual({ status: 200, body: { sent: 2 } });
+  });
+
   // CLAUDE.md: a page reaching data through the bridge must not count as the agent having read the events.
   it("makes no bellman_sync call and leaves the inbox as it found it, whichever route is asked", async () => {
     const { seen, fetchImpl } = serving(() => log());

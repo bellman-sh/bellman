@@ -77,6 +77,19 @@ export interface DoorDeclined {
   cursor: number;
 }
 
+/**
+ * `POST /seats/status`, sent `{ "status": "working" | "idle" | "needs_you" }` as application/json by the Claude Code
+ * hooks (#432). Every seat the bridge holds whose status that changes is sent a `progress` carrying the status alone,
+ * and `sent` counts them: 0 when nothing changed.
+ */
+export interface DoorStatusSet {
+  sent: number;
+}
+
+/** The statuses a seat can be set to: `SEAT_STATUSES` in src/types.ts, repeated here because this file imports no runtime. */
+export const DOOR_SEAT_STATUSES = ["working", "idle", "needs_you"] as const;
+export type DoorSeatStatus = (typeof DOOR_SEAT_STATUSES)[number];
+
 // ---------------------------------------------------------------------------
 // Cleaning — a peer controls every string below, and a terminal obeys escapes
 // ---------------------------------------------------------------------------

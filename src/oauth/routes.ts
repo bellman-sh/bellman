@@ -629,11 +629,28 @@ function signInBody(title: string, intro: string, stateToken: string, available:
 function usableRedirect(uri: string): boolean {
   try {
     const parsed = new URL(uri);
-    if (parsed.protocol === "https:") return true;
-    return parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+    return parsed.protocol === "https:" || isLoopback(parsed);
   } catch {
     return false;
   }
+}
+
+const isLoopback = (url: URL) => url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+
+/**
+ * OpenClaw often runs on a server, so the browser that signed in cannot reach its loopback callback and
+ * shows "can't be reached". Its CLI takes the code by hand instead, so its sign-in ends on this page,
+ * which offers both. The code shown is no more exposed than in the address bar, and PKCE binds it.
+ */
+function openclawReturn(target: URL, code: string): Response {
+  return html(
+    `<h1>Signed in</h1><p>Return to OpenClaw to finish connecting Bellman.</p>` +
+      `<a class="btn" href="${escape(target.toString())}">Return to OpenClaw</a>` +
+      `<p>If that page can't be reached, OpenClaw is running on another machine. Within five minutes, cancel the ` +
+      `waiting login there and run this, with the name you gave Bellman in OpenClaw:</p>` +
+      `<pre><code>openclaw mcp login &lt;name&gt; --code ${escape(code)}</code></pre>` +
+      `<button class="btn" type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent)">Copy</button>`
+  );
 }
 
 interface AuthorizeRequest {
@@ -790,6 +807,9 @@ async function completeAuthorize(profile: ProviderProfile, pending: AuthorizeReq
     expires_at: Date.now() + AUTH_CODE_TTL_MS,
   });
   target.searchParams.set("code", authCode);
+  if (isLoopback(target) && (await config.store.getClient(pending.client_id))?.client_name === "OpenClaw MCP") {
+    return openclawReturn(target, authCode);
+  }
   return Response.redirect(target.toString(), 302);
 }
 

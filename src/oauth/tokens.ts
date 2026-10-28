@@ -22,7 +22,8 @@ function buffer(view: Uint8Array): ArrayBuffer {
 
 export const ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-export const AUTH_CODE_TTL_MS = 60 * 1000;
+/** Five minutes, not one: OpenClaw on another machine redeems it by hand (`openclawReturn`). */
+export const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 /** The signed blob handed to an upstream provider and back, as `state`. */
 export const STATE_TTL_SECONDS = 10 * 60;
 

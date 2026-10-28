@@ -250,7 +250,7 @@ export const CLIENT_COUNT_KEY = "clients:count";
  * sweep is a late sweep rather than a wrong answer. Five minutes is chosen
  * against the cap rather than against any TTL: registrations are rate limited
  * per hour, so the client population moves on an hourly scale, and sweeping at
- * the shortest TTL in play (a 60-second authorization code, which is consumed
+ * the shortest TTL in play (a five-minute authorization code, which is consumed
  * on use anyway) would be alarms spent on nothing.
  */
 export const SWEEP_INTERVAL_MS = 5 * 60 * 1000;

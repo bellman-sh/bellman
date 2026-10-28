@@ -1,10 +1,12 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import http from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Delivery } from "./bridge.js";
-import { DOOR_VERSION, type DoorEvent, type DoorSeat, type DoorStatus, type DoorWaiting } from "./door-protocol.js";
-import { pendingSummary } from "./inbox.js";
+import {
+  DOOR_SEAT_STATUSES, DOOR_VERSION, type DoorEvent, type DoorSeat, type DoorSeatStatus, type DoorStatus, type DoorWaiting,
+} from "./door-protocol.js";
+import { parentPid, pendingSummary } from "./inbox.js";
 
 /**
  * The bridge's door: what the Claude Code mod in the same session reads off the bridge, over a Unix socket.
@@ -14,13 +16,18 @@ import { pendingSummary } from "./inbox.js";
  * The socket is named for the bridge's pid, so each bridge has a door of its own, and a session with two bridges
  * has two.
  *
- * Five routes: `GET /status`, `GET /rooms`, `GET /rooms/<session_id>/events`, `GET /rooms/<session_id>/surface` and
- * `POST /rooms/<session_id>/decline`. A mod's own call of a Bellman tool is refused by Claude Code from its timers and
- * presses, and a read over this socket needs no permission, so the bridge serves what the mod needs through the
- * connection it already holds: the room list, the canvas, and a refusal of an action request. That refusal is the one
- * thing here that writes, and it is the only POST. The folder is 0700 and the socket 0600, which is the only check
- * there is on who may connect, as on the bus (src/bus.ts): any process running as the person can decline a request
- * through this door, as it can already read the person's Bellman sign-in.
+ * Six routes: `GET /status`, `GET /rooms`, `GET /rooms/<session_id>/events`, `GET /rooms/<session_id>/surface`,
+ * `POST /rooms/<session_id>/decline` and `POST /seats/status`. A mod's own call of a Bellman tool is refused by Claude
+ * Code from its timers and presses, and a read over this socket needs no permission, so the bridge serves what the mod
+ * needs through the connection it already holds: the room list, the canvas, and a refusal of an action request. The
+ * two POSTs are the writes: that refusal, and a seat status the Claude Code hooks set (#432), which carries no words.
+ * The folder is 0700 and the socket 0600, which is the only check there is on who may connect, as on the bus
+ * (src/bus.ts): any process running as the person can decline a request or set a status through this door, as it can
+ * already read the person's Bellman sign-in.
+ *
+ * The hooks run under Claude Code, beside the bridge and not under it, so they cannot find a socket named for the
+ * bridge's pid. `doorOwnerPathFor` names a link to it for the bridge's parent, which is Claude Code, and a hook finds
+ * that by walking its own parents (`findDoor`), as the Stop hook finds the inbox.
  *
  * The bridge is the session's Bellman MCP server, and the door is an aid to something else. Nothing that goes
  * wrong behind a request may take the bridge down, so a throw is answered with a 500, and an error on the running
@@ -36,6 +43,69 @@ export function doorRoot(): string {
 /** The socket of the bridge with this pid. */
 export function doorPathFor(pid: number, root = doorRoot()): string {
   return join(root, `${pid}.sock`);
+}
+
+/**
+ * A link to the door of the bridge whose parent has this pid: the Claude Code process the bridge serves.
+ * ponytail: one per Claude Code process, so of two bridges in one session the last to start holds it.
+ */
+export function doorOwnerPathFor(ownerPid: number, root = doorRoot()): string {
+  return join(root, `owner-${ownerPid}.sock`);
+}
+
+/**
+ * Point `link` at `door`, replacing whatever a process that had the owner's pid before left there. A failure is the
+ * caller's to log: the hooks then find no door, and set no status.
+ */
+export function linkDoor(door: string, link: string): void {
+  rmSync(link, { force: true });
+  symlinkSync(door, link);
+}
+
+/** Remove `link` if it still points at `door`: a bridge started since in the same session may hold it now. */
+export function unlinkDoor(door: string, link: string): void {
+  try {
+    if (readlinkSync(link) === door) rmSync(link, { force: true });
+  } catch {
+    // Gone already, or never made.
+  }
+}
+
+/**
+ * What a hook sends (#432): `status` to the door's seat-status route, waiting at most `timeoutMs`. Resolves whether the
+ * door said 200, and never rejects: a hook with no door, or a door that does not answer, sets nothing and says nothing.
+ * The bridge goes on sending after a hook stops waiting.
+ */
+export function postSeatStatus(status: DoorSeatStatus, socketPath = findDoor(), timeoutMs = 2_000): Promise<boolean> {
+  if (socketPath === undefined) return Promise.resolve(false);
+  const body = JSON.stringify({ status });
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        socketPath, path: SEAT_STATUS, method: "POST", timeout: timeoutMs,
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode === 200));
+        res.on("error", () => resolve(false));
+      },
+    );
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+    req.end(body);
+  });
+}
+
+/** The door a hook should use: the owner link of the nearest ancestor that has one, walking up from `startPid`. */
+export function findDoor(startPid: number = process.ppid, root = doorRoot(), maxDepth = 8): string | undefined {
+  let pid: number | undefined = startPid;
+  for (let depth = 0; pid !== undefined && depth < maxDepth; depth++) {
+    const link = doorOwnerPathFor(pid, root);
+    if (existsSync(link)) return link;
+    pid = parentPid(pid);
+  }
+  return undefined;
 }
 
 /**
@@ -62,6 +132,8 @@ export interface DoorSource {
    * else. `refId` is a cursor the door has checked. Never rejects.
    */
   decline(sessionId: string, refId: string): Promise<{ status: number; body: unknown }>;
+  /** The second write (#432): set every seat's status, sending only where it changes. Never rejects. */
+  setStatus(status: DoorSeatStatus): Promise<{ status: number; body: unknown }>;
 }
 
 /**
@@ -105,6 +177,8 @@ interface Reply {
 }
 
 const ROOM_ROUTE = /^\/rooms\/([^/]+)\/(events|surface|decline)$/;
+/** The seat-status route (#432): one path, POST only. */
+const SEAT_STATUS = "/seats/status";
 /** At most fifteen digits, so that the number it parses to is exact: a cursor is an event count, and a `ref_id` names one. */
 const CURSOR = /^\d{1,15}$/;
 /** A decline's body is `{"ref_id":"<fifteen digits>"}`: about thirty bytes. */
@@ -118,7 +192,7 @@ function shapeOf(target: string): string {
   const path = target.split("?")[0];
   const room = ROOM_ROUTE.exec(path);
   if (room !== null) return `/rooms/<id>/${room[2]}`;
-  return path === "/status" || path === "/rooms" ? path : "a path it does not serve";
+  return path === "/status" || path === "/rooms" || path === SEAT_STATUS ? path : "a path it does not serve";
 }
 
 const NOT_FOUND: Reply = { status: 404, body: { error: "not_found" } };
@@ -147,6 +221,7 @@ async function route(src: DoorSource, req: http.IncomingMessage): Promise<Reply>
   const leaf = room?.[2];
 
   if (req.method === "POST" && leaf === "decline" && sessionId !== undefined) return decline(src, req, sessionId);
+  if (req.method === "POST" && path === SEAT_STATUS) return seatStatus(src, req);
   if (req.method !== "GET") return { status: 405, body: { error: "method_not_allowed" } };
   if (path === "/status") return { status: 200, body: statusOf(src) };
   if (path === "/rooms") return src.readRooms();
@@ -170,6 +245,31 @@ async function decline(src: DoorSource, req: http.IncomingMessage, sessionId: st
   const body = await readBody(req, DECLINE_BODY_MAX);
   const refId = body === undefined ? undefined : refIdOf(body);
   return refId === undefined ? BAD_REQUEST : src.decline(sessionId, refId);
+}
+
+/**
+ * `POST /seats/status`, the door's second write (#432): `application/json`, at most 1 KiB, exactly `{ "status": <one of
+ * DOOR_SEAT_STATUSES> }`, and everything else a 400. It sends a status and nothing a peer reads as words.
+ */
+async function seatStatus(src: DoorSource, req: http.IncomingMessage): Promise<Reply> {
+  const type = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") return BAD_REQUEST;
+  const body = await readBody(req, DECLINE_BODY_MAX);
+  const status = body === undefined ? undefined : soleField(body, "status");
+  return (DOOR_SEAT_STATUSES as readonly unknown[]).includes(status) ? src.setStatus(status as DoorSeatStatus) : BAD_REQUEST;
+}
+
+/** The value of a body that is exactly `{ "<key>": <value> }`, and undefined for any other. */
+function soleField(text: string, key: string): unknown {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const keys = Object.keys(body);
+  return keys.length === 1 && keys[0] === key ? (body as Record<string, unknown>)[key] : undefined;
 }
 
 /** The `ref_id` of a body that is exactly `{ "ref_id": "<cursor>" }`, and undefined for any other. */

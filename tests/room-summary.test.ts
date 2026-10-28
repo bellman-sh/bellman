@@ -220,6 +220,14 @@ describe("roomSummary seat status", () => {
     expect(asking.needs_you_count).toBe(1);
   });
 
+  // A hook's status-only report changes the status and leaves the beat's note on the last report that had one.
+  it("keeps the latest note through a status-only report", () => {
+    const tail = [event(1, helper, "progress", { note: "on the migration" }), event(2, helper, "progress", { status: "idle" })];
+    const help = roomSummary(room(), [lead], BOTH, tail, T0).members.find((m) => m.member_id === "m_help")!;
+    expect(help.beat.note?.data).toEqual({ note: "on the migration" });
+    expect([help.status, help.status_source]).toEqual(["idle", "reported"]);
+  });
+
   it("falls back to presence: a stale seat is idle whatever it last reported, and so is a silent one", () => {
     const later = T0 + 11 * 60_000;
     const stale = roomSummary(room(), [lead], NONE, [report(1, helper, "working")], later);

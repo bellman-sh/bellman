@@ -468,6 +468,7 @@ describe("askDoor", () => {
       readRooms: async () => ({ status: 200, body: { rooms: [] } }),
       readSurface: async () => ({ status: 404, body: {} }),
       decline: async () => ({ status: 404, body: {} }),
+      setStatus: async () => ({ status: 200, body: { sent: 0 } }),
     } as Parameters<typeof startDoor>[1]);
     try {
       const answer = (await askDoor(door.path)) as { status: { delivery: string; has_sign_in: boolean; seats: unknown[] } };

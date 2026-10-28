@@ -108,6 +108,16 @@ describe("bellman_send type=progress", () => {
     expect(out.isError, out.text).toBe(false);
   });
 
+  // #432: the Claude Code hooks set a seat's status with no note. That is a status change, not an answer to the tick,
+  // so it leaves lastReportAt alone and the seat can still read as silent.
+  it("takes a status with no note, and does not count it as a report", async () => {
+    const p = await pairUp(h);
+    const out = await report(p, { status: "idle" });
+    expect(out.isError, out.text).toBe(false);
+    expect((await h.store.eventsAfter(p.sessionId, 0)).at(-1)).toMatchObject({ type: "progress", payload: { status: "idle" } });
+    expect((await creatorRow(p)).lastReportAt).toBeUndefined();
+  });
+
   it("refuses an unknown status by name", async () => {
     const out = await report(await pairUp(h), { note: "x", status: "busy" });
     expect(out.isError).toBe(true);

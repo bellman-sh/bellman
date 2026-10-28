@@ -58,7 +58,7 @@ import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
-import { doorPathFor, startDoor } from "./door.js";
+import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
@@ -192,9 +192,16 @@ const doorOpened = (async () => {
       readRooms: bridge.readRooms,
       readSurface: bridge.readSurface,
       decline: bridge.decline,
+      setStatus: bridge.setStatus,
     }, log);
     door = opened;
     doorPath = opened.path;
+    // The hooks' way to the door (#432): they run beside the bridge, under Claude Code, so they look for its pid.
+    try {
+      linkDoor(opened.path, doorOwnerPathFor(process.ppid));
+    } catch (error) {
+      log(`door: no link for the hooks: ${error instanceof Error ? error.message : String(error)}`);
+    }
   } catch (error) {
     log(`door unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -209,6 +216,7 @@ async function shutdown(): Promise<void> {
   signingIn.abort();
   // The door before the bridge, so that nothing is still reading the bridge's rooms through it as close() lets them go.
   // Closing it also removes its socket.
+  if (doorPath) unlinkDoor(doorPath, doorOwnerPathFor(process.ppid));
   await door?.close();
   // close() also closes the local bus, and that is what removes this bridge's socket file if it was the
   // coordinator. The bridges that were its subscribers race again and one takes over, each from its own cursor.

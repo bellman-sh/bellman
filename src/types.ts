@@ -583,6 +583,12 @@ export interface UserRecord {
    * absent for a record whose GitHub sign-ins all came before it was kept (2026-10-24).
    */
   githubLogin?: string;
+  /**
+   * The verified email from the latest sign-in through Google, for the operator's account list, kept the same way as
+   * githubLogin. Absent for a record whose Google sign-ins all came before it was kept (2026-10-28), or whose Google
+   * email was unverified.
+   */
+  googleEmail?: string;
 }
 
 export interface Entitlements {

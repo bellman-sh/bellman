@@ -8297,6 +8297,14 @@ export function describeStoreContract(
           expect((await store.listUsers(2))[1], "no login is no key").toStrictEqual({ userId: "u_google_2", firstSeenAt: 4_000, lastSeenAt: 4_000 });
         });
 
+        it("keeps the Google email a sign-in gives, replaces it with a later one, and keeps it through a sign-in with none", async () => {
+          await store.recordSignIn("u_google_2", 1_000, undefined, "a@example.dev");
+          await store.recordSignIn("u_google_2", 2_000);
+          expect((await store.listUsers(1))[0]).toStrictEqual({ userId: "u_google_2", firstSeenAt: 1_000, lastSeenAt: 2_000, googleEmail: "a@example.dev" });
+          await store.recordSignIn("u_google_2", 3_000, undefined, "b@example.dev");
+          expect((await store.listUsers(1))[0]?.googleEmail).toBe("b@example.dev");
+        });
+
         // The operator's GET /admin/accounts. Signed in out of order, so the order it answers in is first sign-in's.
         it("lists people by first sign-in, ties by id, a later sign-in moving only lastSeenAt, cut at the limit", async () => {
           expect(await store.listUsers(10)).toEqual([]);

@@ -51,8 +51,8 @@ describe("bellman_send type=progress", () => {
   it("refuses a payload with any key the shape does not name", async () => {
     const p = await pairUp(h);
     const before = await eventCount(p);
+    // `status` is named now (#432), a claim about the report's time; these stay refused.
     for (const bad of [
-      { note: "x", status: "working" },
       { note: "x", alive: true },
       { note: "x", present: true },
       { note: "x", healthy: true },
@@ -100,6 +100,18 @@ describe("bellman_send type=progress", () => {
     const out = await report(await pairUp(h), payload);
     expect(out.isError).toBe(true);
     expect(out.text).toContain("progress payload must be");
+  });
+
+  // #432: a seat says whether it is working, idle or needs its human.
+  it.each(["working", "idle", "needs_you"])("accepts the status %s", async (status) => {
+    const out = await report(await pairUp(h), { note: "x", status });
+    expect(out.isError, out.text).toBe(false);
+  });
+
+  it("refuses an unknown status by name", async () => {
+    const out = await report(await pairUp(h), { note: "x", status: "busy" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('status "busy" is not one of working, idle, needs_you');
   });
 
   /** A seat that may not speak may not report either — brief_update's reasoning. */

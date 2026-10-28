@@ -64,6 +64,11 @@ export interface MemberRow {
   presence: "present" | "stale" | "departed";
   active: boolean;
   beat: Beat;
+  /** #432: derived beats reported; a reported status shows only while the seat is present, `status_at` is when it was said. */
+  status: "working" | "idle" | "needs_you";
+  status_source: "derived" | "reported" | "presence";
+  status_at: string | null;
+  needs_you: boolean;
 }
 
 /** One seat an account holds in a room, as bellman_rooms lists it. */
@@ -90,6 +95,7 @@ export interface RoomSummary {
   your_seats: Seat[];
   room: SeatedRoomBlock;
   members: MemberRow[];
+  needs_you_count: number;
   /** `expires_at` is null for a public room's permanent code (ADR 0020). */
   join_codes: { role: string; expires_at: string | null; code?: string; join_url?: string }[];
   last_event: { cursor: number; type: string; at: string } | null;

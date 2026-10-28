@@ -519,13 +519,18 @@ export async function eventsFor(
  * rooms plan, R11), takes the window `bellman_sync` derives its outstanding list from and cannot
  * disagree with the poll about how far back it reaches. The caller says how far back `since` is: a
  * topic room's proposal lives seven days and every other request half an hour.
+ *
+ * `max` caps the events read, for a caller that repeats this across rooms (`bellman_rooms`): past it the
+ * window is the newest `max` events, and a request older than those reads as not outstanding.
  */
-export async function requestWindow(store: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
+export async function requestWindow(
+  store: BellmanStore, sessionId: string, since: number, max = Infinity,
+): Promise<SessionEvent[]> {
   // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
   // said in the window; a store read that pages backward is the upgrade if that gets large.
-  for (let n = 256; ; n *= 2) {
+  for (let n = Math.min(256, max); ; n = Math.min(n * 2, max)) {
     const tail = await store.recentEvents(sessionId, n);
-    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
+    if (tail.length < n || tail[0].at < since || n === max) return tail.filter((e) => e.at >= since);
   }
 }
 

@@ -2296,6 +2296,9 @@ pull request.
    measurements taken at the event's own `at` ("silent for 660 seconds at
    14:05"), which stay true on replay, and never a claim about now — there is no
    `present`, `status`, `alive` or `healthy` key, and there must not be.
+   A `progress` report's `status` (#432) is not one either: it says what the
+   seat was doing at the report's `at`, and `bellman_rooms` shows it only while
+   the seat is present, with that time beside it as `status_at`.
    Presence itself is still derived, and still lives in `presence.ts`. Going
    quiet writes nothing, so it is reversible; only a contested seat
    turns stale into departed. `activeMembers` decides when a room has emptied
@@ -2316,12 +2319,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,785** | every request, whether or not you are in a room |
+| Tool definitions | **~10,852** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
-| `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
+| `bellman_rooms` definition | ~361 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~876 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-28 for seat status (#432), by the method below: 67 tokens over the 10,785
+that main (`6be90577`) measures and records, in `bellman_rooms` (310 to 361: each member's `status`,
+`status_source`, `status_at` and `needs_you`, and the room's `needs_you_count`) and `bellman_send`
+(1,803 to 1,819: `progress` names its optional `status`). No tool added. 10,852.
 
 Re-measured on 2026-10-24 for surface frames, by the method below: 390 tokens over the 10,395
 that trunk (`e1213c2f`) measures, in `bellman_surface` (603 to 876), `bellman_send` (1,737 to

@@ -165,6 +165,70 @@ describe("roomSummary and a hosted room's instructions", () => {
   });
 });
 
+// #432: every seat is working, idle or needs_you, and the room counts the seats waiting on their humans.
+describe("roomSummary seat status", () => {
+  const granting = (m: typeof lead) => ({ ...m, capabilities: [...m.capabilities, "request_actions" as const] });
+  const room = () => stored({ members: [granting(lead), granting(helper)] });
+  const BOTH: ReadonlySet<string> = new Set([lead.memberId, helper.memberId]);
+  const event = (cursor: number, from: typeof lead, type: SessionEvent["type"], payload: unknown, refId: string | null = null): SessionEvent => ({
+    cursor, type, fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload, refId, at: T0 + cursor,
+  });
+  const ask = (cursor: number, from: typeof lead) => event(cursor, from, "action_request", { action: "deploy" });
+  const report = (cursor: number, from: typeof lead, status: string) => event(cursor, from, "progress", { note: "n", status });
+  const statusOf = (out: ReturnType<typeof roomSummary>, id: string) => {
+    const m = out.members.find((x) => x.member_id === id)!;
+    return [m.status, m.status_source, m.needs_you];
+  };
+
+  it("derives needs_you for a seat that can answer a peer's outstanding request, and not for its sender", () => {
+    const out = roomSummary(room(), [lead], BOTH, [ask(1, helper)], T0);
+    expect(statusOf(out, "m_lead")).toEqual(["needs_you", "derived", true]);
+    expect(statusOf(out, "m_help")).toEqual(["working", "presence", false]);
+    expect(out.needs_you_count).toBe(1);
+  });
+
+  // The helper's role holds no respond_actions, so nothing it is shown is a question it could answer.
+  it("does not flag a seat whose role cannot answer, or one that granted no request_actions", () => {
+    expect(statusOf(roomSummary(room(), [lead], BOTH, [ask(1, lead)], T0), "m_help")[2]).toBe(false);
+    const ungranted = stored({ members: [lead, granting(helper)] });
+    expect(statusOf(roomSummary(ungranted, [lead], BOTH, [ask(1, helper)], T0), "m_lead")[2]).toBe(false);
+  });
+
+  it.each([
+    ["answered", [ask(1, helper), event(2, lead, "action_response", { approved: true }, "1")], T0],
+    ["declined", [ask(1, helper), event(2, lead, "action_response", { approved: false }, "1")], T0],
+    ["expired", [ask(1, helper)], T0 + 31 * 60_000],
+  ])("clears needs_you once the request is %s", (_state, tail, now) => {
+    const out = roomSummary(room(), [lead], BOTH, tail as SessionEvent[], now as number);
+    expect(statusOf(out, "m_lead")[2]).toBe(false);
+    expect(out.needs_you_count).toBe(0);
+  });
+
+  it("takes a present seat's latest reported status, and the derived needs_you over it", () => {
+    const tail = [report(1, helper, "needs_you"), report(2, helper, "idle"), report(3, lead, "working")];
+    const out = roomSummary(room(), [lead], BOTH, tail, T0);
+    expect(statusOf(out, "m_help")).toEqual(["idle", "reported", false]);
+    expect(statusOf(out, "m_lead")).toEqual(["working", "reported", false]);
+    // A claim about the report's time, never about now: the time rides beside it.
+    expect(out.members.find((m) => m.member_id === "m_help")!.status_at).toBe(new Date(T0 + 2).toISOString());
+    expect(roomSummary(room(), [lead], BOTH, [], T0).members[0].status_at).toBeNull();
+    const waiting = roomSummary(room(), [lead], BOTH, [...tail, ask(4, helper)], T0);
+    expect(statusOf(waiting, "m_lead")).toEqual(["needs_you", "derived", true]);
+    // A seat may say it needs its human, and is counted for it.
+    const asking = roomSummary(room(), [lead], BOTH, [report(1, helper, "needs_you")], T0);
+    expect(statusOf(asking, "m_help")).toEqual(["needs_you", "reported", true]);
+    expect(asking.needs_you_count).toBe(1);
+  });
+
+  it("falls back to presence: a stale seat is idle whatever it last reported, and so is a silent one", () => {
+    const later = T0 + 11 * 60_000;
+    const stale = roomSummary(room(), [lead], NONE, [report(1, helper, "working")], later);
+    expect(statusOf(stale, "m_help")).toEqual(["idle", "presence", false]);
+    // Present on a socket, but asked to report and silent past the cadence.
+    expect(statusOf(roomSummary(room(), [lead], BOTH, [], later), "m_lead")).toEqual(["idle", "presence", false]);
+  });
+});
+
 describe("beatOf", () => {
   it("is the tick's row for an asked seat", () => {
     const s = stored({ members: [{ ...lead, lastReportAt: T0 }, helper] });

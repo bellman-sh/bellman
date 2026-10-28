@@ -364,7 +364,10 @@ export function roomSummary(
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = tail[i];
     if (e.type !== "progress") continue;
-    if (!latestNote.has(e.fromMemberId)) latestNote.set(e.fromMemberId, e);
+    // A status change alone (a hook's) is no report, and leaves the beat on the last one that was.
+    if (!latestNote.has(e.fromMemberId) && typeof (e.payload as { note?: unknown } | null)?.note === "string") {
+      latestNote.set(e.fromMemberId, e);
+    }
     if (!latestStatus.has(e.fromMemberId) && (e.payload as { status?: unknown } | null)?.status !== undefined) {
       latestStatus.set(e.fromMemberId, e);
     }

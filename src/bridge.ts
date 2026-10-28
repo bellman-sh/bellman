@@ -26,7 +26,9 @@ import {
 import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
-import type { DoorDeclined, DoorEvent, DoorLog, DoorRooms, DoorSeat, DoorSurface } from "./door-protocol.js";
+import type {
+  DoorDeclined, DoorEvent, DoorLog, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
+} from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -1604,6 +1606,33 @@ export function createBridge(opts: BridgeOptions) {
     return typeof cursor === "number" ? { status: 200, body: { cursor } } : { status: 502, body: { error: "upstream" } };
   }
 
+  /** The status each seat was last set to through the door (#432), by member, so that a repeat sends nothing. */
+  const seatStatuses = new Map<string, DoorSeatStatus>();
+
+  /**
+   * The door's second write (#432): every seat this bridge holds whose status `status` changes is sent a `progress`
+   * carrying the status alone, which answers no heartbeat. A seat already at it is skipped, so the Stop hook ending
+   * every turn sends nothing on the second. A seat whose send fails keeps its old status here and is tried on the next
+   * call. Answers the first failure when nothing was sent, and the count otherwise. It never rejects.
+   */
+  async function setStatus(status: DoorSeatStatus): Promise<{ status: number; body: DoorStatusSet | { error: string } }> {
+    let sent = 0;
+    let failed: { status: number; body: { error: string } } | undefined;
+    for (const w of [...watches.values()]) {
+      if (seatStatuses.get(w.memberId) === status) continue;
+      const asked = await callLive("bellman_send", {
+        session_id: w.sessionId, member_id: w.memberId, type: "progress", payload: { status },
+      });
+      if (!("data" in asked)) {
+        failed ??= asked;
+        continue;
+      }
+      seatStatuses.set(w.memberId, status);
+      sent++;
+    }
+    return failed && sent === 0 ? failed : { status: 200, body: { sent } };
+  }
+
   async function close(): Promise<void> {
     closed = true;
     for (const w of watches.values()) w.active = false;
@@ -1648,7 +1677,9 @@ export function createBridge(opts: BridgeOptions) {
     readRooms,
     /** A room's canvas, for the door's `/rooms/<id>/surface`. */
     readSurface,
-    /** A refusal of an action request, for the door's `/rooms/<id>/decline`: the one write the door makes. */
+    /** A refusal of an action request, for the door's `/rooms/<id>/decline`: one of the door's two writes. */
     decline,
+    /** Every seat's status, for the door's `/seats/status`: the other write, which the Claude Code hooks make. */
+    setStatus,
   };
 }

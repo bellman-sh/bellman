@@ -12,6 +12,7 @@
  * It holds the terminal for that long, so keep it short, and set the hook's
  * `timeout` in settings.json above it. Outside a Bellman session it never waits.
  */
+import { postSeatStatus } from "./door.js";
 import { drain, findInbox, readMemberships, renderBatch } from "./inbox.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -31,7 +32,11 @@ function consumeStdin(): Promise<void> {
 async function main(): Promise<number> {
   await consumeStdin();
   const dir = findInbox();
-  if (!dir) return 0; // no Bellman bridge in this session
+  // No inbox: no bridge in hook delivery. One in channel delivery keeps none and still has a door to set idle through.
+  if (!dir) {
+    await postSeatStatus("idle");
+    return 0;
+  }
 
   let events = drain(dir);
   const requested = Number(process.env.BELLMAN_HOOK_WAIT_SECONDS ?? 0);
@@ -45,7 +50,11 @@ async function main(): Promise<number> {
     }
   }
 
-  if (events.length === 0) return 0;
+  if (events.length === 0) {
+    // The turn ends here, so every seat goes idle (#432). A stop blocked below does not end it: Claude goes on working.
+    await postSeatStatus("idle");
+    return 0;
+  }
   process.stderr.write(renderBatch(events) + "\n");
   return 2;
 }

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { enqueue, inboxDirFor, pendingCount, writeMemberships, type PeerEvent } from "../src/inbox.js";
+import { statusDoor } from "./helpers/status-door.js";
 
 /**
  * The real hook, run the way Claude Code runs one: through a shell, as a
@@ -20,7 +21,8 @@ function runHook(root: string, env: Record<string, string> = {}, command = SOURC
   return new Promise<{ code: number | null; stderr: string; ms: number }>((resolve, reject) => {
     const started = Date.now();
     const child = spawn("sh", ["-c", command], {
-      env: { ...process.env, BELLMAN_INBOX_ROOT: root, ...env },
+      // A scratch door root too, so that no run finds the door of a real bridge among its parents (#432).
+      env: { ...process.env, BELLMAN_INBOX_ROOT: root, BELLMAN_DOOR_ROOT: root, ...env },
     });
     let stderr = "";
     child.stderr.on("data", (chunk) => (stderr += chunk));
@@ -94,6 +96,45 @@ describe("Bellman Stop hook", () => {
 
     expect(run.code).toBe(0);
     expect(run.ms).toBeLessThan(4000);
+  });
+});
+
+// #432: a turn that ends sets every seat idle through the bridge's door. One the hook blocks, to hand Claude what is
+// queued, does not end: Claude goes on working.
+describe("the Stop hook and the seat status", () => {
+  it("sets every seat idle when it lets the turn end", async () => {
+    const door = await statusDoor();
+    try {
+      const run = await runHook(root, { BELLMAN_DOOR_ROOT: door.root });
+      expect({ code: run.code, stderr: run.stderr }).toEqual({ code: 0, stderr: "" });
+      expect(door.setStatus).toHaveBeenCalledExactlyOnceWith("idle");
+    } finally {
+      await door.close();
+    }
+  });
+
+  it("sets every seat idle in hook delivery too, from an inbox that holds nothing", async () => {
+    const door = await statusDoor();
+    try {
+      mkdirSync(inbox, { recursive: true });
+      const run = await runHook(root, { BELLMAN_DOOR_ROOT: door.root });
+      expect(run.code).toBe(0);
+      expect(door.setStatus).toHaveBeenCalledExactlyOnceWith("idle");
+    } finally {
+      await door.close();
+    }
+  });
+
+  it("sets no status when it blocks the stop to hand over queued events", async () => {
+    const door = await statusDoor();
+    try {
+      enqueue(inbox, event());
+      const run = await runHook(root, { BELLMAN_DOOR_ROOT: door.root });
+      expect(run.code).toBe(2);
+      expect(door.setStatus).not.toHaveBeenCalled();
+    } finally {
+      await door.close();
+    }
   });
 });
 

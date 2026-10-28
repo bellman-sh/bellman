@@ -28,7 +28,7 @@ import {
   type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
-import { cardResult, messageResult, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
+import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import {
@@ -37,7 +37,8 @@ import {
 import { MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
-import { PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
+import { isTopicRoom } from "./manifest.js";
 import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
 
 // ---------------------------------------------------------------------------
@@ -532,6 +533,54 @@ export async function requestWindow(
     const tail = await store.recentEvents(sessionId, n);
     if (tail.length < n || tail[0].at < since || n === max) return tail.filter((e) => e.at >= since);
   }
+}
+
+/**
+ * How many rooms the listing returns at most. Past this a hub user needs the
+ * paginated listing #49 builds; the monitor is for the rooms you are working in
+ * now.
+ */
+export const ROOMS_LIMIT = 50;
+
+/**
+ * The most events one room's request window reads per listing (#432). `bellman_sync` reads one room's window
+ * per poll; this listing reads one per room, up to `ROOMS_LIMIT`, every 15 seconds from the monitor. Uncapped, a
+ * public topic room kept a week's log in every listing: a joiner holding a proposal open and sending at its limit
+ * grows that past 60,000 events. Past the cap a request older than the newest `WINDOW_LIMIT` events stops
+ * counting toward `needs_you`, so a busy room under-reports rather than costs.
+ */
+export const WINDOW_LIMIT = 1024;
+
+/**
+ * The open rooms `identity` holds a seat in, each as `roomSummary` shows it: what `bellman_rooms` returns and
+ * `GET /me/rooms` (#434) answers, from this one function so the two cannot drift. Closed rooms, and rooms the
+ * caller left or was removed from, are not listed.
+ */
+export async function liveRooms(s: BellmanStore, identity: Identity): Promise<ReturnType<typeof roomSummary>[]> {
+  const ids = new Set([
+    ...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)),
+    ...(await s.sessionsJoinedBy(identity.userId, JOINED_SCAN)),
+  ]);
+  const now = Date.now();
+  const rooms: ReturnType<typeof roomSummary>[] = [];
+  for (const id of ids) {
+    if (rooms.length >= ROOMS_LIMIT) break;
+    const session = await s.getSession(id);
+    if (!session || session.closed) continue;
+    const mine = session.members.filter((m) => m.userId === identity.userId && isActiveMember(m));
+    if (mine.length === 0) continue;
+    const ttl = isTopicRoom(session.manifest) ? PROPOSAL_TTL_MS : ACTION_REQUEST_TTL_MS;
+    const live = session.lastActionRequestAt !== undefined && now <= session.lastActionRequestAt + ttl;
+    const [connected, tail, window] = await Promise.all([
+      s.connectedMembers(id),
+      s.recentEvents(id, ROOM_TAIL),
+      live ? requestWindow(s, id, now - ttl, WINDOW_LIMIT) : Promise.resolve([]),
+    ]);
+    const events = window.length > tail.length ? window : tail;
+    const readable = await eventsFor(s, id, events, identity.userId);
+    rooms.push(roomSummary(session, mine, connected, readable, now, identity.userId));
+  }
+  return rooms;
 }
 
 /**

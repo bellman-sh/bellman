@@ -35,6 +35,10 @@
  *                     turning something off should not leave it on over a spelling.
  *                     Read at launch, and per bridge: one with it off does not stop the
  *                     others sharing a bus among themselves.
+ *   BELLMAN_JOIN_CODE  optional. A join code to take this session into a room at launch (#435), as a desktop
+ *                     app that started the session sets it. The bridge previews the room, refuses a public one,
+ *                     and joins with a brief that names only this directory. The plugin's SessionStart hook says
+ *                     what happened. The code is held in memory and written nowhere.
  *   BELLMAN_UPLOAD_ROOT  optional. Where bellman_upload may read from: a path outside this
  *                     directory, links followed, is refused. Unset or empty, it is the
  *                     directory the bridge was started in, unless that directory contains
@@ -55,6 +59,7 @@
  * stdout is the MCP transport. Log to stderr only.
  */
 import { rmSync } from "node:fs";
+import { basename } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
@@ -193,6 +198,7 @@ const doorOpened = (async () => {
       readSurface: bridge.readSurface,
       decline: bridge.decline,
       setStatus: bridge.setStatus,
+      join: bridge.joinState,
     }, log);
     door = opened;
     doorPath = opened.path;
@@ -234,6 +240,14 @@ async function shutdown(): Promise<void> {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 process.stdin.on("close", shutdown);
+
+/**
+ * The join a desktop app asked for (#435). Started before the door is awaited, so the door never answers the
+ * SessionStart hook without it: `join` marks itself joining before its first await. Not awaited: a sign-in it may
+ * wait on must not hold up Claude Code's handshake, and the door reports where it stands.
+ */
+const joinCode = process.env.BELLMAN_JOIN_CODE?.trim();
+if (joinCode) void bridge.join(joinCode, basename(process.cwd()));
 
 // Before the transport connects, so that the first bellman_whoami already names the door.
 await doorOpened;

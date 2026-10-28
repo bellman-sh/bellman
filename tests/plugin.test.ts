@@ -81,7 +81,7 @@ describe("the plugin's shape", () => {
   it("runs only files that exist under plugin/", () => {
     const files = [...referenced(".mcp.json"), ...referenced("hooks/hooks.json")];
 
-    expect(files).toEqual(["bridge/channel.mjs", "bridge/stop-hook.mjs", "bridge/status-hook.mjs", "bridge/status-hook.mjs"]);
+    expect(files).toEqual(["bridge/channel.mjs", "bridge/join-hook.mjs", "bridge/stop-hook.mjs", "bridge/status-hook.mjs", "bridge/status-hook.mjs"]);
     for (const file of files) expect(existsSync(join(PLUGIN, file)), file).toBe(true);
   });
 

@@ -1,6 +1,6 @@
 /**
- * src/channel.ts, src/stop-hook.ts and src/status-hook.ts → plugin/bridge/channel.mjs, stop-hook.mjs and
- * status-hook.mjs, the files the Claude Code plugin runs. Claude Code copies plugin/ into its cache and installs
+ * src/channel.ts, src/stop-hook.ts, src/status-hook.ts and src/join-hook.ts → plugin/bridge/channel.mjs,
+ * stop-hook.mjs, status-hook.mjs and join-hook.mjs, the files the Claude Code plugin runs. Claude Code copies plugin/ into its cache and installs
  * nothing beside it (plugin/ holds no package.json, on purpose), so each entry carries every
  * dependency it imports. The output is committed, and rebuilt in release PRs, which rebuild the
  * mod's mod/hooks/register.mjs here too (scripts/build-mod.ts).
@@ -12,7 +12,7 @@ import { buildMod } from "./build-mod.js";
 const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
 
 const { metafile } = await build({
-  entryPoints: { channel: "src/channel.ts", "stop-hook": "src/stop-hook.ts", "status-hook": "src/status-hook.ts" },
+  entryPoints: { channel: "src/channel.ts", "stop-hook": "src/stop-hook.ts", "status-hook": "src/status-hook.ts", "join-hook": "src/join-hook.ts" },
   outdir: "plugin/bridge",
   outExtension: { ".js": ".mjs" },
   bundle: true,

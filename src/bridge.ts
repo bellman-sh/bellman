@@ -27,7 +27,7 @@ import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import type {
-  DoorDeclined, DoorEvent, DoorLog, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
+  DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
 } from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
@@ -1633,6 +1633,69 @@ export function createBridge(opts: BridgeOptions) {
     return failed && sent === 0 ? failed : { status: 200, body: { sent } };
   }
 
+  /** Where the join from `BELLMAN_JOIN_CODE` stands, for the door; undefined when the bridge was given no code. */
+  let joined: DoorJoin | undefined;
+
+  /**
+   * Join the room `code` opens, as a session a desktop app started does (#435): preview it, refuse a public room, and
+   * confirm with a brief that says only which project the session was started in. The membership is armed as a
+   * manual join's is. The code stays in memory: it is in no log line, and the outcome the door reports never holds it.
+   *
+   * It goes through `remote()`, as tools/list does at launch, so a machine with no sign-in opens the browser here, at
+   * launch, as it would have anyway. A refusal is said in the bridge's own words; the server's are logged and not
+   * passed on, since a refusal can name a peer. It never rejects.
+   */
+  async function join(code: string, project: string): Promise<DoorJoin> {
+    joined = { state: "joining" };
+    const refuse = (reason: string, said?: string): DoorJoin => {
+      if (said) log(`join refused: ${said}`);
+      return (joined = { state: "refused", reason });
+    };
+    let connected: Remote;
+    try {
+      connected = await remote();
+    } catch (err) {
+      return refuse("Bellman could not be reached, or the sign-in did not finish", err instanceof Error ? err.message : String(err));
+    }
+    try {
+      const preview = await connected.callTool({ name: "bellman_connect", arguments: { join_code: code } });
+      if (preview.isError) {
+        return refuse(
+          "the join code was refused: it may have expired (a code lasts 15 minutes), the room may be full or closed, " +
+            "or you may be banned from it. Ask for a fresh code",
+          textOf(preview),
+        );
+      }
+      const shown = resultData(preview);
+      const room = shown?.room as { public?: unknown } | undefined;
+      if (room?.public !== false) {
+        return refuse("the room is public, and a session never joins a public room on its own. Join it with bellman_connect if you mean to");
+      }
+      const args = {
+        connect_token: shown?.connect_token,
+        brief: {
+          goal: `Joined from the ${project} project`,
+          state: "Just started; nothing done in this room yet",
+          agent: { provider: "anthropic", model: "claude", client: "claude-code" },
+        },
+      };
+      const confirmed = await connected.callTool({ name: "bellman_confirm", arguments: args });
+      if (confirmed.isError) return refuse("the room refused the join after its preview; ask for a fresh code", textOf(confirmed));
+      observe("bellman_confirm", args, confirmed);
+      const out = resultData(confirmed);
+      const seat = out?.room as { your_role?: unknown; your_verbs?: unknown } | undefined;
+      return (joined = {
+        state: "joined",
+        session_id: String(out?.session_id ?? ""),
+        member_id: String(out?.member_id ?? ""),
+        role: String(seat?.your_role ?? ""),
+        verbs: Array.isArray(seat?.your_verbs) ? seat.your_verbs.map(String) : [],
+      });
+    } catch (err) {
+      return refuse("Bellman did not answer the join", err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function close(): Promise<void> {
     closed = true;
     for (const w of watches.values()) w.active = false;
@@ -1681,5 +1744,8 @@ export function createBridge(opts: BridgeOptions) {
     decline,
     /** Every seat's status, for the door's `/seats/status`: the other write, which the Claude Code hooks make. */
     setStatus,
+    /** Join from `BELLMAN_JOIN_CODE` (#435), and where that stands, for the door's `/status`. */
+    join,
+    joinState: (): DoorJoin | undefined => joined,
   };
 }

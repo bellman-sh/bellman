@@ -146,6 +146,13 @@ export const SEND_KINDS = [
 ] as const satisfies readonly EventType[];
 export type SendKind = (typeof SEND_KINDS)[number];
 
+/**
+ * What a seat says it is doing (#432), in a `progress` payload's `status`. A claim about the report's `at`, never
+ * about now: `seatStatusOf` shows it only while the seat is present, and says when it was claimed.
+ */
+export const SEAT_STATUSES = ["working", "idle", "needs_you"] as const;
+export type SeatStatus = (typeof SEAT_STATUSES)[number];
+
 export type OutsideTaskState =
   | "TASK_STATE_WORKING" | "TASK_STATE_INPUT_REQUIRED" | "TASK_STATE_COMPLETED"
   | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED";

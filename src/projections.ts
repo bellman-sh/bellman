@@ -1,4 +1,6 @@
-import type { Member, SessionEvent, SurfaceKind, SurfaceRow, Verb } from "./types.js";
+import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb } from "./types.js";
+import { actionStates } from "./action-state.js";
+import { isTopicRoom } from "./manifest.js";
 import type { CardHit, MessageHit } from "./search.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
@@ -267,6 +269,40 @@ export function beatOf(s: StoredSession, m: Member, now: number, latest: Session
 }
 
 /**
+ * The live seats an outstanding request waits on (#432): every one but its sender's that could answer it,
+ * which is a role holding `respond_actions` and a seat that granted `request_actions`. `events` must reach
+ * back past every request still inside its deadline; `bellman_rooms` hands in `requestWindow` when one may be.
+ */
+export function waitingSeats(s: StoredSession, events: readonly SessionEvent[], now: number): Set<string> {
+  const states = actionStates(events, now, isTopicRoom(s.manifest));
+  const senders = new Set(
+    events.filter((e) => e.type === "action_request" && states.get(e.cursor) === "outstanding").map((e) => e.fromMemberId),
+  );
+  return new Set(s.members
+    .filter((m) => isActiveMember(m) && m.capabilities.includes("request_actions")
+      && verbsOfRole(s.manifest, m.roomRole).includes("respond_actions")
+      && [...senders].some((id) => id !== m.memberId))
+    .map((m) => m.memberId));
+}
+
+/**
+ * A seat's status (#432), and where it came from, so a reader can tell the server's derivation from the seat's word:
+ * - `derived`: a request waits on this seat (`waitingSeats`). It beats anything the seat said: the room is waiting on
+ *   its human whatever its agent thinks.
+ * - `reported`: the seat's latest `progress.status`, a claim about that report's time (invariant 7). So it counts only
+ *   while the seat is present, and `status_at` says when it was claimed.
+ * - `presence`: neither. Present and not silent reads as working, anything else as idle.
+ */
+export function seatStatusOf(present: boolean, silent: boolean, waiting: boolean, reported: SessionEvent | undefined) {
+  if (waiting) return { status: "needs_you" as SeatStatus, status_source: "derived" as const, status_at: null, needs_you: true };
+  const said = (reported?.payload as { status?: SeatStatus } | undefined)?.status;
+  if (present && reported && said) {
+    return { status: said, status_source: "reported" as const, status_at: new Date(reported.at).toISOString(), needs_you: said === "needs_you" };
+  }
+  return { status: (present && !silent ? "working" : "idle") as SeatStatus, status_source: "presence" as const, status_at: null, needs_you: false };
+}
+
+/**
  * Every seat one account holds in a room, oldest first, as the tools an account calls name them
  * (`bellman_rooms`, `bellman_surface`). A call comes from the account and nothing in it says which
  * seat is asking, so these tools list all of them and name none as the asker's. Oldest is join order
@@ -323,10 +359,26 @@ export function roomSummary(
   const only = soleSeat(mine);
   const canInvite = seats.some((seat) => seat.verbs.includes("invite"));
   const latestNote = new Map<string, SessionEvent>();
+  // ponytail: a status older than the tail reads as presence; keep the latest status on the member record if busy rooms lose it.
+  const latestStatus = new Map<string, SessionEvent>();
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = tail[i];
-    if (e.type === "progress" && !latestNote.has(e.fromMemberId)) latestNote.set(e.fromMemberId, e);
+    if (e.type !== "progress") continue;
+    if (!latestNote.has(e.fromMemberId)) latestNote.set(e.fromMemberId, e);
+    if (!latestStatus.has(e.fromMemberId) && (e.payload as { status?: unknown } | null)?.status !== undefined) {
+      latestStatus.set(e.fromMemberId, e);
+    }
   }
+  const waiting = waitingSeats(s, tail, now);
+  const members = s.members.filter(isActiveMember).map((m) => {
+    const beat = beatOf(s, m, now, latestNote.get(m.memberId));
+    const present = presenceOf(m, now, connected) === "present";
+    return {
+      ...publicMember(m, connected),
+      beat,
+      ...seatStatusOf(present, beat.silent, waiting.has(m.memberId), latestStatus.get(m.memberId)),
+    };
+  });
   const last = tail.length > 0 ? tail[tail.length - 1] : undefined;
   const iso = (ms: number) => new Date(ms).toISOString();
   return {
@@ -337,10 +389,8 @@ export function roomSummary(
     your_seats: seats,
     your_member_id: only?.memberId ?? null,
     room: roomPreview(s, only?.roomRole ?? null, viewerUserId),
-    members: s.members.filter(isActiveMember).map((m) => ({
-      ...publicMember(m, connected),
-      beat: beatOf(s, m, now, latestNote.get(m.memberId)),
-    })),
+    members,
+    needs_you_count: members.filter((m) => m.needs_you).length,
     join_codes: Object.entries(s.joinCodes)
       .filter(([, rec]) => codeIsLive(rec, now))
       .map(([role, rec]) => ({

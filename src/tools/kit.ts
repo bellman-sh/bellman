@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
+import { SEAT_STATUSES, SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
 import { FROZEN } from "../rooms.js";
 import { MAX_PAYLOAD_CHARS } from "../payload.js";
 import type { AppendExtras, BellmanStore } from "../store.js";
@@ -118,14 +118,21 @@ export const ActionResponseShape = z.object({
 
 /**
  * A heartbeat reply. `strictObject`, so every key the shape does not name is
- * refused — which is how `status`, `alive`, `present` and `healthy` are kept out
+ * refused — which is how `alive`, `present` and `healthy` are kept out
  * without a denylist that falls behind the first name somebody forgets. The
  * payload is a claim about when it was sent, never about now (invariant 7).
+ *
+ * `status` (#432) is the one exception to that list, and it stays inside the
+ * invariant: it says what the seat was doing at `at`. The read that shows it
+ * (`seatStatusOf`) gates it on live presence and carries the report's time beside it.
  */
 export const ProgressShape = z.strictObject({
   note: z.string().min(1).max(500),
   step: z.string().max(40).optional(),
   eta_seconds: z.number().int().nonnegative().max(86_400).optional(),
+  status: z.enum(SEAT_STATUSES, {
+    error: (iss) => `status ${JSON.stringify(iss.input)} is not one of ${SEAT_STATUSES.join(", ")}`,
+  }).optional(),
 });
 
 /** An answer to an outside question: its text, and whether it asks the caller for more. */

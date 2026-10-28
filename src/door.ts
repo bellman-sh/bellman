@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Delivery } from "./bridge.js";
 import {
-  DOOR_SEAT_STATUSES, DOOR_VERSION, type DoorEvent, type DoorSeat, type DoorSeatStatus, type DoorStatus, type DoorWaiting,
+  DOOR_SEAT_STATUSES, DOOR_VERSION, type DoorEvent, type DoorJoin, type DoorSeat, type DoorSeatStatus, type DoorStatus,
+  type DoorWaiting,
 } from "./door-protocol.js";
 import { parentPid, pendingSummary } from "./inbox.js";
 
@@ -97,6 +98,31 @@ export function postSeatStatus(status: DoorSeatStatus, socketPath = findDoor(), 
   });
 }
 
+/**
+ * What the SessionStart hook reads (#435): the door's `/status`, waiting at most `timeoutMs`. Resolves undefined when
+ * there is no door, it does not answer, or its answer is not JSON. Never rejects.
+ */
+export function readDoorStatus(socketPath: string, timeoutMs = 2_000): Promise<DoorStatus | undefined> {
+  return new Promise((resolve) => {
+    const req = http.request({ socketPath, path: "/status", method: "GET", timeout: timeoutMs }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (text += chunk));
+      res.on("end", () => {
+        try {
+          resolve(res.statusCode === 200 ? (JSON.parse(text) as DoorStatus) : undefined);
+        } catch {
+          resolve(undefined);
+        }
+      });
+      res.on("error", () => resolve(undefined));
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(undefined));
+    req.end();
+  });
+}
+
 /** The door a hook should use: the owner link of the nearest ancestor that has one, walking up from `startPid`. */
 export function findDoor(startPid: number = process.ppid, root = doorRoot(), maxDepth = 8): string | undefined {
   let pid: number | undefined = startPid;
@@ -134,6 +160,8 @@ export interface DoorSource {
   decline(sessionId: string, refId: string): Promise<{ status: number; body: unknown }>;
   /** The second write (#432): set every seat's status, sending only where it changes. Never rejects. */
   setStatus(status: DoorSeatStatus): Promise<{ status: number; body: unknown }>;
+  /** Where the join from `BELLMAN_JOIN_CODE` stands (#435); undefined, or absent, when the bridge was given none. */
+  join?(): DoorJoin | undefined;
 }
 
 /**
@@ -144,6 +172,7 @@ export interface DoorSource {
  */
 export function statusOf(src: DoorSource): DoorStatus {
   const seats = src.seats();
+  const join = src.join?.();
   return {
     version: DOOR_VERSION,
     delivery: src.delivery,
@@ -151,6 +180,7 @@ export function statusOf(src: DoorSource): DoorStatus {
     seats,
     waiting: src.delivery !== "channel" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
     recent: src.recent(),
+    ...(join ? { join } : {}),
   };
 }
 

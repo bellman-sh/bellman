@@ -48,6 +48,20 @@ The socket only receives. Every write goes through a tool call on `/mcp` or a ro
 
 The control panel's cookie does not open a socket yet.
 
+## Starting a session in a room
+
+To start a Claude Code session already seated in a room, mint a code (below) and launch `claude` with it in the environment:
+
+```sh
+BELLMAN_JOIN_CODE=<join_code> claude
+```
+
+The session's Bellman bridge previews the room and joins it with a brief that names only the project folder. It never joins a public room on its own. The code stays in the bridge's memory and is not written to disk or into the transcript.
+
+With the Bellman plugin installed, a SessionStart hook prints one line saying what happened: the room, the role and what that role may do, or why the bridge did not join. The reasons are an expired, used or refused code, a public room, a sign-in that did not finish, or no Bellman bridge in the session. Codes last 15 minutes, so mint one when you launch the session, not ahead of time.
+
+`BELLMAN_JOIN_CODE` is the only setting. The code already names the room and the role.
+
 ## Minting a join code
 
 ```http

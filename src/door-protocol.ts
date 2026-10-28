@@ -29,6 +29,15 @@ export interface DoorWaiting {
   ambient: number;
 }
 
+/**
+ * Where this session's join from `BELLMAN_JOIN_CODE` stands (#435). `reason` is the bridge's own words, never the
+ * server's, which can name a peer; `role` is the room's, written by its creator, and is cleaned before it is shown.
+ */
+export type DoorJoin =
+  | { state: "joining" }
+  | { state: "joined"; session_id: string; member_id: string; role: string; verbs: string[] }
+  | { state: "refused"; reason: string };
+
 /** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
 export interface DoorStatus {
   version: 1;
@@ -42,6 +51,8 @@ export interface DoorStatus {
   waiting: DoorWaiting[];
   /** The latest events the bridge delivered, newest last, ambient ones included. */
   recent: DoorEvent[];
+  /** Present only when the bridge was started with a `BELLMAN_JOIN_CODE`. */
+  join?: DoorJoin;
 }
 
 /** `GET /rooms/<session_id>/events`: a page of the room's log, and the cursor to pass as `?after=` for what is new. */

@@ -266,7 +266,8 @@ an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes them, and with the list
 unset or empty nobody does. `GET /admin/accounts` takes the same gate and lists
 who has signed in, first sign-in first, each as a user id, two dates and, for
-a GitHub sign-in since 2026-10-24, its GitHub login: a sign-in record holds
+a GitHub sign-in since 2026-10-24, its GitHub login, and for a Google sign-in
+since 2026-10-28, its verified Google email: a sign-in record holds
 nothing more, and it reads no room for a label. In the
 registry those records share `us:` with the count and the created-room index,
 so it keeps only rows whose key is `us:` and the record's own id.

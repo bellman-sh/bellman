@@ -100,6 +100,7 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
           first_seen_at: new Date(u.firstSeenAt).toISOString(),
           last_seen_at: new Date(u.lastSeenAt).toISOString(),
           github_login: u.githubLogin ?? null,
+          google_email: u.googleEmail ?? null,
         })),
       }, origin);
     }

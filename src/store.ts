@@ -1914,13 +1914,14 @@ export interface BellmanStore {
    * `githubLogin`, given on a sign-in through GitHub, replaces the one kept: a
    * login can be renamed, so the record holds the latest. Left out, the kept one
    * stays, so a sign-in through another provider does not erase it.
+   * `googleEmail`, a Google sign-in's verified email, is kept the same way.
    */
-  recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void>;
+  recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void>;
   /** How many people have ever signed in. */
   countUsers(): Promise<number>;
   /**
    * The people who have signed in, oldest first sign-in first (ties by user id), at most `limit`: the operator's
-   * `GET /admin/accounts`. A record holds an id and two dates and nothing else, so neither does this.
+   * `GET /admin/accounts`. A record holds an id, two dates, and a GitHub login or Google email where kept, and nothing else, so neither does this.
    *
    * ponytail: every record is read and sorted to answer; page by first sign-in when there are tens of thousands.
    */
@@ -3685,10 +3686,15 @@ export class MemoryStore implements BellmanStore {
     this.recordMonth(this.creates, userId);
   }
 
-  async recordSignIn(userId: string, now: number, githubLogin?: string): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void> {
     const seen = this.users.get(userId);
     const login = githubLogin ?? seen?.githubLogin;
-    this.users.set(userId, { userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now, ...(login === undefined ? {} : { githubLogin: login }) });
+    const email = googleEmail ?? seen?.googleEmail;
+    this.users.set(userId, {
+      userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now,
+      ...(login === undefined ? {} : { githubLogin: login }),
+      ...(email === undefined ? {} : { googleEmail: email }),
+    });
   }
 
   async countUsers(): Promise<number> {

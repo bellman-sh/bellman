@@ -12,6 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { doorPathFor, doorRoot, startDoor, statusOf, type DoorSource } from "../src/door.js";
 import { drain, enqueue, pendingCount, type PeerEvent } from "../src/inbox.js";
+import { SurfaceKeyShape } from "../src/surface.js";
 
 let root: string;
 /** Every door a test started, closed in afterEach so that no listener outlives the test that opened it. */
@@ -57,6 +58,7 @@ function source(over: Partial<DoorSource> = {}): DoorSource {
     readSurface: vi.fn(async () => ({ status: 200, body: { session_id: "qs_room1", room: {}, surface: { cursor: 0, items: [] } } })),
     decline: vi.fn(async () => ({ status: 200, body: { cursor: 12 } })),
     setStatus: vi.fn(async () => ({ status: 200, body: { sent: 1 } })),
+    writeSurface: vi.fn(async () => ({ status: 200, body: { cursor: 14 } })),
     ...over,
   };
 }
@@ -631,6 +633,108 @@ describe("the rooms, the canvas and a decline", () => {
       expect(res.status, why).toBe(500);
       expect(JSON.parse(res.body), why).toEqual({ error: "internal" });
     }
+    expect((await get(door.path, "/status")).status).toBe(200);
+  });
+});
+
+const ITEM = "/rooms/qs_room1/surface/plan";
+const put = (socketPath: string, path: string, body: string, sent: Sent = {}) => request("PUT", socketPath, path, { body, ...sent });
+
+describe("a canvas item", () => {
+  it("hands the bridge a PUT's item with the path's key, and a DELETE's removal, and answers as it did", async () => {
+    const writeSurface = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: { cursor: 14 } })
+      .mockResolvedValueOnce({ status: 200, body: { cursor: 15 } })
+      .mockResolvedValueOnce({ status: 404, body: { error: "not_found" } });
+    const door = await start("20.sock", source({ writeSurface }));
+
+    const written = await put(door.path, "/rooms/qs%2Fa%20b/surface/plan", '{"kind":"text","title":"Plan"}');
+    expect([written.status, JSON.parse(written.body)]).toEqual([200, { cursor: 14 }]);
+    expect(writeSurface).toHaveBeenLastCalledWith("qs/a b", { kind: "text", title: "Plan", key: "plan" });
+
+    const removed = await request("DELETE", door.path, ITEM);
+    expect([removed.status, JSON.parse(removed.body)]).toEqual([200, { cursor: 15 }]);
+    expect(writeSurface).toHaveBeenLastCalledWith("qs_room1", { key: "plan", remove: true });
+
+    const none = await put(door.path, ITEM, '{"key":"plan","kind":"text"}');
+    expect([none.status, JSON.parse(none.body)]).toEqual([404, { error: "not_found" }]);
+    expect(writeSurface).toHaveBeenLastCalledWith("qs_room1", { key: "plan", kind: "text" });
+  });
+
+  // The door's pattern repeats the server's so that the hooks bundle no zod: these are held to one grammar here.
+  it("takes the keys the server takes and refuses the rest with a 400, before it asks the bridge", async () => {
+    const src = source();
+    const door = await start("21.sock", src);
+    const keys = [
+      "plan", "a", "a-b", "a_b", "a1", "z".repeat(31), "z".repeat(32), "A", "1a", "-a", "_a", "a b", "a/b", "a.b", "é",
+      "constructor", "prototype", "__proto__", "plan\n",
+    ];
+    for (const key of keys) {
+      const takes = SurfaceKeyShape.safeParse(key).success;
+      for (const method of ["PUT", "DELETE"]) {
+        const res = await request(method, door.path, `/rooms/qs_room1/surface/${encodeURIComponent(key)}`, { body: "{}" });
+        expect(res.status, `${method} ${JSON.stringify(key)}`).toBe(takes ? 200 : 400);
+        if (!takes) expect(JSON.parse(res.body)).toEqual({ error: "bad_key" });
+      }
+    }
+    expect((await put(door.path, "/rooms/qs_room1/surface/%E0%A4%A", "{}")).status).toBe(400);
+    const taken = keys.filter((key) => SurfaceKeyShape.safeParse(key).success);
+    expect(taken.length).toBeGreaterThan(0);
+    expect(src.writeSurface).toHaveBeenCalledTimes(taken.length * 2);
+  });
+
+  it("refuses a PUT body that is no JSON object, names another key or carries remove, and asks the bridge nothing", async () => {
+    const src = source();
+    const door = await start("22.sock", src);
+    const bodies = ["", "not json", "[]", "null", '"plan"', "3", '{"key":"other","kind":"text"}', '{"key":"plan","remove":true}', '{"remove":false}'];
+    for (const body of bodies) {
+      const res = await put(door.path, ITEM, body);
+      expect(res.status, body).toBe(400);
+      expect(JSON.parse(res.body), body).toEqual({ error: "bad_request" });
+    }
+    for (const type of [null, "text/plain", "application/jsonx"]) {
+      expect((await put(door.path, ITEM, '{"kind":"text"}', { type })).status, String(type)).toBe(400);
+    }
+    expect(src.writeSurface).not.toHaveBeenCalled();
+    expect((await put(door.path, ITEM, '{"kind":"text"}', { type: "Application/JSON; charset=utf-8" })).status).toBe(200);
+  });
+
+  it("takes a body of 64 KiB at most, and answers 413 to a larger one however much is sent", async () => {
+    const src = source();
+    const door = await start("23.sock", src);
+    const padded = (bytes: number) => {
+      const head = '{"kind":"text","body":"';
+      return head + "x".repeat(bytes - head.length - 2) + '"}';
+    };
+    expect((await put(door.path, ITEM, padded(64 * 1024))).status).toBe(200);
+    for (const bytes of [64 * 1024 + 1, 1024 * 1024]) {
+      const res = await put(door.path, ITEM, padded(bytes));
+      expect([res.status, JSON.parse(res.body)], String(bytes)).toEqual([413, { error: "too_large" }]);
+    }
+    expect(src.writeSurface).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a canvas item to a PUT and a DELETE alone: a GET is a path it does not serve, a POST a 405", async () => {
+    const src = source();
+    const door = await start("24.sock", src);
+    expect((await get(door.path, ITEM)).status).toBe(404);
+    expect((await post(door.path, ITEM, { body: "{}" })).status).toBe(405);
+    expect((await request("PATCH", door.path, ITEM, { body: "{}" })).status).toBe(405);
+    for (const path of ["/rooms/qs_room1/surface/", "/rooms//surface/plan", "/rooms/qs_room1/surface/plan/", "/rooms/qs_room1/surface/a/b", "/rooms/%E0%A4%A/surface/plan"]) {
+      const res = await put(door.path, path, "{}");
+      expect(res.status, path).toBe(path.includes("%E0") ? 404 : 405);
+    }
+    expect(src.writeSurface).not.toHaveBeenCalled();
+  });
+
+  it("answers 500 to a canvas write that rejects, with one log line naming the route and nothing of the room or key", async () => {
+    const lines: string[] = [];
+    const door = await startDoor(join(root, "25.sock"), source({ writeSurface: vi.fn().mockRejectedValue(new Error("no seat")) }), (l) => lines.push(l));
+    doors.push(door);
+    const res = await put(door.path, "/rooms/qs_secret_room/surface/secret-key", '{"kind":"text","body":"secret body"}');
+    expect([res.status, JSON.parse(res.body)]).toEqual([500, { error: "internal" }]);
+    expect(lines).toEqual(["door: PUT /rooms/<id>/surface/<key> answered 500: no seat"]);
     expect((await get(door.path, "/status")).status).toBe(200);
   });
 });

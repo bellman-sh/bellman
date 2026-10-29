@@ -18,7 +18,7 @@ export async function statusDoor(joinState: () => DoorJoin | undefined = () => u
   const none = async () => ({ status: 404, body: { error: "not_found" } });
   const src: DoorSource = {
     delivery: "hook", hasSignIn: () => true, seats: () => [], recent: () => [],
-    readEvents: none, readRooms: none, readSurface: none, decline: none, setStatus, join: joinState,
+    readEvents: none, readRooms: none, readSurface: none, decline: none, setStatus, writeSurface: none, join: joinState,
   };
   const door = await startDoor(join(root, "1.sock"), src);
   linkDoor(door.path, doorOwnerPathFor(process.pid, root));

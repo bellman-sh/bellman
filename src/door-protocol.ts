@@ -97,6 +97,14 @@ export interface DoorStatusSet {
   sent: number;
 }
 
+/**
+ * `PUT /rooms/<session_id>/surface/<key>`, sent the item as application/json, and `DELETE` of the same path (#465): the
+ * item written or removed as the bridge's one seat in that room, and this is the cursor of that write.
+ */
+export interface DoorSurfaceWritten {
+  cursor: number;
+}
+
 /** The statuses a seat can be set to: `SEAT_STATUSES` in src/types.ts, repeated here because this file imports no runtime. */
 export const DOOR_SEAT_STATUSES = ["working", "idle", "needs_you"] as const;
 export type DoorSeatStatus = (typeof DOOR_SEAT_STATUSES)[number];

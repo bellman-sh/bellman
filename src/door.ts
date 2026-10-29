@@ -17,14 +17,15 @@ import { parentPid, pendingSummary } from "./inbox.js";
  * The socket is named for the bridge's pid, so each bridge has a door of its own, and a session with two bridges
  * has two.
  *
- * Six routes: `GET /status`, `GET /rooms`, `GET /rooms/<session_id>/events`, `GET /rooms/<session_id>/surface`,
- * `POST /rooms/<session_id>/decline` and `POST /seats/status`. A mod's own call of a Bellman tool is refused by Claude
- * Code from its timers and presses, and a read over this socket needs no permission, so the bridge serves what the mod
- * needs through the connection it already holds: the room list, the canvas, and a refusal of an action request. The
- * two POSTs are the writes: that refusal, and a seat status the Claude Code hooks set (#432), which carries no words.
- * The folder is 0700 and the socket 0600, which is the only check there is on who may connect, as on the bus
- * (src/bus.ts): any process running as the person can decline a request or set a status through this door, as it can
- * already read the person's Bellman sign-in.
+ * Seven routes: `GET /status`, `GET /rooms`, `GET /rooms/<session_id>/events`, `GET /rooms/<session_id>/surface`,
+ * `POST /rooms/<session_id>/decline`, `POST /seats/status`, and `PUT` and `DELETE /rooms/<session_id>/surface/<key>`.
+ * A mod's own call of a Bellman tool is refused by Claude Code from its timers and presses, and a read over this socket
+ * needs no permission, so the bridge serves what the mod needs through the connection it already holds: the room list,
+ * the canvas, and a refusal of an action request. The writes are that refusal, a seat status the Claude Code hooks set
+ * (#432), which carries no words, and a canvas item written or removed (#465), for a terminal's `canvas` and `draw`,
+ * which hold no Bellman token of their own. The folder is 0700 and the socket 0600, which is the only check there is on
+ * who may connect, as on the bus (src/bus.ts): any process running as the person can decline a request, set a status
+ * or edit a room's canvas as the person's seat through this door, as it can already read the person's Bellman sign-in.
  *
  * The hooks run under Claude Code, beside the bridge and not under it, so they cannot find a socket named for the
  * bridge's pid. `doorOwnerPathFor` names a link to it for the bridge's parent, which is Claude Code, and a hook finds
@@ -154,12 +155,17 @@ export interface DoorSource {
   /** A room's canvas, as `bellman_surface` gave it, for a room the bridge holds a seat in. Never rejects. */
   readSurface(sessionId: string): Promise<{ status: number; body: unknown }>;
   /**
-   * The one write: answer the action request `refId` with a refusal, as the bridge's seat in the room, and send nothing
+   * The first write: answer the action request `refId` with a refusal, as the bridge's seat in the room, and send nothing
    * else. `refId` is a cursor the door has checked. Never rejects.
    */
   decline(sessionId: string, refId: string): Promise<{ status: number; body: unknown }>;
   /** The second write (#432): set every seat's status, sending only where it changes. Never rejects. */
   setStatus(status: DoorSeatStatus): Promise<{ status: number; body: unknown }>;
+  /**
+   * The canvas write (#465): `payload` is an item whose `key` the door has checked, or `{ key, remove: true }`, written as
+   * the bridge's one seat in the room. Never rejects.
+   */
+  writeSurface(sessionId: string, payload: Record<string, unknown>): Promise<{ status: number; body: unknown }>;
   /** Where the join from `BELLMAN_JOIN_CODE` stands (#435); undefined, or absent, when the bridge was given none. */
   join?(): DoorJoin | undefined;
 }
@@ -213,6 +219,16 @@ const SEAT_STATUS = "/seats/status";
 const CURSOR = /^\d{1,15}$/;
 /** A decline's body is `{"ref_id":"<fifteen digits>"}`: about thirty bytes. */
 const DECLINE_BODY_MAX = 1024;
+/** A canvas item (#465): PUT writes it and DELETE removes it. */
+const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
+/**
+ * `SurfaceKeyShape` (src/surface.ts), repeated so that the hooks importing this file bundle no zod; `__proto__` fails
+ * the pattern. tests/door.test.ts holds the two to one grammar.
+ */
+const SURFACE_KEY = /^[a-z][a-z0-9_-]{0,30}$/;
+const RESERVED_KEYS: ReadonlySet<string> = new Set(["constructor", "prototype"]);
+/** `MAX_SURFACE_WRITE_BYTES` (src/http/rooms.ts): an item's largest field is 8,000 characters, and this bounds the JSON around it. */
+const SURFACE_BODY_MAX = 64 * 1024;
 
 /**
  * The route a request named, for a log line: the room it named and anything it sent are left out, since a room's id
@@ -220,6 +236,7 @@ const DECLINE_BODY_MAX = 1024;
  */
 function shapeOf(target: string): string {
   const path = target.split("?")[0];
+  if (SURFACE_ITEM.test(path)) return "/rooms/<id>/surface/<key>";
   const room = ROOM_ROUTE.exec(path);
   if (room !== null) return `/rooms/<id>/${room[2]}`;
   return path === "/status" || path === "/rooms" || path === SEAT_STATUS ? path : "a path it does not serve";
@@ -239,8 +256,9 @@ function decode(segment: string): string | undefined {
 
 /**
  * The path is matched as it came, with nothing normalised, so each route has one spelling. A throw here is the
- * caller's to catch. A POST is for the decline route alone: any other method gets a 405, whatever the path, as it
- * always did, and a GET of the decline route is a path the door does not serve.
+ * caller's to catch. A POST is for the decline and seat-status routes alone, and a PUT or a DELETE for a canvas item:
+ * any other method gets a 405, whatever the path, as it always did, and a GET of a write's route is a path the door
+ * does not serve.
  */
 async function route(src: DoorSource, req: http.IncomingMessage): Promise<Reply> {
   const target = req.url ?? "";
@@ -249,9 +267,11 @@ async function route(src: DoorSource, req: http.IncomingMessage): Promise<Reply>
   const room = ROOM_ROUTE.exec(path);
   const sessionId = room === null ? undefined : decode(room[1]);
   const leaf = room?.[2];
+  const item = SURFACE_ITEM.exec(path);
 
   if (req.method === "POST" && leaf === "decline" && sessionId !== undefined) return decline(src, req, sessionId);
   if (req.method === "POST" && path === SEAT_STATUS) return seatStatus(src, req);
+  if ((req.method === "PUT" || req.method === "DELETE") && item !== null) return surfaceWrite(src, req, item[1], item[2]);
   if (req.method !== "GET") return { status: 405, body: { error: "method_not_allowed" } };
   if (path === "/status") return { status: 200, body: statusOf(src) };
   if (path === "/rooms") return src.readRooms();
@@ -266,12 +286,11 @@ async function route(src: DoorSource, req: http.IncomingMessage): Promise<Reply>
 
 /**
  * `POST /rooms/<session_id>/decline`. What it takes is `application/json` and a body of at most 1 KiB that is exactly
- * `{ "ref_id": "<cursor>" }`, and everything else is a 400: this is the door's one write, and it sends nothing but
+ * `{ "ref_id": "<cursor>" }`, and everything else is a 400: this is the door's first write, and it sends nothing but
  * the refusal of that request.
  */
 async function decline(src: DoorSource, req: http.IncomingMessage, sessionId: string): Promise<Reply> {
-  const type = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
-  if (type !== "application/json") return BAD_REQUEST;
+  if (!isJson(req)) return BAD_REQUEST;
   const body = await readBody(req, DECLINE_BODY_MAX);
   const refId = body === undefined ? undefined : refIdOf(body);
   return refId === undefined ? BAD_REQUEST : src.decline(sessionId, refId);
@@ -282,11 +301,48 @@ async function decline(src: DoorSource, req: http.IncomingMessage, sessionId: st
  * DOOR_SEAT_STATUSES> }`, and everything else a 400. It sends a status and nothing a peer reads as words.
  */
 async function seatStatus(src: DoorSource, req: http.IncomingMessage): Promise<Reply> {
-  const type = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
-  if (type !== "application/json") return BAD_REQUEST;
+  if (!isJson(req)) return BAD_REQUEST;
   const body = await readBody(req, DECLINE_BODY_MAX);
   const status = body === undefined ? undefined : soleField(body, "status");
   return (DOOR_SEAT_STATUSES as readonly unknown[]).includes(status) ? src.setStatus(status as DoorSeatStatus) : BAD_REQUEST;
+}
+
+/**
+ * `PUT` and `DELETE /rooms/<session_id>/surface/<key>`, the canvas write (#465), as the server's own route reads them
+ * (`writeSurfaceRoute` in src/http/rooms.ts): the key is the path's, a PUT's body is the item as a JSON object of at
+ * most 64 KiB, one naming another key or carrying `remove` is refused, and a DELETE's body is not read. The door checks
+ * the key and the body's shape and bound; what an item may hold is the server's to say, and its refusal reaches the
+ * door as the bridge's 422.
+ */
+async function surfaceWrite(src: DoorSource, req: http.IncomingMessage, rawRoom: string, rawKey: string): Promise<Reply> {
+  const sessionId = decode(rawRoom);
+  if (sessionId === undefined) return NOT_FOUND;
+  const key = decode(rawKey);
+  if (key === undefined || !SURFACE_KEY.test(key) || RESERVED_KEYS.has(key)) return { status: 400, body: { error: "bad_key" } };
+  if (req.method === "DELETE") return src.writeSurface(sessionId, { key, remove: true });
+  if (!isJson(req)) return BAD_REQUEST;
+  const body = await readBody(req, SURFACE_BODY_MAX);
+  if (body === undefined) return { status: 413, body: { error: "too_large" } };
+  const item = itemOf(body, key);
+  return item === undefined ? BAD_REQUEST : src.writeSurface(sessionId, item);
+}
+
+/** A PUT's item with the path's key, or undefined for a body that is no JSON object, names another key or carries `remove`. */
+function itemOf(text: string, key: string): Record<string, unknown> | undefined {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body) || "remove" in body) return undefined;
+  const given = (body as { key?: unknown }).key;
+  return given === undefined || given === key ? { ...body, key } : undefined;
+}
+
+/** Whether a request says it sends `application/json`, with any parameters and in any case. */
+function isJson(req: http.IncomingMessage): boolean {
+  return (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() === "application/json";
 }
 
 /** The value of a body that is exactly `{ "<key>": <value> }`, and undefined for any other. */

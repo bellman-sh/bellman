@@ -508,7 +508,7 @@ one on a Unix socket, `~/.claude/bellman/door/<bridge pid>.sock`
 `$.http.fetch(url, { socketPath })`. The plugin's hooks reach the same socket
 through `~/.claude/bellman/door/owner-<Claude Code pid>.sock`, a link the bridge
 makes for its parent, found by walking up the hook's own parents (#432). It has
-six routes:
+seven routes:
 
 | Route | Answers |
 |---|---|
@@ -517,7 +517,8 @@ six routes:
 | `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
 | `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
 | `POST /rooms/<id>/decline { ref_id }` | a write: answers the action request `approved: false` as the bridge's seat, and sends nothing else |
-| `POST /seats/status { status }` | the other write (#432): the Stop, UserPromptSubmit and Notification hooks set every seat `idle`, `working` or `needs_you`; the bridge sends a `progress` carrying the status alone for each seat it changes, which answers no heartbeat, and nothing for one already there |
+| `PUT` / `DELETE /rooms/<id>/surface/<key>` | a write (#465): a PUT's body is the item, a DELETE removes the key; sent as `bellman_send type: "surface"` by the bridge's one seat in the room (404 with none, 409 with several), for a terminal's `canvas` and `draw`, which hold no Bellman token |
+| `POST /seats/status { status }` | another write (#432): the Stop, UserPromptSubmit and Notification hooks set every seat `idle`, `working` or `needs_you`; the bridge sends a `progress` carrying the status alone for each seat it changes, which answers no heartbeat, and nothing for one already there |
 
 **How the mod finds a door.** A bridge is any MCP server that lists
 `bellman_whoami`, whatever it is registered as (the plugin's, or one the person
@@ -1610,17 +1611,24 @@ loud:
   an organization manages Claude Code the system-prompt note (`prompt.compose`)
   that tells the model approvals happen in the pane does not run, though the
   refusal says it.
-- **The door is local and has two writes.** A seat status (#432) is the second:
+- **The door is local and has three writes.** A seat status (#432) is one:
   one of three enum values in a body of at most 1 KiB, sent as a `progress`
   with no words in it, so a process that can reach the door can say a seat is
-  idle, working or waiting on its human and nothing a peer reads as text. Its folder is made `0700` when the
+  idle, working or waiting on its human and nothing a peer reads as text. A
+  canvas item (#465) is the widest: a PUT of up to 64 KiB, or a DELETE, sent
+  as `bellman_send type: "surface"` by the bridge's one seat in the room, so a
+  process that can reach the door can write and remove canvas items as the
+  person's seat, within that seat's `write_surface` verb and the server's rules
+  for each kind, as the server's own route would let it with the person's
+  sign-in. The door checks the key and the body's shape and size and nothing an
+  item holds; a server refusal comes back as a 422 with none of its words. Its folder is made `0700` when the
   door has to make it, and each bridge's `<pid>.sock` is made `0600` by
   narrowing the umask around the bind and not by a chmod afterwards, which would
   leave it connectable for the moment between; a folder that already exists is
   left as it is, as the bus's is. Those modes are the only check on who may
   connect, as on the bus (`src/bus.ts`), so any process running as the person
-  can use the door: read a room's log and canvas through it, and decline an
-  action request, as it can already read the person's Bellman sign-in under
+  can use the door: read a room's log and canvas through it, decline an
+  action request, and edit a room's canvas, as it can already read the person's Bellman sign-in under
   `~/.config/bellman/`. The decline is a `bellman_send` of one `action_response`
   `{ approved: false }` for the bridge's seat in a room it watches, through the
   connection the bridge holds, so the write path stays one and keeps its verb

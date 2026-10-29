@@ -28,6 +28,7 @@ import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import type {
   DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
+  DoorSurfaceWritten,
 } from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
@@ -1583,8 +1584,15 @@ export function createBridge(opts: BridgeOptions) {
     return "data" in asked ? { status: 200, body: asked.data as unknown as DoorSurface } : asked;
   }
 
+  /** A send's answer for the door: its cursor, or the door's own words for what went wrong. */
+  function sentCursor(asked: Awaited<ReturnType<typeof callLive>>): { status: number; body: { cursor: number } | { error: string } } {
+    if (!("data" in asked)) return asked;
+    const cursor = asked.data.cursor;
+    return typeof cursor === "number" ? { status: 200, body: { cursor } } : { status: 502, body: { error: "upstream" } };
+  }
+
   /**
-   * The door's one write: the action request `refId` in a room this bridge holds a seat in is answered `approved: false`
+   * The door's first write: the action request `refId` in a room this bridge holds a seat in is answered `approved: false`
    * as that seat (the first, as `readEvents` has it), and nothing else is sent. The key names the request, so that a
    * decline made twice, by two presses or by two panes, lands once: the server reads the key before its
    * first-answer-wins check, so the second gets the first's cursor whether it overlaps or follows (src/tools/send.ts).
@@ -1593,17 +1601,34 @@ export function createBridge(opts: BridgeOptions) {
   async function decline(sessionId: string, refId: string): Promise<{ status: number; body: DoorDeclined | { error: string } }> {
     const seat = seatIn(sessionId);
     if (!seat) return { status: 404, body: { error: "not_found" } };
-    const asked = await callLive("bellman_send", {
+    return sentCursor(await callLive("bellman_send", {
       session_id: sessionId,
       member_id: seat.memberId,
       type: "action_response",
       ref_id: refId,
       payload: { approved: false },
       idempotency_key: `bellman-mod-decline-${refId}`,
-    });
-    if (!("data" in asked)) return asked;
-    const cursor = asked.data.cursor;
-    return typeof cursor === "number" ? { status: 200, body: { cursor } } : { status: 502, body: { error: "upstream" } };
+    }));
+  }
+
+  /**
+   * The door's canvas write (#465), for a terminal's `canvas` and `draw`: `payload`, an item or `{ key, remove: true }`,
+   * is sent as `bellman_send type: "surface"` by this bridge's seat in the room, through the connection it holds, so
+   * the server's one write path keeps its verb check, its rules for each kind, its send limit and its audit row. The
+   * door names no member. A room this bridge holds no seat in is a 404, as everywhere, and one it holds several in a
+   * 409, where a decline would take the first: a canvas edit is the seat's authorship, and the door has no way yet to
+   * say which. It never rejects.
+   */
+  async function writeSurface(
+    sessionId: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ status: number; body: DoorSurfaceWritten | { error: string } }> {
+    const seats = [...watches.values()].filter((w) => w.sessionId === sessionId);
+    if (seats.length === 0) return { status: 404, body: { error: "not_found" } };
+    if (seats.length > 1) return { status: 409, body: { error: "several_seats" } };
+    return sentCursor(await callLive("bellman_send", {
+      session_id: sessionId, member_id: seats[0].memberId, type: "surface", payload,
+    }));
   }
 
   /** The status each seat was last set to through the door (#432), by member, so that a repeat sends nothing. */
@@ -1740,8 +1765,10 @@ export function createBridge(opts: BridgeOptions) {
     readRooms,
     /** A room's canvas, for the door's `/rooms/<id>/surface`. */
     readSurface,
-    /** A refusal of an action request, for the door's `/rooms/<id>/decline`: one of the door's two writes. */
+    /** A refusal of an action request, for the door's `/rooms/<id>/decline`: one of the door's writes. */
     decline,
+    /** A canvas item written or removed, for the door's `/rooms/<id>/surface/<key>` (#465). */
+    writeSurface,
     /** Every seat's status, for the door's `/seats/status`: the other write, which the Claude Code hooks make. */
     setStatus,
     /** Join from `BELLMAN_JOIN_CODE` (#435), and where that stands, for the door's `/status`. */

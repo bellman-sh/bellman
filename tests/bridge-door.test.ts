@@ -497,6 +497,7 @@ describe("the room routes, against the real tools", () => {
     const before = asked.length;
     expect(await bridge.readSurface(other.sessionId)).toEqual({ status: 404, body: { error: "not_found" } });
     expect(await bridge.decline(other.sessionId, "5")).toEqual({ status: 404, body: { error: "not_found" } });
+    expect(await bridge.writeSurface(other.sessionId, { key: "plan", remove: true })).toEqual({ status: 404, body: { error: "not_found" } });
     expect(asked).toHaveLength(before);
   });
 
@@ -549,6 +550,38 @@ describe("the room routes, against the real tools", () => {
 
     expect(await bridge.decline(mine.sessionId, two)).toEqual({ status: 200, body: { cursor: expect.any(Number) } });
     expect((await mine.answers()).map((e) => e.ref_id)).toEqual([one, two]);
+  });
+
+  // #465: a terminal's `canvas` and `draw` write through the door, as the bridge's seat, with no token of their own.
+  it("writes a canvas item and removes it as its seat, one bellman_send each, and reads it back still enveloped", async () => {
+    const { bridge, asked, room } = await roomBridge();
+    const mine = await room();
+    const item = { key: "plan", kind: "text", title: "Plan", body: "ship it" };
+    const before = asked.length;
+
+    const put = await bridge.writeSurface(mine.sessionId, item);
+    expect(put).toEqual({ status: 200, body: { cursor: expect.any(Number) } });
+    const canvas = await bridge.readSurface(mine.sessionId);
+    const items = (canvas.body as DoorSurface).surface.items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ trust: "untrusted", data: { ...item, cursor: (put.body as { cursor: number }).cursor } });
+
+    const removed = await bridge.writeSurface(mine.sessionId, { key: "plan", remove: true });
+    expect(removed).toEqual({ status: 200, body: { cursor: expect.any(Number) } });
+    expect(((await bridge.readSurface(mine.sessionId)).body as DoorSurface).surface.items).toEqual([]);
+
+    const sends = asked.slice(before).filter((call) => call.name === "bellman_send");
+    expect(sends.map((call) => call.arguments)).toEqual([
+      { session_id: mine.sessionId, member_id: mine.memberId, type: "surface", payload: item },
+      { session_id: mine.sessionId, member_id: mine.memberId, type: "surface", payload: { key: "plan", remove: true } },
+    ]);
+  });
+
+  it("answers a canvas write the server refuses with 422, and none of the server's words", async () => {
+    const { bridge, room } = await roomBridge();
+    const mine = await room();
+    const refused = await bridge.writeSurface(mine.sessionId, { key: "plan", kind: "no-such-kind" });
+    expect(refused).toEqual({ status: 422, body: { error: "refused" } });
   });
 
   // #432: the Claude Code hooks set a seat's status through the door. One status-only progress per seat, and only when
@@ -615,6 +648,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
     expect(await bridge.readRooms()).toEqual({ status: 503, body: { error: "not_connected" } });
     expect(await bridge.readSurface(S)).toEqual({ status: 404, body: { error: "not_found" } });
     expect(await bridge.decline(S, "5")).toEqual({ status: 404, body: { error: "not_found" } });
+    expect(await bridge.writeSurface(S, { key: "plan", remove: true })).toEqual({ status: 404, body: { error: "not_found" } });
     expect(connects).toBe(0);
   });
 
@@ -634,6 +668,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
     expect(await armed.bridge.readRooms()).toEqual({ status: 503, body: { error: "not_connected" } });
     expect(await armed.bridge.readSurface(S)).toEqual({ status: 503, body: { error: "not_connected" } });
     expect(await armed.bridge.decline(S, "5")).toEqual({ status: 503, body: { error: "not_connected" } });
+    expect(await armed.bridge.writeSurface(S, { key: "plan", remove: true })).toEqual({ status: 503, body: { error: "not_connected" } });
     expect({ connects, asked: armed.asked.length }).toEqual({ connects: 1, asked });
   });
 
@@ -669,6 +704,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
     ["the room list", (bridge) => bridge.readRooms()],
     ["a canvas", (bridge) => bridge.readSurface(S)],
     ["a decline", (bridge) => bridge.decline(S, "5")],
+    ["a canvas write", (bridge) => bridge.writeSurface(S, { key: "plan", kind: "text" })],
   ];
   it.each(reads)("answers %s that fails or is refused in the words of the door, none of them the server's", async (_what, read) => {
     let next!: () => CallToolResult;
@@ -698,6 +734,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
     });
     expect(await armed.bridge.readRooms()).toEqual({ status: 502, body: { error: "upstream" } });
     expect(await armed.bridge.decline(S, "5")).toEqual({ status: 502, body: { error: "upstream" } });
+    expect(await armed.bridge.writeSurface(S, { key: "plan", remove: true })).toEqual({ status: 502, body: { error: "upstream" } });
   });
 
   it("addresses the first seat when the bridge holds two in one room", async () => {
@@ -709,5 +746,9 @@ describe("the room routes, when the connection or the server says otherwise", ()
     expect(armed.bridge.seats().map((seat) => seat.member_id)).toEqual([M, "m_second"]);
     await armed.bridge.decline(S, "5");
     expect(armed.asked.find((call) => call.name === "bellman_send")?.arguments.member_id).toBe(M);
+    // A canvas edit is authored by the seat that makes it, so the door picks none: it refuses, and sends nothing.
+    const before = armed.asked.length;
+    expect(await armed.bridge.writeSurface(S, { key: "plan", remove: true })).toEqual({ status: 409, body: { error: "several_seats" } });
+    expect(armed.asked).toHaveLength(before);
   });
 });

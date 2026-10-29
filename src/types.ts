@@ -133,7 +133,12 @@ export type EventType =
   /** A seat's reply to an outside question, sent with `bellman_send` under the `answer` verb. */
   | "outside_answer"
   /** The room-visible line for an outside task's cancel, expiry or room-closed: `{taskId, text}`. Never sent by a member. */
-  | "outside_notice";
+  | "outside_notice"
+  /** A decision's opening, a vote on it, its close, and a removed voter's votes voided (ADR 0040). Payloads in `src/decision.ts`. */
+  | "decision_opened"
+  | "decision_vote"
+  | "decision_closed"
+  | "decision_voter_removed";
 
 /**
  * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other

@@ -209,6 +209,7 @@ describe("bellman_report (spec §3)", () => {
       message: true, artifact: true, action_request: true, action_response: true, brief_update: true, progress: true, surface: true, outside_answer: true,
       member_joined: false, member_left: false, member_evicted: false, member_timed_out: false,
       invite_issued: false, invite_revoked: false, session_expired: false, heartbeat: false, housekeeping: false, outside_question: false, outside_notice: false,
+      decision_opened: false, decision_vote: false, decision_closed: false, decision_voter_removed: false,
     } as const satisfies Record<EventType, boolean>;
     const outcomes: [string, boolean][] = [];
     for (const [type, byMember] of Object.entries(BY_A_MEMBER) as [EventType, boolean][]) {

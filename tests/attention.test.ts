@@ -47,6 +47,15 @@ describe("attention", () => {
    */
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))
-      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping", "outside_question", "outside_notice", "outside_answer"]));
+      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping", "outside_question", "outside_notice", "outside_answer",
+        "decision_opened", "decision_vote", "decision_closed", "decision_voter_removed"]));
+  });
+
+  // A decision asks the electorate and its close is an outcome; a vote is watched, not pushed (ADR 0040).
+  it("interrupts for a decision's opening, close and voided voter, and not for a vote", () => {
+    expect(attentionOf("decision_opened")).toBe("interrupt");
+    expect(attentionOf("decision_closed")).toBe("interrupt");
+    expect(attentionOf("decision_voter_removed")).toBe("interrupt");
+    expect(attentionOf("decision_vote")).toBe("ambient");
   });
 });

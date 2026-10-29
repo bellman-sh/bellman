@@ -195,8 +195,8 @@ describe("the tools' words for a public room", () => {
 
   it("put the page on bellman.sh (public rooms on bellman.sh spec, section 1)", async () => {
     const text = await texts();
-    expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
-    expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
+    expect(text.bellman_public_name).toContain("bellman.sh/r/<name> (otherwise bellman.sh/r/<session_id>).");
+    expect(text.bellman_start).toContain("- public_name: the room's link name, bellman.sh/r/<public_name> (needs public: true).");
     expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r/);
   });
 });

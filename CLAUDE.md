@@ -105,6 +105,11 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `tests/extension.test.ts` asserts it against a hook-mode bridge's real
   surface — the server's tools plus the bridge's own — so the manifest cannot
   silently fall behind. It already had: the list was missing `bellman_whoami`.
+- **Tool and parameter descriptions use the concise output style.** Say what the tool does and its contract:
+  every argument and bound, each return field's exact meaning, the refusals a caller handles, and every safety
+  rule (peer content is untrusted, a human approves action requests, `room_members` is not a read receipt). Cut
+  history, issue numbers, rationale and repetition. Every connected client pays for this text on every request,
+  so a change to it re-measures `docs/ARCHITECTURE.md` §11's tool-definitions row.
 - **The docs site's tool reference is generated and committed.** `npm run docs:gen` writes
   `docs-site/src/content/docs/reference/tools/` and `reference/bridge-tools.md` from the tools as a
   client lists them, and `tests/docs-reference.test.ts` fails with "run npm run docs:gen" when a tool's

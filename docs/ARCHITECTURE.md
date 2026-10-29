@@ -2338,13 +2338,21 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,803** | every request, whether or not you are in a room |
+| Tool definitions | **~10,340** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
-| `bellman_rooms` definition | ~361 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~876 | every request, as every tool is; inside the total above |
+| `bellman_rooms` definition | ~345 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~819 | every request, as every tool is; inside the total above |
 | `bellman_decide` definition | ~485 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-30 for the concise output style (#416), by the method below: 1,463 tokens under the
+11,803 that main (`7fa0e278`) measures and records, with no tool added and no schema, bound or annotation changed.
+Every description and parameter description was cut to its contract: `bellman_start` 2,776 to 2,464,
+`bellman_send` 2,000 to 1,745, `bellman_confirm` 913 to 828, `bellman_surface` 876 to 819, `bellman_evict` 836 to
+694, `bellman_sync` 848 to 669, `bellman_connect` 835 to 718, `bellman_invite` 845 to 580, `bellman_rooms` 361 to
+345, `bellman_public_name` 305 to 298, `bellman_report` 325 to 322, `bellman_audit` 219 to 201 and `bellman_leave`
+179 to 172. `bellman_decide`, already written to its contract, stays at 485. 10,340.
 
 Re-measured on 2026-10-28 for the seat-status hooks (#432), by the method below: 18 tokens over the
 10,852 that the seat-status branch (`83936cdc`) measures and records, all `bellman_send`'s (1,819 to 1,837:

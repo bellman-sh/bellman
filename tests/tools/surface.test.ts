@@ -120,7 +120,7 @@ describe("tool surface", () => {
 
     // What each mode holds is what a caller chooses a preset by.
     expect(flat).toContain('"pair" room holds exactly 2 members');
-    expect(flat).toContain(`a "swarm" room holds as many as you invite, up to ${ROOM_MEMBER_CEILING}`);
+    expect(flat).toContain(`a "swarm" room as many as you invite, up to ${ROOM_MEMBER_CEILING}`);
   });
 
   // capacityOf gives a swarm room ROOM_MEMBER_CEILING; this description said 100, and docs.bellman.sh
@@ -128,7 +128,7 @@ describe("tool surface", () => {
   it("gives bellman_connect's swarm capacity as the room ceiling", async () => {
     const { tools } = await jesse.listTools();
     const flat = tools.find((t) => t.name === "bellman_connect")!.description!.replace(/\s+/g, " ");
-    expect(flat).toContain(`max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room`);
+    expect(flat).toContain(`max_members: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room`);
   });
 
   // Evicting a member of a code's seat ends an ordinary code and leaves a public room's permanent one:

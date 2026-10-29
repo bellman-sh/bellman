@@ -121,12 +121,11 @@ describe("bellman_upload", () => {
     expect(tool.annotations?.readOnlyHint).toBe(false);
   });
 
-  // What the agent is told, which is the artifact: the root a path must be under, and what a hosted connector
-  // has instead, which is nothing yet. The panel's upload is piece 3, so the description must not say it exists.
-  it("tells the agent where it may read from, and that a hosted connector has no such tool", async () => {
+  // What the agent is told, which is the artifact: the root a path must be under. The panel's upload is piece 3,
+  // so the description must not say it exists.
+  it("tells the agent where it may read from", async () => {
     const description = (await client.listTools()).tools.find((t) => t.name === "bellman_upload")!.description!;
-    expect(description).toContain("a regular file under the upload root (the directory the bridge was started in, or BELLMAN_UPLOAD_ROOT; / for any file)");
-    expect(description).toContain("a hosted connector has no bellman_upload; the control panel's upload comes with the canvas");
+    expect(description).toContain("a regular file, not a symbolic link, under the upload root (the bridge's start directory, or BELLMAN_UPLOAD_ROOT; / for any file)");
     expect(description).not.toContain("uploads through the control panel");
   });
 
@@ -211,7 +210,7 @@ describe("bellman_upload", () => {
     const kind = (tool.inputSchema.properties as Record<string, { enum?: string[] }>).kind;
     expect(kind.enum).toEqual(["file", "image", "html"]);
     expect(tool.description).toContain('kind: "file" | "image" | "html"');
-    expect(tool.description).toContain('a .html file is placed as a file unless kind: "html" is asked for');
+    expect(tool.description).toContain('a .html file is a file unless kind: "html"');
   });
 
   it("places a page as an html item when asked and as a file when not, and the result says which", async () => {

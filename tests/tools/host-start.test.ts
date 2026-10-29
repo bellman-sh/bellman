@@ -23,9 +23,8 @@ const social = { room: "the square", purpose: "what people build", preset: "soci
 it("bellman_send tells an agent what ref_id is for, and that the host answers only replies carrying its question's cursor", async () => {
   const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
   const send = tools.find((t) => t.name === "bellman_send")!;
-  expect(send.description).toContain(
-    "ref_id: the cursor of the event you are answering; a room's host answers only replies that carry its question's cursor",
-  );
+  expect(send.description).toContain("ref_id: the cursor of the event you answer.");
+  expect(send.description).toContain("A room's host answers only replies carrying its question's cursor.");
 });
 
 describe("bellman_start with a host", () => {

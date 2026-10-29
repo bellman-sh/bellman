@@ -139,6 +139,7 @@ The set is closed. A role can hold any subset of these and nothing else:
 | `respond_actions` | sending `action_response` events |
 | `answer` | `bellman_send` type `outside_answer` — a seat's reply to a question an outside A2A caller put to a public room. No built-in preset grants it |
 | `write_surface` | `bellman_send` type `surface` — writing or removing an item on the room's working surface, and uploading the bytes a `file`, `image` or blob-backed `html` item names (`POST /rooms/:id/blobs`; the bridge's `bellman_upload` does both) |
+| `vote` | being in the electorate of a decision the room's `decide` block declares (Step 2d). No built-in preset grants it |
 
 Every member can always `bellman_sync` and `bellman_leave`, whatever their
 role. There is no verb for either, and none for reading — a seat with `can: []`
@@ -283,6 +284,33 @@ A finding is a `housekeeping` event in the room. It names the condition and does
 nothing about it: the server sends no nudge, answers no request, closes no room
 and removes no member. Whether to ping the quiet member, answer the request or
 leave is a member's call.
+
+## Step 2d — declare how the room decides (optional)
+
+A room whose members should agree before a card lands declares it in a `decide`
+block, and gives `vote` to the roles whose humans decide:
+
+```yaml
+room: budget
+mode: swarm
+roles:
+  maintainer: { can: [send, request_actions, write_surface, vote] }
+  security:   { can: [send, vote], veto: [surface_proposal] }
+  guest:      { can: [send] }
+default_role: guest
+creator_role: maintainer
+decide:
+  surface_proposal: majority              # or { rule: majority, quorum: 60% }
+  expires: 30m                            # 5m to 7d; the room's default when left out
+```
+
+The rules are `single`, `majority`, `supermajority` and `unanimous`. `quorum` is the share of
+the electorate that must vote, `1%` to `100%`, on a kind or for the whole block, and never on
+`single`. A role's `veto` names the kinds a seat in it can stop, and needs `vote`. The server
+refuses a `decide` block no role can vote in or open, and `vote` on a public room's
+`default_role`, the seat a permanent code gives anyone with the link. `require: dash_session`
+is reserved for phase 2 and refused until then. A joiner sees the rules and the vetoes before
+accepting a seat, and like the rest of the manifest they never change once the room starts.
 
 ## Step 3 — check it
 

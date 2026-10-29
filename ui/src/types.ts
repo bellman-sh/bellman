@@ -28,6 +28,9 @@ export interface RoomBlock {
   creator_role: string;
   roles: Record<string, string[]>;
   heartbeat_on: Record<string, boolean>;
+  /** How the room decides (ADR 0040), and the kinds each role can veto. Both absent from a room that declares none. */
+  decide?: { rules: Record<string, { rule: string; quorum_percent: number | null }>; expires_seconds: number | null };
+  veto?: Record<string, string[]>;
   text: Untrusted<{ room: string; purpose: string | null; descriptions: Record<string, string | null>; instructions?: Record<string, string | null> }>;
 }
 

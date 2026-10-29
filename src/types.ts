@@ -651,7 +651,26 @@ export type Verb =
   | "request_actions"
   | "respond_actions"
   | "write_surface"
-  | "answer";
+  | "answer"
+  | "vote";
+
+/**
+ * What a passed decision may do (ADR 0040, decision 10), as a manifest's `decide` and a role's `veto` name it.
+ * `data_grant` and `primitive` join with their effects (#409, #410), as a verb joins with its operation.
+ */
+export type DecisionKind = "surface_proposal";
+/** The closed rule set (ADR 0040, decision 6). */
+export type DecisionRuleName = "single" | "majority" | "supermajority" | "unanimous";
+
+/**
+ * A room's `decide` block as resolveManifest expanded it (ADR 0040, decisions 6 and 20): each declared kind's rule,
+ * with the block's default quorum folded into every kind that sets none, so nothing reads the default twice.
+ * `quorum` is a whole percentage of the electorate, null for none; `expiresMs` null takes the room's default.
+ */
+export interface DecideConfig {
+  rules: Partial<Record<DecisionKind, { rule: DecisionRuleName; quorum: number | null }>>;
+  expiresMs: number | null;
+}
 
 export type PresetName = "pair" | "swarm" | "review" | "social" | "topic";
 
@@ -702,6 +721,11 @@ export interface RoleDef {
    * and read as null on every row (`withManifestDefaults`): plan ruling R1.
    */
   report?: string | null;
+  /**
+   * The decision kinds a seat in this role can veto (ADR 0040, decision 6): a binding reject from it fails the
+   * decision. Present only on a role that names one, so a manifest without consensus is the shape it always was.
+   */
+  veto?: DecisionKind[];
 }
 
 export interface RoomManifest {
@@ -744,6 +768,11 @@ export interface RoomManifest {
    * made private is marked on the session (`unpublishedAt`), never here.
    */
   public?: boolean;
+  /**
+   * How the room decides (ADR 0040), present only when the manifest declares a kind. Immutable with the rest: no
+   * decision can change it (decision 11), and a room that wants other rules is a new room.
+   */
+  decide?: DecideConfig;
 }
 
 /**
@@ -766,7 +795,7 @@ export interface SavedPreset {
    */
   housekeeping?: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
   /** Each role's place on the heartbeat (vocabulary spec D6): false, true, or what it reports. */
-  roles: Record<string, { can: Verb[]; description: string | null; heartbeat_on: boolean | string }>;
+  roles: Record<string, { can: Verb[]; description: string | null; heartbeat_on: boolean | string; veto?: DecisionKind[] }>;
   default_role: string;
   creator_role: string;
   /**
@@ -776,6 +805,8 @@ export interface SavedPreset {
   host?: HostConfig | null;
   /** The default for the rooms started from it (public rooms spec D1). Absent on a preset saved before it, and read as false. */
   public?: boolean;
+  /** The author arm's `decide` block as written (ADR 0040). Absent when the preset declares none. */
+  decide?: Record<string, unknown>;
   /** ISO 8601 when it was saved; null for a built-in, which never was. */
   updated_at: string | null;
 }

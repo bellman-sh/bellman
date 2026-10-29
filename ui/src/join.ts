@@ -55,6 +55,20 @@ function housekeepingLine(h: RoomBlock["housekeeping"]): string | null {
   return `Bellman names ${list}, and names each again ${again} while it holds.`;
 }
 
+/**
+ * How the room decides (ADR 0040), in a sentence: the consent point is where a human learns that a decision can
+ * pass without their seat, or that another seat can stop one. Every word is the server's: rule and kind names
+ * from closed sets, role keys from the role-key grammar.
+ */
+function decidingLine(room: RoomBlock): string | null {
+  if (!room.decide) return null;
+  const rules = Object.entries(room.decide.rules)
+    .map(([kind, r]) => `a ${kind} by ${r.rule}${r.quorum_percent !== null ? ` (${r.quorum_percent}% must vote)` : ""}`);
+  const open = room.decide.expires_seconds !== null ? `, each open for ${exact(room.decide.expires_seconds)}` : "";
+  const vetoes = Object.entries(room.veto ?? {}).map(([role, kinds]) => ` A ${role} seat can veto a ${kinds.join(" or ")}.`);
+  return `The room decides ${rules.join(", ")}${open}.${vetoes.join("")}`;
+}
+
 /** What the host answers ui/message with: ext-apps reports a refusal as `isError`, not as a rejection. */
 export type Delivery = { isError?: boolean } | void;
 
@@ -136,6 +150,7 @@ export function renderJoin(
       : "");
 
   const naming = housekeepingLine(r.room.housekeeping);
+  const deciding = decidingLine(r.room);
 
   return el("section", { class: "join" },
     el("h1", {}, "Join a Bellman room"),
@@ -160,6 +175,7 @@ export function renderJoin(
     el("h2", {}, `Your seat: ${r.room.your_role}`),
     el("p", {}, seat),
     naming ? el("p", {}, naming) : null,
+    deciding ? el("p", {}, deciding) : null,
     el("table", {},
       el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Heartbeat"), el("th", {}, "Description (creator's words)"))),
       el("tbody", {}, ...roleRows)),

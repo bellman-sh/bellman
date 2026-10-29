@@ -3376,8 +3376,11 @@ export function describeStoreContract(
     describe("decisions (ADR 0040)", () => {
       const ANN = member({ memberId: "m_ann", userId: "u_ann", label: "ann@codenerd", roomRole: "peer_a" });
       const BEN = member({ memberId: "m_ben", userId: "u_ben", label: "ben@codenerd", roomRole: "peer_a" });
+      // peer_a votes (#403) and peer_b does not, so the electorate is the seats whose role holds `vote`.
+      const pair = roomManifest();
+      const voting = roomManifest({ roles: { ...pair.roles, peer_a: { ...pair.roles.peer_a, can: [...pair.roles.peer_a.can, "vote"] } } });
       const room = async (over: NonNullable<Parameters<typeof session>[0]> = {}) => {
-        const s = session({ members: [ANN, BEN], ...over });
+        const s = session({ members: [ANN, BEN], manifest: voting, ...over });
         await store.createSession(s);
         return s.id;
       };
@@ -3407,6 +3410,14 @@ export function describeStoreContract(
         });
         expect(await store.decision(id, event.cursor, event.at)).toMatchObject({ state: "open", cursor: event.cursor, ballots: [] });
         expect(await store.decision(id, event.cursor - 1, event.at), "a cursor that opened nothing").toBeNull();
+      });
+
+      it("leaves out of the electorate a present seat whose role does not hold vote, and refuses its vote", async () => {
+        const CAL = member({ memberId: "m_cal", userId: "u_cal", label: "cal@codenerd", roomRole: "peer_b" });
+        const id = await room({ manifest: { ...voting, mode: "swarm" }, members: [ANN, BEN, CAL] });
+        const { event } = await open(id);
+        expect((event.payload as { electorate: string[] }).electorate).toEqual(["m_ann", "m_ben"]);
+        expect(await store.castVote(id, ballot(event.cursor, {}, CAL), null)).toEqual({ outcome: "not_electorate" });
       });
 
       it("gives a topic room's decision seven days, and a rule's expires its own", async () => {
@@ -4134,8 +4145,15 @@ export function describeStoreContract(
         expect(await instructionsOf(s.id)).toBeNull();
       });
 
+      // A manifest is immutable after start bar the host's instructions (ADR 0009), and consensus does not change
+      // that (ADR 0040, decision 11): the room's rules and vetoes come back exactly as they went in.
       it("changes the instructions and nothing else in the room", async () => {
-        const s = hostedRoom({ id: "qs_hi_only" });
+        const base = hostedManifest();
+        const s = hostedRoom({ id: "qs_hi_only", manifest: {
+          ...base,
+          roles: { ...base.roles, lead: { ...base.roles.lead, can: ["send", "invite", "request_actions", "vote"], veto: ["surface_proposal"] } },
+          decide: { rules: { surface_proposal: { rule: "majority", quorum: 60 } }, expiresMs: 3_600_000 },
+        } });
         await store.createSession(s);
         const before = (await store.getSession(s.id))!;
         await store.setHostInstructions(s.id, "Ask how agents have grown.", []);

@@ -42,6 +42,7 @@ export function asManifest(
     default_role: p.default_role,
     creator_role: p.creator_role,
     host: p.host ?? null,
+    decide: p.decide ?? null,
   };
 }
 
@@ -112,6 +113,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
   for (const [key, def] of Object.entries(v.roles)) {
     const onBeat = roleBeat(key, def);
     roles[key] = { can: [...def.can], description: def.description ?? null, heartbeat_on: onBeat.report ?? onBeat.reports };
+    if (def.veto?.length) roles[key].veto = [...def.veto];
   }
   const preset: SavedPreset = {
     name,
@@ -124,6 +126,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     creator_role: v.creator_role,
     host: v.host == null ? null : { role: v.host.role, model: v.host.model, instructions: v.host.instructions ?? null },
     public: v.public ?? false,
+    ...(v.decide != null ? { decide: v.decide } : {}),
     updated_at: new Date(now).toISOString(),
   };
   return { ok: true, preset };

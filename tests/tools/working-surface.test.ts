@@ -1071,3 +1071,49 @@ describe("frames through bellman_send (surface frames spec, D2, D8)", () => {
     expect((await write(p, { ...frameOf("f0", 0), title: "Renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } })).isError).toBe(false);
   });
 });
+
+describe("a widget's owner (surface widget and batch spec, D3)", () => {
+  const swarm = () => pairUp(h, { manifest: manifestFixture({ preset: "swarm" }), joinAs: "lead" });
+  const widget = (owner: string, over: Record<string, unknown> = {}) =>
+    ({ key: "n-1", kind: "widget", title: "Stripe", placement: { x: 0, y: 0 }, widget: { plugin: "stripe", locality: "credential_bound", owner }, ...over });
+  const asJoiner = (p: PairedSession, payload: Record<string, unknown>) =>
+    p.joiner.call("bellman_send", { session_id: p.sessionId, member_id: p.joinerMemberId, type: "surface", payload });
+  const refusal = (owner: string) => `surface widget "n-1": owner ${owner} is not a seat of yours in this room; only the owner's account sets a widget's owner`;
+
+  it("lands a widget its writer owns", async () => {
+    const p = await swarm();
+    const out = await write(p, widget(p.creatorMemberId));
+    expect(out.isError, out.text).toBe(false);
+    expect((await rows(p))[0].widget).toEqual({ plugin: "stripe", locality: "credential_bound", owner: p.creatorMemberId, seat: null });
+  });
+
+  it("refuses a new widget naming another account's seat as owner, and appends nothing", async () => {
+    const p = await swarm();
+    const before = await eventCount(p);
+    const out = await asJoiner(p, widget(p.creatorMemberId));
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain(refusal(p.creatorMemberId));
+    expect(await eventCount(p)).toBe(before);
+  });
+
+  it("lets a peer move a widget and keep its owner, or make it their own, but never name another account's seat", async () => {
+    const p = await swarm();
+    await write(p, widget(p.creatorMemberId));
+    const moved = await asJoiner(p, widget(p.creatorMemberId, { placement: { x: 400, y: 0 } }));
+    expect(moved.isError, moved.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({ byMemberId: p.joinerMemberId, placement: { x: 400, y: 0 }, widget: { owner: p.creatorMemberId } });
+    const claimed = await asJoiner(p, widget(p.joinerMemberId));
+    expect(claimed.isError, claimed.text).toBe(false);
+    const handed = await asJoiner(p, widget(p.creatorMemberId));
+    expect(handed.text).toContain(refusal(p.creatorMemberId));
+    expect((await rows(p))[0].widget?.owner).toBe(p.joinerMemberId);
+  });
+
+  it("refuses a peer's restore of a removed widget whose owner is not theirs: the key is new again", async () => {
+    const p = await swarm();
+    const v1 = await write(p, widget(p.creatorMemberId));
+    await write(p, { key: "n-1", remove: true });
+    const back = await asJoiner(p, { key: "n-1", restore: v1.data.cursor });
+    expect(back.text).toContain(refusal(p.creatorMemberId));
+  });
+});

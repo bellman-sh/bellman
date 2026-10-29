@@ -1133,7 +1133,7 @@ export async function resolveSurfaceWrite(
   blobs: BlobStore,
   sessionId: string,
   payload: unknown,
-): Promise<RoomResult<{ write: SurfaceWrite }>> {
+): Promise<RoomResult<{ write: SurfaceWrite; stored: SurfaceRow | undefined }>> {
   const normalized = normalizeSurfaceWrite(payload);
   if (!normalized.ok) return refuse("invalid", normalized.reason);
   let { write } = normalized;
@@ -1178,7 +1178,26 @@ export async function resolveSurfaceWrite(
       }
     }
   }
-  return succeed({ write });
+  return succeed({ write, stored: byKey.get(write.key) });
+}
+
+/**
+ * Whether a widget write names an owner its writer may name (surface widget and batch spec, D3): null when it may,
+ * else the refusal. A write that is not a widget, or that keeps the owner the key already holds, passes, so a peer
+ * holding `write_surface` moves a widget without making it theirs. Any other owner must be a seat of the writing
+ * account, so a card never says it is someone's who did not put it there. The key's row is the one the write's
+ * checks read; a removed key has none, so a restore of a removed widget is a new key.
+ */
+export function widgetOwnerRefusal(
+  session: StoredSession,
+  actor: Identity,
+  write: SurfaceWrite,
+  stored: SurfaceRow | undefined,
+): string | null {
+  const owner = write.item?.widget?.owner;
+  if (owner === undefined || owner === stored?.widget?.owner) return null;
+  if (session.members.some((m) => m.memberId === owner && m.userId === actor.userId)) return null;
+  return `surface widget "${write.key}": owner ${owner} is not a seat of yours in this room; only the owner's account sets a widget's owner`;
 }
 
 /**
@@ -1309,7 +1328,9 @@ export async function writeSurface(
 
   const resolved = await resolveSurfaceWrite(store, blobs, sessionId, restored === null ? payload : restored.payload);
   if (!resolved.ok) return resolved;
-  const { write } = resolved.value;
+  const { write, stored } = resolved.value;
+  const unowned = widgetOwnerRefusal(session, actor, write, stored);
+  if (unowned !== null) return refuse("forbidden", unowned);
 
   // The gate has just found this handle, so this is the same read. A restore needs the seat for the approver it
   // stamps, a counted send for the minute it spends.

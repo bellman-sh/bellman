@@ -1458,6 +1458,65 @@ export async function writeSurface(
 }
 
 /**
+ * A seat writes a batch of surface items and removals in one operation (surface widget and batch spec, D2), in
+ * `writeSurface`'s order: the gate, the batch's checks (`resolveSurfaceBatch`), each widget's owner, the minute's
+ * count once for the whole batch when `countSend` (bellman_send's), the append (`appendSurfaces`), one audit row. A
+ * refusal anywhere writes nothing and names the entry. The result's cursor is the batch's last event's.
+ */
+export async function writeSurfaceBatch(
+  store: BellmanStore,
+  blobs: BlobStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  payload: unknown,
+  idempotencyKey?: string,
+  countSend = false,
+): Promise<RoomResult<{ cursor: number; count: number; replayed: boolean; roomMembers: string[] }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
+  if (!gate.ok) return gate;
+  const session = gate.value;
+
+  const resolved = await resolveSurfaceBatch(store, blobs, sessionId, payload);
+  if (!resolved.ok) return resolved;
+  const { writes, stored } = resolved.value;
+  for (const [i, write] of writes.entries()) {
+    const unowned = widgetOwnerRefusal(session, actor, write, stored.get(write.key));
+    if (unowned !== null) return refuse("forbidden", `items[${i}]: ${unowned}`);
+  }
+
+  const me = await findMember(store, session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
+  if (countSend) {
+    const admitted = await admitSend(store, sessionId, me);
+    if (!admitted.ok) return admitted;
+  }
+
+  const author = { fromMemberId: memberId, fromUserId: actor.userId, fromLabel: actor.label };
+  const appended = await store.appendSurfaces(sessionId, author, writes, idempotencyKey ?? null);
+  if (appended.outcome === "conflict") {
+    return refuse(
+      "conflict",
+      `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
+    );
+  }
+  if (appended.outcome === "frozen") return refuse("frozen", FROZEN);
+  if (appended.outcome === "refused") return refuse(appended.kind, `items[${appended.index}]: ${appended.reason}`);
+  const replayed = appended.outcome === "replayed";
+  const cursor = replayed ? appended.event.cursor : appended.events[appended.events.length - 1].cursor;
+
+  if (!replayed) {
+    await audit(store, session, actor, "sent_surface_batch", { count: writes.length, keys: writes.map((w) => w.key) });
+  }
+  return succeed({
+    cursor,
+    count: writes.length,
+    replayed,
+    roomMembers: activeMembers(session).filter((m) => m.memberId !== memberId).map((m) => m.label),
+  });
+}
+
+/**
  * The event that says a seat's code was retired by its creator. Built here and
  * written by the store, in the transaction that retires the code. From "system"
  * for the reason member_evicted is: there is no member handle to name.

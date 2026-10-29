@@ -1163,3 +1163,49 @@ describe("resolveSurfaceBatch (surface widget and batch spec, D2)", () => {
       .toEqual({ id, bytes: PNG.byteLength, type: "image/png", name: "shot.png" });
   });
 });
+
+describe("a batch through bellman_send (surface widget and batch spec, D2)", () => {
+  const items = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ key: `b${from + i}`, kind: "text", body: "x", placement: { x: (from + i) * 400, y: 0 } }));
+
+  it("writes every item as one call, and its cursor is the surface cursor after it", async () => {
+    const p = await pairUp(h);
+    const out = await write(p, { items: items(3) });
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data.count).toBe(3);
+    const read = await p.creator.call("bellman_surface", { session_id: p.sessionId });
+    expect(out.data.cursor).toBe((read.data.surface as { cursor: number }).cursor);
+    expect((await rows(p)).map((r) => r.key).sort()).toEqual(["b0", "b1", "b2"]);
+  });
+
+  it("refuses the whole batch for one bad item, naming it, and changes nothing", async () => {
+    const p = await pairUp(h);
+    const before = await eventCount(p);
+    const out = await write(p, { items: [items(1)[0], { key: "bad", kind: "text" }] });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("items[1]: ");
+    expect(await eventCount(p)).toBe(before);
+    expect(await rows(p)).toEqual([]);
+  });
+
+  it("replays a keyed batch with its first cursor", async () => {
+    const p = await pairUp(h);
+    const first = await write(p, { items: items(2) }, { idempotency_key: "batch-0001" });
+    const again = await write(p, { items: items(2) }, { idempotency_key: "batch-0001" });
+    expect(again.data).toMatchObject({ replayed: true, cursor: first.data.cursor });
+  });
+
+  it("files one audit row for the batch", async () => {
+    const p = await pairUp(h);
+    await write(p, { items: items(3) });
+    const row = (await h.store.auditForOrg(p.creator.identity.orgId!, 50)).at(-1)!;
+    expect(row).toMatchObject({ action: "sent_surface_batch", detail: { count: 3, keys: ["b0", "b1", "b2"] } });
+  });
+
+  it("refuses a widget in a batch whose owner is another account's seat, naming its index", async () => {
+    const p = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }), joinAs: "lead" });
+    const out = await p.joiner.call("bellman_send", { session_id: p.sessionId, member_id: p.joinerMemberId, type: "surface", payload: { items: [
+      items(1)[0], { key: "n-1", kind: "widget", title: "W", placement: { x: 0, y: 400 }, widget: { plugin: "p", locality: "shared", owner: p.creatorMemberId } },
+    ] } });
+    expect(out.text).toContain(`items[1]: surface widget "n-1": owner ${p.creatorMemberId} is not a seat of yours`);
+  });
+});

@@ -3,7 +3,8 @@ import {
   NEXT_ALONE, NEXT_FRAME_GONE, NEXT_REFUSAL, SURFACE_PAGE, WINDOW_REFUSAL_HTTP, WINDOW_REFUSAL_TOOL,
   frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName,
 } from "../src/frames.js";
-import type { SurfaceRow } from "../src/types.js";
+import type { SurfaceItem, SurfaceRow } from "../src/types.js";
+import { placeSurfaceBatch } from "../src/store.js";
 
 const row = (key: string, over: Partial<SurfaceRow> = {}): SurfaceRow => ({
   key, kind: "text", title: null, body: "b", ends: null, placement: null, blob: null, shape: null,
@@ -211,5 +212,46 @@ describe("placing a write among frames (D2)", () => {
     const rows = [frame("f", { x: 0, y: 0, w: 1480, h: 520 }, 1)];
     // Slot rows at y 0, 240 and 480 meet the frame; y 720 is the first clear row.
     expect(placed(rows, card("a")).write.item!.placement).toEqual({ x: 0, y: 720 });
+  });
+});
+
+describe("placeSurfaceBatch (surface widget and batch spec, D1)", () => {
+  const author = { fromMemberId: "m_mover", fromUserId: "u_mover", fromLabel: "mover@codenerd" };
+  const card = (key: string, over: Partial<SurfaceItem> = {}): SurfaceItem =>
+    ({ key, kind: "text", title: null, body: "x", ends: null, placement: null, blob: null, shape: null, ...over });
+  const box = (key: string, placement: { x: number; y: number; w: number; h: number }): SurfaceItem =>
+    card(key, { kind: "frame", title: key, body: null, placement, locked: true });
+  const ok = (out: ReturnType<typeof placeSurfaceBatch>) => {
+    if (!out.ok) throw new Error(out.reason);
+    return out.entries;
+  };
+
+  it("gives two unplaced cards in one batch distinct slots", () => {
+    const entries = ok(placeSurfaceBatch([], [{ key: "a", item: card("a") }, { key: "b", item: card("b") }], author, 1, 0));
+    expect(entries.map((e) => e.placed.write.item!.placement)).toEqual([{ x: 0, y: 0 }, { x: 360, y: 0 }]);
+  });
+
+  it("puts a card in a frame the batch made earlier", () => {
+    const entries = ok(placeSurfaceBatch([], [
+      { key: "f", item: box("f", { x: 1000, y: 0, w: 1480, h: 520 }) }, { key: "a", item: card("a"), frame: 1 },
+    ], author, 1, 0));
+    expect(entries[1].placed.write.item!.placement).toEqual({ x: 1040, y: 40 });
+  });
+
+  it("refuses an entry that overlaps a frame the batch made, by its index", () => {
+    const out = placeSurfaceBatch([], [
+      { key: "f1", item: box("f1", { x: 0, y: 0, w: 1000, h: 1000 }) }, { key: "a", item: card("a", { placement: { x: 5000, y: 0 } }) },
+      { key: "f2", item: box("f2", { x: 500, y: 0, w: 1000, h: 1000 }) },
+    ], author, 1, 0);
+    expect(out).toMatchObject({ ok: false, index: 2, kind: "conflict" });
+  });
+
+  it("carries a card the batch wrote when the batch then moves its locked frame, with the card's writer the author", () => {
+    const rows = [{ ...box("f", { x: 0, y: 0, w: 1000, h: 1000 }), cursor: 1, at: 0, byMemberId: "m_ada", byLabel: "ada" } as SurfaceRow];
+    const entries = ok(placeSurfaceBatch(rows, [
+      { key: "a", item: card("a", { placement: { x: 40, y: 40 } }) }, { key: "f", item: box("f", { x: 2000, y: 0, w: 1000, h: 1000 }) },
+    ], author, 2, 0));
+    expect(entries[1].placed.carried.map((w) => w.item!.placement)).toEqual([{ x: 2040, y: 40 }]);
+    expect(entries[1].moved).toMatchObject([{ key: "a", byMemberId: "m_mover", cursor: 2 }]);
   });
 });

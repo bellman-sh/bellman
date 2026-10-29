@@ -967,6 +967,73 @@ export function windowUnderCut(
 export const placedEvent = (e: EventBody, asked: SurfaceWrite, placed: Extract<Placed, { ok: true }>): EventBody =>
   placed.write.item === asked.item || placed.write.item === null ? e : { ...e, payload: placed.write.item };
 
+/** Who a batch's events are by (surface widget and batch spec, D1): the writing seat, the same on every write in it. */
+export type SurfaceAuthor = Pick<EventBody, "fromMemberId" | "fromUserId" | "fromLabel">;
+
+/**
+ * What `appendSurfaces` did. `events` is every event the batch appended, in cursor order: each write's own, then the
+ * cards a locked frame's move carried. A replay returns the last of them, as the original call's cursor is its last.
+ */
+export type SurfaceBatchAppend =
+  | { outcome: "appended"; events: SessionEvent[] }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "conflict" }
+  | { outcome: "frozen" }
+  | { outcome: "refused"; index: number; kind: "conflict" | "invalid"; reason: string };
+
+/** The event a batch's write is appended as, before placement: the author's, its payload the item or the removal. */
+export const batchEvent = (author: SurfaceAuthor, write: SurfaceWrite): EventBody =>
+  ({ type: "surface", ...author, payload: write.item ?? { key: write.key, remove: true }, refId: null });
+
+/** The fingerprint a keyed batch is recorded under: every write, in order, each with its `frame` folded in as `surfacePrint` does. */
+export const surfaceBatchPrint = (author: SurfaceAuthor, writes: readonly SurfaceWrite[]): string =>
+  fingerprint({
+    type: "surface", ...author, refId: null,
+    payload: { items: writes.map((w) => {
+      const payload = w.item ?? { key: w.key, remove: true };
+      return w.frame === undefined ? payload : { ...payload, frame: w.frame };
+    }) },
+  });
+
+/**
+ * A batch placed in order over the room's rows (spec D1), in memory, so a refusal is decided before either store
+ * writes: each write placed among the rows as the writes before it leave them, by `placeSurfaceWrite` when it is
+ * placed among rows (`placesAmongRows`) and as written otherwise. A refusal names the entry's index. `moved` is the
+ * row of each card an entry's locked move carries, as the entries before it left it, which is the row whose writer
+ * and approver the carried row keeps (L2). The rows are applied with `applySurfaceWrite` at provisional cursors from
+ * `cursor`, the room's next, and at `at`.
+ */
+export function placeSurfaceBatch(
+  rows: readonly SurfaceRow[],
+  writes: readonly SurfaceWrite[],
+  author: SurfaceAuthor,
+  cursor: number,
+  at: number,
+):
+  | { ok: true; entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] }
+  | { ok: false; index: number; kind: "conflict" | "invalid"; reason: string } {
+  const room = new Map(rows.map((r) => [r.key, r] as const));
+  const apply = (event: SessionEvent, write: SurfaceWrite, approvedBy: ApprovedBy | undefined) => {
+    const verdict = applySurfaceWrite(room.get(write.key), event, write, approvedBy);
+    if (verdict === "remove") room.delete(write.key);
+    else if (verdict !== null) room.set(write.key, verdict);
+  };
+  const entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] = [];
+  let next = cursor;
+  for (const [index, write] of writes.entries()) {
+    const placed: Placed = placesAmongRows(write) ? placeSurfaceWrite([...room.values()], write) : { ok: true, write, carried: [] };
+    if (!placed.ok) return { ok: false, index, kind: placed.kind, reason: placed.reason };
+    const moved = placed.carried.map((c) => room.get(c.key)!);
+    const e = placedEvent(batchEvent(author, write), write, placed);
+    apply({ ...e, cursor: next++, at }, placed.write, undefined);
+    for (const [i, c] of placed.carried.entries()) {
+      apply(asRowWriter({ ...carriedEvent(e, c), cursor: next++, at }, moved[i]), c, moved[i].approvedBy);
+    }
+    entries.push({ placed, moved });
+  }
+  return { ok: true, entries };
+}
+
 /**
  * What `setJoinCode` did, which a boolean could not say once the write became
  * conditional: `frozen` and `live_code_exists` are different refusals and the
@@ -1755,6 +1822,20 @@ export interface BellmanStore {
     extras: { surface: SurfaceWrite; approvedBy?: ApprovedBy },
     key: string | null,
   ): Promise<SurfaceAppend>;
+  /**
+   * Append a batch of surface writes in one operation (surface widget and batch spec, D1): every write's `surface`
+   * event, by `author`, and each carried card's after its frame's, at consecutive cursors, with their rows, or none
+   * of them. The batch is placed in order by `placeSurfaceBatch` over the rows listed in the same operation, so a
+   * refusal at any entry answers `refused` with its index and writes nothing, not even the key's record. A key names
+   * the batch, fingerprinted by `surfaceBatchPrint`; a replay returns the last event the original call appended and
+   * applies nothing, and the key check precedes the frozen check. One wake carries every event.
+   */
+  appendSurfaces(
+    sessionId: string,
+    author: SurfaceAuthor,
+    writes: readonly SurfaceWrite[],
+    key: string | null,
+  ): Promise<SurfaceBatchAppend>;
   /**
    * Approve a proposal (topic rooms spec, D2; plan R12): append `e`, the maintainer's `action_response`, and, when
    * `decideApproval` says `apply`, the card's `surface` event and row after it, in the same operation. The card is
@@ -3410,6 +3491,52 @@ export class MemoryStore implements BellmanStore {
       this.keys.set(sessionId, map);
     }
     return { outcome: "appended", event: detach(event), carried: carried.map(detach) };
+  }
+
+  async appendSurfaces(
+    sessionId: string,
+    author: SurfaceAuthor,
+    writes: readonly SurfaceWrite[],
+    key: string | null,
+  ): Promise<SurfaceBatchAppend> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`Unknown session ${sessionId}`);
+
+    // Synchronous from the key check to the last row, for appendSurface's reason.
+    const storageKey = key === null ? null : idempotencyKey(author.fromMemberId, key);
+    const print = surfaceBatchPrint(author, writes);
+    const seen = this.keys.get(sessionId);
+    const record = storageKey === null ? undefined : seen?.get(storageKey);
+    if (record) {
+      if (record.print !== print) return { outcome: "conflict" };
+      const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (!original) throw new Error(`Idempotency record for ${sessionId} names missing cursor ${record.cursor}`);
+      return { outcome: "replayed", event: detach(original) };
+    }
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+
+    const at = Date.now();
+    const rows = writes.some(placesAmongRows) ? [...(this.surfaces.get(sessionId)?.values() ?? [])] : [];
+    const placed = placeSurfaceBatch(rows, writes, author, s.events.length + 1, at);
+    if (!placed.ok) return { outcome: "refused", index: placed.index, kind: placed.kind, reason: placed.reason };
+    // The waiters are held for the batch and woken once after it, as SessionDO's one wake after its commit: a poll
+    // waiting on the room is handed the whole batch, not its first event. Nothing can register in between, since
+    // this stretch is synchronous.
+    const held = this.waiters.get(sessionId) ?? [];
+    this.waiters.set(sessionId, []);
+    const events: SessionEvent[] = [];
+    for (const [i, { placed: one }] of placed.entries.entries()) {
+      const { event, carried } = this.surfaceNow(s, placedEvent(batchEvent(author, writes[i]), writes[i], one), one, undefined, at);
+      events.push(event, ...carried);
+    }
+    this.waiters.set(sessionId, held);
+    this.wake(s);
+    if (storageKey !== null) {
+      const map = seen ?? new Map<string, IdempotencyRecord>();
+      map.set(storageKey, { cursor: events[events.length - 1].cursor, print });
+      this.keys.set(sessionId, map);
+    }
+    return { outcome: "appended", events: events.map(detach) };
   }
 
   /** `placeSurfaceWrite` over the room's rows, listed only when the write is placed among them (`placesAmongRows`). */

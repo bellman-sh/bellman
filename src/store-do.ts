@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
-  AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceFacts,
+  AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
   DecisionClose, DecisionOpen, VoteWrite,
 } from "./store.js";
 import { electorateOf, voteRefusal } from "./store.js";
@@ -25,7 +25,7 @@ import {
   type ClosedState, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
-import { asRowWriter, carriedEvent, placedEvent, placesAmongRows, surfaceFactsOf, surfacePrint, windowUnderCut } from "./store.js";
+import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, placesAmongRows, surfaceBatchPrint, surfaceFactsOf, surfacePrint, windowUnderCut } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
@@ -2355,6 +2355,69 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (result.outcome === "appended") {
       // One wake for the write and every card it carried, so a long poll is handed them all at once.
       this.#wake([result.event, ...result.carried], members);
+      if (broughtForward) await this.driver.reArm();
+    }
+    return result;
+  }
+
+  /**
+   * `BellmanStore.appendSurfaces` (surface widget and batch spec, D1), in `appendSurface`'s shape: one transaction;
+   * the key before the frozen check; the room's `sf:` rows listed once when any write is placed among them, and the
+   * batch placed in memory by `placeSurfaceBatch`, so a refusal returns before anything is written. Then each entry
+   * through `placedSurfaceRows` in order, with the session threaded from one to the next and its events and rows put
+   * before the next runs, so `extraRows`' reads see the rows the earlier entries wrote. The cursor, the key's record
+   * and the record go in one last put. One wake after the commit holds every event, in cursor order.
+   */
+  async appendSurfaces(author: SurfaceAuthor, writes: readonly SurfaceWrite[], key: string | null): Promise<SurfaceBatchAppend> {
+    let broughtForward = false as boolean;
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<SurfaceBatchAppend>(async (txn) => {
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+
+      const keyed = key === null ? null : { storageKey: idempotencyKey(author.fromMemberId, key), print: surfaceBatchPrint(author, writes) };
+      if (keyed !== null) {
+        const record = await txn.get<IdempotencyRecord>(keyed.storageKey);
+        if (record) {
+          if (record.print !== keyed.print) return { outcome: "conflict" };
+          const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+          if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+          return { outcome: "replayed", event: original };
+        }
+      }
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+
+      const at = Date.now();
+      const first = await this.nextCursor(txn);
+      const rows = writes.some(placesAmongRows) ? [...(await txn.list<SurfaceRow>({ prefix: SURFACE_PREFIX })).values()] : [];
+      const placed = placeSurfaceBatch(rows, writes, author, first, at);
+      if (!placed.ok) return { outcome: "refused", index: placed.index, kind: placed.kind, reason: placed.reason };
+
+      let session = s;
+      const events: SessionEvent[] = [];
+      for (const [i, { placed: one, moved }] of placed.entries.entries()) {
+        const out = await placedSurfaceRows(
+          txn, session, [], placedEvent(batchEvent(author, writes[i]), writes[i], one), one, undefined,
+          new Map(moved.map((r) => [r.key, r] as const)), first + events.length, at,
+        );
+        await putRows(txn, { ...Object.fromEntries(out.events.map((ev) => [eventKey(ev.cursor), ev])), ...out.puts });
+        for (const gone of out.deletes) await txn.delete(gone);
+        session = out.session;
+        events.push(...out.events);
+      }
+      const last = events[events.length - 1].cursor;
+      await putRows(txn, {
+        cursor: last,
+        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: last, print: keyed.print } satisfies IdempotencyRecord }),
+        ...asRows(s, { session: session === s ? undefined : session }),
+      });
+      broughtForward = session !== s && (bringsForward(s, session, at) || tickBroughtForward(s, session));
+      return { outcome: "appended", events };
+    });
+    if (result.outcome === "appended") {
+      this.#wake(result.events, members);
       if (broughtForward) await this.driver.reArm();
     }
     return result;
@@ -6528,6 +6591,10 @@ export class DurableObjectStore implements BellmanStore {
     key: string | null,
   ): Promise<SurfaceAppend> {
     return this.session(sessionId).appendSurface(e, extras, key);
+  }
+
+  async appendSurfaces(sessionId: string, author: SurfaceAuthor, writes: readonly SurfaceWrite[], key: string | null): Promise<SurfaceBatchAppend> {
+    return this.session(sessionId).appendSurfaces(author, writes, key);
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

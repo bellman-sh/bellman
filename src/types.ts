@@ -819,7 +819,20 @@ export interface SavedPreset {
  * the canvas draws, with its own field and no body; `frame` is a titled rectangle
  * that names a region of the canvas and, in the order it was written, a step of the path.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape" | "frame";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape" | "frame" | "widget";
+
+/** Where a widget runs (surface widget and batch spec, D3). A local-only widget is never written to a room, so it has no value here. */
+export type WidgetLocality = "shared" | "credential_bound" | "local_with_remote_input" | "proximity_collaborative";
+
+/** What a widget item says about the widget a client such as Colony Nerve runs: Bellman stores it and runs nothing. */
+export interface Widget {
+  plugin: string;
+  locality: WidgetLocality;
+  /** The member whose widget it is: a seat of the writing account when the key is new or this changes (rooms.ts, `widgetOwnerRefusal`). */
+  owner: string;
+  /** The Bellman seat running inside it, such as a terminal's; null when none is known. */
+  seat: string | null;
+}
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -878,6 +891,8 @@ export interface SurfaceItem {
    * (locked unless the write says otherwise) and it is absent on every other row, so no stored row changes.
    */
   locked?: boolean;
+  /** A widget's alone, and absent on every other row, as `locked` is. */
+  widget?: Widget;
 }
 
 /**

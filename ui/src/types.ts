@@ -124,7 +124,7 @@ export interface RoomsResult {
 }
 
 /** The surface kinds the server knows today. A kind the page predates still renders, by name. */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape" | "frame" | "widget";
 
 export interface Placement {
   x: number;
@@ -143,6 +143,8 @@ export interface SurfaceItemWire {
   placement: Placement | null;
   blob: { id: string; bytes: number; type: string; name: string } | null;
   shape: { form: string; color: string; flip: boolean } | null;
+  /** A widget's alone; absent from a server older than the kind. */
+  widget?: { plugin: string; locality: string; owner: string; seat: string | null } | null;
   cursor: number;
   at: string;
 }

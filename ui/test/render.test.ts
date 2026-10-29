@@ -471,6 +471,23 @@ describe("createCanvas", () => {
     expect(card(c.root, "A box").textContent).toContain("shape item");
   });
 
+  it("draws a widget as a card naming its plugin and owner, and never renders its body", () => {
+    const r = surfaceFixture();
+    const at = r.surface.items[0].data.at;
+    const widget = (key: string, title: string, owner: string, body: string | null) => ({ trust: "untrusted" as const, origin: { memberId: "m_jesse", label: "jesse@codenerd" }, data: {
+      key, kind: "widget", title, body, ends: null, placement: null, blob: null, shape: null, cursor: 9, at,
+      widget: { plugin: "stripe", locality: "credential_bound", owner, seat: null },
+    } });
+    r.surface.items.push(widget("n-1", "Revenue", "m_jesse", "<b>secret config</b>"), widget("n-2", "Theirs", "m_other", null));
+    const c = createCanvas(r, deps().deps, NOW);
+    const mine = card(c.root, "Revenue");
+    expect(mine.textContent).toContain("stripe");
+    expect(mine.textContent).toContain("on jesse@codenerd's machine");
+    expect(mine.innerHTML).not.toContain("secret config");
+    expect(mine.querySelector("b")).toBeNull();
+    expect(card(c.root, "Theirs").textContent).toContain("owner m_other");
+  });
+
   it("shows 0 items and no error when the block's items is not an array", () => {
     const r = surfaceFixture();
     (r.surface as { items: unknown }).items = "nope";

@@ -198,6 +198,7 @@ const doorOpened = (async () => {
       readSurface: bridge.readSurface,
       decline: bridge.decline,
       setStatus: bridge.setStatus,
+      writeSurface: bridge.writeSurface,
       join: bridge.joinState,
     }, log);
     door = opened;

@@ -41,7 +41,8 @@ producing bugs. Read it before changing how the pieces fit together.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.
 - `src/door.ts` / `src/door-protocol.ts` — the bridge's door: a Unix socket per bridge that the mod in the
-  same session reads (six routes, two writes: a decline, and a seat status the plugin's hooks set). The protocol file is runtime-free and shared
+  same session reads (seven routes, three writes: a decline, a seat status the plugin's hooks set, and a canvas item
+  put or deleted as the bridge's seat, for a terminal that holds no token). The protocol file is runtime-free and shared
   with the mod.
 - `mod/` — `bellman-mod`, the second plugin in the marketplace: a Claude Code mod, a hooks module.
   `mod/src/` is the wiring, `mod/hooks/register.mjs` the bundle that runs, `mod/tests/` the kit tests. It

@@ -19,6 +19,7 @@ import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS, gridSlot,
 } from "../../src/surface.js";
 import type { SurfaceItem } from "../../src/types.js";
+import { resolveSurfaceBatch } from "../../src/rooms.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -1115,5 +1116,50 @@ describe("a widget's owner (surface widget and batch spec, D3)", () => {
     await write(p, { key: "n-1", remove: true });
     const back = await asJoiner(p, { key: "n-1", restore: v1.data.cursor });
     expect(back.text).toContain(refusal(p.creatorMemberId));
+  });
+});
+
+describe("resolveSurfaceBatch (surface widget and batch spec, D2)", () => {
+  const card = (key: string, over: Record<string, unknown> = {}) => ({ key, kind: "text", body: "x", placement: { x: 0, y: 0 }, ...over });
+  const connector = (key: string, from: string, to: string) => ({ key, kind: "connector", ends: { from, to } });
+  const reasonOf = (out: { ok: boolean }) => (out as unknown as { reason: string }).reason;
+
+  it("checks a connector against cards made earlier in the batch and cards already on the surface", async () => {
+    const p = await pairUp(h);
+    await write(p, card("old"));
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("new"), connector("c", "new", "old")] });
+    expect(out.ok, reasonOf(out)).toBe(true);
+    expect((out as { value: { writes: unknown[] } }).value.writes).toHaveLength(2);
+  });
+
+  it("refuses a connector naming a key an earlier entry removed", async () => {
+    const p = await pairUp(h);
+    await write(p, card("a"));
+    await write(p, card("b"));
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [{ key: "a", remove: true }, connector("c", "a", "b")] });
+    expect(reasonOf(out)).toBe('items[1]: connector "c" names "a", which is not on the surface.');
+  });
+
+  it("counts the batch's new keys against the 1,000-item cap", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < MAX_SURFACE_ITEMS - 1; i++) {
+      const item: SurfaceItem = { key: `k_${i}`, kind: "text", title: null, body: "x", ends: null, placement: gridSlot(i), blob: null, shape: null };
+      await h.store.appendEvent(p.sessionId, {
+        type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null,
+      }, { surface: { key: item.key, item } });
+    }
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("n1"), card("n2")] });
+    expect(reasonOf(out)).toContain("items[1]: this room's surface already holds 1,000 items");
+    const replaced = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("k_0"), card("n1")] });
+    expect(replaced.ok, reasonOf(replaced)).toBe(true);
+  });
+
+  it("settles a blob-backed image to the object's bytes, type and name", async () => {
+    const p = await pairUp(h);
+    const id = await stored(p, "image/png", PNG, "shot.png");
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [{ key: "shot", kind: "image", blob: { id } }] });
+    expect(out.ok, reasonOf(out)).toBe(true);
+    expect((out as { value: { writes: { item: { blob: unknown } }[] } }).value.writes[0].item.blob)
+      .toEqual({ id, bytes: PNG.byteLength, type: "image/png", name: "shot.png" });
   });
 });

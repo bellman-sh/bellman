@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  GRID, MAX_SLOT_SEARCH, MAX_SURFACE_ITEMS, PLACED_KINDS, SurfaceKeyShape, applySurfaceWrite, createdAtOf, gridSlot, needsPlacement, normalizeSurfaceWrite, withPlacement, surfaceCursor,
+  GRID, MAX_SLOT_SEARCH, MAX_SURFACE_ITEMS, PLACED_KINDS, MAX_SURFACE_BATCH, isBatchPayload, normalizeSurfaceBatch, SurfaceKeyShape, applySurfaceWrite, createdAtOf, gridSlot, needsPlacement, normalizeSurfaceWrite, withPlacement, surfaceCursor,
   type SurfaceWrite,
 } from "../src/surface.js";
 import { GRID as VIEWER_GRID, gridSlot as viewerSlot } from "../ui/src/canvas-layout.js";
@@ -437,5 +437,34 @@ describe("a widget on the wire", () => {
     const widget = { plugin: "terminal", locality: "local_with_remote_input" as const, owner: "m_peer", seat: "m_agent" };
     expect(surfaceItem({ ...item({ key: "n-1", kind: "widget", body: null }), widget, ...base }).data.widget).toEqual(widget);
     expect(surfaceItem({ ...item(), ...base }).data.widget).toBeNull();
+  });
+});
+
+describe("a batch payload (surface widget and batch spec, D2)", () => {
+  const text = (key: string) => ({ key, kind: "text", body: "x" });
+  const reason = (p: unknown) => (normalizeSurfaceBatch(p) as { reason: string }).reason;
+
+  it("is an object with items, and nothing else is", () => {
+    expect(isBatchPayload({ items: [] })).toBe(true);
+    expect(isBatchPayload(text("a"))).toBe(false);
+    expect(MAX_SURFACE_BATCH).toBe(100);
+  });
+
+  it("takes 1 to 100 entries and no other field", () => {
+    expect(normalizeSurfaceBatch({ items: [] }).ok).toBe(false);
+    expect(normalizeSurfaceBatch({ items: Array.from({ length: 101 }, (_, i) => text(`k${i}`)) }).ok).toBe(false);
+    expect(normalizeSurfaceBatch({ items: Array.from({ length: 100 }, (_, i) => text(`k${i}`)) }).ok).toBe(true);
+    expect(normalizeSurfaceBatch({ items: [text("a"), text("b")], extra: 1 }).ok).toBe(false);
+  });
+
+  it("refuses a restore, a key written twice, and a bad entry, each by its index", () => {
+    expect(reason({ items: [text("a"), { key: "b", restore: 3 }] })).toBe("items[1]: a batch does not restore; send { key, restore } on its own");
+    expect(reason({ items: [text("k"), text("j"), text("k")] })).toBe('items[2]: key "k" is already written by items[0]');
+    expect(reason({ items: [text("a"), text("b"), text("c"), { key: "d", kind: "text" }] })).toBe('items[3]: surface text "d": needs a body');
+  });
+
+  it("returns each entry's write and blob in order", () => {
+    const out = normalizeSurfaceBatch({ items: [text("a"), { key: "b", remove: true }] });
+    expect(out).toMatchObject({ ok: true, entries: [{ write: { key: "a", item: { kind: "text" } }, blobId: null }, { write: { key: "b", item: null }, blobId: null }] });
   });
 });

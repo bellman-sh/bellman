@@ -435,3 +435,39 @@ export function normalizeRestore(
   }
   return { ok: true, key: parsed.data.key, cursor: parsed.data.restore };
 }
+
+/** The most writes one batch carries (surface widget and batch spec, D2). */
+export const MAX_SURFACE_BATCH = 100;
+
+/** Whether a `surface` payload is a batch: an object with an `items` key, whatever else it holds, so the shape names a stray field. */
+export const isBatchPayload = (payload: unknown): boolean =>
+  typeof payload === "object" && payload !== null && "items" in payload;
+
+const BatchShape = z.strictObject({ items: z.array(z.unknown()).min(1).max(MAX_SURFACE_BATCH) });
+
+/**
+ * Read a batch (spec D2): `{ items }` of 1 to 100 entries, each an item or a removal as a single write is, each key
+ * once, and no restore, whose event is authored by the version's author and would split the batch's authorship. Each
+ * entry goes through `normalizeSurfaceWrite`, and a refusal names its index ahead of that function's own words. What
+ * the room holds is `resolveSurfaceBatch`'s read.
+ */
+export function normalizeSurfaceBatch(
+  payload: unknown,
+): { ok: true; entries: { write: SurfaceWrite; blobId: string | null }[] } | { ok: false; reason: string } {
+  const parsed = BatchShape.safeParse(payload);
+  if (!parsed.success) {
+    return { ok: false, reason: `a surface batch must be { items: [1 to ${MAX_SURFACE_BATCH} items or removals] }: ${describeIssue(parsed.error.issues[0])}` };
+  }
+  const entries: { write: SurfaceWrite; blobId: string | null }[] = [];
+  const first = new Map<string, number>();
+  for (const [i, entry] of parsed.data.items.entries()) {
+    if (isRestorePayload(entry)) return { ok: false, reason: `items[${i}]: a batch does not restore; send { key, restore } on its own` };
+    const one = normalizeSurfaceWrite(entry);
+    if (!one.ok) return { ok: false, reason: `items[${i}]: ${one.reason}` };
+    const seen = first.get(one.write.key);
+    if (seen !== undefined) return { ok: false, reason: `items[${i}]: key "${one.write.key}" is already written by items[${seen}]` };
+    first.set(one.write.key, i);
+    entries.push({ write: one.write, blobId: one.blobId });
+  }
+  return { ok: true, entries };
+}

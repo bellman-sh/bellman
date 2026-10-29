@@ -14,7 +14,7 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceRow, type Verb } from "./types.js";
+import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceKind, type SurfaceRow, type Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
@@ -32,7 +32,7 @@ import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type Ca
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
 import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import {
-  MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
+  MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
 import { MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
@@ -1114,6 +1114,96 @@ export async function checkProposal(
   return succeed(null);
 }
 
+/** What the room holds as a write's checks read it: the counts, and the kind each key holds, or undefined for none. */
+export interface SurfaceView {
+  count: number;
+  frames: number;
+  kindOf(key: string): SurfaceKind | undefined;
+}
+
+/**
+ * The checks a write is held to against what the room holds: the 1,000-item cap, the 100-frame cap and a connector's
+ * ends. One function for a single write and for each entry of a batch, which `resolveSurfaceBatch` checks against the
+ * room as the entries before it leave it.
+ */
+function checkAgainstFacts(write: SurfaceWrite, view: SurfaceView): RoomResult<null> {
+  if (write.item === null) return succeed(null);
+  if (view.kindOf(write.key) === undefined && view.count >= MAX_SURFACE_ITEMS) {
+    return refuse(
+      "conflict",
+      // "1,000", written out: the tests pin the wording and a locale must not move it.
+      `this room's surface already holds 1,000 items; remove one with { key, remove: true } before adding "${write.key}".`,
+    );
+  }
+  // A frame key already on the surface is a rewrite and passes; a key that is not a frame yet is a new frame.
+  if (write.item.kind === "frame" && view.kindOf(write.key) !== "frame" && view.frames >= MAX_FRAMES) {
+    return refuse(
+      "conflict",
+      `this room's surface already holds ${MAX_FRAMES} frames; remove one with { key, remove: true } before adding frame "${write.key}".`,
+    );
+  }
+  if (write.item.kind === "connector" && write.item.ends !== null) {
+    for (const end of [write.item.ends.from, write.item.ends.to]) {
+      const target = view.kindOf(end);
+      if (target === undefined) {
+        return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
+      }
+      if (target === "connector") {
+        return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
+      }
+    }
+  }
+  return succeed(null);
+}
+
+/**
+ * A batch's checks before it counts as a send (spec D2): the shape and each entry's rules (`normalizeSurfaceBatch`),
+ * each blob settled as a single write's is, then every entry checked in order against the room as the entries before
+ * it leave it, so a connector may name a card made earlier in the batch and the caps count the batch's new keys. The
+ * room is read once, for every key the batch names and every end a connector names. A refusal names the entry's index.
+ * `stored` is the room's rows for those keys, as the read found them.
+ */
+export async function resolveSurfaceBatch(
+  store: BellmanStore,
+  blobs: BlobStore,
+  sessionId: string,
+  payload: unknown,
+): Promise<RoomResult<{ writes: SurfaceWrite[]; stored: Map<string, SurfaceRow> }>> {
+  const normalized = normalizeSurfaceBatch(payload);
+  if (!normalized.ok) return refuse("invalid", normalized.reason);
+  const writes: SurfaceWrite[] = [];
+  for (const [i, { write, blobId }] of normalized.entries.entries()) {
+    if (blobId === null || write.item === null) {
+      writes.push(write);
+      continue;
+    }
+    const settled = await settleBlob(blobs, sessionId, write, blobId);
+    if (!settled.ok) return refuse(settled.code, `items[${i}]: ${settled.reason}`);
+    writes.push(settled.value);
+  }
+
+  const named = writes.flatMap((w) => [w.key, ...(w.item?.kind === "connector" && w.item.ends !== null ? [w.item.ends.from, w.item.ends.to] : [])]);
+  const facts = await store.surfaceFacts(sessionId, [...new Set(named)]);
+  const stored = new Map(facts.rows.map((r) => [r.key, r] as const));
+  const kinds = new Map<string, SurfaceKind>([...stored].map(([k, r]) => [k, r.kind]));
+  const view: SurfaceView = { count: facts.count, frames: facts.frames, kindOf: (key) => kinds.get(key) };
+  for (const [i, write] of writes.entries()) {
+    const checked = checkAgainstFacts(write, view);
+    if (!checked.ok) return refuse(checked.code, `items[${i}]: ${checked.reason}`);
+    const was = kinds.get(write.key);
+    if (was === "frame") view.frames--;
+    if (write.item === null) {
+      if (was !== undefined) view.count--;
+      kinds.delete(write.key);
+    } else {
+      if (was === undefined) view.count++;
+      if (write.item.kind === "frame") view.frames++;
+      kinds.set(write.key, write.item.kind);
+    }
+  }
+  return succeed({ writes, stored });
+}
+
 /**
  * The checks of a surface write that come before it counts as a send, for any payload (topic rooms plan, R14): the
  * shape and each kind's rule (`normalizeSurfaceWrite`), the blob a file, image or html item names
@@ -1149,35 +1239,8 @@ export async function resolveSurfaceWrite(
   const ends = write.item?.kind === "connector" && write.item.ends !== null ? [write.item.ends.from, write.item.ends.to] : [];
   const facts = await store.surfaceFacts(sessionId, [write.key, ...ends]);
   const byKey = new Map(facts.rows.map((r) => [r.key, r] as const));
-  if (write.item !== null) {
-    if (!byKey.has(write.key) && facts.count >= MAX_SURFACE_ITEMS) {
-      return refuse(
-        "conflict",
-        // "1,000", written out: the tests pin the wording and a locale must not move it.
-        `this room's surface already holds 1,000 items; remove one with { key, remove: true } before adding "${write.key}".`,
-      );
-    }
-    // A frame key already on the surface is a rewrite and passes; a key that is not a frame yet is a new frame.
-    if (
-      write.item.kind === "frame" && byKey.get(write.key)?.kind !== "frame" && facts.frames >= MAX_FRAMES
-    ) {
-      return refuse(
-        "conflict",
-        `this room's surface already holds ${MAX_FRAMES} frames; remove one with { key, remove: true } before adding frame "${write.key}".`,
-      );
-    }
-    if (write.item.kind === "connector" && write.item.ends !== null) {
-      for (const end of [write.item.ends.from, write.item.ends.to]) {
-        const target = byKey.get(end);
-        if (!target) {
-          return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
-        }
-        if (target.kind === "connector") {
-          return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
-        }
-      }
-    }
-  }
+  const checked = checkAgainstFacts(write, { count: facts.count, frames: facts.frames, kindOf: (key) => byKey.get(key)?.kind });
+  if (!checked.ok) return checked;
   return succeed({ write, stored: byKey.get(write.key) });
 }
 

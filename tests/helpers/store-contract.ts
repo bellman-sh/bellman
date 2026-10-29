@@ -17,7 +17,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
-import { actionStates } from "../../src/action-state.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
+import { decisionHash, type DecisionDraft, type VoteInput } from "../../src/decision.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
@@ -3365,6 +3366,166 @@ export function describeStoreContract(
           expect(await store.surfaceNamesBlob(id, BLOB)).toBe(false);
           expect(await store.surfaceNamesBlob("qs_nobody", BLOB)).toBe(false);
         });
+      });
+    });
+
+    /**
+     * Decisions (ADR 0040, #402): opening, voting and closing are each one operation in the room's object, decided by
+     * the functions in decision.ts, so these hold both stores to the same answers.
+     */
+    describe("decisions (ADR 0040)", () => {
+      const ANN = member({ memberId: "m_ann", userId: "u_ann", label: "ann@codenerd", roomRole: "peer_a" });
+      const BEN = member({ memberId: "m_ben", userId: "u_ben", label: "ben@codenerd", roomRole: "peer_a" });
+      const room = async (over: NonNullable<Parameters<typeof session>[0]> = {}) => {
+        const s = session({ members: [ANN, BEN], ...over });
+        await store.createSession(s);
+        return s.id;
+      };
+      const draft = (over: Partial<DecisionDraft> = {}): DecisionDraft => ({
+        key: "tools", effect: { kind: "surface_proposal", item: { key: "tools", kind: "text", body: "https://example.com" }, base: 0 },
+        rule: "majority", ...over,
+      });
+      const opening = (d: DecisionDraft = draft(), by = ANN): EventBody => ({
+        type: "decision_opened", fromMemberId: by.memberId, fromUserId: by.userId, fromLabel: by.label, payload: d, refId: null,
+      });
+      const ballot = (decision: number, over: Partial<VoteInput> = {}, by = ANN): EventBody => ({
+        type: "decision_vote", fromMemberId: by.memberId, fromUserId: by.userId, fromLabel: by.label, refId: null,
+        payload: { decision, hash: decisionHash(draft()), choice: "approve", via: "action_response", human_approved: true, ...over },
+      });
+      const open = async (id: string, d?: DecisionDraft) => {
+        const out = await store.openDecision(id, opening(d), null);
+        if (out.outcome !== "appended") throw new Error(`the open said ${out.outcome}`);
+        return out;
+      };
+      const count = async (id: string) => (await store.eventsAfter(id, 0)).length;
+
+      it("opens with the seated electorate, the hash, and the default thirty minutes, and reads open", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        expect(event.payload).toEqual({
+          ...draft(), expires_at: event.at + ACTION_REQUEST_TTL_MS, electorate: ["m_ann", "m_ben"], hash: decisionHash(draft()),
+        });
+        expect(await store.decision(id, event.cursor, event.at)).toMatchObject({ state: "open", cursor: event.cursor, ballots: [] });
+        expect(await store.decision(id, event.cursor - 1, event.at), "a cursor that opened nothing").toBeNull();
+      });
+
+      it("gives a topic room's decision seven days, and a rule's expires its own", async () => {
+        const id = await room({ manifest: resolveManifest({ room: "mcp", preset: "topic", public: true }) });
+        const { event } = await open(id);
+        expect((event.payload as { expires_at: number }).expires_at).toBe(event.at + PROPOSAL_TTL_MS);
+        const own = (await open(id, draft({ expires_ms: 10 * 60_000 }))).event;
+        expect((own.payload as { expires_at: number }).expires_at).toBe(own.at + 10 * 60_000);
+      });
+
+      it("refuses an expiry out of bounds and writes nothing", async () => {
+        const id = await room();
+        const before = await count(id);
+        await expect(store.openDecision(id, opening(draft({ expires_ms: 60_000 })), null)).rejects.toThrow(/5 minutes to 7 days/);
+        expect(await count(id)).toBe(before);
+      });
+
+      it("stamps the capacity from via and human_approved, never from the caller", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const bound = await store.castVote(id, ballot(event.cursor), null);
+        expect(bound).toMatchObject({ outcome: "appended", closed: null, event: { type: "decision_vote", payload: { capacity: "binding" } } });
+        const forged = { ...ballot(event.cursor, { human_approved: false }, BEN) };
+        forged.payload = { ...(forged.payload as object), capacity: "binding" };
+        expect(await store.castVote(id, forged, null)).toMatchObject({ outcome: "appended", event: { payload: { capacity: "advisory" } } });
+        expect((await store.decision(id, event.cursor, event.at))!.tally)
+          .toEqual({ approve: 1, reject: 0, abstain: 0, advisory: { approve: 1, reject: 0, abstain: 0 } });
+      });
+
+      it("counts a revision in place of the vote before it, and keeps both in the log", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        await store.castVote(id, ballot(event.cursor, { choice: "reject" }), null);
+        await store.castVote(id, ballot(event.cursor, { choice: "approve" }), null);
+        const view = (await store.decision(id, event.cursor, event.at))!;
+        expect(view.ballots.map((b) => b.vote.choice)).toEqual(["reject", "approve"]);
+        expect(view.tally).toMatchObject({ approve: 1, reject: 0 });
+      });
+
+      it("refuses a vote on another hash as stale, naming the current hash, and writes nothing", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const before = await count(id);
+        expect(await store.castVote(id, ballot(event.cursor, { hash: "0".repeat(64) }), null))
+          .toEqual({ outcome: "stale", hash: decisionHash(draft()) });
+        expect(await count(id)).toBe(before);
+      });
+
+      it("refuses a seat outside the electorate and a cursor that opened no decision", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const late = member({ memberId: "m_late", userId: "u_late", label: "late@codenerd" });
+        expect(await store.castVote(id, ballot(event.cursor, {}, late), null)).toEqual({ outcome: "not_electorate" });
+        expect(await store.castVote(id, ballot(event.cursor + 50), null)).toEqual({ outcome: "unknown" });
+      });
+
+      it("a superseding decision closes the old one failed: superseded, and its votes do not carry", async () => {
+        const id = await room();
+        const first = (await open(id)).event;
+        await store.castVote(id, ballot(first.cursor), null);
+        const changed = draft({ rule: "unanimous", supersedes: first.cursor });
+        const out = await open(id, changed);
+        expect(out.event.cursor).toBeGreaterThan(first.cursor);
+        expect(out.superseded).toMatchObject({
+          type: "decision_closed", cursor: out.event.cursor + 1, fromMemberId: "system",
+          payload: { decision: first.cursor, state: "failed", reason: "superseded", tally: { approve: 1 } },
+        });
+        expect(await store.decision(id, first.cursor, out.event.at)).toMatchObject({ state: "failed", reason: "superseded" });
+        expect((await store.decision(id, out.event.cursor, out.event.at))!.tally.approve).toBe(0);
+        expect(await store.castVote(id, ballot(first.cursor), null)).toEqual({ outcome: "closed", state: "failed" });
+        expect(await store.openDecision(id, opening(draft({ supersedes: first.cursor })), null))
+          .toEqual({ outcome: "not_open", state: "failed" });
+        expect(await store.openDecision(id, opening(draft({ supersedes: first.cursor + 50 })), null))
+          .toEqual({ outcome: "not_open", state: null });
+      });
+
+      it("derives expired from the clock given, closes only once it is due, and lands no vote after the close", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const deadline = (event.payload as { expires_at: number }).expires_at;
+        expect((await store.decision(id, event.cursor, deadline))!.state).toBe("open");
+        expect((await store.decision(id, event.cursor, deadline + 1))!.state).toBe("expired");
+        expect(await store.closeDecision(id, event.cursor, { state: "expired" }, deadline)).toEqual({ outcome: "not_due" });
+        const closed = await store.closeDecision(id, event.cursor, { state: "expired" }, deadline + 1);
+        expect(closed).toMatchObject({ outcome: "appended", event: { type: "decision_closed", payload: { decision: event.cursor, state: "expired" } } });
+        expect(await store.closeDecision(id, event.cursor, { state: "failed", reason: "rejected" }, deadline + 1))
+          .toEqual({ outcome: "closed", state: "expired" });
+        const before = await count(id);
+        expect(await store.castVote(id, ballot(event.cursor), null)).toEqual({ outcome: "closed", state: "expired" });
+        expect(await count(id)).toBe(before);
+      });
+
+      it("leaves a voided vote in the log and out of the tally", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const voted = await store.castVote(id, ballot(event.cursor, {}, BEN), null);
+        if (voted.outcome !== "appended") throw new Error(voted.outcome);
+        await store.appendEvent(id, {
+          type: "decision_voter_removed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null,
+          payload: { decision: event.cursor, member: "m_ben", by: "m_ann", reason: "evicted", voided: [voted.event.cursor] },
+        });
+        const view = (await store.decision(id, event.cursor, event.at))!;
+        expect(view.ballots.map((b) => b.cursor)).toEqual([voted.event.cursor]);
+        expect(view.voided).toEqual([voted.event.cursor]);
+        expect(view.tally.approve).toBe(0);
+      });
+
+      it("replays a keyed open and a keyed vote, and refuses a key reused for other content", async () => {
+        const id = await room();
+        const first = await store.openDecision(id, opening(), "open-0001");
+        if (first.outcome !== "appended") throw new Error(first.outcome);
+        expect(await store.openDecision(id, opening(), "open-0001")).toEqual({ outcome: "replayed", event: first.event });
+        expect(await store.openDecision(id, opening(draft({ key: "other" })), "open-0001")).toEqual({ outcome: "conflict" });
+        const vote = await store.castVote(id, ballot(first.event.cursor), "vote-0001");
+        if (vote.outcome !== "appended") throw new Error(vote.outcome);
+        const before = await count(id);
+        expect(await store.castVote(id, ballot(first.event.cursor), "vote-0001")).toEqual({ outcome: "replayed", event: vote.event });
+        expect(await store.castVote(id, ballot(first.event.cursor, { choice: "reject" }), "vote-0001")).toEqual({ outcome: "conflict" });
+        expect(await count(id)).toBe(before);
       });
     });
 

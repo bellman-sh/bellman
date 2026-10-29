@@ -69,6 +69,12 @@ export const ATTENTION = {
   outside_question: "interrupt",
   outside_notice: "interrupt",
   outside_answer: "interrupt",
+  /** A decision asks the electorate's humans, and its close and a voided voter are outcomes the room must see (ADR 0040). */
+  decision_opened: "interrupt",
+  decision_closed: "interrupt",
+  decision_voter_removed: "interrupt",
+  /** A vote does not: a member who cares is watching the decision, and every vote mid-turn in a swarm is noise. */
+  decision_vote: "ambient",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

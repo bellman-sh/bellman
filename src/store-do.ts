@@ -17,7 +17,14 @@ import type {
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceFacts,
+  DecisionClose, DecisionOpen, VoteWrite,
 } from "./store.js";
+import { electorateOf, voteRefusal } from "./store.js";
+import {
+  applyVote, capacityOfVote, closingEvent, decideClose, decideSupersede, decisionsOf, openedPayload,
+  type ClosedState, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
+} from "./decision.js";
+import { isTopicRoom } from "./manifest.js";
 import { asRowWriter, carriedEvent, placedEvent, placesAmongRows, surfaceFactsOf, surfacePrint, windowUnderCut } from "./store.js";
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
@@ -2472,6 +2479,169 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (broughtForward) await this.driver.reArm();
     }
     return result;
+  }
+
+  /**
+   * A decision write's key (ADR 0040), read in its transaction: the replay or the conflict when `key` was used, else
+   * the key's row to put beside the event once it has its cursor. A retry re-checks nothing, as approveProposal's.
+   */
+  async #decisionKey(
+    txn: DurableObjectTransaction,
+    e: EventBody,
+    key: string | null,
+  ): Promise<
+    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" } }
+    | { done: null; record: (cursor: number) => Record<string, unknown> }
+  > {
+    if (key === null) return { done: null, record: () => ({}) };
+    const storageKey = idempotencyKey(e.fromMemberId, key);
+    const print = fingerprint(e);
+    const found = await txn.get<IdempotencyRecord>(storageKey);
+    if (found) {
+      if (found.print !== print) return { done: { outcome: "conflict" } };
+      const original = await txn.get<SessionEvent>(eventKey(found.cursor));
+      if (!original) throw new Error(`Idempotency record names missing cursor ${found.cursor}`);
+      return { done: { outcome: "replayed", event: original } };
+    }
+    return { done: null, record: (cursor) => ({ [storageKey]: { cursor, print } satisfies IdempotencyRecord }) };
+  }
+
+  /**
+   * The log from `cursor` on: everything a decision opened there can be read from.
+   *
+   * ponytail: one list of the log since the decision opened, at most its seven days, as approveProposal lists the
+   * log since `base`. The upgrade is an index of decision events, which #411's read route is the place for.
+   */
+  async #logFrom(from: DurableObjectTransaction | DurableObjectStorage, cursor: number): Promise<SessionEvent[]> {
+    return [...(await from.list<SessionEvent>({ prefix: "e:", start: eventKey(cursor) })).values()];
+  }
+
+  /**
+   * A decision write's events in one put, with the key's row, the books (#66) folded over them in cursor order as
+   * approveProposal folds them. Answers whether the books brought a due time forward, as `#writeEvent` does.
+   */
+  async #writeDecision(
+    txn: DurableObjectTransaction,
+    s: StoredSession,
+    events: readonly SessionEvent[],
+    record: Record<string, unknown>,
+  ): Promise<boolean> {
+    let kept: StoredSession = s;
+    for (const ev of events) {
+      const books = noteAppend(kept, ev);
+      if (books !== kept) kept = { ...kept, ...books };
+    }
+    await putRows(txn, {
+      ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
+      cursor: events[events.length - 1].cursor,
+      ...record,
+      ...asRows(s, { session: kept === s ? undefined : kept }),
+    });
+    return kept !== s && (bringsForward(s, kept, events[0].at) || tickBroughtForward(s, kept));
+  }
+
+  /** The wake and the re-arm a decision write owes once it has committed, as approveProposal's. */
+  async #afterDecision(events: readonly SessionEvent[], members: readonly Member[], broughtForward: boolean): Promise<void> {
+    this.#wake(events, members);
+    if (broughtForward) await this.driver.reArm();
+  }
+
+  /** `BellmanStore.openDecision`: the snapshot, the hash and the append in one transaction, and a supersession's close after it. */
+  async openDecision(e: EventBody, key: string | null): Promise<DecisionOpen> {
+    let broughtForward = false as boolean;
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<DecisionOpen>(async (txn) => {
+      // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+      const k = await this.#decisionKey(txn, e, key);
+      if (k.done !== null) return k.done;
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+      const draft = e.payload as DecisionDraft;
+      const at = Date.now();
+      const old = draft.supersedes === undefined
+        ? undefined
+        : decisionsOf(await this.#logFrom(txn, draft.supersedes), at).get(draft.supersedes);
+      if (draft.supersedes !== undefined) {
+        const d = decideSupersede(old);
+        if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
+      }
+      const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.members));
+      const event: SessionEvent = { ...e, payload, cursor: await this.nextCursor(txn), at };
+      const superseded: SessionEvent | null = old === undefined
+        ? null
+        : { ...closingEvent(old, { state: "failed", reason: "superseded" }), cursor: event.cursor + 1, at };
+      broughtForward = await this.#writeDecision(txn, s, superseded === null ? [event] : [event, superseded], k.record(event.cursor));
+      return { outcome: "appended", event, superseded };
+    });
+    if (result.outcome === "appended") {
+      await this.#afterDecision(result.superseded === null ? [result.event] : [result.event, result.superseded], members, broughtForward);
+    }
+    return result;
+  }
+
+  /** `BellmanStore.castVote`: `applyVote` decides from the decision read in the transaction that writes the vote. */
+  async castVote(e: EventBody, key: string | null): Promise<VoteWrite> {
+    let broughtForward = false as boolean;
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<VoteWrite>(async (txn) => {
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+      const k = await this.#decisionKey(txn, e, key);
+      if (k.done !== null) return k.done;
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+      const input = e.payload as VoteInput;
+      const at = Date.now();
+      const log = await this.#logFrom(txn, input.decision);
+      const view = decisionsOf(log, at).get(input.decision);
+      if (view === undefined) return { outcome: "unknown" };
+      const vote: DecisionVote = { ...input, capacity: capacityOfVote(input) };
+      const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote);
+      if (d.kind !== "record") return voteRefusal(d);
+      const event: SessionEvent = { ...e, payload: vote, cursor: await this.nextCursor(txn), at };
+      // The close carries the tally with this vote counted in it.
+      const closed: SessionEvent | null = d.close === null
+        ? null
+        : { ...closingEvent(decisionsOf([...log, event], at).get(view.cursor)!, d.close), cursor: event.cursor + 1, at };
+      broughtForward = await this.#writeDecision(txn, s, closed === null ? [event] : [event, closed], k.record(event.cursor));
+      return { outcome: "appended", event, closed };
+    });
+    if (result.outcome === "appended") {
+      await this.#afterDecision(result.closed === null ? [result.event] : [result.event, result.closed], members, broughtForward);
+    }
+    return result;
+  }
+
+  /** `BellmanStore.closeDecision`: the server's close, refused once a closing event exists or before an expiry is due. */
+  async closeDecision(decision: number, close: { state: ClosedState; reason?: FailReason }, now: number): Promise<DecisionClose> {
+    let broughtForward = false as boolean;
+    let members: readonly Member[] = [];
+    const result = await this.ctx.storage.transaction<DecisionClose>(async (txn) => {
+      broughtForward = false;
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      members = s.members;
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+      const view = decisionsOf(await this.#logFrom(txn, decision), now).get(decision);
+      if (view === undefined) return { outcome: "unknown" };
+      const d = decideClose(view, close.state, now);
+      if (d.kind === "closed") return { outcome: "closed", state: d.state };
+      if (d.kind === "not_due") return { outcome: "not_due" };
+      const event: SessionEvent = { ...closingEvent(view, close), cursor: await this.nextCursor(txn), at: Date.now() };
+      broughtForward = await this.#writeDecision(txn, s, [event], {});
+      return { outcome: "appended", event };
+    });
+    if (result.outcome === "appended") await this.#afterDecision([result.event], members, broughtForward);
+    return result;
+  }
+
+  /** `BellmanStore.decision`: read without a transaction, as `idempotencyRecord` is, because it writes nothing. */
+  async decision(cursor: number, now: number): Promise<DecisionView | null> {
+    return decisionsOf(await this.#logFrom(this.ctx.storage, cursor), now).get(cursor) ?? null;
   }
 
   /**
@@ -6328,6 +6498,27 @@ export class DurableObjectStore implements BellmanStore {
 
   async approveProposal(sessionId: string, e: EventBody, key: string | null, approval: ProposalApproval): Promise<ApprovalWrite> {
     return this.session(sessionId).approveProposal(e, key, approval);
+  }
+
+  async openDecision(sessionId: string, e: EventBody, key: string | null): Promise<DecisionOpen> {
+    return this.session(sessionId).openDecision(e, key);
+  }
+
+  async castVote(sessionId: string, e: EventBody, key: string | null): Promise<VoteWrite> {
+    return this.session(sessionId).castVote(e, key);
+  }
+
+  async closeDecision(
+    sessionId: string,
+    decision: number,
+    close: { state: ClosedState; reason?: FailReason },
+    now: number,
+  ): Promise<DecisionClose> {
+    return this.session(sessionId).closeDecision(decision, close, now);
+  }
+
+  async decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null> {
+    return this.session(sessionId).decision(cursor, now);
   }
 
   async appendSurface(

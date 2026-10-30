@@ -38,13 +38,17 @@ and it does: `deps.caller` accepts the panel cookie or a bearer. Like the single
   connector may name two cards created earlier in the same batch, which a paste of a diagram does. A card without
   a placement takes a slot clear of the cards before it. The item cap counts the new keys of the whole batch, and
   so does the frame cap.
-- **All or nothing.** The first refusal refuses the batch, writes nothing and spends no send. It names the entry:
-  `items[7]: surface text "plan": …`, the single write's own words after the prefix.
+- **All or nothing.** The first refusal refuses the batch and writes nothing. It names the entry:
+  `items[7]: surface text "plan": …`, the single write's own words after the prefix. A refusal from the batch's
+  checks spends no send. One from placement among the frames is decided in the store's transaction, after the
+  count, and spends the send, as a single write's does (amended at review).
 - **Frames.** Placement among frames, the overlap refusal and the locked carry all run per entry inside the
   transaction, against the rows as the earlier entries left them. A carried card's event follows its frame's
-  event, as it does now.
+  event, as it does now. Every position a batch writes is final: a locked frame's move carries only the cards no
+  entry writes, so a canvas may send a marquee move's positions in any order (amended at review).
 - **Idempotency.** One `idempotency_key` names the whole batch. Its fingerprint covers every entry in order. A replay
-  returns the original result and appends nothing.
+  returns the original result and appends nothing, however the room has changed since: a key with a record skips
+  the room's checks and the owner check.
 - **Result.** `{ room_members, cursor, count, replayed? }`. `cursor` is the last event's cursor, which is the room's
   surface cursor after the batch, carried cards included. `count` is the number of entries. One audit row,
   `sent_surface_batch`, carries `{ count, keys }`, with keys capped at 100 because entries are.

@@ -1194,6 +1194,36 @@ describe("a batch through bellman_send (surface widget and batch spec, D2)", () 
     expect(again.data).toMatchObject({ replayed: true, cursor: first.data.cursor });
   });
 
+  // A key with a record is the retry of a batch that landed, answered from its key however the room has changed:
+  // the room's checks are not asked again, as bellman_send's are not for a proposal's or an answer's retry.
+  it("replays a keyed batch the room has changed under, and one whose own removal took its connector's end", async () => {
+    const p = await pairUp(h);
+    await write(p, { items: items(3) });
+    const own = { items: [{ key: "c", kind: "connector", ends: { from: "b0", to: "b1" } }, { key: "b0", remove: true }] };
+    const first = await write(p, own, { idempotency_key: "batch-0002" });
+    expect(first.isError, first.text).toBe(false);
+    const again = await write(p, own, { idempotency_key: "batch-0002" });
+    expect(again.isError, again.text).toBe(false);
+    expect(again.data).toMatchObject({ replayed: true, cursor: first.data.cursor });
+
+    const changed = { items: [{ key: "d", kind: "connector", ends: { from: "b1", to: "b2" } }] };
+    const landed = await write(p, changed, { idempotency_key: "batch-0003" });
+    await write(p, { key: "b2", remove: true });
+    const retried = await write(p, changed, { idempotency_key: "batch-0003" });
+    expect(retried.isError, retried.text).toBe(false);
+    expect(retried.data).toMatchObject({ replayed: true, cursor: landed.data.cursor });
+  });
+
+  it("leaves a card where the batch puts it when the batch also moves the locked frame holding it", async () => {
+    const p = await pairUp(h);
+    const frame = (x: number) => ({ key: "f", kind: "frame", title: "F", placement: { x, y: 0, w: 1000, h: 1000 }, locked: true });
+    await write(p, frame(0));
+    await write(p, { key: "a", kind: "text", body: "x", placement: { x: 40, y: 40 } });
+    const out = await write(p, { items: [{ key: "a", kind: "text", body: "x", placement: { x: 140, y: 40 } }, frame(100)] });
+    expect(out.isError, out.text).toBe(false);
+    expect((await rows(p)).find((r) => r.key === "a")!.placement).toEqual({ x: 140, y: 40 });
+  });
+
   it("files one audit row for the batch", async () => {
     const p = await pairUp(h);
     await write(p, { items: items(3) });

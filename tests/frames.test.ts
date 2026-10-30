@@ -246,12 +246,20 @@ describe("placeSurfaceBatch (surface widget and batch spec, D1)", () => {
     expect(out).toMatchObject({ ok: false, index: 2, kind: "conflict" });
   });
 
-  it("carries a card the batch wrote when the batch then moves its locked frame, with the card's writer the author", () => {
-    const rows = [{ ...box("f", { x: 0, y: 0, w: 1000, h: 1000 }), cursor: 1, at: 0, byMemberId: "m_ada", byLabel: "ada" } as SurfaceRow];
-    const entries = ok(placeSurfaceBatch(rows, [
-      { key: "a", item: card("a", { placement: { x: 40, y: 40 } }) }, { key: "f", item: box("f", { x: 2000, y: 0, w: 1000, h: 1000 }) },
-    ], author, 2, 0));
-    expect(entries[1].placed.carried.map((w) => w.item!.placement)).toEqual([{ x: 2040, y: 40 }]);
-    expect(entries[1].moved).toMatchObject([{ key: "a", byMemberId: "m_mover", cursor: 2 }]);
+  // Every position a batch writes is final, so a canvas may send a marquee move's positions in any order: a locked
+  // frame's move carries only the cards the batch does not write.
+  it("carries none of the cards the batch writes when it moves their locked frame, in either order", () => {
+    const row = (item: SurfaceItem, cursor: number) => ({ ...item, cursor, at: 0, byMemberId: "m_ada", byLabel: "ada" } as SurfaceRow);
+    const rows = [
+      row(box("f", { x: 0, y: 0, w: 1000, h: 1000 }), 1), row(card("a", { placement: { x: 40, y: 40 } }), 2),
+      row(card("b", { placement: { x: 400, y: 40 } }), 3),
+    ];
+    const a = { key: "a", item: card("a", { placement: { x: 140, y: 40 } }) };
+    const f = { key: "f", item: box("f", { x: 100, y: 0, w: 1000, h: 1000 }) };
+    for (const batch of [[a, f], [f, a]]) {
+      const frame = ok(placeSurfaceBatch(rows, batch, author, 4, 0))[batch.indexOf(f)];
+      expect(frame.placed.carried.map((w) => [w.key, w.item!.placement])).toEqual([["b", { x: 500, y: 40 }]]);
+      expect(frame.moved).toMatchObject([{ key: "b", byMemberId: "m_ada" }]);
+    }
   });
 });

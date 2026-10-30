@@ -3292,14 +3292,17 @@ export function describeStoreContract(
           expect(await store.idempotencyRecord(id, "m_creator", "kb")).toBeNull();
         });
 
-        it("carries a card written earlier in the batch, the carried event after the frame's, the row the author's", async () => {
+        // Every position a batch writes is final: the frame's move carries only the card no entry writes.
+        it("carries the frame's cards the batch does not write, each event after the frame's, each row keeping its writer", async () => {
           const id = await room();
-          await store.appendSurface(id, { type: "surface", ...author, fromMemberId: "m_ada", fromLabel: "ada", payload: {}, refId: null },
-            { surface: w(frameItem("f", { x: 0, y: 0, w: 1000, h: 1000 })) }, null);
+          const ada = { type: "surface" as const, ...author, fromMemberId: "m_ada", fromLabel: "ada", payload: {}, refId: null };
+          await store.appendSurface(id, ada, { surface: w(frameItem("f", { x: 0, y: 0, w: 1000, h: 1000 })) }, null);
+          await store.appendSurface(id, ada, { surface: w(item("b", { placement: { x: 400, y: 40 } })) }, null);
           const out = appended(await store.appendSurfaces(id, author, [w(item("a", { placement: { x: 40, y: 40 } })), w(frameItem("f", { x: 2000, y: 0, w: 1000, h: 1000 }))], null));
-          expect(out.events.map((e) => (e.payload as { key: string }).key)).toEqual(["a", "f", "a"]);
-          const a = (await store.surfaceOf(id)).find((r) => r.key === "a")!;
-          expect(a).toMatchObject({ placement: { x: 2040, y: 40 }, byMemberId: "m_creator", cursor: out.events[2].cursor });
+          expect(out.events.map((e) => (e.payload as { key: string }).key)).toEqual(["a", "f", "b"]);
+          const rows = await store.surfaceOf(id);
+          expect(rows.find((r) => r.key === "a")).toMatchObject({ placement: { x: 40, y: 40 }, byMemberId: "m_creator" });
+          expect(rows.find((r) => r.key === "b")).toMatchObject({ placement: { x: 2400, y: 40 }, byMemberId: "m_ada", cursor: out.events[2].cursor });
         });
 
         it("replays a keyed batch with its last event however the room changed since, and answers conflict for other writes", async () => {

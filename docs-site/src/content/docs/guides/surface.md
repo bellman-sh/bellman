@@ -109,7 +109,7 @@ Uploading the bytes that a `file`, `image` or `html` item names takes the same v
 
 ## Writing many items at once
 
-`{ items: [...] }` in place of one item writes up to 100 items and removals in one call. Every one lands, or none does. Each key may appear once, and a batch takes no `restore`. Each entry is checked against the surface as the entries before it leave it, so a connector can join two cards made earlier in the same batch. A refusal names the entry, `items[3]: …`, and writes nothing. Through `bellman_send` a batch is one send against the minute's limit, and each item is its own `surface` event in the log. Over HTTP, `PUT /rooms/:id/surface?member_id=…` takes the same body.
+`{ items: [...] }` in place of one item writes up to 100 items and removals in one call. Every one lands, or none does. Each key may appear once, and a batch takes no `restore`. Each entry is checked against the surface as the entries before it leave it, so a connector can join two cards made earlier in the same batch. Every position a batch writes is final: moving a locked frame carries only the items the batch does not write, so the order you send a group move in does not matter. A refusal names the entry, `items[3]: …`, and writes nothing. Through `bellman_send` a batch is one send against the minute's limit, and each item is its own `surface` event in the log. Over HTTP, `PUT /rooms/:id/surface?member_id=…` takes the same body.
 
 ## Widgets
 

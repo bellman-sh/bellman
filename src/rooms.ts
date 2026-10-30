@@ -1161,13 +1161,15 @@ function checkAgainstFacts(write: SurfaceWrite, view: SurfaceView): RoomResult<n
  * each blob settled as a single write's is, then every entry checked in order against the room as the entries before
  * it leave it, so a connector may name a card made earlier in the batch and the caps count the batch's new keys. The
  * room is read once, for every key the batch names and every end a connector names. A refusal names the entry's index.
- * `stored` is the room's rows for those keys, as the read found them.
+ * `stored` is the room's rows for those keys, as the read found them. With `againstRoom` false (a keyed retry the store
+ * will replay) it stops after the blobs: the room is not read, and `stored` is empty.
  */
 export async function resolveSurfaceBatch(
   store: BellmanStore,
   blobs: BlobStore,
   sessionId: string,
   payload: unknown,
+  againstRoom = true,
 ): Promise<RoomResult<{ writes: SurfaceWrite[]; stored: Map<string, SurfaceRow> }>> {
   const normalized = normalizeSurfaceBatch(payload);
   if (!normalized.ok) return refuse("invalid", normalized.reason);
@@ -1181,6 +1183,7 @@ export async function resolveSurfaceBatch(
     if (!settled.ok) return refuse(settled.code, `items[${i}]: ${settled.reason}`);
     writes.push(settled.value);
   }
+  if (!againstRoom) return succeed({ writes, stored: new Map() });
 
   const named = writes.flatMap((w) => [w.key, ...(w.item?.kind === "connector" && w.item.ends !== null ? [w.item.ends.from, w.item.ends.to] : [])]);
   const facts = await store.surfaceFacts(sessionId, [...new Set(named)]);
@@ -1462,6 +1465,11 @@ export async function writeSurface(
  * `writeSurface`'s order: the gate, the batch's checks (`resolveSurfaceBatch`), each widget's owner, the minute's
  * count once for the whole batch when `countSend` (bellman_send's), the append (`appendSurfaces`), one audit row. A
  * refusal anywhere writes nothing and names the entry. The result's cursor is the batch's last event's.
+ *
+ * A key with a record is the retry of a batch that landed, and the store replays it however the room has changed
+ * since, so neither the room's checks nor the owners are asked again: the batch's own removal could refuse its
+ * connector on every retry. The shape and the blobs are checked whatever the key, since the store's print is of the
+ * writes they make, and so is the minute's count (ADR 0022, R6), as `bellman_send` does for a proposal's retry.
  */
 export async function writeSurfaceBatch(
   store: BellmanStore,
@@ -1477,10 +1485,11 @@ export async function writeSurfaceBatch(
   if (!gate.ok) return gate;
   const session = gate.value;
 
-  const resolved = await resolveSurfaceBatch(store, blobs, sessionId, payload);
+  const known = idempotencyKey ? await store.idempotencyRecord(sessionId, memberId, idempotencyKey) : null;
+  const resolved = await resolveSurfaceBatch(store, blobs, sessionId, payload, known === null);
   if (!resolved.ok) return resolved;
   const { writes, stored } = resolved.value;
-  for (const [i, write] of writes.entries()) {
+  for (const [i, write] of known === null ? writes.entries() : []) {
     const unowned = widgetOwnerRefusal(session, actor, write, stored.get(write.key));
     if (unowned !== null) return refuse("forbidden", `items[${i}]: ${unowned}`);
   }

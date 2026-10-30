@@ -1000,8 +1000,9 @@ export const surfaceBatchPrint = (author: SurfaceAuthor, writes: readonly Surfac
  * writes: each write placed among the rows as the writes before it leave them, by `placeSurfaceWrite` when it is
  * placed among rows (`placesAmongRows`) and as written otherwise. A refusal names the entry's index. `moved` is the
  * row of each card an entry's locked move carries, as the entries before it left it, which is the row whose writer
- * and approver the carried row keeps (L2). The rows are applied with `applySurfaceWrite` at provisional cursors from
- * `cursor`, the room's next, and at `at`.
+ * and approver the carried row keeps (L2). Every position a batch writes is final: a locked frame's move carries only
+ * the cards no entry writes, so a marquee move sent in any order moves no card twice. The rows are applied with
+ * `applySurfaceWrite` at provisional cursors from `cursor`, the room's next, and at `at`.
  */
 export function placeSurfaceBatch(
   rows: readonly SurfaceRow[],
@@ -1019,10 +1020,12 @@ export function placeSurfaceBatch(
     else if (verdict !== null) room.set(write.key, verdict);
   };
   const entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] = [];
+  const written = new Set(writes.map((w) => w.key));
   let next = cursor;
   for (const [index, write] of writes.entries()) {
-    const placed: Placed = placesAmongRows(write) ? placeSurfaceWrite([...room.values()], write) : { ok: true, write, carried: [] };
-    if (!placed.ok) return { ok: false, index, kind: placed.kind, reason: placed.reason };
+    const found: Placed = placesAmongRows(write) ? placeSurfaceWrite([...room.values()], write) : { ok: true, write, carried: [] };
+    if (!found.ok) return { ok: false, index, kind: found.kind, reason: found.reason };
+    const placed = { ...found, carried: found.carried.filter((c) => !written.has(c.key)) };
     const moved = placed.carried.map((c) => room.get(c.key)!);
     const e = placedEvent(batchEvent(author, write), write, placed);
     apply({ ...e, cursor: next++, at }, placed.write, undefined);

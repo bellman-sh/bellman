@@ -16,5 +16,10 @@ Colony Nerve draws a room's surface as its canvas (colony-nerve `docs/plans/2026
 
 - A batch of 100 writes adds 100 events to every member's `bellman_sync`, more if it moves a locked frame, as 100 single writes would.
 - A peer can move a widget card it does not own, or make the card its own. It cannot make the card name another account's seat. What Nerve runs live also checks who wrote the item and which Mac made it, so taking over a card does not run a widget on the new owner's Mac.
-- A keyed batch is recorded against its last event's cursor, so a replay answers that cursor and not the first.
+- A keyed batch is recorded against its last event's cursor, so a replay answers that cursor and not the first. A
+  retry with a recorded key is replayed without the room's checks, so a batch whose own removal left a connector's
+  end gone still replays.
+- Every position a batch writes is final: a locked frame's move carries only the cards no entry writes.
+- A batch refused for placement among the frames has spent its send, as a single write refused there has. The
+  refusal is decided in the store's transaction, after the count.
 - A rollback is a revert while no room holds a widget. After that, the old code reads a widget row as an unknown kind, and the MCP App draws it by name.

@@ -1790,6 +1790,39 @@ export function describeStoreContract(
         .toEqual(["qs_live_1", "qs_live_2"]);
     });
 
+    // The operator's index of every room (#471): one row a room, written with the create, kept through a close.
+    it("lists every room newest first, each with what it was created as, closed rooms included", async () => {
+      await store.createSession(session({ id: "qs_first", createdBy: "u_jesse" }));
+      vi.advanceTimersByTime(1_000);
+      await store.createSession(session({
+        id: "qs_hosted", createdBy: "u_peer", orgId: null,
+        manifest: { ...hostedManifest(), public: true },
+        members: [member({ memberId: "m_peer", userId: "u_peer", roomRole: "lead", orgId: null })],
+      }));
+      vi.advanceTimersByTime(1_000);
+      await store.createSession(session({ id: "qs_last", createdBy: "u_jesse" }));
+      await store.closeSession("qs_first");
+
+      const t = Date.now();
+      expect(await store.listRoomsPage(10)).toEqual([
+        { sessionId: "qs_last", createdAt: t, createdBy: "u_jesse", orgId: "org_codenerd", preset: "pair", mode: "pair", public: false, hosted: false },
+        { sessionId: "qs_hosted", createdAt: t - 1_000, createdBy: "u_peer", orgId: null, preset: null, mode: "swarm", public: true, hosted: true },
+        { sessionId: "qs_first", createdAt: t - 2_000, createdBy: "u_jesse", orgId: "org_codenerd", preset: "pair", mode: "pair", public: false, hosted: false },
+      ]);
+    });
+
+    it("pages the room index from the last row of the page before, same-millisecond rooms included", async () => {
+      for (const id of ["qs_a", "qs_b", "qs_c"]) await store.createSession(session({ id }));
+      vi.advanceTimersByTime(1);
+      await store.createSession(session({ id: "qs_d" }));
+
+      const first = await store.listRoomsPage(2);
+      expect(first.map((r) => r.sessionId)).toEqual(["qs_d", "qs_c"]);
+      const second = await store.listRoomsPage(2, first.at(-1));
+      expect(second.map((r) => r.sessionId)).toEqual(["qs_b", "qs_a"]);
+      expect(await store.listRoomsPage(2, second.at(-1))).toEqual([]);
+    });
+
     it("forgets a closed room's row, so the walk pays for it once", async () => {
       (await store.createSession(session({ id: "qs_gone", createdBy: "u_jesse" })));
       await store.closeSession("qs_gone");
@@ -7423,6 +7456,7 @@ export function describeStoreContract(
         await store.closeSession(s.id);
         await sweepRoom(s.id);
         expect(await store.getSession(s.id), "inside the window").toBeDefined();
+        expect((await store.listRoomsPage(10)).map((r) => r.sessionId), "a close keeps the index row").toContain(s.id);
         expect(await blobs.list(s.id), "and its bytes with it").toHaveLength(1);
 
         vi.advanceTimersByTime(60_001);
@@ -7430,6 +7464,7 @@ export function describeStoreContract(
         expect(await store.getSession(s.id)).toBeUndefined();
         expect(await store.sessionsCreatedBy("u_jesse", 10)).not.toContain(s.id);
         expect(await store.sessionsJoinedBy("u_jesse", 10)).not.toContain(s.id);
+        expect((await store.listRoomsPage(10)).map((r) => r.sessionId), "the operator's index (#471)").not.toContain(s.id);
         expect(await blobs.list(s.id)).toEqual([]);
         const audit = await store.auditForOrg("org_codenerd", 50);
         expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });

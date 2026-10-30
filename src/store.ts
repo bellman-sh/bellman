@@ -1,7 +1,7 @@
 import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
-  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, PresetName, SessionMode,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
@@ -214,6 +214,33 @@ export function creatorOf(m: Member | undefined): RoomCreator {
   if (!m) throw new Error("a room is created with its creator seated, and this one names no member");
   return { memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt };
 }
+
+/**
+ * A row of the operator's index of every room (#471), fixed at the room's creation, so the list reads
+ * without visiting a room. A close keeps it, and the purge (#65) removes it.
+ */
+export interface RoomIndexRow {
+  sessionId: string;
+  /** The creator's `joinedAt`: a room is created with its creator seated (ADR 0019). */
+  createdAt: number;
+  createdBy: string;
+  orgId: string | null;
+  preset: PresetName | null;
+  mode: SessionMode;
+  public: boolean;
+  hosted: boolean;
+}
+
+export const roomIndexRow = (
+  s: Pick<Session, "id" | "createdBy" | "orgId" | "manifest"> & { creator: Pick<RoomCreator, "joinedAt"> },
+): RoomIndexRow => ({
+  sessionId: s.id, createdAt: s.creator.joinedAt, createdBy: s.createdBy, orgId: s.orgId,
+  preset: s.manifest.preset, mode: s.manifest.mode, public: s.manifest.public === true, hosted: s.manifest.host !== null,
+});
+
+/** A row's place in both stores' order: the time zero-padded, then the id, so newest first is this, descending. */
+export const roomIndexKey = (r: Pick<RoomIndexRow, "createdAt" | "sessionId">): string =>
+  `${String(r.createdAt).padStart(16, "0")}:${r.sessionId}`;
 
 /**
  * What `departedMembers` answers, from every member a room has seated (ADR 0019, D7): those
@@ -1768,6 +1795,22 @@ export interface BellmanStore {
    * before then is not listed, and the admin's read of it by id works all the same.
    */
   sessionsForOrg(orgId: string, limit: number): Promise<string[]>;
+  /**
+   * Every room, newest first (#471): the operator's list, read without walking every account. At most
+   * `limit` rows, past `startAfter` when given, which is the last row of the page before; a short page
+   * is the end. Open, closed and frozen rooms alike, until the purge (#65) removes a room's row.
+   *
+   * The Durable Objects store wrote no row before its deploy; `backfillRoomIndex` there writes one
+   * for every room the account indexes can still name. A failed write is logged rather than thrown, as
+   * the other indexes' are (`DurableObjectStore.writeIndex`), so a room can be missing from the list
+   * and present for a read by id.
+   */
+  listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]>;
+  /**
+   * One window of the walk that writes `listRoomsPage`'s missing rows (#471): `next` goes back in as `after`, and
+   * null is the end. Idempotent. MemoryStore indexes every room at its create, so it has nothing to write.
+   */
+  backfillRoomIndex(limit: number, after?: string): Promise<{ indexed: number; next: string | null }>;
 
   /**
    * Append an event. Null means the session is frozen, for the same reason.
@@ -2461,6 +2504,8 @@ export class MemoryStore implements BellmanStore {
   private byMember = new Map<string, Set<string>>();
   /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
   private byOrg = new Map<string, Set<string>>();
+  /** The operator's index of every room (#471), by id: written at the create, cleared by the purge. */
+  private roomIndex = new Map<string, RoomIndexRow>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
@@ -2555,6 +2600,21 @@ export class MemoryStore implements BellmanStore {
     // are indexed here. addMember indexes everyone who joins afterwards.
     for (const m of stored.members) this.indexMember(m.userId, stored.id);
     for (const orgId of stored.orgs) this.indexOrg(orgId, stored.id);
+    this.roomIndex.set(stored.id, roomIndexRow(stored));
+  }
+
+  async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
+    const before = startAfter && roomIndexKey(startAfter);
+    return [...this.roomIndex.values()]
+      .map((r) => ({ key: roomIndexKey(r), r }))
+      .filter(({ key }) => before === undefined || key < before)
+      .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0))
+      .slice(0, limit)
+      .map(({ r }) => ({ ...r }));
+  }
+
+  async backfillRoomIndex(): Promise<{ indexed: number; next: string | null }> {
+    return { indexed: 0, next: null };
   }
 
   /**
@@ -4981,6 +5041,7 @@ export class MemoryStore implements BellmanStore {
     this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
+    this.roomIndex.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);

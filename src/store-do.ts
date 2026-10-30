@@ -17,7 +17,7 @@ import type {
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
-  DecisionClose, DecisionOpen, VoteWrite,
+  DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow,
 } from "./store.js";
 import { electorateOf, voteRefusal } from "./store.js";
 import {
@@ -29,8 +29,8 @@ import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, 
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
-  stampSeen,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomIndexKey, roomIndexRow,
+  seatInOrder, seatVictims, stampSeen,
 } from "./store.js";
 import {
   BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
@@ -142,6 +142,13 @@ function asRows(read: StoredSession, rows: Record<string, unknown>): Record<stri
  * map nobody validated, and grant-index.ts makes the same argument at more length.
  */
 const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)}:`;
+/** The operator's index of every room (#471); `RegistryDO.listRoomsPage` says what the rows hold. */
+const ROOM_INDEX_PREFIX = "rm:";
+const roomIdKey = (sessionId: string): string => `ri:${sessionId}`;
+const roomRows = (room: RoomIndexRow): Record<string, unknown> => {
+  const key = `${ROOM_INDEX_PREFIX}${roomIndexKey(room)}`;
+  return { [key]: room, [roomIdKey(room.sessionId)]: key };
+};
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -3843,6 +3850,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await new R2BlobStore(this.env.BLOBS).deleteAll(s.id);
     const registry = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
     await registry.dropCreatedIndex(s.createdBy, s.id);
+    await registry.dropRoomIndex(s.id);
     // The close gave the slot back already (I7); a purge makes sure, and the delete is idempotent.
     if (s.manifest.host !== null) await registry.releaseHostedRoom(s.createdBy, s.id);
     // Everyone who ever sat in the room, from the person index rows, since those who left
@@ -5248,8 +5256,62 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * either row can land without the other, and a room can be listed for its
    * creator and still be out of a lapse's reach.
    */
-  async indexSession(userId: string, sessionId: string): Promise<void> {
-    await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
+  async indexSession(userId: string, sessionId: string, room?: RoomIndexRow): Promise<void> {
+    // `room` is optional so a caller a deploy ahead of this object still writes the `us:` row (#361's lag);
+    // the backfill writes the room's row the call left out.
+    await this.ctx.storage.put<unknown>({ [`us:${userId}:${sessionId}`]: Date.now(), ...(room ? roomRows(room) : {}) });
+  }
+
+  /**
+   * `rm:<roomIndexKey>` — every room, for the operator (#471), its `RoomIndexRow`: newest first is reverse key order.
+   * `ri:<sessionId>` holds that row's key, so the purge finds it by id and the backfill can tell an indexed room.
+   * Written with the creator's `us:` row (`indexSession`), or by the backfill (`indexRoom`). A close keeps both.
+   */
+  async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
+    const rows = await this.ctx.storage.list<RoomIndexRow>({
+      prefix: ROOM_INDEX_PREFIX, reverse: true, limit,
+      ...(startAfter === undefined ? {} : { end: `${ROOM_INDEX_PREFIX}${roomIndexKey(startAfter)}` }),
+    });
+    return [...rows.values()];
+  }
+
+  async indexRoom(room: RoomIndexRow): Promise<void> {
+    await this.ctx.storage.put<unknown>(roomRows(room));
+  }
+
+  /** The purge's (#65), and only the purge's. Idempotent. */
+  async dropRoomIndex(sessionId: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const key = await txn.get<string>(roomIdKey(sessionId));
+      if (key !== undefined) await txn.delete([key, roomIdKey(sessionId)]);
+    });
+  }
+
+  /**
+   * One window of the backfill's walk (#471): of at most `limit` rows of the account indexes (`um:`, `uo:`, `us:`,
+   * which sort together and in that order), the rooms they name that have no `ri:` row, and the key to go on from,
+   * null at the end. Every index row's key ends in its room's id, which holds no colon; a sign-in record and
+   * `us:count` are not numbers, and are passed over.
+   */
+  async unindexedRooms(limit: number, after?: string): Promise<{ sessionIds: string[]; next: string | null }> {
+    const page = await this.ctx.storage.list<unknown>({
+      ...(after === undefined ? { start: "um:" } : { startAfter: after }), end: "ut", limit,
+    });
+    const named = new Set<string>();
+    for (const [key, value] of page) {
+      if (/^u[mos]:/.test(key) && typeof value === "number" && key.indexOf(":", 3) !== -1) {
+        named.add(key.slice(key.lastIndexOf(":") + 1));
+      }
+    }
+    const ids = [...named];
+    const sessionIds: string[] = [];
+    // A get takes at most 128 keys.
+    for (let i = 0; i < ids.length; i += 128) {
+      const batch = ids.slice(i, i + 128);
+      const held = await this.ctx.storage.get(batch.map(roomIdKey));
+      sessionIds.push(...batch.filter((id) => !held.has(roomIdKey(id))));
+    }
+    return { sessionIds, next: page.size < limit ? null : [...page.keys()].at(-1)! };
   }
 
   /**
@@ -6207,8 +6269,9 @@ export class DurableObjectStore implements BellmanStore {
     //
     // `us:` is how a lapsed plan finds this person's rooms, which bare create counts
     // cannot say. A missed entry means a room that is not frozen.
+    // The operator's index of every room (#471) is written in the same put.
     await this.writeIndex("us", s.createdBy, s.id, () =>
-      this.registry.indexSession(s.createdBy, s.id));
+      this.registry.indexSession(s.createdBy, s.id, roomIndexRow({ ...s, creator: s.members[0] })));
     // The members a session is created with are seated directly — bellman_start hands
     // over the creator in `members` and never calls addMember — so the joined index is
     // written here as well as in addMember. A missed entry leaves the room out of that
@@ -6536,6 +6599,31 @@ export class DurableObjectStore implements BellmanStore {
 
   async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
     return this.registry.sessionsForOrg(orgId, limit);
+  }
+
+  async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
+    return this.registry.listRoomsPage(limit, startAfter);
+  }
+
+  /**
+   * One window of the room index's backfill (#471): reads up to `limit` account index rows past `after`, and writes
+   * a row for each room they name that has a record and no row. Idempotent, so a rerun writes nothing it has
+   * written. Three subrequests a room at most (the walk, the record, the write), so a limit of 300 stays inside a
+   * request's 1,000. `next` goes back in as `after`; null is the end.
+   *
+   * ponytail: a purge landing between the record's read and the write leaves a row naming no room; the list's
+   * reader skips a row whose record is gone, and a sweep of such rows waits until one is seen.
+   */
+  async backfillRoomIndex(limit: number, after?: string): Promise<{ indexed: number; next: string | null }> {
+    const { sessionIds, next } = await this.registry.unindexedRooms(limit, after);
+    let indexed = 0;
+    for (const id of sessionIds) {
+      const s = await this.getSession(id);
+      if (!s) continue;
+      await this.registry.indexRoom(roomIndexRow(s));
+      indexed++;
+    }
+    return { indexed, next };
   }
 
   async appendEvent(

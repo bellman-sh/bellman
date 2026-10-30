@@ -49,7 +49,7 @@ const rowCount = (id: string) =>
   runInDurableObject(stubOf(id), async (_i: SessionDO, ctx) => (await ctx.storage.list()).size);
 /** The handler, run when asked. The runtime's own firing is the first case's. */
 const runAlarm = (id: string) => runInDurableObject(stubOf(id), (instance: SessionDO) => instance.alarm());
-/** Every key the registry holds that names this room: the creator and joined indexes. */
+/** Every key the registry holds that names this room: the room, creator, joined and org indexes. */
 const registryRows = (id: string) =>
   runInDurableObject(registry(), async (_i: RegistryDO, ctx) =>
     [...(await ctx.storage.list()).keys()].filter((key) => key.endsWith(`:${id}`)));
@@ -74,9 +74,10 @@ it("purges a closed room when its window has run out, and a second alarm finds n
   const { store, closedAt } = await closedRoom("qs_window");
   await putObject("qs_window", "b_one");
   expect(await armedAlarm("qs_window"), "the purge is armed from the close").toBe(closedAt + WINDOW);
-  expect(await registryRows("qs_window"), "the registry lists it before: joined, org's, created").toEqual(
-    ["um:u_jesse:qs_window", "uo:org_codenerd:qs_window", "us:u_jesse:qs_window"],
-  );
+  expect(await registryRows("qs_window"), "the registry lists it before: every room's (#471), joined, org's, created").toEqual([
+    "ri:qs_window", expect.stringMatching(/^rm:\d{16}:qs_window$/),
+    "um:u_jesse:qs_window", "uo:org_codenerd:qs_window", "us:u_jesse:qs_window",
+  ]);
 
   setClock(closedAt + WINDOW); // the window's last millisecond is the first that purges
   expect(await runDurableObjectAlarm(stubOf("qs_window"))).toBe(true);

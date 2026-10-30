@@ -119,6 +119,7 @@ export type PlanStore = Pick<
   | "recordSignIn" | "countUsers" | "listUsers"
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
+  | "backfillRoomIndex"
 >;
 
 // ponytail: two hundred reports a read, not tuned, and no paging. The queue lists the open reports first and then the
@@ -130,6 +131,9 @@ export const MAX_REPORTS_LISTED = 200;
 // ponytail: a thousand accounts a read, and no cursor: the store sorts every record to answer, and the first thousand
 // by first sign-in is the read this was built for. A cursor on first sign-in when the list outgrows it.
 export const MAX_ACCOUNTS_LISTED = 1000;
+
+/** The backfill's largest window: three subrequests a room at most, inside a Workers request's 1,000 (#471). */
+export const MAX_BACKFILL_WINDOW = 300;
 
 export type PlanSource = "operator" | "grant" | "default";
 
@@ -2250,6 +2254,24 @@ export async function handleOAuth(
         google_email: u.googleEmail ?? null,
       })),
     });
+  }
+
+  // ------------------------------------------------ /admin/rooms/backfill
+  // The operator writes the room index's missing rows (#471), one window a call: `?limit=` from 1 to
+  // MAX_BACKFILL_WINDOW, that when absent, and `?after=` the `next` of the call before. Rerun until `next` is null;
+  // a rerun writes nothing twice. On /admin/handles' gate, in the order every operator route takes.
+  if (path === "/admin/rooms/backfill") {
+    const gate = await operatorGate(request, config, "backfilling the room index");
+    if (gate instanceof Response) return gate;
+    if (method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const params = new URL(request.url).searchParams;
+    const raw = params.get("limit");
+    const limit = raw === null ? MAX_BACKFILL_WINDOW : /^[1-9]\d{0,3}$/.test(raw) ? Number(raw) : NaN;
+    if (!(limit <= MAX_BACKFILL_WINDOW)) {
+      return oauthError("invalid_request", `limit must be a whole number from 1 to ${MAX_BACKFILL_WINDOW}`);
+    }
+    return json(await config.plans.backfillRoomIndex(limit, params.get("after") ?? undefined));
   }
 
   // ------------------------------------------------------ /admin/handles

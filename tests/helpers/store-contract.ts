@@ -15,7 +15,8 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend } from "../../src/store.js";
+import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
+import type { SurfaceWrite } from "../../src/surface.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
 import { decisionHash, type DecisionDraft, type VoteInput } from "../../src/decision.js";
@@ -3258,6 +3259,73 @@ export function describeStoreContract(
           })).rejects.toThrow("goes through appendSurface");
           await store.freezeSession(id, Date.now());
           expect(await put(id, item("a"))).toEqual({ outcome: "frozen" });
+        });
+      });
+
+      describe("appendSurfaces (surface widget and batch spec, D1)", () => {
+        const author = { fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd" };
+        const item = (key: string, over: Partial<SurfaceItem> = {}): SurfaceItem =>
+          ({ key, kind: "text", title: null, body: "x", ends: null, placement: { x: 0, y: 0 }, blob: null, shape: null, ...over });
+        const frameItem = (key: string, placement: { x: number; y: number; w: number; h: number }): SurfaceItem =>
+          item(key, { kind: "frame", title: key, body: null, placement, locked: true });
+        const w = (i: SurfaceItem, frame?: number): SurfaceWrite => ({ key: i.key, item: i, ...(frame === undefined ? {} : { frame }) });
+        const room = async () => { const s = session({}); await store.createSession(s); return s.id; };
+        const appended = (out: SurfaceBatchAppend) => out as Extract<SurfaceBatchAppend, { outcome: "appended" }>;
+
+        it("appends one surface event per write at consecutive cursors, with its rows, and moves the surface cursor to the last", async () => {
+          const id = await room();
+          const out = appended(await store.appendSurfaces(id, author, [w(item("a")), w(item("b", { placement: { x: 400, y: 0 } })), { key: "a", item: null }], null));
+          expect(out.outcome).toBe("appended");
+          expect(out.events.map((e) => [e.cursor, e.type, (e.payload as { key: string }).key])).toEqual([[1, "surface", "a"], [2, "surface", "b"], [3, "surface", "a"]]);
+          expect((await store.surfaceOf(id)).map((r) => r.key)).toEqual(["b"]);
+          expect(await cursorOf(id)).toBe(3);
+        });
+
+        it("refuses at the last entry and writes nothing: no event, no row, no key record", async () => {
+          const id = await room();
+          const out = await store.appendSurfaces(id, author, [
+            w(frameItem("f1", { x: 0, y: 0, w: 1000, h: 1000 })), w(item("a", { placement: null })), w(frameItem("f2", { x: 500, y: 0, w: 1000, h: 1000 })),
+          ], "kb");
+          expect(out).toMatchObject({ outcome: "refused", index: 2, kind: "conflict" });
+          expect(await store.eventsAfter(id, 0)).toEqual([]);
+          expect(await store.surfaceOf(id)).toEqual([]);
+          expect(await store.idempotencyRecord(id, "m_creator", "kb")).toBeNull();
+        });
+
+        // Every position a batch writes is final: the frame's move carries only the card no entry writes.
+        it("carries the frame's cards the batch does not write, each event after the frame's, each row keeping its writer", async () => {
+          const id = await room();
+          const ada = { type: "surface" as const, ...author, fromMemberId: "m_ada", fromLabel: "ada", payload: {}, refId: null };
+          await store.appendSurface(id, ada, { surface: w(frameItem("f", { x: 0, y: 0, w: 1000, h: 1000 })) }, null);
+          await store.appendSurface(id, ada, { surface: w(item("b", { placement: { x: 400, y: 40 } })) }, null);
+          const out = appended(await store.appendSurfaces(id, author, [w(item("a", { placement: { x: 40, y: 40 } })), w(frameItem("f", { x: 2000, y: 0, w: 1000, h: 1000 }))], null));
+          expect(out.events.map((e) => (e.payload as { key: string }).key)).toEqual(["a", "f", "b"]);
+          const rows = await store.surfaceOf(id);
+          expect(rows.find((r) => r.key === "a")).toMatchObject({ placement: { x: 40, y: 40 }, byMemberId: "m_creator" });
+          expect(rows.find((r) => r.key === "b")).toMatchObject({ placement: { x: 2400, y: 40 }, byMemberId: "m_ada", cursor: out.events[2].cursor });
+        });
+
+        it("replays a keyed batch with its last event however the room changed since, and answers conflict for other writes", async () => {
+          const id = await room();
+          const first = appended(await store.appendSurfaces(id, author, [w(item("a")), w(item("b", { placement: { x: 400, y: 0 } }))], "kb"));
+          await store.appendSurface(id, { type: "surface", ...author, payload: {}, refId: null }, { surface: w(item("c", { placement: { x: 800, y: 0 } })) }, null);
+          expect(await store.appendSurfaces(id, author, [w(item("a")), w(item("b", { placement: { x: 400, y: 0 } }))], "kb"))
+            .toEqual({ outcome: "replayed", event: first.events[1] });
+          expect(await store.appendSurfaces(id, author, [w(item("a"))], "kb")).toEqual({ outcome: "conflict" });
+          expect((await store.eventsAfter(id, 0))).toHaveLength(3);
+        });
+
+        it("answers frozen for a frozen room", async () => {
+          const id = await room();
+          await store.freezeSession(id, Date.now());
+          expect(await store.appendSurfaces(id, author, [w(item("a"))], null)).toEqual({ outcome: "frozen" });
+        });
+
+        it("hands a waiting poll every event of the batch", async () => {
+          const id = await room();
+          const waiting = store.waitForEvents(id, 0, 10_000);
+          await store.appendSurfaces(id, author, [w(item("a")), w(item("b", { placement: { x: 400, y: 0 } }))], null);
+          expect((await waiting).map((e) => e.cursor)).toEqual([1, 2]);
         });
       });
 

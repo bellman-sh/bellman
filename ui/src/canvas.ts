@@ -101,6 +101,14 @@ function renderCard(e: Untrusted<SurfaceItemWire>, box: Box, sessionId: string, 
         );
       }
       break;
+    case "widget": {
+      // A widget runs in the client that owns it, never here: the card names it, and its body (config) is never drawn.
+      const w = item.widget;
+      if (!w) break;
+      const owner = w.owner === e.origin.memberId ? `on ${e.origin.label}'s machine` : `owner ${w.owner}`;
+      card.append(el("p", { class: "muted" }, `${text(w.plugin)} · ${text(owner)}`), openInDash(sessionId, deps));
+      break;
+    }
     default:
       card.append(el("p", { class: "muted" }, `${text(item.kind)} item`));
   }

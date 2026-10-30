@@ -2338,7 +2338,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,870** | every request, whether or not you are in a room |
+| Tool definitions | **~11,225** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
@@ -2348,6 +2348,11 @@ treat these as plus or minus ten percent:
 Re-measured on 2026-10-28 for the seat-status hooks (#432), by the method below: 18 tokens over the
 10,852 that the seat-status branch (`83936cdc`) measures and records, all `bellman_send`'s (1,819 to 1,837:
 `progress` takes a note or a status, and a status alone does not answer the heartbeat). No tool added. 10,870.
+
+Re-measured on 2026-10-30 for the surface's widget kind and batch write (ADR 0043), by the method below: 127
+tokens over the 11,098 main (`a4d2a79a`) measures, all `bellman_send`'s (1,837 to 1,964: the `widget` kind's line,
+the `{ items }` batch's sentence, and `count` in Returns). Main records 10,870: #478's `vote` verb and `decide and
+veto` return added 228 to `bellman_start` and `bellman_connect` without a re-measure. No tool added. 11,225.
 
 Re-measured on 2026-10-28 for seat status (#432), by the method below: 67 tokens over the 10,785
 that main (`6be90577`) measures and records, in `bellman_rooms` (310 to 361: each member's `status`,

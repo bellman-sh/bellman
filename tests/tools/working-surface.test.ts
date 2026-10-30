@@ -19,6 +19,7 @@ import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS, gridSlot,
 } from "../../src/surface.js";
 import type { SurfaceItem } from "../../src/types.js";
+import { resolveSurfaceBatch } from "../../src/rooms.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -1069,5 +1070,172 @@ describe("frames through bellman_send (surface frames spec, D2, D8)", () => {
     }
     await refusedWith(p, frameOf("f100", 500_000), 'this room\'s surface already holds 100 frames; remove one with { key, remove: true } before adding frame "f100".');
     expect((await write(p, { ...frameOf("f0", 0), title: "Renamed", placement: { x: 0, y: 0, w: 1000, h: 1000 } })).isError).toBe(false);
+  });
+});
+
+describe("a widget's owner (surface widget and batch spec, D3)", () => {
+  const swarm = () => pairUp(h, { manifest: manifestFixture({ preset: "swarm" }), joinAs: "lead" });
+  const widget = (owner: string, over: Record<string, unknown> = {}) =>
+    ({ key: "n-1", kind: "widget", title: "Stripe", placement: { x: 0, y: 0 }, widget: { plugin: "stripe", locality: "credential_bound", owner }, ...over });
+  const asJoiner = (p: PairedSession, payload: Record<string, unknown>) =>
+    p.joiner.call("bellman_send", { session_id: p.sessionId, member_id: p.joinerMemberId, type: "surface", payload });
+  const refusal = (owner: string) => `surface widget "n-1": owner ${owner} is not a seat of yours in this room; only the owner's account sets a widget's owner`;
+
+  it("lands a widget its writer owns", async () => {
+    const p = await swarm();
+    const out = await write(p, widget(p.creatorMemberId));
+    expect(out.isError, out.text).toBe(false);
+    expect((await rows(p))[0].widget).toEqual({ plugin: "stripe", locality: "credential_bound", owner: p.creatorMemberId, seat: null });
+  });
+
+  it("refuses a new widget naming another account's seat as owner, and appends nothing", async () => {
+    const p = await swarm();
+    const before = await eventCount(p);
+    const out = await asJoiner(p, widget(p.creatorMemberId));
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain(refusal(p.creatorMemberId));
+    expect(await eventCount(p)).toBe(before);
+  });
+
+  it("lets a peer move a widget and keep its owner, or make it their own, but never name another account's seat", async () => {
+    const p = await swarm();
+    await write(p, widget(p.creatorMemberId));
+    const moved = await asJoiner(p, widget(p.creatorMemberId, { placement: { x: 400, y: 0 } }));
+    expect(moved.isError, moved.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({ byMemberId: p.joinerMemberId, placement: { x: 400, y: 0 }, widget: { owner: p.creatorMemberId } });
+    const claimed = await asJoiner(p, widget(p.joinerMemberId));
+    expect(claimed.isError, claimed.text).toBe(false);
+    const handed = await asJoiner(p, widget(p.creatorMemberId));
+    expect(handed.text).toContain(refusal(p.creatorMemberId));
+    expect((await rows(p))[0].widget?.owner).toBe(p.joinerMemberId);
+  });
+
+  it("refuses a peer's restore of a removed widget whose owner is not theirs: the key is new again", async () => {
+    const p = await swarm();
+    const v1 = await write(p, widget(p.creatorMemberId));
+    await write(p, { key: "n-1", remove: true });
+    const back = await asJoiner(p, { key: "n-1", restore: v1.data.cursor });
+    expect(back.text).toContain(refusal(p.creatorMemberId));
+  });
+});
+
+describe("resolveSurfaceBatch (surface widget and batch spec, D2)", () => {
+  const card = (key: string, over: Record<string, unknown> = {}) => ({ key, kind: "text", body: "x", placement: { x: 0, y: 0 }, ...over });
+  const connector = (key: string, from: string, to: string) => ({ key, kind: "connector", ends: { from, to } });
+  const reasonOf = (out: { ok: boolean }) => (out as unknown as { reason: string }).reason;
+
+  it("checks a connector against cards made earlier in the batch and cards already on the surface", async () => {
+    const p = await pairUp(h);
+    await write(p, card("old"));
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("new"), connector("c", "new", "old")] });
+    expect(out.ok, reasonOf(out)).toBe(true);
+    expect((out as { value: { writes: unknown[] } }).value.writes).toHaveLength(2);
+  });
+
+  it("refuses a connector naming a key an earlier entry removed", async () => {
+    const p = await pairUp(h);
+    await write(p, card("a"));
+    await write(p, card("b"));
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [{ key: "a", remove: true }, connector("c", "a", "b")] });
+    expect(reasonOf(out)).toBe('items[1]: connector "c" names "a", which is not on the surface.');
+  });
+
+  it("counts the batch's new keys against the 1,000-item cap", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < MAX_SURFACE_ITEMS - 1; i++) {
+      const item: SurfaceItem = { key: `k_${i}`, kind: "text", title: null, body: "x", ends: null, placement: gridSlot(i), blob: null, shape: null };
+      await h.store.appendEvent(p.sessionId, {
+        type: "surface", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null,
+      }, { surface: { key: item.key, item } });
+    }
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("n1"), card("n2")] });
+    expect(reasonOf(out)).toContain("items[1]: this room's surface already holds 1,000 items");
+    const replaced = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [card("k_0"), card("n1")] });
+    expect(replaced.ok, reasonOf(replaced)).toBe(true);
+  });
+
+  it("settles a blob-backed image to the object's bytes, type and name", async () => {
+    const p = await pairUp(h);
+    const id = await stored(p, "image/png", PNG, "shot.png");
+    const out = await resolveSurfaceBatch(h.store, h.blobs, p.sessionId, { items: [{ key: "shot", kind: "image", blob: { id } }] });
+    expect(out.ok, reasonOf(out)).toBe(true);
+    expect((out as { value: { writes: { item: { blob: unknown } }[] } }).value.writes[0].item.blob)
+      .toEqual({ id, bytes: PNG.byteLength, type: "image/png", name: "shot.png" });
+  });
+});
+
+describe("a batch through bellman_send (surface widget and batch spec, D2)", () => {
+  const items = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ key: `b${from + i}`, kind: "text", body: "x", placement: { x: (from + i) * 400, y: 0 } }));
+
+  it("writes every item as one call, and its cursor is the surface cursor after it", async () => {
+    const p = await pairUp(h);
+    const out = await write(p, { items: items(3) });
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data.count).toBe(3);
+    const read = await p.creator.call("bellman_surface", { session_id: p.sessionId });
+    expect(out.data.cursor).toBe((read.data.surface as { cursor: number }).cursor);
+    expect((await rows(p)).map((r) => r.key).sort()).toEqual(["b0", "b1", "b2"]);
+  });
+
+  it("refuses the whole batch for one bad item, naming it, and changes nothing", async () => {
+    const p = await pairUp(h);
+    const before = await eventCount(p);
+    const out = await write(p, { items: [items(1)[0], { key: "bad", kind: "text" }] });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("items[1]: ");
+    expect(await eventCount(p)).toBe(before);
+    expect(await rows(p)).toEqual([]);
+  });
+
+  it("replays a keyed batch with its first cursor", async () => {
+    const p = await pairUp(h);
+    const first = await write(p, { items: items(2) }, { idempotency_key: "batch-0001" });
+    const again = await write(p, { items: items(2) }, { idempotency_key: "batch-0001" });
+    expect(again.data).toMatchObject({ replayed: true, cursor: first.data.cursor });
+  });
+
+  // A key with a record is the retry of a batch that landed, answered from its key however the room has changed:
+  // the room's checks are not asked again, as bellman_send's are not for a proposal's or an answer's retry.
+  it("replays a keyed batch the room has changed under, and one whose own removal took its connector's end", async () => {
+    const p = await pairUp(h);
+    await write(p, { items: items(3) });
+    const own = { items: [{ key: "c", kind: "connector", ends: { from: "b0", to: "b1" } }, { key: "b0", remove: true }] };
+    const first = await write(p, own, { idempotency_key: "batch-0002" });
+    expect(first.isError, first.text).toBe(false);
+    const again = await write(p, own, { idempotency_key: "batch-0002" });
+    expect(again.isError, again.text).toBe(false);
+    expect(again.data).toMatchObject({ replayed: true, cursor: first.data.cursor });
+
+    const changed = { items: [{ key: "d", kind: "connector", ends: { from: "b1", to: "b2" } }] };
+    const landed = await write(p, changed, { idempotency_key: "batch-0003" });
+    await write(p, { key: "b2", remove: true });
+    const retried = await write(p, changed, { idempotency_key: "batch-0003" });
+    expect(retried.isError, retried.text).toBe(false);
+    expect(retried.data).toMatchObject({ replayed: true, cursor: landed.data.cursor });
+  });
+
+  it("leaves a card where the batch puts it when the batch also moves the locked frame holding it", async () => {
+    const p = await pairUp(h);
+    const frame = (x: number) => ({ key: "f", kind: "frame", title: "F", placement: { x, y: 0, w: 1000, h: 1000 }, locked: true });
+    await write(p, frame(0));
+    await write(p, { key: "a", kind: "text", body: "x", placement: { x: 40, y: 40 } });
+    const out = await write(p, { items: [{ key: "a", kind: "text", body: "x", placement: { x: 140, y: 40 } }, frame(100)] });
+    expect(out.isError, out.text).toBe(false);
+    expect((await rows(p)).find((r) => r.key === "a")!.placement).toEqual({ x: 140, y: 40 });
+  });
+
+  it("files one audit row for the batch", async () => {
+    const p = await pairUp(h);
+    await write(p, { items: items(3) });
+    const row = (await h.store.auditForOrg(p.creator.identity.orgId!, 50)).at(-1)!;
+    expect(row).toMatchObject({ action: "sent_surface_batch", detail: { count: 3, keys: ["b0", "b1", "b2"] } });
+  });
+
+  it("refuses a widget in a batch whose owner is another account's seat, naming its index", async () => {
+    const p = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }), joinAs: "lead" });
+    const out = await p.joiner.call("bellman_send", { session_id: p.sessionId, member_id: p.joinerMemberId, type: "surface", payload: { items: [
+      items(1)[0], { key: "n-1", kind: "widget", title: "W", placement: { x: 0, y: 400 }, widget: { plugin: "p", locality: "shared", owner: p.creatorMemberId } },
+    ] } });
+    expect(out.text).toContain(`items[1]: surface widget "n-1": owner ${p.creatorMemberId} is not a seat of yours`);
   });
 });

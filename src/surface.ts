@@ -10,12 +10,12 @@
  * `clearSilence` in store.ts rather than heartbeat.ts.
  */
 import { z } from "zod";
-import type { ApprovedBy, SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
+import type { ApprovedBy, SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow, WidgetLocality } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
 
-export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape", "frame"] as const satisfies readonly SurfaceKind[];
+export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape", "frame", "widget"] as const satisfies readonly SurfaceKind[];
 
 // ponytail: ceilings, not tuned. 1,000 is a courtesy bound (ADR 0015); a read is a window of `SURFACE_PAGE`,
 // so the cap no longer sizes a response. 8,000 is the scribe spec's 4,000 doubled, for a body read on demand
@@ -107,7 +107,7 @@ export const gridSlot = (index: number): { x: number; y: number } => ({
 });
 
 /** The kinds the server places when they arrive without a placement. */
-export const PLACED_KINDS: readonly SurfaceKind[] = ["text", "link", "diagram", "file", "image", "html"];
+export const PLACED_KINDS: readonly SurfaceKind[] = ["text", "link", "diagram", "file", "image", "html", "widget"];
 
 /** The ceiling on the slot search (R7): a row of four slots for each item the surface can hold, 256. */
 // ponytail: a ceiling on the search, not tuned: a row of four slots for every item the surface can hold. A
@@ -211,6 +211,18 @@ const ShapeShape = z.strictObject({
   flip: z.boolean().default(false),
 });
 
+/** The localities a room holds (spec D3), and `local_only`, which the shape takes so the rule can refuse it in its own words. */
+export const WIDGET_LOCALITIES = ["shared", "credential_bound", "local_with_remote_input", "proximity_collaborative"] as const satisfies readonly WidgetLocality[];
+const MemberIdShape = z.string().min(4).max(64);
+
+/** A widget's own field (spec D3): the plugin a client runs, where it runs, whose it is, and the seat inside it. */
+const WidgetShape = z.strictObject({
+  plugin: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "must be a plugin id: lowercase letters, digits, '.', '_' and '-', at most 64"),
+  locality: z.enum([...WIDGET_LOCALITIES, "local_only"]),
+  owner: MemberIdShape,
+  seat: MemberIdShape.nullish(),
+});
+
 /**
  * Non-empty text of at most `max` UTF-16 code units: `.length`, which is what
  * the index reports as `chars`, so the bound and the number read against it
@@ -244,6 +256,7 @@ export const SurfaceItemShape = z.strictObject({
   // Surface frames spec, D2: `frame` places a card in frame N and is never stored; `locked` is a frame's own.
   frame: z.number().int().positive().nullish(),
   locked: z.boolean().nullish(),
+  widget: WidgetShape.nullish(),
 });
 
 /** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */
@@ -292,7 +305,7 @@ export function normalizeSurfaceWrite(
   if (!parsed.success) {
     return {
       ok: false,
-      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, frame?, blob?, shape?, locked? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
+      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, frame?, blob?, shape?, locked?, widget? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
     };
   }
   const v = parsed.data;
@@ -333,6 +346,17 @@ export function normalizeSurfaceWrite(
       // `flip: false` is the default every stored shape carries, so a shape read back and sent back is
       // accepted; only a flip that would draw nothing is refused.
       if (v.shape.flip && !LINE_FORMS.has(v.shape.form)) return refuse("flip is for an arrow or a line");
+    } else if (v.kind === "widget") {
+      // A widget is data a client runs (spec D3): its own field, and its config, when it has one, as JSON text.
+      if (!v.widget) return refuse("a widget needs widget { plugin, locality, owner, seat? }");
+      if (v.widget.locality === "local_only") return refuse("a local-only widget stays on its Mac and is never written to a room");
+      if (v.body) {
+        try {
+          JSON.parse(v.body);
+        } catch {
+          return refuse("a widget's body is its config, as JSON text");
+        }
+      }
     } else if (!v.body) {
       return refuse("needs a body");
     }
@@ -340,9 +364,10 @@ export function normalizeSurfaceWrite(
   if (v.blob && !blobBacked && v.kind !== "html") return refuse("only a file, an image or an html item names a blob");
   if (v.shape && v.kind !== "shape") return refuse("only a shape has shape");
   if (v.locked != null && v.kind !== "frame") return refuse("only a frame is locked");
+  if (v.widget && v.kind !== "widget") return refuse("only a widget has widget");
   if (v.frame != null) {
     if (v.kind === "frame") return refuse("a frame is not placed in a frame: frames do not nest");
-    if (!PLACED_KINDS.includes(v.kind)) return refuse(`frame: ${v.frame} places text, link, diagram, file, image and html items`);
+    if (!PLACED_KINDS.includes(v.kind)) return refuse(`frame: ${v.frame} places text, link, diagram, file, image, html and widget items`);
     if (v.placement) return refuse("send placement or frame, not both");
   }
 
@@ -378,6 +403,10 @@ export function normalizeSurfaceWrite(
         shape: v.kind === "shape" ? v.shape! : null,
         // A frame's alone: locked unless the write says otherwise (D2); absent on every other row.
         ...(v.kind === "frame" ? { locked: v.locked ?? true } : {}),
+        // A widget's alone, as `locked` is a frame's; the local-only arm was refused above.
+        ...(v.kind === "widget"
+          ? { widget: { plugin: v.widget!.plugin, locality: v.widget!.locality as WidgetLocality, owner: v.widget!.owner, seat: v.widget!.seat ?? null } }
+          : {}),
       },
       ...(v.frame != null ? { frame: v.frame } : {}),
     },
@@ -405,4 +434,40 @@ export function normalizeRestore(
     return { ok: false, reason: `surface restore must be { key, restore: <cursor> }: ${describeIssue(parsed.error.issues[0])}` };
   }
   return { ok: true, key: parsed.data.key, cursor: parsed.data.restore };
+}
+
+/** The most writes one batch carries (surface widget and batch spec, D2). */
+export const MAX_SURFACE_BATCH = 100;
+
+/** Whether a `surface` payload is a batch: an object with an `items` key, whatever else it holds, so the shape names a stray field. */
+export const isBatchPayload = (payload: unknown): boolean =>
+  typeof payload === "object" && payload !== null && "items" in payload;
+
+const BatchShape = z.strictObject({ items: z.array(z.unknown()).min(1).max(MAX_SURFACE_BATCH) });
+
+/**
+ * Read a batch (spec D2): `{ items }` of 1 to 100 entries, each an item or a removal as a single write is, each key
+ * once, and no restore, whose event is authored by the version's author and would split the batch's authorship. Each
+ * entry goes through `normalizeSurfaceWrite`, and a refusal names its index ahead of that function's own words. What
+ * the room holds is `resolveSurfaceBatch`'s read.
+ */
+export function normalizeSurfaceBatch(
+  payload: unknown,
+): { ok: true; entries: { write: SurfaceWrite; blobId: string | null }[] } | { ok: false; reason: string } {
+  const parsed = BatchShape.safeParse(payload);
+  if (!parsed.success) {
+    return { ok: false, reason: `a surface batch must be { items: [1 to ${MAX_SURFACE_BATCH} items or removals] }: ${describeIssue(parsed.error.issues[0])}` };
+  }
+  const entries: { write: SurfaceWrite; blobId: string | null }[] = [];
+  const first = new Map<string, number>();
+  for (const [i, entry] of parsed.data.items.entries()) {
+    if (isRestorePayload(entry)) return { ok: false, reason: `items[${i}]: a batch does not restore; send { key, restore } on its own` };
+    const one = normalizeSurfaceWrite(entry);
+    if (!one.ok) return { ok: false, reason: `items[${i}]: ${one.reason}` };
+    const seen = first.get(one.write.key);
+    if (seen !== undefined) return { ok: false, reason: `items[${i}]: key "${one.write.key}" is already written by items[${seen}]` };
+    first.set(one.write.key, i);
+    entries.push({ write: one.write, blobId: one.blobId });
+  }
+  return { ok: true, entries };
 }

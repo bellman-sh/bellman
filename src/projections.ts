@@ -495,6 +495,8 @@ export function surfaceItem(r: SurfaceRow) {
       // reader never tells "absent" from "null", and a legacy row has no key at all.
       blob: r.blob ?? null,
       shape: r.shape ?? null,
+      // Surface widget and batch spec, D3: a widget's alone; `null` on every other row, as `shape` is.
+      widget: r.widget ?? null,
       // Surface frames spec, D2: a frame's alone; `null` on every other row, as `shape` is.
       locked: r.locked ?? null,
       cursor: r.cursor,

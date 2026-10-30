@@ -31,7 +31,7 @@ import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
   auditEntries, issueInvite, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
-  sessionStatus, writeSurface, type RoomFailure, type SurfaceBlock,
+  sessionStatus, writeSurface, writeSurfaceBatch, type RoomFailure, type SurfaceBlock,
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
@@ -61,6 +61,8 @@ export const MAX_ROOMS_LISTED = 50;
 // ponytail: 64 KB, not tuned. An item's largest field is 8,000 characters;
 // this is the bound on the JSON around it, read off the header before parsing.
 export const MAX_SURFACE_WRITE_BYTES = 64 * 1024;
+/** A batch's bound (surface widget and batch spec, D2): a hundred items, each well under a single write's bound. */
+export const MAX_SURFACE_BATCH_BYTES = 1024 * 1024;
 
 // ponytail: two hundred events a read, not tuned, and no paging backwards. A first read is the newest
 // two hundred; a room whose story is longer than that wants #49's paged read.
@@ -195,7 +197,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     }
     const surface = SURFACE.exec(path);
     if (surface) {
-      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      if (request.method === "PUT") return await writeSurfaceBatchRoute(request, url, surface[1], origin, deps);
+      if (request.method !== "GET") return methodNotAllowed("GET, PUT", origin);
       return await readSurfaceRoute(request, url, surface[1], origin, deps);
     }
     const events = EVENTS.exec(path);
@@ -1154,4 +1157,46 @@ async function writeSurfaceRoute(
   const out = await writeSurface(deps.store, deps.blobs, who.identity, sessionId, memberId, payload);
   if (!out.ok) return problem(STATUS[out.code], out.code, out.reason, origin);
   return json(200, { cursor: out.value.cursor, room_members: out.value.roomMembers }, origin);
+}
+
+/**
+ * A batch write (surface widget and batch spec, D2): a PUT whose body is `{ items }`, through `writeSurfaceBatch`, as
+ * `writeSurfaceRoute` goes through `writeSurface`, so the guards, the checks, the append and the audit row are the
+ * tool's. Like the single-key routes it spends no send (ADR 0022, R6). It maps the result to a status and nothing else.
+ */
+async function writeSurfaceBatchRoute(
+  request: Request,
+  url: URL,
+  sessionId: string,
+  origin: string | undefined,
+  deps: RoomRouteDeps,
+): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+
+  const memberId = url.searchParams.get("member_id") ?? "";
+  if (!memberId) return problem(400, "invalid_request", "member_id is required", origin);
+
+  const refused = lengthRefusal(request, MAX_SURFACE_BATCH_BYTES, "a surface batch", origin);
+  if (refused) return refused;
+  const notBatch = () => problem(400, "invalid_request", "the body must be a JSON object { items: [...] }", origin);
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return notBatch();
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body) || !("items" in body)) return notBatch();
+
+  // A stranger's answer is the unknown room's answer, before the gate, as on a single write.
+  const found = await deps.store.getSession(sessionId);
+  if (!found || !(await findMember(deps.store, found, memberId, who.identity))) {
+    return await adminWriteRefusal(deps.store, found, who.identity, origin)
+      ?? problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const out = await writeSurfaceBatch(deps.store, deps.blobs, who.identity, sessionId, memberId, body);
+  if (!out.ok) return problem(STATUS[out.code], out.code, out.reason, origin);
+  return json(200, { cursor: out.value.cursor, count: out.value.count, room_members: out.value.roomMembers }, origin);
 }

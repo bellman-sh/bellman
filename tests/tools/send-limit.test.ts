@@ -55,6 +55,16 @@ describe("the send limit (spec \u{A7}2)", () => {
     expect((await h.store.eventsAfter(s.sessionId, 0)).length).toBe(before);
   });
 
+  it("counts a surface batch as one send, however many items it holds", async () => {
+    const s = await pairUp(h);
+    const surface = (payload: Record<string, unknown>) => s.creator.call("bellman_send", { session_id: s.sessionId, member_id: s.creatorMemberId, type: "surface", payload });
+    for (let i = 0; i < 29; i++) expect((await surface({ key: `k${i}`, kind: "text", body: "x", placement: { x: i * 400, y: 0 } })).isError, `send ${i + 1}`).toBe(false);
+    const batch = await surface({ items: Array.from({ length: 40 }, (_, i) => ({ key: `b${i}`, kind: "text", body: "x", placement: { x: i * 400, y: 400 } })) });
+    expect(batch.isError, batch.text).toBe(false);
+    const after = await surface({ key: "one-more", kind: "text", body: "x", placement: { x: 0, y: 800 } });
+    expect(after.text).toContain("rate_limited");
+  });
+
   it("refuses a stranger's 7th send, counting every kind", async () => {
     const room = await publicRoom(h);
     const peer = await h.connect(DEV_KEY.peer);

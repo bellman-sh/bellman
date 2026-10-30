@@ -9,7 +9,7 @@ import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb, verbsOfRole } from "../roles.js";
 import {
   FROZEN, NO_ANSWERER, activeMembers, admitSend, audit, checkProposal, findMember, resolveSurfaceWrite, surfaceAuditDetail,
-  touchMember, writeSurface,
+  touchMember, writeSurface, writeSurfaceBatch,
 } from "../rooms.js";
 import { isProposalPayload } from "../action-state.js";
 import { answerQuestion, type AnswerError } from "../outside.js";
@@ -17,7 +17,7 @@ import { isTopicRoom } from "../manifest.js";
 import { readProposal } from "../proposal.js";
 import type { StoredSession } from "../stored-session.js";
 import type { AppendExtras, BellmanStore, EventWrite, ProposalApproval } from "../store.js";
-import type { SurfaceWrite } from "../surface.js";
+import { isBatchPayload, type SurfaceWrite } from "../surface.js";
 import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 import { SEND_LIMIT, STRANGER_SEND_LIMIT } from "../send-limit.js";
@@ -82,15 +82,17 @@ Args:
       "progress"       — answer the room's heartbeat: where you are now ({ note?, step?, eta_seconds?, status? }, a note or a status); status is working, idle or needs_you (waiting on your human), and a status with no note does not answer the heartbeat. Peers are not interrupted by it; it reaches them when they next look.
       "outside_answer" — a member's reply to an outside A2A caller's question. Set ref_id to the outside_question's cursor id and send { text, needs_input? }; needs_input: true asks the caller for more and leaves the task waiting on them. Only the room's voice may: the members whose role holds the answer verb (no built-in preset grants it), or, while no member's role does, the room's creator.
       "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, frame?, blob?, shape?, locked? } or { key, remove: true }. { key, restore: <cursor> } re-applies the version of that key written at that cursor, with its author kept (needs write_surface).
-                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp), html (a self-contained page: the page inline in body, or blob: { id } naming a blob stored as text/html (uploaded as for a file, or bellman_upload with kind: "html"), never both; the panel renders it only inside a sandboxed frame on another origin, where its inline script and style and data: images work and it gets no cookies, no parent, no navigation, no popups, no downloads, no forms and no network through anything the policy governs (fetch, sockets, beacons; WebRTC is outside it in Chromium, so a page naming a STUN or TURN server reaches that host) — inline any library it needs; the bytes are the artifact, whatever they claim to be), shape (shape: { form: rect, ellipse, diamond, arrow or line, color?: slate, blue, green, amber, red or violet, or a hex such as #3b82f6, flip?: true draws an arrow or a line from the bottom-left to the top-right }; placement { x, y, w, h } required; the label is title; no body), frame (a numbered rectangle: a title and placement { x, y, w, h }; locked, the default, carries its items when it moves; frames cannot overlap; at most 100). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given. frame: <n> in place of placement puts the item in frame n's first free slot.
+                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp), html (a self-contained page: the page inline in body, or blob: { id } naming a blob stored as text/html (uploaded as for a file, or bellman_upload with kind: "html"), never both; the panel renders it only inside a sandboxed frame on another origin, where its inline script and style and data: images work and it gets no cookies, no parent, no navigation, no popups, no downloads, no forms and no network through anything the policy governs (fetch, sockets, beacons; WebRTC is outside it in Chromium, so a page naming a STUN or TURN server reaches that host) — inline any library it needs; the bytes are the artifact, whatever they claim to be), shape (shape: { form: rect, ellipse, diamond, arrow or line, color?: slate, blue, green, amber, red or violet, or a hex such as #3b82f6, flip?: true draws an arrow or a line from the bottom-left to the top-right }; placement { x, y, w, h } required; the label is title; no body), frame (a numbered rectangle: a title and placement { x, y, w, h }; locked, the default, carries its items when it moves; frames cannot overlap; at most 100), widget (widget: { plugin, locality: shared, credential_bound, local_with_remote_input or proximity_collaborative, owner: a member id of yours, seat? }; body, if any, is its config as JSON; a client such as Colony Nerve runs it, viewers draw a card). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given. frame: <n> in place of placement puts the item in frame n's first free slot.
                          Needs the write_surface verb. Items replace by key; at most 1,000 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
+                         { items: [...] } writes up to 100 items or removals in one call: all land or none, as one send; each key once, no restores; a refusal names items[i].
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Both bounds matter: a deeply nested payload can be small and still be undeliverable, so flatten rather than nest.
   - ref_id: the cursor of the event you are answering; a room's host answers only replies that carry its question's cursor. Required for action_response.
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
-Returns: { room_members, cursor, replayed?, applied? }
+Returns: { room_members, cursor, count?, replayed?, applied? }
   - room_members: the OTHER active members this call saw just before appending — your own seat is not in it, and on a replayed send it is who was there at the retry rather than at the original append. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
   - replayed: true means this key had already been used and nothing new was sent.
+  - count: a surface batch's number of items; cursor is then its last event's.
   - applied: the card an approval wrote, { key, cursor }; absent when the approval wrote none.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke. A member sends at most ${SEND_LIMIT} times a minute, and one who joined through a public room's permanent code ${STRANGER_SEND_LIMIT}; past that the send is refused as rate_limited with retry_after in seconds, and nothing is sent. An approval is refused as stale when its card changed after the proposal's base, and as already answered when another answer landed first; nothing is written either way.`,
       inputSchema: {
@@ -114,11 +116,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // Handled before the common guards below, which writeSurface runs itself.
       if (type === "surface") {
         // Counted here and not on the HTTP routes, which run the same writeSurface (R6).
-        const out = await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key, true);
+        const out = isBatchPayload(payload)
+          ? await writeSurfaceBatch(s, blobs, identity, session_id, member_id, payload, idempotency_key, true)
+          : await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key, true);
         if (!out.ok) return refusal(out);
         return ok({
           room_members: out.value.roomMembers,
           cursor: out.value.cursor,
+          ...("count" in out.value ? { count: out.value.count } : {}),
           ...(out.value.replayed ? { replayed: true } : {}),
         });
       }

@@ -653,7 +653,7 @@ describe("GET /rooms/:id/surface", () => {
     expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
     const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { method: "POST", body: {} }))!;
     expect(post.status).toBe(405);
-    expect(post.headers.get("allow")).toBe("GET");
+    expect(post.headers.get("allow")).toBe("GET, PUT");
   });
 });
 
@@ -2232,5 +2232,45 @@ describe("GET /rooms/:id says whose room it is", () => {
   it("marks the creator's room mine, and nobody else's", async () => {
     expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`))).toMatchObject({ mine: true });
     expect(await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`))).toMatchObject({ mine: false });
+  });
+});
+
+describe("PUT /rooms/:id/surface (surface widget and batch spec, D2)", () => {
+  const items = [{ key: "a", kind: "text", body: "x", placement: { x: 0, y: 0 } }, { key: "b", kind: "text", body: "y", placement: { x: 400, y: 0 } }];
+  const batch = (key: string | null, body: unknown, over: CallOptions & { member?: string } = {}) =>
+    call(key, `/rooms/${ROOM}/surface?member_id=${over.member ?? "m_creator"}`, { method: "PUT", body, ...over });
+
+  it("writes every item for a bearer, and for the panel's cookie with its Origin", async () => {
+    const res = (await batch(DEV_KEY.jesse, { items }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await bodyOf(res)).toMatchObject({ cursor: 2, count: 2 });
+    const viaCookie = (await batch(null, { items: [{ ...items[0], body: "z" }] }, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect(viaCookie.status).toBe(200);
+    expect((await store.surfaceOf(ROOM)).map((r) => [r.key, r.body])).toEqual([["a", "z"], ["b", "y"]]);
+  });
+
+  it("refuses a body over 1 MiB, a body that is not an object, and an object without items", async () => {
+    expect((await batch(DEV_KEY.jesse, { items }, { headers: { "content-length": String(1024 * 1024 + 1) } }))!.status).toBe(413);
+    expect((await batch(DEV_KEY.jesse, [items]))!.status).toBe(400);
+    expect((await batch(DEV_KEY.jesse, { key: "a", kind: "text", body: "x" }))!.status).toBe(400);
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  it("answers a stranger 404 and a seat without write_surface 403", async () => {
+    expect((await batch(DEV_KEY.outsider, { items }))!.status).toBe(404);
+    expect((await batch(DEV_KEY.peer, { items }, { member: "m_peer" }))!.status).toBe(403);
+  });
+
+  it("refuses a bad entry with 400 naming it, and writes nothing", async () => {
+    const res = (await batch(DEV_KEY.jesse, { items: [items[0], { key: "c", kind: "text" }] }))!;
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toMatchObject({ error_description: expect.stringContaining("items[1]: ") });
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  it("answers 405 to a method that is neither GET nor PUT", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { method: "POST", body: { items } }))!;
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET, PUT");
   });
 });

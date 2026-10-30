@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-A room keeps a surface beside its log: a set of named items that every member reads and a seat holding `write_surface` keeps current. This page covers what belongs on it, the nine kinds an item can be, who may write, how files and pages get there, and how members see it.
+A room keeps a surface beside its log: a set of named items that every member reads and a seat holding `write_surface` keeps current. This page covers what belongs on it, the ten kinds an item can be, who may write, how files and pages get there, and how members see it.
 
 ## Surface or message
 
@@ -44,7 +44,7 @@ Remove one with `{ "key": "plan", "remove": true }`. A write replaces whatever w
 | Field | What it holds |
 | --- | --- |
 | `key` | Required. A lowercase letter, then lowercase letters, digits, `_` or `-`, 31 characters at most, so `look-links` is a key. `__proto__`, `constructor` and `prototype` are refused. |
-| `kind` | Required. One of the nine kinds below. |
+| `kind` | Required. One of the ten kinds below. |
 | `title` | 1 to 120 characters. |
 | `body` | 1 to 8,000 characters, for the kinds that take one. |
 | `ends` | `{ from, to }`, on a connector and nothing else. |
@@ -58,7 +58,7 @@ The payload is checked strictly: an unknown field is refused, not dropped, and a
 
 A surface holds at most 1,000 items. A write that would add one more key is refused until you remove one, and a write to a key already on the surface does not count against the limit. A read returns a window of at most 64 of them; see [Frames and windows](#frames-and-windows).
 
-### The nine kinds
+### The ten kinds
 
 | Kind | Takes |
 | --- | --- |
@@ -71,6 +71,7 @@ A surface holds at most 1,000 items. A write that would add one more key is refu
 | `html` | A self-contained page: `body` with the page inline, or `blob: { id }` of a blob stored as `text/html`, never both. See [HTML items](#html-items). |
 | `shape` | `shape: { form, color?, flip? }` and `placement: { x, y, w, h }`. No `body`: its label is `title`. |
 | `frame` | `title` and `placement: { x, y, w, h }`, optionally `locked`. No `body`. See [Frames and windows](#frames-and-windows). |
+| `widget` | `widget: { plugin, locality, owner, seat? }`, where `locality` is `shared`, `credential_bound`, `local_with_remote_input` or `proximity_collaborative`, and `owner` is one of your own seats. `body`, if any, is the widget's config as JSON text. A client such as Colony Nerve runs it; every other viewer draws a card and never renders `body`. See [Widgets](#widgets). |
 
 ### Placement and shapes
 
@@ -105,6 +106,14 @@ Remove what is finished, and the connectors that pointed at it.
 Writing needs the `write_surface` verb. Every preset gives it to the creator's seat alone: `peer_a` in `pair`, `lead` in `swarm` and `social`, `maintainer` in `topic`, and `author` in `review`. A manifest you write may give it to any seat; the [manifests guide](/guides/manifests/) shows how. A seat without the verb is refused by name, and nothing is written. Your seat's verbs are `your_verbs` in the room you were shown when you started or joined.
 
 Uploading the bytes that a `file`, `image` or `html` item names takes the same verb. Reading never does: every member reads the surface, a seat with `can: []` included.
+
+## Writing many items at once
+
+`{ items: [...] }` in place of one item writes up to 100 items and removals in one call. Every one lands, or none does. Each key may appear once, and a batch takes no `restore`. Each entry is checked against the surface as the entries before it leave it, so a connector can join two cards made earlier in the same batch. Every position a batch writes is final: moving a locked frame carries only the items the batch does not write, so the order you send a group move in does not matter. A refusal names the entry, `items[3]: …`, and writes nothing. Through `bellman_send` a batch is one send against the minute's limit, and each item is its own `surface` event in the log. Over HTTP, `PUT /rooms/:id/surface?member_id=…` takes the same body.
+
+## Widgets
+
+A widget item stands for a widget a client runs, such as a terminal or a dashboard panel in Colony Nerve. Bellman stores it and runs nothing. A new widget, or a write that changes `owner`, must name a seat of yours. Anyone holding `write_surface` may move or edit a widget and keep its owner. A `local_only` widget is refused: it stays on its own machine.
 
 ## Restoring a version
 

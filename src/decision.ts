@@ -11,7 +11,7 @@
  * to vote decides it. Quotas and writing `decision_voter_removed` are #407.
  */
 import { createHash } from "node:crypto";
-import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "./action-state.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, type OutstandingRequest } from "./action-state.js";
 import type { DecisionRuleName, EventType, SessionEvent } from "./types.js";
 
 /** The four decision event types. Only the server writes them: none is a `bellman_send` kind. */
@@ -154,9 +154,13 @@ export function decisionHash(d: Pick<DecisionDraft, "effect" | "rule" | "key">):
 export const capacityOfVote = (v: Pick<VoteInput, "via" | "human_approved">): Capacity =>
   v.via === "dash_session" || (v.via === "action_response" && v.human_approved === true) ? "binding" : "advisory";
 
-/** When a decision opened at `at` expires: the rule's `expires`, else seven days in a topic room and thirty minutes elsewhere. */
+/** How long a decision lives: the rule's `expires`, else seven days in a topic room and thirty minutes elsewhere. */
+export const decisionTtlMs = (expiresMs: number | null | undefined, topic: boolean): number =>
+  expiresMs ?? (topic ? PROPOSAL_TTL_MS : ACTION_REQUEST_TTL_MS);
+
+/** When a decision opened at `at` expires (`decisionTtlMs`). */
 export function decisionExpiry(at: number, draft: Pick<DecisionDraft, "expires_ms">, topic: boolean): number {
-  const ttl = draft.expires_ms ?? (topic ? PROPOSAL_TTL_MS : ACTION_REQUEST_TTL_MS);
+  const ttl = decisionTtlMs(draft.expires_ms, topic);
   if (!(ttl >= MIN_DECISION_TTL_MS && ttl <= MAX_DECISION_TTL_MS)) {
     throw new RangeError(`a decision's expiry must be from 5 minutes to 7 days, not ${ttl} ms`);
   }
@@ -293,6 +297,38 @@ export function decisionsOf(events: readonly SessionEvent[], now: number): Map<n
 /** The state of every decision in `events`, keyed by cursor, as `actionStates` gives a request's. */
 export function decisionStates(events: readonly SessionEvent[], now: number): Map<number, DecisionState> {
   return new Map([...decisionsOf(events, now)].map(([cursor, v]) => [cursor, v.state]));
+}
+
+/** An open decision as `bellman_sync` lists it beside the action requests: its cursor is what a vote names. */
+export interface OutstandingDecision extends OutstandingRequest {
+  decision: { kind: string; key: string; hash: string };
+}
+
+/**
+ * The open decisions in `events` that wait on `memberId`'s human (#405): the seat is in the electorate, was not
+ * removed from it, and its account has no binding vote that counts. An advisory vote is the agent's, so the human is
+ * still asked. At most `perOpener` from any one opener, oldest first, as a window caps a sender's requests.
+ */
+export function decisionsAwaiting(
+  events: readonly SessionEvent[], memberId: string, now: number, perOpener: number,
+): OutstandingDecision[] {
+  const shown = new Map<string, number>();
+  const out: OutstandingDecision[] = [];
+  for (const v of decisionsOf(events, now).values()) {
+    const { electorate, accounts, key, effect, hash, expires_at } = v.payload;
+    if (v.state !== "open" || !electorate.includes(memberId) || v.removed.includes(memberId)) continue;
+    const voted = v.ballots.some((b) =>
+      b.vote.capacity === "binding" && accounts[b.memberId] === accounts[memberId] && !v.voided.includes(b.cursor));
+    const from = v.opened.fromMemberId;
+    if (voted || (shown.get(from) ?? 0) >= perOpener) continue;
+    shown.set(from, (shown.get(from) ?? 0) + 1);
+    out.push({
+      cursor: v.cursor, from_member_id: from, from_label: v.opened.fromLabel, mine: false,
+      age_seconds: Math.max(0, Math.round((now - v.opened.at) / 1000)), expires_at: new Date(expires_at).toISOString(),
+      decision: { kind: effect.kind, key, hash },
+    });
+  }
+  return out;
 }
 
 /** What a store does with a draft that names `supersedes`: replace it, or refuse because it is not open. */

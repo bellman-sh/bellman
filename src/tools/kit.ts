@@ -117,6 +117,12 @@ export const ActionResponseShape = z.object({
 });
 
 /**
+ * An `action_response` that answers a decision (ADR 0040, decision 8). It is a vote, so it names the hash it is bound
+ * to and says whether its human approved; neither is assumed, since a guess either way is a vote nobody cast.
+ */
+export const DecisionAnswerShape = ActionResponseShape.extend({ hash: z.string().max(64), human_approved: z.boolean() });
+
+/**
  * A heartbeat reply. `strictObject`, so every key the shape does not name is
  * refused — which is how `alive`, `present` and `healthy` are kept out
  * without a denylist that falls behind the first name somebody forgets. The

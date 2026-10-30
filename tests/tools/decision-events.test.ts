@@ -1,7 +1,7 @@
 /**
  * Decision events (ADR 0040, #402) reach a member through `bellman_sync` as any other event does: projected by
- * `publicEvent`, wrapped as untrusted, and with no effect on `outstanding`, which lists action requests alone until
- * #405. No tool opens or votes on a decision yet, so the room's store writes them directly.
+ * `publicEvent` and wrapped as untrusted. The room's store writes them directly here; `decide.test.ts` drives them
+ * through `bellman_decide` and lists an open one in `outstanding` (#405).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/store.js";
@@ -28,7 +28,7 @@ afterEach(async () => { await h.close(); });
 const draft: DecisionDraft = { key: "tools", effect: { kind: "surface_proposal", base: 0 }, rule: "majority" };
 
 describe("decision events over bellman_sync", () => {
-  it("arrive projected and wrapped, interrupting except the vote, and leave outstanding alone", async () => {
+  it("arrive projected and wrapped, interrupting except the vote, and a closed decision is not outstanding", async () => {
     const opened = await store.openDecision(p.sessionId, {
       type: "decision_opened", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "creator",
       payload: draft, refId: null,

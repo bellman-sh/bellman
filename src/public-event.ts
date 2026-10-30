@@ -27,7 +27,7 @@ export function publicEvent(e: SessionEvent) {
     cursor: e.cursor,
     type: e.type,
     from: { member_id: e.fromMemberId, label: e.fromLabel },
-    payload: e.payload,
+    payload: e.type === "decision_opened" ? publicOpened(e.payload) : e.payload,
     ref_id: e.refId,
     at: new Date(e.at).toISOString(),
     // Only when true. Omission costs nothing for the twelve types that predate
@@ -35,6 +35,22 @@ export function publicEvent(e: SessionEvent) {
     ...(isAmbient(e) ? { ambient: true as const } : {}),
   };
 }
+
+/**
+ * Each seat's account as a peer is shown it: `a1`, `a2` and on, in the order the accounts first appear. A decision
+ * snapshot keys every electorate seat to its account (ADR 0040, decision 3), which is the upstream id `publicEvent`
+ * keeps from peers; the alias still shows which seats one account holds, the thing the tally dedupes by.
+ */
+export function accountAliases(accounts: Record<string, string>): Record<string, string> {
+  const n = new Map<string, number>();
+  for (const a of Object.values(accounts)) if (!n.has(a)) n.set(a, n.size + 1);
+  return Object.fromEntries(Object.entries(accounts).map(([m, a]) => [m, `a${n.get(a)}`]));
+}
+
+const publicOpened = (payload: unknown) => {
+  const p = payload as { accounts?: Record<string, string> } | null;
+  return p?.accounts === undefined ? payload : { ...p, accounts: accountAliases(p.accounts) };
+};
 
 /**
  * An event as anyone with a public room's link is shown it (public rooms spec D4): what a member

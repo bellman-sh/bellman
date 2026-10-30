@@ -18,7 +18,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
-import { decisionHash, type DecisionDraft, type VoteInput } from "../../src/decision.js";
+import {
+  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type VoteInput,
+} from "../../src/decision.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
@@ -3406,7 +3408,8 @@ export function describeStoreContract(
         const id = await room();
         const { event } = await open(id);
         expect(event.payload).toEqual({
-          ...draft(), expires_at: event.at + ACTION_REQUEST_TTL_MS, electorate: ["m_ann", "m_ben"], hash: decisionHash(draft()),
+          ...draft(), expires_at: event.at + ACTION_REQUEST_TTL_MS, electorate: ["m_ann", "m_ben"],
+          accounts: { m_ann: "u_ann", m_ben: "u_ben" }, hash: decisionHash(draft()),
         });
         expect(await store.decision(id, event.cursor, event.at)).toMatchObject({ state: "open", cursor: event.cursor, ballots: [] });
         expect(await store.decision(id, event.cursor - 1, event.at), "a cursor that opened nothing").toBeNull();
@@ -3444,11 +3447,15 @@ export function describeStoreContract(
         forged.payload = { ...(forged.payload as object), capacity: "binding" };
         expect(await store.castVote(id, forged, null)).toMatchObject({ outcome: "appended", event: { payload: { capacity: "advisory" } } });
         expect((await store.decision(id, event.cursor, event.at))!.tally)
-          .toEqual({ approve: 1, reject: 0, abstain: 0, advisory: { approve: 1, reject: 0, abstain: 0 } });
+          .toEqual({
+            approve: 1, reject: 0, abstain: 0, advisory: { approve: 1, reject: 0, abstain: 0 },
+            electorate: 2, unreachable: 0, turnout: 1, quorum: null,
+          });
       });
 
       it("counts a revision in place of the vote before it, and keeps both in the log", async () => {
-        const id = await room();
+        // Three seats, so one reject does not already decide the majority.
+        const id = await room({ manifest: { ...voting, mode: "swarm" }, members: [ANN, BEN, DAN] });
         const { event } = await open(id);
         await store.castVote(id, ballot(event.cursor, { choice: "reject" }), null);
         await store.castVote(id, ballot(event.cursor, { choice: "approve" }), null);
@@ -3523,6 +3530,86 @@ export function describeStoreContract(
         expect(view.ballots.map((b) => b.cursor)).toEqual([voted.event.cursor]);
         expect(view.voided).toEqual([voted.event.cursor]);
         expect(view.tally.approve).toBe(0);
+      });
+
+      // CAL votes and vetoes surface proposals (#404), and shares ANN's account.
+      const CAL = member({ memberId: "m_cal", userId: "u_ann", label: "cal@codenerd", roomRole: "peer_b" });
+      const vetoing = {
+        ...voting, mode: "swarm" as const,
+        roles: { ...voting.roles, peer_b: { ...voting.roles.peer_b, can: [...voting.roles.peer_b.can, "vote" as const], veto: ["surface_proposal" as const] } },
+      };
+      const DAN = member({ memberId: "m_dan", userId: "u_dan", label: "dan@codenerd", roomRole: "peer_a" });
+
+      it("snapshots each seat's account and the seats whose role vetoes the kind, and no veto for a kind no role vetoes", async () => {
+        const id = await room({ manifest: vetoing, members: [ANN, BEN, CAL] });
+        const { event } = await open(id);
+        expect(event.payload).toMatchObject({
+          electorate: ["m_ann", "m_ben", "m_cal"], accounts: { m_ann: "u_ann", m_ben: "u_ben", m_cal: "u_ann" }, veto: ["m_cal"],
+        });
+        expect((await open(id, draft({ key: "other", effect: { kind: "data_grant" } }))).event.payload).not.toHaveProperty("veto");
+      });
+
+      it("closes passed in the transaction that stores the deciding vote, with the tally it read", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        expect(await store.castVote(id, ballot(event.cursor), null)).toMatchObject({ outcome: "appended", closed: null });
+        const out = await store.castVote(id, ballot(event.cursor, {}, BEN), null);
+        if (out.outcome !== "appended") throw new Error(out.outcome);
+        expect(out.closed).toMatchObject({
+          type: "decision_closed", cursor: out.event.cursor + 1, fromMemberId: "system",
+          payload: {
+            decision: event.cursor, state: "passed",
+            tally: { approve: 2, reject: 0, abstain: 0, electorate: 2, unreachable: 0, turnout: 2, quorum: null },
+          },
+        });
+        expect(await store.decision(id, event.cursor, event.at)).toMatchObject({ state: "passed", reason: null });
+        expect(await store.castVote(id, ballot(event.cursor, { choice: "reject" }, BEN), null)).toEqual({ outcome: "closed", state: "passed" });
+      });
+
+      it("closes failed: vetoed on a veto seat's binding reject, and an advisory one vetoes nothing", async () => {
+        const id = await room({ manifest: vetoing, members: [ANN, BEN, CAL, DAN] });
+        const { event } = await open(id);
+        expect(await store.castVote(id, ballot(event.cursor, { choice: "reject", human_approved: false }, CAL), null))
+          .toMatchObject({ outcome: "appended", closed: null });
+        expect(await store.castVote(id, ballot(event.cursor, { choice: "reject" }, CAL), null))
+          .toMatchObject({ outcome: "appended", closed: { payload: { state: "failed", reason: "vetoed" } } });
+      });
+
+      it("closes a random sequence of votes where the rule engine says, in every store alike (property, 15 seeds)", async () => {
+        const seats = [ANN, BEN, CAL, DAN];
+        const choices = ["approve", "reject", "abstain"] as const;
+        const closes = new Set<string>();
+        for (let seed = 1; seed <= 15; seed++) {
+          let s = seed;
+          const next = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+          const rule: DecisionRule = [
+            "majority", "supermajority", "unanimous", { rule: "majority", quorum: 75 }, { rule: "supermajority", quorum: 50 },
+          ][seed % 5];
+          const id = await room({ id: `qs_decide_${seed}`, manifest: vetoing, members: seats });
+          const { event } = await open(id, draft({ rule }));
+          const log = [event];
+          const hash = (event.payload as { hash: string }).hash;
+          for (let i = 0; i < 8; i++) {
+            const by = seats[Math.floor(next() * seats.length)];
+            const input = { hash, choice: choices[Math.floor(next() * 3)], human_approved: next() < 0.75 };
+            const vote = { ...(ballot(event.cursor, input, by).payload as VoteInput) };
+            const want = applyVote(decisionsOf(log, event.at).get(event.cursor)!, by, { ...vote, capacity: capacityOfVote(vote) });
+            const out = await store.castVote(id, ballot(event.cursor, input, by), null);
+            const at = `seed ${seed}, vote ${i}`;
+            if (want.kind !== "record") {
+              expect(out, at).toMatchObject({ outcome: want.kind });
+              continue;
+            }
+            if (out.outcome !== "appended") throw new Error(`${at}: ${out.outcome}`);
+            log.push(out.event, ...(out.closed === null ? [] : [out.closed]));
+            const closed = out.closed?.payload as { state: string; reason?: string } | undefined;
+            expect(closed === undefined ? null : { state: closed.state, ...(closed.reason ? { reason: closed.reason } : {}) }, at).toEqual(want.close);
+          }
+          expect((await store.decision(id, event.cursor, event.at))!.tally, `seed ${seed}`)
+            .toEqual(decisionsOf(log, event.at).get(event.cursor)!.tally);
+          closes.add(decisionsOf(log, event.at).get(event.cursor)!.reason ?? decisionsOf(log, event.at).get(event.cursor)!.state);
+        }
+        expect([...closes].sort(), "the seeds pass, reject and veto").toEqual(["passed", "rejected", "vetoed"]);
       });
 
       it("replays a keyed open and a keyed vote, and refuses a key reused for other content", async () => {

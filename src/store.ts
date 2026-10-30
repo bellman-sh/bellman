@@ -30,7 +30,7 @@ import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Pla
 import { decideApproval } from "./proposal.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideSupersede, decisionsOf, openedPayload,
-  type ClosedState, type DecisionDraft, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
+  type ClosedState, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
   type VoteDecision, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
@@ -869,12 +869,19 @@ export type DecisionClose =
   | { outcome: "frozen" };
 
 /**
- * The seats a decision opened now may vote on (ADR 0040, decisions 5 and 7): every member present whose role holds
- * `vote`. The hosted seat never does (checkHost holds it to exactly `send`), and is left out by name besides.
+ * The snapshot a decision on `kind` opened now takes (ADR 0040, decisions 5, 6 and 7): every member present whose role
+ * holds `vote`, each seat's account, and the seats whose role vetoes `kind`. The hosted seat never holds `vote`
+ * (checkHost holds it to exactly `send`), and is left out by name besides.
  */
-export const electorateOf = (manifest: RoomManifest, members: readonly Member[]): string[] =>
-  members.filter((m) => m.leftAt === null && !isHostMember(m) && verbsOfRole(manifest, m.roomRole).includes("vote"))
-    .map((m) => m.memberId);
+export function electorateOf(manifest: RoomManifest, members: readonly Member[], kind: string): Electorate {
+  const seats = members.filter((m) => m.leftAt === null && !isHostMember(m) && verbsOfRole(manifest, m.roomRole).includes("vote"));
+  const vetoes = (role: string) => (manifest.roles[role]?.veto as readonly string[] | undefined)?.includes(kind) ?? false;
+  return {
+    electorate: seats.map((m) => m.memberId),
+    accounts: Object.fromEntries(seats.map((m) => [m.memberId, m.userId])),
+    ...(Object.keys(manifest.roles).some(vetoes) ? { veto: seats.filter((m) => vetoes(m.roomRole)).map((m) => m.memberId) } : {}),
+  };
+}
 
 /** `applyVote`'s refusal as `castVote` reports it. */
 export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
@@ -3566,7 +3573,7 @@ export class MemoryStore implements BellmanStore {
       const d = decideSupersede(old);
       if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
     }
-    const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.manifest, s.members));
+    const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.manifest, s.members, draft.effect.kind));
     const event = this.appendNow(s, { ...e, payload }, at);
     const superseded = old === undefined ? null : this.appendNow(s, closingEvent(old, { state: "failed", reason: "superseded" }), at);
     k.remember(event.cursor);

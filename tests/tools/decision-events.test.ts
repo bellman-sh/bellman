@@ -37,8 +37,7 @@ describe("decision events over bellman_sync", () => {
     await store.castVote(p.sessionId, {
       type: "decision_vote", fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "creator", refId: null,
       payload: { decision: opened.event.cursor, hash: decisionHash(draft), choice: "approve", via: "action_response", human_approved: true },
-    }, null);
-    await store.closeDecision(p.sessionId, opened.event.cursor, { state: "failed", reason: "rejected" }, Date.now());
+    }, null); // the electorate of one passes it alone, and the store writes the close after the vote (#404)
 
     const out = await p.joiner.call("bellman_sync", { session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: p.joinerCursor });
     expect(out.isError, out.text).toBe(false);
@@ -49,7 +48,7 @@ describe("decision events over bellman_sync", () => {
       ["decision_opened", false], ["decision_vote", true], ["decision_closed", false],
     ]);
     expect(shown[1].payload).toMatchObject({ capacity: "binding", hash: decisionHash(draft) });
-    expect(shown[2].payload).toMatchObject({ decision: opened.event.cursor, state: "failed", reason: "rejected" });
+    expect(shown[2].payload).toMatchObject({ decision: opened.event.cursor, state: "passed" });
     expect(out.data.outstanding).toBeUndefined();
   });
 });

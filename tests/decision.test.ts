@@ -4,12 +4,12 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyVote, capacityOfVote, decideClose, decideSupersede, decisionExpiry, decisionHash, decisionStates, decisionsOf, tally,
-  MAX_DECISION_TTL_MS, MIN_DECISION_TTL_MS,
-  type Ballot, type DecisionOpened, type DecisionVote,
+  applyVote, capacityOfVote, decideClose, decideSupersede, decisionExpiry, decisionHash, decisionStates, decisionsOf, evaluate,
+  ruleOf, tally, DECISION_EVENTS, MAX_DECISION_TTL_MS, MIN_DECISION_TTL_MS,
+  type Ballot, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
 } from "../src/decision.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "../src/action-state.js";
-import type { SessionEvent } from "../src/types.js";
+import type { EventType, SessionEvent } from "../src/types.js";
 
 const draft = () => ({
   key: "tools",
@@ -114,27 +114,252 @@ const vote = (choice: DecisionVote["choice"], human_approved = true, hash = HASH
   ({ decision: 1, hash, choice, via: "action_response", human_approved, capacity: capacityOfVote({ via: "action_response", human_approved }) });
 const ballot = (cursor: number, memberId: string, userId: string, v: DecisionVote): Ballot => ({ cursor, memberId, userId, vote: v });
 
+/** The part of a decision `tally` and `evaluate` read, with `u_<seat>` as each seat's account unless `accounts` says. */
+type Counted = Pick<DecisionView, "payload" | "ballots" | "voided" | "removed">;
+const counted = (
+  rule: DecisionRule, electorate: string[], ballots: Ballot[] = [],
+  over: { veto?: string[]; accounts?: Record<string, string>; voided?: number[]; removed?: string[] } = {},
+): Counted => ({
+  payload: {
+    ...draft(), rule, expires_at: 0, hash: HASH, electorate,
+    accounts: { ...Object.fromEntries(electorate.map((m) => [m, `u_${m}`])), ...over.accounts },
+    ...(over.veto === undefined ? {} : { veto: over.veto }),
+  },
+  ballots, voided: over.voided ?? [], removed: over.removed ?? [],
+});
+/** Ballots from `"<seat>:<choice>"`, `"<seat>:<choice>?"` for an advisory one, cursors from 2 in order. */
+const cast = (...votes: string[]): Ballot[] => votes.map((v, i) => {
+  const [seat, rest] = v.split(":");
+  const choice = rest.replace("?", "") as DecisionVote["choice"];
+  return ballot(i + 2, seat, `u_${seat}`, vote(choice, !rest.endsWith("?")));
+});
+
 describe("tally", () => {
   const electorate = ["m_a", "m_b", "m_c", "m_a2"];
+  const accounts = { m_a2: "u_m_a" };
 
-  it("counts the latest vote of each account, binding and advisory apart", () => {
-    const t = tally([
-      ballot(2, "m_a", "u_a", vote("reject")),
-      ballot(3, "m_b", "u_b", vote("approve")),
-      ballot(4, "m_a", "u_a", vote("approve")),           // a revision replaces the reject
-      ballot(5, "m_c", "u_c", vote("reject", false)),     // advisory
-      ballot(6, "m_a2", "u_a", vote("abstain")),          // the same account's second seat: latest wins
-    ], electorate);
-    expect(t).toEqual({ approve: 1, reject: 0, abstain: 1, advisory: { approve: 0, reject: 1, abstain: 0 } });
+  it("counts the latest vote of each account, binding and advisory apart, and accounts not seats", () => {
+    const t = tally(counted("majority", electorate, [
+      ballot(2, "m_a", "u_m_a", vote("reject")),
+      ballot(3, "m_b", "u_m_b", vote("approve")),
+      ballot(4, "m_a", "u_m_a", vote("approve")),           // a revision replaces the reject
+      ballot(5, "m_c", "u_m_c", vote("reject", false)),     // advisory
+      ballot(6, "m_a2", "u_m_a", vote("abstain")),          // the same account's second seat: latest wins
+    ], { accounts }));
+    expect(t).toEqual({
+      approve: 1, reject: 0, abstain: 1, advisory: { approve: 0, reject: 1, abstain: 0 },
+      electorate: 3, unreachable: 0, turnout: 2, quorum: null,
+    });
   });
 
-  it("leaves out a voided vote and a seat outside the electorate", () => {
-    const t = tally([
-      ballot(2, "m_a", "u_a", vote("approve")),
-      ballot(3, "m_b", "u_b", vote("approve")),
-      ballot(4, "m_x", "u_x", vote("approve")),
-    ], electorate, [3]);
-    expect(t).toMatchObject({ approve: 1, reject: 0, abstain: 0 });
+  it("leaves out a voided vote, a removed seat's every vote, and a seat outside the electorate", () => {
+    const t = tally(counted("majority", electorate, [
+      ballot(2, "m_a", "u_m_a", vote("approve")),
+      ballot(3, "m_b", "u_m_b", vote("approve")),
+      ballot(4, "m_x", "u_m_x", vote("approve")),
+      ballot(5, "m_c", "u_m_c", vote("approve")),
+    ], { accounts, voided: [3], removed: ["m_c"] }));
+    expect(t).toMatchObject({ approve: 1, reject: 0, abstain: 0, electorate: 3, unreachable: 1, turnout: 1 });
+  });
+
+  it("counts an account unreachable only once every seat it held is removed", () => {
+    expect(tally(counted("majority", electorate, [], { accounts, removed: ["m_a"] })).unreachable).toBe(0);
+    expect(tally(counted("majority", electorate, [], { accounts, removed: ["m_a", "m_a2"] })).unreachable).toBe(1);
+  });
+
+  it("states the quorum as the turnout needed, rounded up", () => {
+    expect(tally(counted({ rule: "majority", quorum: 60 }, ["a", "b", "c", "d", "e"])).quorum).toBe(3);
+    expect(tally(counted({ rule: "majority", quorum: 60 }, ["a", "b", "c"])).quorum).toBe(2);
+    expect(tally(counted({ rule: "majority", quorum: 34 }, ["a", "b", "c"])).quorum).toBe(2);
+    expect(tally(counted({ rule: "majority", quorum: null }, ["a", "b", "c"])).quorum).toBeNull();
+  });
+});
+
+describe("ruleOf", () => {
+  it("reads a rule's name alone or with the quorum the manifest resolved, and nothing outside the set", () => {
+    expect(ruleOf("unanimous")).toEqual({ rule: "unanimous", quorum: null });
+    expect(ruleOf({ rule: "majority", quorum: 60 })).toEqual({ rule: "majority", quorum: 60 });
+    expect(ruleOf({ rule: "plurality" })).toEqual({ rule: null, quorum: null });
+  });
+});
+
+describe("evaluate", () => {
+  const SEATS = ["a", "b", "c"];
+  const PASSED = { state: "passed" } as const;
+  const failed = (reason: FailReason) => ({ state: "failed", reason }) as const;
+
+  // Three seats, no veto, no quorum. Each row is a sequence of votes and the close it calls for.
+  const rules: [DecisionRule, string[], ReturnType<typeof evaluate>][] = [
+    ["majority", [], null],
+    ["majority", ["a:approve"], null],                                    // the other two could reject
+    ["majority", ["a:approve", "b:approve"], PASSED],                     // 2 against at worst 1
+    ["majority", ["a:approve", "b:reject"], null],
+    ["majority", ["a:approve", "b:reject", "c:abstain"], failed("rejected")], // a tie is no majority
+    ["majority", ["a:reject", "b:reject"], failed("rejected")],
+    ["majority", ["a:approve", "b:abstain"], null],                       // c could still reject
+    ["majority", ["a:approve", "b:abstain", "c:abstain"], PASSED],        // abstain is not a no
+    ["majority", ["a:abstain", "b:abstain", "c:abstain"], failed("rejected")],
+    ["majority", ["a:reject", "a:approve", "b:approve"], PASSED],         // a revision counts in place of the vote before
+    ["supermajority", ["a:approve", "b:approve"], PASSED],                // 2 of 3 at worst
+    ["supermajority", ["a:approve", "b:reject"], null],                   // c approving makes 2 of 3
+    ["supermajority", ["a:approve", "b:reject", "c:approve"], PASSED],
+    ["supermajority", ["a:approve", "b:reject", "c:reject"], failed("rejected")],
+    ["supermajority", ["a:approve", "b:reject", "c:abstain"], failed("rejected")], // 1 of 2 is short of two thirds
+    ["unanimous", ["a:approve", "b:approve"], null],                      // c could reject
+    ["unanimous", ["a:approve", "b:approve", "c:approve"], PASSED],
+    ["unanimous", ["a:approve", "b:abstain", "c:abstain"], PASSED],       // every seat that did not abstain approved
+    ["unanimous", ["a:approve", "b:reject"], failed("rejected")],
+    ["unanimous", ["a:abstain", "b:abstain", "c:abstain"], failed("rejected")],
+    ["single", ["a:approve", "b:approve", "c:approve"], null],            // the action_request flow, never closed here
+    ["plurality", ["a:approve", "b:approve", "c:approve"], null],
+  ];
+  it.each(rules)("%s after %j closes %j", (rule, votes, want) => {
+    expect(evaluate(counted(rule, SEATS, cast(...votes)))).toEqual(want);
+  });
+
+  it("an electorate of one passes alone", () => {
+    expect(evaluate(counted("unanimous", ["a"], cast("a:approve")))).toEqual(PASSED);
+  });
+
+  it("an advisory vote neither counts, nor stands for its account, nor replaces the account's binding vote", () => {
+    expect(evaluate(counted("majority", SEATS, cast("a:approve?", "b:approve?", "c:approve?")))).toBeNull();
+    expect(evaluate(counted("majority", SEATS, cast("a:approve", "b:approve", "b:reject?")))).toEqual(PASSED);
+    expect(tally(counted("majority", SEATS, cast("a:approve", "a:reject?")))).toMatchObject({ approve: 1, advisory: { reject: 1 } });
+  });
+
+  // c holds the veto. A veto seat's binding reject fails it; until it has voted, nothing passes.
+  const vetoes: [string[], string[], ReturnType<typeof evaluate>][] = [
+    [["c"], ["a:approve", "b:approve"], null],                            // would pass, but c has yet to vote
+    [["c"], ["a:approve", "b:approve", "c:reject"], failed("vetoed")],
+    [["c"], ["c:reject"], failed("vetoed")],
+    [["c"], ["a:approve", "b:approve", "c:abstain"], PASSED],             // a veto holder's abstain does not block
+    [["c"], ["a:approve", "b:approve", "c:approve"], PASSED],
+    [["c"], ["a:approve", "b:approve", "c:reject?"], null],               // an advisory reject is no veto
+    [["c"], ["a:reject", "b:reject"], failed("rejected")],
+    [["b", "c"], ["a:approve", "b:approve", "c:abstain"], PASSED],
+    [["b", "c"], ["a:approve", "b:approve"], null],
+    [[], ["a:approve"], failed("blocked")],                               // a role vetoes the kind and nobody holding it was seated
+  ];
+  it.each(vetoes)("majority with veto %j after %j closes %j", (veto, votes, want) => {
+    expect(evaluate(counted("majority", SEATS, cast(...votes), { veto }))).toEqual(want);
+  });
+
+  it("counts an unreachable seat as a possible reject when passing, and as no approver when failing", () => {
+    expect(evaluate(counted("majority", SEATS, cast("a:approve", "b:abstain")))).toBeNull();
+    expect(evaluate(counted("majority", SEATS, cast("a:approve", "b:abstain"), { removed: ["c"] }))).toBeNull();
+    expect(evaluate(counted("majority", SEATS, cast("a:reject", "b:abstain"), { removed: ["c"] }))).toEqual(failed("rejected"));
+  });
+
+  it("fails blocked once no veto seat is reachable, the veto seat's approval voided with it", () => {
+    const ballots = cast("a:approve", "b:approve", "c:approve");
+    expect(evaluate(counted("majority", SEATS, ballots, { veto: ["c"], removed: ["c"], voided: [4] }))).toEqual(failed("blocked"));
+  });
+
+  // Five seats, quorum 80%: a turnout of 4. Each row's close under majority, supermajority and unanimous.
+  type Close = ReturnType<typeof evaluate>;
+  const quorums: [string, string[], string[], [Close, Close, Close]][] = [
+    ["not yet met, though a majority holds", ["a:approve", "b:approve", "c:approve"], [], [null, null, null]],
+    ["met, an abstain counting as presence", ["a:approve", "b:approve", "c:approve", "d:abstain"], [], [PASSED, PASSED, null]],
+    ["met by four approvals, e still able to reject", ["a:approve", "b:approve", "c:approve", "d:approve"], [], [PASSED, PASSED, null]],
+    ["met by five approvals", ["a:approve", "b:approve", "c:approve", "d:approve", "e:approve"], [], [PASSED, PASSED, PASSED]],
+    ["not met by an advisory vote", ["a:approve", "b:approve", "c:approve", "d:approve?"], [], [null, null, null]],
+    ["out of reach once two seats are unreachable", ["a:approve"], ["d", "e"], [failed("no_quorum"), failed("no_quorum"), failed("no_quorum")]],
+    ["still in reach with one unreachable", ["a:approve"], ["e"], [null, null, null]],
+  ];
+  (["majority", "supermajority", "unanimous"] as const).forEach((rule, i) => {
+    it.each(quorums)(`${rule}, quorum 80%%: %s`, (_, votes, removed, want) => {
+      expect(evaluate(counted({ rule, quorum: 80 }, ["a", "b", "c", "d", "e"], cast(...votes), { removed }))).toEqual(want[i]);
+    });
+  });
+
+  it("a single rule takes no quorum, and one written anyway closes nothing", () => {
+    expect(evaluate(counted({ rule: "single", quorum: 10 }, SEATS, cast("a:approve", "b:approve", "c:approve")))).toBeNull();
+  });
+
+  /** A random decision: one to five seats, two sharing an account sometimes, a random rule, quorum and veto. */
+  function randomDecision(next: () => number): Counted {
+    const seats = ["a", "b", "c", "d", "e"].slice(0, 1 + Math.floor(next() * 5));
+    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)];
+    const rule = pick(["majority", "supermajority", "unanimous"]);
+    const quorum = pick([null, 34, 50, 80, 100]);
+    const veto = pick([undefined, [], seats.filter(() => next() < 0.4)]);
+    const accounts = seats.length > 1 && next() < 0.3 ? { [seats[1]]: `u_${seats[0]}` } : {};
+    return counted({ rule, quorum }, seats, [], { veto, accounts });
+  }
+  const choices = ["approve", "reject", "abstain"] as const;
+
+  it("no leave, eviction or join turns a decision that has not passed into passed (property, 3000 seeds)", () => {
+    for (let seed = 1; seed <= 3000; seed++) {
+      const next = rng(seed);
+      let d = randomDecision(next);
+      const seats = d.payload.electorate;
+      for (let step = 0, cursor = 2; step < 12 && evaluate(d) === null; step++, cursor++) {
+        const seat = seats[Math.floor(next() * seats.length)];
+        const roll = next();
+        if (roll < 0.25) {
+          // A leave or an eviction: the seat's votes are voided and the seat stays in the snapshot.
+          const voided = d.ballots.filter((b) => b.memberId === seat).map((b) => b.cursor);
+          d = { ...d, removed: [...d.removed, seat], voided: [...d.voided, ...voided] };
+          expect(evaluate(d)?.state, `seed ${seed}, step ${step}: removing ${seat}`).not.toBe("passed");
+        } else if (roll < 0.4) {
+          // A join: a newcomer, or the removed seat back, and its vote.
+          const who = d.removed.includes(seat) && next() < 0.5 ? seat : `new${cursor}`;
+          const view = { ...d, cursor: 1, closed: null } as unknown as DecisionView;
+          const out = applyVote(view, { memberId: who, userId: d.payload.accounts[who] ?? `u_${who}` }, vote(choices[cursor % 3]));
+          expect(out, `seed ${seed}, step ${step}: ${who} joining`).toEqual({ kind: "not_electorate" });
+        } else if (!d.removed.includes(seat)) {
+          const userId = d.payload.accounts[seat];
+          d = { ...d, ballots: [...d.ballots, ballot(cursor, seat, userId, vote(choices[Math.floor(next() * 3)], next() < 0.8))] };
+        }
+      }
+    }
+  });
+
+  it("removing a seat brings back no vote its account's other seat cast before it", () => {
+    // u_a holds a and b: b's reject replaced a's approve, and voiding it leaves u_a with no vote, not the approve.
+    const ballots = [ballot(2, "a", "u_a", vote("approve")), ballot(3, "b", "u_a", vote("reject")), ballot(4, "c", "u_c", vote("approve"))];
+    const d = counted("supermajority", ["a", "b", "c", "d"], ballots, { accounts: { a: "u_a", b: "u_a" }, removed: ["b"], voided: [3] });
+    expect(tally(d)).toMatchObject({ approve: 1, reject: 0, electorate: 3, unreachable: 0 });
+    expect(evaluate(d)).toBeNull();
+  });
+
+  it("voiding gives what the vote never cast would, with the seat unreachable (property, 300 seeds, one seat per account)", () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed);
+      const d = randomDecision(next);
+      if (new Set(Object.values(d.payload.accounts)).size < d.payload.electorate.length) continue;
+      const seats = d.payload.electorate;
+      const ballots = Array.from({ length: Math.floor(next() * 8) }, (_, i) => {
+        const seat = seats[Math.floor(next() * seats.length)];
+        return ballot(i + 2, seat, d.payload.accounts[seat], vote(choices[Math.floor(next() * 3)], next() < 0.8));
+      });
+      const gone = seats[Math.floor(next() * seats.length)];
+      const voided = ballots.filter((b) => b.memberId === gone).map((b) => b.cursor);
+      const withVoid = { ...d, ballots, voided, removed: [gone] };
+      const neverCast = { ...d, ballots: ballots.filter((b) => b.memberId !== gone), removed: [gone] };
+      expect(tally(withVoid), `seed ${seed}`).toEqual(tally(neverCast));
+      expect(evaluate(withVoid), `seed ${seed}`).toEqual(evaluate(neverCast));
+    }
+  });
+
+  it("advisory votes never change the binding tally, the turnout or the close (property, 300 seeds)", () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const next = rng(seed);
+      const d = randomDecision(next);
+      const seats = d.payload.electorate;
+      const binding: Ballot[] = [];
+      const all: Ballot[] = [];
+      for (let i = 0; i < 10; i++) {
+        const seat = seats[Math.floor(next() * seats.length)];
+        const b = ballot(i + 2, seat, d.payload.accounts[seat], vote(choices[Math.floor(next() * 3)], next() < 0.5));
+        all.push(b);
+        if (b.vote.capacity === "binding") binding.push(b);
+      }
+      const { advisory: _a, ...withAdvisory } = tally({ ...d, ballots: all });
+      const { advisory: _b, ...without } = tally({ ...d, ballots: binding });
+      expect(withAdvisory, `seed ${seed}`).toEqual(without);
+      expect(evaluate({ ...d, ballots: all }), `seed ${seed}`).toEqual(evaluate({ ...d, ballots: binding }));
+    }
   });
 });
 
@@ -142,7 +367,9 @@ describe("decisionsOf", () => {
   const AT = 1_000_000;
   const opened = (cursor: number, over: Partial<DecisionOpened> = {}): SessionEvent => ({
     cursor, type: "decision_opened", fromMemberId: "m_a", fromUserId: "u_a", fromLabel: "a", refId: null, at: AT,
-    payload: { ...draft(), expires_at: AT + ACTION_REQUEST_TTL_MS, electorate: ["m_a", "m_b"], hash: HASH, ...over } satisfies DecisionOpened,
+    payload: {
+      ...draft(), expires_at: AT + ACTION_REQUEST_TTL_MS, electorate: ["m_a", "m_b"], accounts: { m_a: "u_a", m_b: "u_b" }, hash: HASH, ...over,
+    } satisfies DecisionOpened,
   });
   const voted = (cursor: number, memberId: string, v: DecisionVote, decision = 1): SessionEvent => ({
     cursor, type: "decision_vote", fromMemberId: memberId, fromUserId: `u_${memberId.slice(2)}`, fromLabel: memberId,
@@ -180,7 +407,38 @@ describe("decisionsOf", () => {
     const v = decisionsOf(events, AT).get(1)!;
     expect(v.ballots.map((b) => b.cursor)).toEqual([2, 3]);
     expect(v.voided).toEqual([3]);
-    expect(v.tally.approve).toBe(1);
+    expect(v.removed).toEqual(["m_b"]);
+    expect(v.tally).toMatchObject({ approve: 1, unreachable: 1 });
+  });
+
+  it("reads only decision events: any other event, shaped like a vote or a judge's signal, changes nothing (property, #424)", () => {
+    const others = (["message", "progress", "surface", "housekeeping", "action_response", "brief_update"] as EventType[]);
+    for (let seed = 1; seed <= 200; seed++) {
+      const next = rng(seed);
+      const pure: SessionEvent[] = [opened(1, { rule: { rule: "majority", quorum: 50 } }), opened(2, { rule: "unanimous" })];
+      const mixed = [...pure];
+      for (let cursor = 3; cursor < 30; cursor++) {
+        const decision = 1 + Math.floor(next() * 2);
+        const choice = (["approve", "reject", "abstain"] as const)[Math.floor(next() * 3)];
+        if (next() < 0.5) {
+          const e = voted(cursor, next() < 0.5 ? "m_a" : "m_b", vote(choice, next() < 0.7), decision);
+          pure.push(e);
+          mixed.push(e);
+        } else {
+          // A signal: no seat, any non-decision type, a payload naming the decision with a vote's fields and a judge's.
+          const type = others[Math.floor(next() * others.length)];
+          mixed.push(system(cursor, type, { decision, hash: HASH, choice, capacity: "binding", signal_id: `s${cursor}`, bands: ["high"] }));
+        }
+      }
+      expect(mixed.some((e) => !(DECISION_EVENTS as readonly string[]).includes(e.type)), `seed ${seed}`).toBe(true);
+      const strip = (m: Map<number, DecisionView>) => [...m.values()].map(({ opened: _, closed: __, ...v }) => v);
+      expect(strip(decisionsOf(mixed, AT)), `seed ${seed}`).toEqual(strip(decisionsOf(pure, AT)));
+      for (const v of decisionsOf(mixed, AT).values()) {
+        const agentVotes = v.ballots.filter((b) => b.vote.capacity === "advisory");
+        const advisory = v.tally.advisory.approve + v.tally.advisory.reject + v.tally.advisory.abstain;
+        expect(advisory, `seed ${seed}: tally.advisory counts seats' advisory votes only`).toBeLessThanOrEqual(new Set(agentVotes.map((b) => b.userId)).size);
+      }
+    }
   });
 
   it("keeps two decisions apart", () => {
@@ -194,16 +452,21 @@ describe("decisionsOf", () => {
     const view = (events: SessionEvent[] = [opened(1)]) => decisionsOf(events, AT).get(1)!;
     const A = { memberId: "m_a", userId: "u_a" };
 
-    it("records a vote from the electorate on the current hash, and the stub rule closes nothing", () => {
+    it("records a vote from the electorate on the current hash, with the close it calls for", () => {
       expect(applyVote(view(), A, vote("approve"))).toEqual({ kind: "record", close: null });
+      const majority = view([opened(1, { rule: "majority" }), voted(2, "m_b", vote("approve"))]);
+      expect(applyVote(majority, A, vote("approve"))).toEqual({ kind: "record", close: { state: "passed" } });
+      expect(applyVote(majority, A, vote("reject"))).toEqual({ kind: "record", close: { state: "failed", reason: "rejected" } });
     });
 
     it("refuses a vote on another hash as stale, naming the current hash", () => {
       expect(applyVote(view(), A, vote("approve", true, "f".repeat(64)))).toEqual({ kind: "stale", hash: HASH });
     });
 
-    it("refuses a seat outside the electorate", () => {
+    it("refuses a seat outside the electorate, and a removed seat back in the room", () => {
       expect(applyVote(view(), { memberId: "m_late", userId: "u_late" }, vote("approve"))).toEqual({ kind: "not_electorate" });
+      const removed = view([opened(1), system(2, "decision_voter_removed", { decision: 1, member: "m_a", by: "m_b", reason: "left", voided: [] })]);
+      expect(applyVote(removed, A, vote("approve"))).toEqual({ kind: "not_electorate" });
     });
 
     it("refuses any vote once a closing event exists, before the hash is read", () => {

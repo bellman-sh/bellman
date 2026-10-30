@@ -7,12 +7,12 @@
  * differently. The hash uses `node:crypto`'s synchronous `createHash`, as `AuditDO` does (ADR 0035): an async
  * digest would let another append land between the read and the write that stores it.
  *
- * The rule engine (#404) fills in `evaluate`; until then it closes nothing, so a decision ends only by a
- * supersession or by `closeDecision`. Quotas, voiding on eviction and the `vote` verb are #407 and #403.
+ * `evaluate` is the rule engine (#404): after each vote it closes a decision the moment the worst case for the seats yet
+ * to vote decides it. Quotas and writing `decision_voter_removed` are #407.
  */
 import { createHash } from "node:crypto";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "./action-state.js";
-import type { EventType, SessionEvent } from "./types.js";
+import type { DecisionRuleName, EventType, SessionEvent } from "./types.js";
 
 /** The four decision event types. Only the server writes them: none is a `bellman_send` kind. */
 export const DECISION_EVENTS = [
@@ -56,6 +56,13 @@ export interface DecisionOpened {
   expires_at: number;
   /** The seats that may vote, fixed at open (decision 5). */
   electorate: string[];
+  /** Each electorate seat's account, fixed with it: one account counts once however many seats it holds. */
+  accounts: Record<string, string>;
+  /**
+   * The electorate seats whose role vetoes the effect's kind (decision 6). Present whenever a role vetoes the kind,
+   * even empty: a veto nobody seated can cast is not waived, and the decision closes `failed: blocked`.
+   */
+  veto?: string[];
   hash: string;
   supersedes?: number;
 }
@@ -76,8 +83,18 @@ export interface VoteInput {
 export interface DecisionVote extends VoteInput { capacity: Capacity }
 
 export interface Counts { approve: number; reject: number; abstain: number }
-/** Binding counts at the top, advisory ones beside them; each account counted once (decision 3). */
-export interface Tally extends Counts { advisory: Counts }
+/**
+ * Binding counts at the top, advisory ones beside them; each account counted once (decision 3). `electorate` and
+ * `unreachable` count accounts: an account is unreachable once every seat it held in the snapshot was removed.
+ * `turnout` is the binding votes of any choice; `quorum` the turnout the rule needs, null for none (decision 20).
+ */
+export interface Tally extends Counts {
+  advisory: Counts;
+  electorate: number;
+  unreachable: number;
+  turnout: number;
+  quorum: number | null;
+}
 
 /** A `decision_closed` payload. A closed decision's tally is stored so no reader recomputes it (decision 13). */
 export interface DecisionClosed {
@@ -109,6 +126,8 @@ export interface DecisionView {
   /** Every vote cast while it was open, in cursor order, the voided and the revised included. */
   ballots: Ballot[];
   voided: number[];
+  /** The seats `decision_voter_removed` named: unreachable for the decision's life, a rejoin included (decision 12). */
+  removed: string[];
   tally: Tally;
   closed: SessionEvent | null;
 }
@@ -146,28 +165,85 @@ export function decisionExpiry(at: number, draft: Pick<DecisionDraft, "expires_m
 
 const noCounts = (): Counts => ({ approve: 0, reject: 0, abstain: 0 });
 
+/** A rule as the server writes it into a draft, the name alone or `{ rule, quorum }`; null for a name outside the set. */
+export function ruleOf(rule: DecisionRule): { rule: DecisionRuleName | null; quorum: number | null } {
+  const o = typeof rule === "string" ? { rule } : rule;
+  const name = (["single", "majority", "supermajority", "unanimous"] as const).find((n) => n === o.rule) ?? null;
+  return { rule: name, quorum: typeof o.quorum === "number" ? o.quorum : null };
+}
+
+type Counted = Pick<DecisionView, "payload" | "ballots" | "voided" | "removed">;
+
 /**
- * The tally of `ballots` (decision 3): the latest vote of each account counts, so a revision replaces the vote
- * before it and one account's several seats count once. A voided vote and a seat outside the electorate are
- * left out. Advisory votes are counted beside the binding ones and never in them.
+ * The count `tally` and `evaluate` share. The latest vote of each account counts, so a revision replaces the vote
+ * before it and one account's several seats count once. Binding and advisory are kept apart, so an advisory vote
+ * never replaces a binding one (decision 9). A seat outside the electorate is left out. A voided vote and a removed
+ * seat's every vote are left out after the latest is found, never before: one account's other seat then has no vote
+ * until it casts one, and the vote the voided one replaced does not come back, which could ease a pass (decision 12).
+ * `pending` is the reachable accounts with no binding vote; `veto` what the veto seats have done, null when no role
+ * vetoes the kind.
  */
-export function tally(ballots: readonly Ballot[], electorate: readonly string[], voided: readonly number[] = []): Tally {
-  const latest = new Map<string, Ballot>();
-  for (const b of ballots) {
-    if (voided.includes(b.cursor) || !electorate.includes(b.memberId)) continue;
-    const prior = latest.get(b.userId);
-    if (prior === undefined || prior.cursor < b.cursor) latest.set(b.userId, b);
+function count(v: Counted) {
+  const { electorate, accounts } = v.payload;
+  const live = (m: string) => electorate.includes(m) && !v.removed.includes(m);
+  const latest = { binding: new Map<string, Ballot>(), advisory: new Map<string, Ballot>() };
+  for (const b of v.ballots) {
+    if (!electorate.includes(b.memberId)) continue;
+    const of = latest[b.vote.capacity];
+    const prior = of.get(accounts[b.memberId]);
+    if (prior === undefined || prior.cursor < b.cursor) of.set(accounts[b.memberId], b);
   }
-  const t: Tally = { ...noCounts(), advisory: noCounts() };
-  for (const { vote } of latest.values()) (vote.capacity === "binding" ? t : t.advisory)[vote.choice] += 1;
-  return t;
+  for (const of of Object.values(latest)) {
+    for (const [account, b] of of) if (v.voided.includes(b.cursor) || !live(b.memberId)) of.delete(account);
+  }
+  const t: Tally = { ...noCounts(), advisory: noCounts(), electorate: 0, unreachable: 0, turnout: 0, quorum: null };
+  for (const { vote } of latest.binding.values()) t[vote.choice] += 1;
+  for (const { vote } of latest.advisory.values()) t.advisory[vote.choice] += 1;
+  const all = new Set(electorate.map((m) => accounts[m]));
+  const reachable = new Set(electorate.filter(live).map((m) => accounts[m]));
+  const bound = (account: string) => latest.binding.has(account);
+  const { quorum } = ruleOf(v.payload.rule);
+  Object.assign(t, {
+    electorate: all.size, unreachable: all.size - reachable.size, turnout: t.approve + t.reject + t.abstain,
+    quorum: quorum === null ? null : Math.ceil((quorum * all.size) / 100),
+  });
+  const seats = v.payload.veto?.filter(live);
+  const veto = seats === undefined ? null : {
+    cast: [...latest.binding.values()].some((b) => b.vote.choice === "reject" && seats.includes(b.memberId)),
+    blocked: seats.length === 0,
+    pending: seats.some((m) => !bound(accounts[m])),
+  };
+  return { tally: t, pending: [...reachable].filter((a) => !bound(a)).length, veto };
+}
+
+/** The tally of a decision's votes (decision 3), with its electorate, unreachable seats, turnout and quorum. */
+export const tally = (v: Counted): Tally => count(v).tally;
+
+/** Whether `rule` holds at `approve` against `reject`; abstain is in neither (decision 6). */
+function holds(rule: Exclude<DecisionRuleName, "single">, approve: number, reject: number): boolean {
+  if (rule === "majority") return approve > reject;
+  if (rule === "supermajority") return approve > 0 && 3 * approve >= 2 * (approve + reject);
+  return approve > 0 && reject === 0;
 }
 
 /**
- * The rule engine's entry point (#404): the close `opened`'s rule calls for at tally `t`, or null to stay open.
- * A stub that closes nothing until #404 fills it in.
+ * The rule engine (decisions 6, 12 and 20): the close a decision's votes call for, or null to stay open. A veto
+ * seat's binding reject fails it `vetoed`, and no veto seat left reachable fails it `blocked`. It fails `rejected`
+ * when the rule cannot hold even if every reachable account yet to vote approved, and `no_quorum` when turnout
+ * cannot be met even if they all voted. It passes when turnout is met, no veto seat has yet to vote, and the rule
+ * holds even if every account yet to vote and every unreachable one rejected. `single` is the `action_request`
+ * flow and never closes here; neither does a rule outside the set.
  */
-export function evaluate(_opened: DecisionOpened, _t: Tally): { state: "passed" | "failed"; reason?: FailReason } | null {
+export function evaluate(v: Counted): { state: "passed" | "failed"; reason?: FailReason } | null {
+  const { rule } = ruleOf(v.payload.rule);
+  if (rule === null || rule === "single") return null;
+  const { tally: t, pending, veto } = count(v);
+  if (veto?.cast) return { state: "failed", reason: "vetoed" };
+  if (veto?.blocked) return { state: "failed", reason: "blocked" };
+  if (!holds(rule, t.approve + pending, t.reject)) return { state: "failed", reason: "rejected" };
+  if (t.quorum !== null && t.turnout + pending < t.quorum) return { state: "failed", reason: "no_quorum" };
+  const turnoutMet = t.quorum === null || t.turnout >= t.quorum;
+  if (turnoutMet && !veto?.pending && holds(rule, t.approve, t.reject + pending + t.unreachable)) return { state: "passed" };
   return null;
 }
 
@@ -187,15 +263,19 @@ export function decisionsOf(events: readonly SessionEvent[], now: number): Map<n
     if (e.type === "decision_opened") {
       const payload = e.payload as DecisionOpened;
       views.set(e.cursor, {
-        cursor: e.cursor, opened: e, payload, state: "open", reason: null,
-        ballots: [], voided: [], tally: { ...noCounts(), advisory: noCounts() }, closed: null,
+        cursor: e.cursor, opened: e, payload, state: "open", reason: null, ballots: [], voided: [], removed: [], closed: null,
+        tally: { ...noCounts(), advisory: noCounts(), electorate: 0, unreachable: 0, turnout: 0, quorum: null },
       });
       continue;
     }
     const v = views.get(decisionOf(e) ?? -1);
     if (v === undefined || v.closed !== null) continue;
     if (e.type === "decision_vote") v.ballots.push(ballotOf(e));
-    else if (e.type === "decision_voter_removed") v.voided.push(...(e.payload as VoterRemoved).voided);
+    else if (e.type === "decision_voter_removed") {
+      const r = e.payload as VoterRemoved;
+      v.voided.push(...r.voided);
+      v.removed.push(r.member);
+    }
     else if (e.type === "decision_closed") v.closed = e;
   }
   for (const v of views.values()) {
@@ -203,7 +283,7 @@ export function decisionsOf(events: readonly SessionEvent[], now: number): Map<n
       const c = v.closed.payload as DecisionClosed;
       Object.assign(v, { state: c.state, reason: c.reason ?? null, tally: c.tally });
     } else {
-      v.tally = tally(v.ballots, v.payload.electorate, v.voided);
+      v.tally = tally(v);
       if (now > v.payload.expires_at) v.state = "expired";
     }
   }
@@ -224,22 +304,23 @@ export function decideSupersede(old: DecisionView | undefined): { kind: "replace
 /** What a store does with a vote, decided from the decision as it read it in the transaction that writes. */
 export type VoteDecision =
   | { kind: "closed"; state: DecisionState }    // a closing event exists: no vote lands after it
-  | { kind: "not_electorate" }                  // the seat is not in the snapshot taken at open
+  | { kind: "not_electorate" }                  // the seat is not in the snapshot taken at open, or was removed from it
   | { kind: "stale"; hash: string }             // the vote names another hash; `hash` is the current one
   | { kind: "record"; close: { state: "passed" | "failed"; reason?: FailReason } | null };
 
 /**
  * `applyVote` decides a vote by `voter` against `view` (decision 3). In this order: a closed decision refuses it,
- * so a superseded decision's vote reads `closed` and not `stale`; then a seat outside the electorate; then a hash
+ * so a superseded decision's vote reads `closed` and not `stale`; then a seat outside the electorate, or one
+ * `decision_voter_removed` named, since a rejoin restores neither the seat nor its vote (decision 12); then a hash
  * that is not the decision's. A vote past the deadline on a decision nobody has closed still lands (decision 4).
  * A recorded vote carries the close `evaluate` calls for with the vote counted in.
  */
 export function applyVote(view: DecisionView, voter: { memberId: string; userId: string }, vote: DecisionVote): VoteDecision {
   if (view.closed !== null) return { kind: "closed", state: view.state };
-  if (!view.payload.electorate.includes(voter.memberId)) return { kind: "not_electorate" };
+  if (!view.payload.electorate.includes(voter.memberId) || view.removed.includes(voter.memberId)) return { kind: "not_electorate" };
   if (vote.hash !== view.payload.hash) return { kind: "stale", hash: view.payload.hash };
-  const next = [...view.ballots, { cursor: Number.MAX_SAFE_INTEGER, ...voter, vote }];
-  return { kind: "record", close: evaluate(view.payload, tally(next, view.payload.electorate, view.voided)) };
+  const ballots = [...view.ballots, { cursor: Number.MAX_SAFE_INTEGER, ...voter, vote }];
+  return { kind: "record", close: evaluate({ ...view, ballots }) };
 }
 
 /** What a store does with a close: write it, or refuse a decision already closed or one not yet due to expire. */
@@ -253,10 +334,13 @@ export function decideClose(
   return { kind: "close" };
 }
 
+/** The snapshot a store takes of the room at open (decision 5): who may vote, as which account, and who may veto. */
+export type Electorate = Pick<DecisionOpened, "electorate" | "accounts" | "veto">;
+
 /** A `decision_opened` payload for `draft`, opened at `at`: its expiry, the electorate snapshot and the hash. Throws on an expiry out of bounds. */
-export function openedPayload(draft: DecisionDraft, at: number, topic: boolean, electorate: string[]): DecisionOpened {
+export function openedPayload(draft: DecisionDraft, at: number, topic: boolean, snapshot: Electorate): DecisionOpened {
   return {
-    key: draft.key, effect: draft.effect, rule: draft.rule, expires_at: decisionExpiry(at, draft, topic), electorate,
+    key: draft.key, effect: draft.effect, rule: draft.rule, expires_at: decisionExpiry(at, draft, topic), ...snapshot,
     hash: decisionHash(draft), ...(draft.supersedes === undefined ? {} : { supersedes: draft.supersedes }),
   };
 }

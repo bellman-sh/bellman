@@ -117,6 +117,10 @@
       "description": "Check or set the name in a public room's link."
     },
     {
+      "name": "bellman_decide",
+      "description": "Open, vote on, or read a room's decisions. Only your human's approval binds."
+    },
+    {
       "name": "bellman_report",
       "description": "Report a room, a member or a message to Bellman."
     }

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  ActionResponseShape, BriefShape, OutsideAnswerShape, ProgressShape, SEND_KINDS, isReport, SEND_VERB, appendOrFrozen, fail, ok, refusal,
+  ActionResponseShape, BriefShape, DecisionAnswerShape, OutsideAnswerShape, ProgressShape, SEND_KINDS, isReport, SEND_VERB, appendOrFrozen, fail, ok, refusal,
 } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
@@ -15,6 +15,7 @@ import { isProposalPayload } from "../action-state.js";
 import { answerQuestion, type AnswerError } from "../outside.js";
 import { isTopicRoom } from "../manifest.js";
 import { readProposal } from "../proposal.js";
+import { voteOn } from "./decide.js";
 import type { StoredSession } from "../stored-session.js";
 import type { AppendExtras, BellmanStore, EventWrite, ProposalApproval } from "../store.js";
 import { isBatchPayload, type SurfaceWrite } from "../surface.js";
@@ -77,7 +78,7 @@ Args:
       "artifact"       — code/doc/data payload ({ name, content })
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
                          It ends in exactly one of three states and cannot sit between them: answered, declined (a human said no), or expired (30 minutes passed and nobody did). Silence and refusal are different answers, and this is what tells them apart. Until it ends it appears in every member's bellman_sync as \`outstanding\`. An answer that arrives after the deadline still lands and still counts. In a topic room, payload { kind: "surface_proposal", item, base } proposes a card: item is a surface payload or { key, remove: true }, base is the surface_cursor you read. A text or diagram item needs an http or https link in its body, a member holds at most 3 open proposals, and each lives 7 days. A maintainer's human approves it with an action_response of approved: true, which writes the card; if the card's key changed after base the approval is refused as stale (error "stale", with the cursor) and nothing is written.
-      "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
+      "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }. Answering an open decision instead is a vote (see bellman_decide): add hash and human_approved, and it returns the vote's { cursor, capacity, state }.
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note?, step?, eta_seconds?, status? }, a note or a status); status is working, idle or needs_you (waiting on your human), and a status with no note does not answer the heartbeat. Peers are not interrupted by it; it reaches them when they next look.
       "outside_answer" — a member's reply to an outside A2A caller's question. Set ref_id to the outside_question's cursor id and send { text, needs_input? }; needs_input: true asks the caller for more and leaves the task waiting on them. Only the room's voice may: the members whose role holds the answer verb (no built-in preset grants it), or, while no member's role does, the room's creator.
@@ -152,6 +153,27 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (!answered.ok) return fail(OUTSIDE_ANSWER_ERROR(answered.error, ref_id));
         await audit(s, session, identity, "sent_outside_answer", { chars: parsed.data.text.length, ref_id });
         return ok({ task_id: answered.task.id, state: answered.task.state, cursor: answered.task.answers.at(-1)?.cursor });
+      }
+
+      // The event an answer names, read once. An answer to a decision is a vote (ADR 0040, decision 8), which `vote`
+      // gates and not `respond_actions`, so it is told apart before the verb check below. String-compared, not
+      // numeric: "007" never matched cursor 7 and must not start to.
+      const refAt = Number(ref_id);
+      const named = type === "action_response" && ref_id !== undefined && Number.isSafeInteger(refAt) && refAt > 0
+        ? await s.eventAt(session_id, refAt)
+        : undefined;
+      if (named?.type === "decision_opened" && String(named.cursor) === ref_id) {
+        const parsed = DecisionAnswerShape.safeParse(payload);
+        if (!parsed.success) {
+          return fail(
+            "an answer to a decision must be { approved: boolean, hash: string, human_approved: boolean, result?: string }: " +
+            parsed.error.issues[0]?.message,
+          );
+        }
+        const { approved, hash, human_approved, result } = parsed.data;
+        return voteOn(s, session_id, session, me, identity, {
+          decision: refAt, hash, choice: approved ? "approve" : "reject", ...(result !== undefined ? { reason: result } : {}), human_approved,
+        }, idempotency_key);
       }
 
       // Authority first: before the payload, before who is listening. A seat that
@@ -256,12 +278,8 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       let retrying = false;
       if (type === "action_response") {
         if (!ref_id) return fail("action_response requires ref_id (the cursor id of the action_request).");
-        // One key, not the whole history (#25). String-compared, not numeric:
-        // "007" never matched cursor 7 and must not start to.
-        const at = Number(ref_id);
-        const req = Number.isSafeInteger(at) && at > 0
-          ? await s.eventAt(session_id, at)
-          : undefined;
+        // One key, not the whole history (#25), read above.
+        const req = named;
         if (!req || String(req.cursor) !== ref_id || req.type !== "action_request") {
           return fail(`no action_request with cursor id ${ref_id}.`);
         }

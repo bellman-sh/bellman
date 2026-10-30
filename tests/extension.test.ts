@@ -15,7 +15,7 @@
  * Names, not descriptions. The manifest's one-liners are deliberately shorter than the
  * tool descriptions the model is shown; holding them identical would force marketing
  * copy into a tool schema. Sibling of tests/tools/surface.test.ts, which pins the
- * server's thirteen.
+ * server's fourteen.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -52,9 +52,9 @@ describe("the Claude Desktop bundle manifest", () => {
   });
 
   // The count as an assertion, not prose: tests/tools/surface.test.ts once said 7 over a
-  // list of 8 and nothing failed. Sixteen is the server's thirteen plus the bridge's three.
-  it("declares exactly sixteen tools", () => {
-    expect(declared()).toHaveLength(16);
+  // list of 8 and nothing failed. Seventeen is the server's fourteen plus the bridge's three.
+  it("declares exactly seventeen tools", () => {
+    expect(declared()).toHaveLength(17);
   });
 
   // Not cosmetic: the expected list above is mode-dependent, so this is what makes the

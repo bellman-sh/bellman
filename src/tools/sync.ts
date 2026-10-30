@@ -13,6 +13,8 @@ import { publicEvent } from "../public-event.js";
 import { VOICE_NOTE, questionsToAnswer } from "../outside.js";
 import { isTopicRoom } from "../manifest.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../action-state.js";
+import { decisionTtlMs, decisionsAwaiting } from "../decision.js";
+import { MAX_REQUESTS_PER_SENDER } from "../housekeeping.js";
 
 /**
  * The most events one poll returns (#208), the earliest after the caller's cursor. A member
@@ -42,7 +44,7 @@ Returns: { events[] (untrusted envelopes, your own events excluded), cursor, ses
 more: true means this page was full (at most ${SYNC_PAGE} events): call again at once with the returned cursor for the rest.
 surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for the front window, and page the rest with bellman_surface.
 A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
-outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
+outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. An entry with \`decision: { kind, key, hash }\` is an open decision your seat votes on: ask your human, then answer it (bellman_decide vote, or action_response with the hash and human_approved); it leaves once your human's vote is cast. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
 removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.
 If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
@@ -255,8 +257,16 @@ If a room's creator has removed you, you still get the history up to and includi
         askedInSlice
         || (stampedAt !== undefined && Date.now() <= stampedAt + ttl);
 
-      const recent = mayHaveOutstanding
-        ? await requestWindow(s, session_id, Date.now() - ttl)
+      // A room whose manifest decides by vote reads its decisions' window too (ADR 0040, #405): a decision lives the
+      // decide block's `expires`, or as long as a request in this room. No stamp guards it, so such a room reads its
+      // window on every poll, and a room that declares no decide block never does.
+      //
+      // ponytail: a room with a decide block reads up to its decisions' lifetime of log per poll; the upgrade is a
+      // stamp on the record when a decision opens, as `lastActionRequestAt` is for requests.
+      const decide = answering.manifest.decide;
+      const window = Math.max(mayHaveOutstanding ? ttl : 0, decide ? decisionTtlMs(decide.expiresMs, topic) : 0);
+      const recent = window > 0
+        ? await requestWindow(s, session_id, Date.now() - window)
         : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
@@ -276,8 +286,13 @@ If a room's creator has removed you, you still get the history up to and includi
       // Their OWN requests still show. Those are what they were waiting on when
       // they went, and reading the room is something a departed member may still
       // do — the eviction cut above already bounds how much.
-      const outstanding = outstandingFor(visible, member_id, Date.now(), topic)
-        .filter((o) => o.mine || isActiveMember(me));
+      //
+      // An open decision this seat votes on waits on its human the same way, so it is listed beside the requests,
+      // in cursor order, and only to a member still in the room.
+      const outstanding = [
+        ...outstandingFor(visible, member_id, Date.now(), topic).filter((o) => o.mine || isActiveMember(me)),
+        ...(decide && isActiveMember(me) ? decisionsAwaiting(visible, member_id, Date.now(), MAX_REQUESTS_PER_SENDER) : []),
+      ].sort((a, b) => a.cursor - b.cursor);
 
       // The surface's cursor, and the surface when it was asked for, capped by
       // `stopAt` above: a removed member reads its history and nothing after it.

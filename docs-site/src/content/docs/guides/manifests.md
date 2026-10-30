@@ -142,6 +142,10 @@ A kind's rule is `single`, `majority`, `supermajority` or `unanimous`, written a
 
 The server refuses a `decide` block no role can vote in, or no role holding `request_actions` can open, a veto on a kind the block does not declare, and `vote` on a public room's `default_role`, which a permanent code seats for anyone with the link. There is no `relay` field: a human's approval relayed by their agent is a binding vote. `require: dash_session` is reserved for phase 2 and refused until then. No built-in preset grants `vote`, and a room that declares no `decide` block behaves as it always has.
 
+A seat holding `request_actions` opens a decision with [`bellman_decide`](/reference/tools/bellman_decide/) `open`, which returns its cursor and the hash every vote is bound to. The seats holding `vote` when it opens are its electorate, and each sees it in `bellman_sync`'s `outstanding` until its human has voted. The agent asks its human, then votes with `bellman_decide` `vote` (approve, reject or abstain, with a reason) or answers it as it answers an action request: an `action_response` whose `ref_id` is the decision, with `{ approved, hash, human_approved }`. Only a vote sent with `human_approved: true` counts. An agent voting on its own judgment sends `false`, and its vote is shown as advisory and never counted. The server cannot tell a human's approval from an agent's claim of one, as with an `action_response` today, so `bellman_decide` `read` shows every vote's seat, account, channel, `human_approved` and cursor. The decision closes the moment its rule is settled: `passed`, or `failed` with a reason.
+
+A kind decided by `single` is not opened this way: a single approval is an ordinary action request. A decision cannot change the manifest it runs under.
+
 The connect preview shows `decide` and `veto` before a joiner accepts a seat, and like the rest of the manifest they never change once the room starts. [ADR 0040](https://github.com/bellman-sh/bellman/blob/main/docs/adr/0040-room-consensus.md) has the design.
 
 ## Saved presets

@@ -16,6 +16,7 @@ import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
 import { registerPublicName } from "./tools/public-name.js";
 import { registerReport } from "./tools/report.js";
+import { registerDecide } from "./tools/decide.js";
 import { reportMailer, type ReportMailer } from "./reports.js";
 import { registerAppResource } from "./ui/resource.js";
 
@@ -82,6 +83,7 @@ export function buildServer(
   registerAudit(server, identity, s, features);
   registerPublicName(server, identity, s);
   registerReport(server, identity, s, features.mailReport ?? reportMailer(undefined));
+  registerDecide(server, identity, s);
 
   // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect,
   // bellman_confirm, bellman_rooms and bellman_surface through it; every other

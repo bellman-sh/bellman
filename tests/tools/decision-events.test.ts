@@ -16,7 +16,12 @@ let p: PairedSession;
 beforeEach(async () => {
   store = new MemoryStore();
   h = new Harness(store);
-  p = await pairUp(h);
+  // The creator's seat votes (#403), so its ballot is in the electorate.
+  p = await pairUp(h, { manifest: {
+    room: "decisions", mode: "pair", default_role: "peer", creator_role: "lead",
+    roles: { lead: { can: ["send", "request_actions", "invite", "vote"] }, peer: { can: ["send"] } },
+    decide: { surface_proposal: "majority" },
+  } });
 });
 afterEach(async () => { await h.close(); });
 

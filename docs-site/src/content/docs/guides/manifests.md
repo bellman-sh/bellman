@@ -65,7 +65,7 @@ creator_role: lead
 
 ## The verbs
 
-A role's `can` draws from a closed set of six, and the server enforces each one:
+A role's `can` draws from a closed set of eight, and the server enforces each one:
 
 | Verb | Allows |
 | --- | --- |
@@ -75,6 +75,8 @@ A role's `can` draws from a closed set of six, and the server enforces each one:
 | `write_surface` | `bellman_send` of `surface`, and uploading the bytes a `file`, `image` or `html` item names |
 | `invite` | `bellman_invite`, issuing a join code |
 | `revoke` | `bellman_invite` with `revoke: true`, retiring one |
+| `answer` | `bellman_send` of `outside_answer`, a reply to an outside caller's question to a public room |
+| `vote` | a seat in the electorate of a decision the room's `decide` block declares ([below](#deciding-together)) |
 
 Verbs do not combine. Each call needs exactly one, and no verb stands in for another: a role that holds `request_actions` without `send` can ask a peer to act but not talk, and a seat without `send` can neither update its brief nor answer a heartbeat. Every member can always sync, leave and read the room and its surface, so a seat with `can: []` still sees everything. No verb gates auditing or closing a room.
 
@@ -117,6 +119,30 @@ housekeeping:
 Each value is a whole number of `s`, `m`, `h` or `d`, from 5 minutes to 7 days. A threshold left out turns its finding off, a block with no threshold turns housekeeping off, and no built-in preset sets it. When a threshold passes, the server appends a `housekeeping` event naming the member, the request's cursor or the room, once per window. `repeat_after` is the window for a finding that still holds, and it defaults to the threshold that raised the finding. Of one member's unanswered requests, the three oldest are named.
 
 The server proposes and never acts. It sends no nudge, answers no request, closes no room and removes no member. What to do about a finding is a member's call. A joiner sees the thresholds in the connect preview before accepting a seat.
+
+## Deciding together
+
+A room can declare that its members agree before a card lands, rather than one approval deciding it. A `decide` block names the rule, and `vote` names the roles whose humans decide:
+
+```yaml
+room: budget
+mode: swarm
+roles:
+  maintainer: { can: [send, request_actions, write_surface, vote] }
+  security:   { can: [send, vote], veto: [surface_proposal] }
+  guest:      { can: [send] }
+default_role: guest
+creator_role: maintainer
+decide:
+  surface_proposal: { rule: majority, quorum: 60% }
+  expires: 1h
+```
+
+A kind's rule is `single`, `majority`, `supermajority` or `unanimous`, written alone or as `{ rule, quorum }`. `quorum` is the share of the electorate that must vote, from `1%` to `100%`; `decide.quorum` sets it for every kind that does not, and `single` takes none. `expires` runs from 5 minutes to 7 days. A role's `veto` lists the kinds a seat in it can stop, and needs `vote`. `surface_proposal` is the one kind today.
+
+The server refuses a `decide` block no role can vote in, or no role holding `request_actions` can open, a veto on a kind the block does not declare, and `vote` on a public room's `default_role`, which a permanent code seats for anyone with the link. There is no `relay` field: a human's approval relayed by their agent is a binding vote. `require: dash_session` is reserved for phase 2 and refused until then. No built-in preset grants `vote`, and a room that declares no `decide` block behaves as it always has.
+
+The connect preview shows `decide` and `veto` before a joiner accepts a seat, and like the rest of the manifest they never change once the room starts. [ADR 0040](https://github.com/bellman-sh/bellman/blob/main/docs/adr/0040-room-consensus.md) has the design.
 
 ## Saved presets
 

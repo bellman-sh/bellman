@@ -23,7 +23,7 @@ import { SINK_BATCH, SINK_DELAY_MS, SWEEP_EVERY_MS, SYSTEM_INTENT, chainHash, ch
 import { entryView } from "./audit.js";
 import { randomId } from "./oauth/tokens.js";
 import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
-import { mustReport } from "./roles.js";
+import { mustReport, verbsOfRole } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Placed, type Window, type WindowPage } from "./frames.js";
@@ -869,11 +869,12 @@ export type DecisionClose =
   | { outcome: "frozen" };
 
 /**
- * The seats a decision opened now may vote on: every member present but the hosted seat (ADR 0040, decision 5).
- * ponytail: every present seat until #403 adds the `vote` verb; then only the seats whose role holds it.
+ * The seats a decision opened now may vote on (ADR 0040, decisions 5 and 7): every member present whose role holds
+ * `vote`. The hosted seat never does (checkHost holds it to exactly `send`), and is left out by name besides.
  */
-export const electorateOf = (members: readonly Member[]): string[] =>
-  members.filter((m) => m.leftAt === null && !isHostMember(m)).map((m) => m.memberId);
+export const electorateOf = (manifest: RoomManifest, members: readonly Member[]): string[] =>
+  members.filter((m) => m.leftAt === null && !isHostMember(m) && verbsOfRole(manifest, m.roomRole).includes("vote"))
+    .map((m) => m.memberId);
 
 /** `applyVote`'s refusal as `castVote` reports it. */
 export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
@@ -3565,7 +3566,7 @@ export class MemoryStore implements BellmanStore {
       const d = decideSupersede(old);
       if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
     }
-    const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.members));
+    const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.manifest, s.members));
     const event = this.appendNow(s, { ...e, payload }, at);
     const superseded = old === undefined ? null : this.appendNow(s, closingEvent(old, { state: "failed", reason: "superseded" }), at);
     k.remember(event.cursor);

@@ -233,6 +233,16 @@ export function roomPreview(session: StoredSession, viewerRole: string | null, v
     // a joiner's human accepts a seat, as the roles are. Its instructions are the
     // creator's prose and stay out of this block; the creator reads them in `text`.
     host: m.host === null ? null : { role: m.host.role, model: m.host.model },
+    // How the room decides, and who can veto what (ADR 0040): the consent point is where a joiner learns that a
+    // decision can pass without them, or that a seat can stop one. Absent for a room that declares none, so its
+    // preview is what it always was. Every value is one the server parsed from the closed sets.
+    ...(m.decide ? {
+      decide: {
+        rules: Object.fromEntries(Object.entries(m.decide.rules).map(([kind, r]) => [kind, { rule: r.rule, quorum_percent: r.quorum }])),
+        expires_seconds: seconds(m.decide.expiresMs),
+      },
+      veto: Object.fromEntries(Object.entries(m.roles).flatMap(([key, def]) => (def.veto ? [[key, def.veto]] : []))),
+    } : {}),
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
       {

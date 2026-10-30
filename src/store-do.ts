@@ -2568,7 +2568,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         const d = decideSupersede(old);
         if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
       }
-      const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.members));
+      const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.manifest, s.members));
       const event: SessionEvent = { ...e, payload, cursor: await this.nextCursor(txn), at };
       const superseded: SessionEvent | null = old === undefined
         ? null

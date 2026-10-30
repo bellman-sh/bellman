@@ -61,3 +61,5 @@ enforced none; #89 enforced them.
   (ADR 0010), and a room whose manifest gives nobody `invite` cannot be reopened.
 - Authority no verb names stays with the creator: `bellman_evict` checks
   `session.createdBy`, and so does making a public room private (ADR 0011).
+- ADR 0040 amends this ADR in two places and no others: the verb `vote`, and the manifest's `decide` block with a
+  role's `veto` (#403).

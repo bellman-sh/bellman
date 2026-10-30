@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, SavedPreset, Verb } from "./types.js";
+import { MAX_DECISION_TTL_MS, MIN_DECISION_TTL_MS } from "./decision.js";
+import type {
+  DecideConfig, DecisionKind, DecisionRuleName, HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, SavedPreset, Verb,
+} from "./types.js";
 
 /**
  * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
@@ -16,10 +19,18 @@ import type { HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, Save
  *
  * `answer` gates `bellman_send type: "outside_answer"`, a seat's reply to a question an outside A2A caller
  * put to a public room. No built-in preset grants it: a creator adds it to the one role that speaks for the room.
+ *
+ * `vote` (ADR 0040, #403) puts a seat in the electorate a decision snapshots when it opens (`electorateOf`), which
+ * is what `castVote` checks. No built-in preset grants it, and resolveManifest refuses it on a role a public room's
+ * permanent code seats.
  */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer",
+  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote",
 ] as const satisfies readonly Verb[];
+
+/** The kinds a `decide` block and a role's `veto` may name (ADR 0040, decision 10). See DecisionKind. */
+export const DECISION_KINDS = ["surface_proposal"] as const satisfies readonly DecisionKind[];
+export const DECISION_RULES = ["single", "majority", "supermajority", "unanimous"] as const satisfies readonly DecisionRuleName[];
 
 export const PRESET_NAMES = ["pair", "swarm", "review", "social", "topic"] as const satisfies readonly PresetName[];
 export const HOST_MODEL_NAMES = ["haiku", "sonnet", "opus"] as const satisfies readonly HostModelName[];
@@ -252,6 +263,7 @@ const RoleDefShape = z.strictObject({
   // What the seat reports on a tick, in the creator's words (heartbeat instructions
   // spec D1). Bounded like a description; refused below on a seat that does not report.
   report: z.string().max(300).nullish(),
+  veto: z.array(z.enum(DECISION_KINDS)).max(DECISION_KINDS.length).nullish(),
 });
 
 /**
@@ -307,6 +319,23 @@ export type HousekeepingInput = z.input<typeof HousekeepingShape>;
  */
 export const HostInstructionsShape = z.string().max(300);
 
+/**
+ * A kind's rule (ADR 0040, decisions 6 and 20): a rule's name, or `{ rule, quorum }`. Strings, not enums, so
+ * resolveDecide can refuse a wrong one naming the valid set, and so the schema every tool listing carries grows by
+ * as little as it can. `require` is known so it can be refused in words (decision 8): nothing enforces it yet.
+ */
+const RuleShape = z.union([
+  z.string().max(16),
+  z.strictObject({ rule: z.string().max(16), quorum: z.string().max(4).nullish(), require: z.unknown().optional() }),
+]);
+
+const DecideShape = z.strictObject({
+  surface_proposal: RuleShape.nullish(),
+  expires: DurationShape.nullish(),
+  quorum: z.string().max(4).nullish(),
+});
+type DecideInput = z.infer<typeof DecideShape>;
+
 const HostShape = z.strictObject({
   // Echoed verbatim by the cross-field errors, as default_role is, so it is bounded the same way.
   role: z.string().max(MAX_ROLE_KEY_LENGTH),
@@ -345,6 +374,7 @@ const AuthorShape = z.strictObject({
   default_role: z.string().max(MAX_ROLE_KEY_LENGTH),
   creator_role: z.string().max(MAX_ROLE_KEY_LENGTH),
   host: HostShape.nullish(),
+  decide: DecideShape.nullish(),
 });
 
 /** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */
@@ -638,6 +668,7 @@ export function resolveManifest(input: unknown): RoomManifest {
         : `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`);
     }
     roles[key] = { can: [...def.can], description: def.description ?? null, reports: onBeat.reports, report: onBeat.report };
+    if (def.veto?.length) roles[key].veto = [...def.veto];
   }
 
   const host: HostConfig | null = v.host == null ? null : {
@@ -659,6 +690,9 @@ export function resolveManifest(input: unknown): RoomManifest {
     housekeeping: resolveHousekeeping(v.housekeeping),
     host,
   };
+  const decide = resolveDecide(v.decide);
+  if (decide !== null) manifest.decide = decide;
+  checkDecide(manifest);
   checkHost(manifest, {
     cadence: beat.word ?? (spelledOld ? "heartbeat_on" : "heartbeat"),
     hostRole: (v.host && roleWords[v.host.role]) ?? "reports",
@@ -750,4 +784,76 @@ function resolveHousekeeping(
     repeatAfterMs: ms("repeat_after"),
   };
   return out.quietAfterMs === null && out.answerWithinMs === null && out.idleAfterMs === null ? null : out;
+}
+
+/** `"60%"` to 60, refused outside 1% to 100%. Bounded to 4 characters by the shape before it is echoed. */
+function parseQuorum(field: string, raw: string): number {
+  const m = /^(\d{1,3})%$/.exec(raw);
+  const pct = m ? Number(m[1]) : 0;
+  if (pct < 1 || pct > 100) throw new ManifestError(`${field} must be a percentage from 1% to 100% (got "${raw}")`);
+  return pct;
+}
+
+/**
+ * The `decide` block expanded (ADR 0040): each kind's rule checked against the closed set, the block's quorum
+ * folded into every kind but `single`, and `expires` in ms. Null for a block that declares no kind, as
+ * resolveHousekeeping makes a block with no threshold null, after every value in it has been checked.
+ */
+function resolveDecide(d: DecideInput | null | undefined): DecideConfig | null {
+  if (!d) return null;
+  const fallback = d.quorum != null ? parseQuorum("decide.quorum", d.quorum) : null;
+  const expiresMs = d.expires != null
+    ? parseDuration("decide.expires", d.expires, MIN_DECISION_TTL_MS, MAX_DECISION_TTL_MS, THRESHOLD_UNITS)
+    : null;
+  const rules: DecideConfig["rules"] = {};
+  for (const kind of DECISION_KINDS) {
+    const given = d[kind];
+    if (given == null) continue;
+    const field = `decide.${kind}`;
+    const { rule, quorum, require } = typeof given === "string" ? { rule: given, quorum: null, require: undefined } : given;
+    if (!(DECISION_RULES as readonly string[]).includes(rule)) {
+      throw new ManifestError(`${field}: unknown rule "${rule}" (valid: ${DECISION_RULES.join(", ")})`);
+    }
+    if (require != null) {
+      throw new ManifestError(`${field}.require: dash_session is reserved for phase 2, and nothing enforces it yet; omit it`);
+    }
+    if (rule === "single" && quorum != null) throw new ManifestError(`${field}: single takes no quorum: one approval decides it`);
+    rules[kind] = {
+      rule: rule as DecisionRuleName,
+      quorum: quorum != null ? parseQuorum(`${field}.quorum`, quorum) : rule === "single" ? null : fallback,
+    };
+  }
+  return Object.keys(rules).length > 0 ? { rules, expiresMs } : null;
+}
+
+/**
+ * The cross-field rules consensus adds (ADR 0040, decisions 6, 7 and 8), so a manifest cannot declare a decision
+ * nobody can open or carry, a veto that does nothing, or a vote a stranger with a link can cast. The host role's
+ * `vote` is refused by checkHost, which holds it to exactly `send`.
+ */
+function checkDecide(m: RoomManifest): void {
+  const holds = (verb: Verb) => Object.values(m.roles).some((r) => r.can.includes(verb));
+  for (const kind of Object.keys(m.decide?.rules ?? {}) as DecisionKind[]) {
+    // Every kind there is today opens with request_actions; data_grant and primitive will name their own (#409, #410).
+    if (!holds("request_actions")) {
+      throw new ManifestError(`decide.${kind}: no role holds "request_actions", the verb that opens one`);
+    }
+  }
+  if (m.decide && !holds("vote")) throw new ManifestError('decide: no role holds "vote", so no decision could ever be carried');
+  for (const [key, def] of Object.entries(m.roles)) {
+    if (!def.veto) continue;
+    if (!def.can.includes("vote")) {
+      throw new ManifestError(`role "${key}" holds a veto but not the verb "vote" (it holds: ${def.can.join(", ") || "none"})`);
+    }
+    for (const kind of def.veto) {
+      if (!m.decide?.rules[kind]) throw new ManifestError(`role "${key}" vetoes ${kind}, which decide does not declare`);
+    }
+  }
+  // A permanent code seats only the default role, and only in a public room (rooms.ts, ADR 0020).
+  if (m.public && m.roles[m.defaultRole]?.can.includes("vote")) {
+    throw new ManifestError(
+      `role "${m.defaultRole}" holds the verb "vote", but it is this public room's default_role, which a permanent code ` +
+      "seats for anyone with the link; give vote only to roles seated by invitation",
+    );
+  }
 }

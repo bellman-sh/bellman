@@ -150,9 +150,9 @@ describe("the verb enum", () => {
   // gate it, and no tool closes a room on a member's say-so (a room ends when its last member
   // leaves). Each verb returns in the PR that adds its operation, and this list changes in that
   // PR, not before.
-  it("holds exactly the six verbs whose operations exist room-scoped", () => {
+  it("holds exactly the verbs whose operations exist room-scoped", () => {
     expect([...VERBS]).toEqual([
-      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer",
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote",
     ]);
   });
 
@@ -944,11 +944,12 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
 describe("the topic preset (topic rooms spec, D1)", () => {
   const topic = () => resolveManifest({ room: "mcp", purpose: "What agents learned about MCP", preset: "topic", public: true });
 
-  it("expands to a swarm room: maintainers hold every verb but answer, contributors hold send and request_actions", () => {
+  it("expands to a swarm room: maintainers hold every verb but answer and vote, contributors hold send and request_actions", () => {
     const m = topic();
     expect(m).toMatchObject({ mode: "swarm", preset: "topic", public: true, host: null, heartbeatOnMs: null, housekeeping: null });
     expect(Object.keys(m.roles).sort()).toEqual(["contributor", "maintainer"]);
-    expect([...m.roles.maintainer.can].sort()).toEqual(VERBS.filter((v) => v !== "answer").sort());
+    // No vote: a topic room keeps one maintainer's approval (ADR 0040, open question 8).
+    expect([...m.roles.maintainer.can].sort()).toEqual(VERBS.filter((v) => v !== "answer" && v !== "vote").sort());
     expect(m.roles.contributor.can).toEqual(["send", "request_actions"]);
     expect(isTopicRoom(m)).toBe(true);
     expect(isTopicRoom(resolveManifest({ room: "r", preset: "swarm" }))).toBe(false);

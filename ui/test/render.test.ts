@@ -95,6 +95,18 @@ describe("renderJoin", () => {
     expect(text).not.toContain("idle");
   });
 
+  // Consensus (ADR 0040, #403): a joiner's human sees the rules and the vetoes before accepting the seat.
+  it("says how the room decides and who can veto, and nothing when it declares no rule", () => {
+    const r = connectFixture();
+    r.room.decide = { rules: { surface_proposal: { rule: "majority", quorum_percent: 60 } }, expires_seconds: 3_600 };
+    r.room.veto = { security: ["surface_proposal"] };
+
+    expect(renderJoin(r, () => {}, NOW).textContent!).toContain(
+      "The room decides a surface_proposal by majority (60% must vote), each open for 1h. A security seat can veto a surface_proposal.",
+    );
+    expect(renderJoin(connectFixture(), () => {}, NOW).textContent!).not.toContain("The room decides");
+  });
+
   it("says nothing of it when the room names no member for anything", () => {
     const none = renderJoin(connectFixture(), () => {}, NOW).textContent!;
     expect(none).not.toContain("Bellman names");

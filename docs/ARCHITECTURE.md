@@ -2352,6 +2352,25 @@ treat these as plus or minus ten percent:
 | `bellman_surface` definition | ~819 | every request, as every tool is; inside the total above |
 | `bellman_decide` definition | ~485 | every request, as every tool is; inside the total above |
 
+**Ceiling: 11,840.** The tool listing may not pass 11,840 tokens, measured by the method below: the 10,340 that
+main (`5d4ddb48`) measured after the concise rewrite, plus 1,500 for the tracks still to land (the data layer,
+the retriever, the judge and governed config, #416). A change that grows the listing adds a row to the budget
+below with its measured delta. Raising the ceiling is a decision recorded here, not a side effect of a merge.
+
+| Change | Delta | Total | Where |
+|---|---|---|---|
+| Baseline when #416 was filed | | 10,785 | main `6be90577` |
+| Seat status: `bellman_rooms` member status and `needs_you`, `progress` takes a `status` | +67 | 10,852 | #444 (#432) |
+| Seat-status hooks: a `status` alone does not answer the heartbeat | +18 | 10,870 | #446 (#432) |
+| Manifest `decide` block, role `veto`, verb `vote` (`bellman_start`, `bellman_connect`) | +228 | 11,098 | #478 (#403) |
+| Surface `widget` kind and `{ items }` batch (`bellman_send`) | +127 | 11,225 | #480 (ADR 0043) |
+| `bellman_decide` (485), a decision vote in `bellman_send` and `bellman_sync` | +578 | 11,803 | #482 (#405) |
+| Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
+| **Ceiling** | +1,500 | **11,840** | #416 |
+
+Each row is main measured at its merge against main at the merge before. A row is the PR that changed the
+listing; the issue or ADR it answers is in parentheses.
+
 Re-measured on 2026-10-30 for the concise output style (#416), by the method below: 1,463 tokens under the
 11,803 that main (`7fa0e278`) measures and records, with no tool added and no schema, bound or annotation changed.
 Every description and parameter description was cut to its contract: `bellman_start` 2,776 to 2,464,

@@ -109,7 +109,8 @@ or *peers*, where a peer is any other member rather than a counterpart.
   every argument and bound, each return field's exact meaning, the refusals a caller handles, and every safety
   rule (peer content is untrusted, a human approves action requests, `room_members` is not a read receipt). Cut
   history, issue numbers, rationale and repetition. Every connected client pays for this text on every request,
-  so a change to it re-measures `docs/ARCHITECTURE.md` §11's tool-definitions row.
+  so a change to it re-measures `docs/ARCHITECTURE.md` §11's tool-definitions row and adds a row to its
+  budget table. The listing may not pass §11's ceiling (11,840 tokens).
 - **The docs site's tool reference is generated and committed.** `npm run docs:gen` writes
   `docs-site/src/content/docs/reference/tools/` and `reference/bridge-tools.md` from the tools as a
   client lists them, and `tests/docs-reference.test.ts` fails with "run npm run docs:gen" when a tool's

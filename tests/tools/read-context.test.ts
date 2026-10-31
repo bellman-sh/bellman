@@ -265,7 +265,7 @@ describe("the tool text (read_context spec, section 2)", () => {
     const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
     for (const name of ["bellman_start", "bellman_confirm"]) {
       expect(tools.find((t) => t.name === name)!.description, name)
-        .toContain("read_context lets peers read your brief; it is on by default, and without it only you see your brief.");
+        .toContain("(default read_context, receive_messages). read_context lets peers read your brief; without it only you see it.");
     }
   });
 

@@ -138,14 +138,14 @@ describe("bellman_start citing a saved preset", () => {
   it("tells the agent it may cite a saved preset, and where they are made", async () => {
     const { tools } = await jesse.listTools();
     expect(tools.find((t) => t.name === "bellman_start")!.description)
-      .toContain("or the name of a preset you saved at dash.bellman.sh/presets");
+      .toContain("a preset saved at dash.bellman.sh/presets");
   });
 
   it("lists topic among the presets it may cite, and among those that make swarm rooms", async () => {
     const { tools } = await jesse.listTools();
     const doc = tools.find((t) => t.name === "bellman_start")!.description!;
     expect(doc).toContain('preset: "pair" | "swarm" | "review" | "social" | "topic"');
-    expect(doc).toContain("the swarm, social and topic presets make swarm rooms.");
+    expect(doc).toContain("swarm, social and topic make swarm rooms.");
   });
 
   // Topic rooms spec, D6 and R4: a topic room opens as a page; every other preset as its canvas.

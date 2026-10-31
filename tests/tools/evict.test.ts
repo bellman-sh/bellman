@@ -769,16 +769,16 @@ describe("bellman_evict", () => {
       const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
       const doc = tools.find((t) => t.name === "bellman_evict")!.description!.replace(/\s+/g, " ");
 
-      expect(doc).toContain("Remove someone from a room you created");
-      expect(doc).toContain("retires the join code for that member's seat");
+      expect(doc).toContain("Remove a member from a room you created");
+      expect(doc).toContain("retires the live join code for that member's seat");
     });
 
     it("no longer promises the person removed the room's new events", async () => {
       const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
       const doc = tools.find((t) => t.name === "bellman_evict")!.description!.replace(/\s+/g, " ");
 
-      expect(doc).toContain("The history stays readable to the person removed");
-      expect(doc).toContain("new events do not reach them");
+      expect(doc).toContain("still returns the history through the member_evicted event");
+      expect(doc).toContain("no new events reach them");
       // The sentence #112 shipped. It was true then and is false now.
       expect(doc).not.toContain("keeps returning new events");
       expect(doc).not.toContain("removal does not keep later messages from them");

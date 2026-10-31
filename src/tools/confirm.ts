@@ -25,20 +25,20 @@ export function registerConfirm(server: McpServer, identity: Identity, s: Bellma
     "bellman_confirm",
     {
       title: "Confirm joining a Bellman session",
-      description: `Phase 2 of joining: after your human has reviewed the preview from bellman_connect, ship your brief and become a session member.
+      description: `Join, step 2: after your human reviews bellman_connect's preview, send your brief and take your seat.
 
 Args:
-  - connect_token: from bellman_connect (single-use, 10 minute TTL)
-  - brief: YOUR structured context summary — this is what crosses to the room
-  - capabilities: what you allow peers to do to you (default: read_context, receive_messages). read_context lets peers read your brief; it is on by default, and without it only you see your brief.
+  - connect_token: from bellman_connect (single-use, expires in 10 minutes)
+  - brief: YOUR context summary; this crosses to the room
+  - capabilities: what peers may do to you (default read_context, receive_messages). read_context lets peers read your brief; without it only you see it.
 
-You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
+Your seat is the role the previewed code carried, fixed at bellman_connect: revoking the code since does not change it.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, cursor }
-surface is the room's working surface's front window; a later bellman_sync carries each change as a surface event, surface: true on it returns the front window again, and bellman_surface pages further with next or reads a frame.
-The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
-Keep member_id and cursor — bellman_sync and bellman_send need them.
-Errors: "connect token invalid or expired" — re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join, read again here so a policy tightened since the preview still binds), "your org's policy forbids granting ... to peers" (policy).`,
+Returns: { session_id, member_id, members[] (each with room_role), room (as previewed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, cursor }
+surface is the front window. bellman_sync carries each later change as a surface event and returns the front window with surface: true; bellman_surface pages with next or reads a frame.
+Verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
+Keep member_id and cursor: bellman_sync and bellman_send need them.
+Errors: "connect token invalid or expired": re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, either side of the join, checked again here), "your org's policy forbids granting ... to peers".`,
       inputSchema: {
         connect_token: z.string().min(8).max(60),
         brief: BriefShape,

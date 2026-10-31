@@ -7,22 +7,20 @@ description: "Issue a new Bellman join code"
 
 **Writes**
 
-Mint a fresh join code for a room whose seat gives you the `invite` verb — at any time, for as long as the session lives. This mints for any role the manifest declares, not only your own seat.  
+Mint a join code for any role the manifest declares, at any time while the room lives. Needs the `invite` verb.  
 
-A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.  
+A code expires 15 minutes after issue, and a pair room consumes it once full. Mint a new one to add a member later.  
 
-`permanent: true` is the exception, for a public room's default seat and no other: a code with no expiry, for a link put on a page. It works until it is revoked, the room is made private, or the room closes, and a full room keeps it for when a seat frees. Evicting a member of its seat does not end it: `bellman_evict` with `ban` is what keeps that person out.  
+`permanent: true`, for a public room's default seat only: a code with no expiry, for a link on a page. It lasts until revoked, the room is made private, or the room closes; a full room keeps it. Evicting a member of its seat does not end it: `bellman_evict` with `ban` keeps a person out.  
 
-A room mints one live code per role, and roles are independent — you can hand a reviewer code and a contributor code to different people. Issuing for a role with NO live code opens that door. Issuing for one that has a live code retires the code someone may be holding, so that needs the `revoke` verb as well as `invite`; without it the call is refused and the live code stands. An expired code is not live, so minting over one is only ever opening.  
+Each role has at most one live code. Minting for a role with no live code opens it. Minting over a live code retires the code someone may hold, so it needs `revoke` as well as `invite`; without `revoke` the call is refused and the live code stands. An expired code is not live.  
 
-Omitting `role` issues for the room's default seat. Omitting it when revoking retires EVERY code: over-revoking is recoverable by minting again, while under-revoking leaves a door open behind someone who believes they shut it. Pass a role to revoke exactly one.  
-
-`invite` opens a door that is shut. `revoke` shuts one that is open and leaves it shut. Replacing a live code is both at once, so it takes both. A seat holding `invite` and not `revoke` cannot cut off a code someone is holding — the connect preview has always implied that, and it is now also true.  
+Omitting `role` issues for the default seat, but with revoke retires EVERY code. Pass a role to revoke one.  
 
 Args: session_id, member_id (yours), role (optional), revoke (default false), permanent (default false)  
 Returns: { join_code, join_url, join_code_expires_at (null when permanent), permanent, role, replaced_previous, share_instructions } or { revoked: true, roles }  
-Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.  
-Errors: issuing needs the `invite` verb, revoking needs `revoke`, and replacing a live code needs both; a room whose manifest gives nobody `invite` cannot be reopened by anyone. A `role` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).  
+Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change stands, unannounced. Revoking a role with no live code does nothing (no event, no audit row) and roles comes back empty.  
+Errors: issuing needs `invite`, revoking `revoke`, replacing a live code both; if no role holds `invite`, nobody can reopen the room. A `role` the manifest does not declare is refused, listing those it does. A full room refuses.  
 
 ## Parameters
 

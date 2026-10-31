@@ -19,20 +19,20 @@ export function registerConnect(server: McpServer, identity: Identity, s: Bellma
     "bellman_connect",
     {
       title: "Preview a Bellman session by join code",
-      description: `Phase 1 of joining: look up a join code and PREVIEW the creator's brief WITHOUT sharing any of your own context yet.
+      description: `Join, step 1: look up a join code and preview the room and its creator's brief. Shares nothing of yours.
 
-Show the returned preview to your human. If they want to proceed, call bellman_confirm with the connect_token and your own brief. Nothing about your session crosses the wire until bellman_confirm.
+Show the preview to your human. To join, call bellman_confirm with connect_token and your brief; nothing of your session crosses before that.
 
 Args:
-  - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
+  - join_code: e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), decide and veto (only when the room declares how it decides: each kind's rule, and the kinds each role can veto), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }], frames: [{ number, key, count }] } }
-max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
-surface lists the room's front window and its frames: keys, kinds, sizes and counts, no content. The items themselves come with bellman_confirm.
-public: true means anyone with the room's public page can read its surface and its log, with members named by number and never a brief: tell your human before they accept.
-The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
-The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
-Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, a member of its seat is evicted, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. Evicting a member of its seat does not end it. "session is org-restricted" — creator limited joining to their org. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, both sides of the join).`,
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat reports), host ({ role, model } or null), decide and veto (only when the room declares how it decides: each kind's rule, and the kinds each role can veto), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off; or null), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }], frames: [{ number, key, count }] } }
+max_members: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room, on every plan.
+surface: the front window's keys, kinds, sizes and frames, no content; bellman_confirm returns the items.
+public: true: anyone with the room's public page reads its surface and log, members named by number, never a brief. Tell your human before they accept.
+your_role/your_verbs are the seat the code's last group grants, not the room's default. A hand-edited role group does not resolve.
+Verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack, and a peer may still withhold the capability to receive it. Reading the room and leaving it are never gated.
+Errors: "join code not found or expired": a code lives 15 minutes and seats every joiner who redeems it until then, unless the room fills (a pair room at its second member), its role's code is reissued or revoked, a member of its seat is evicted, or the room closes. A public room's permanent code never expires and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. Evicting a member of its seat does not end it. "session is org-restricted": joining is limited to the creator's org. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, either side of the join).`,
       inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         // `readOnlyHint` is FALSE, and this tool previews rather than joins (#119).

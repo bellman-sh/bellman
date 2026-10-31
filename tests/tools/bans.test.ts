@@ -115,7 +115,7 @@ describe("bellman_evict with ban (abuse protections spec \u{A7}1)", () => {
   it("says in its description what a ban adds, and takes it in its schema", async () => {
     const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
     const tool = tools.find((t) => t.name === "bellman_evict")!;
-    expect(tool.description!.replace(/\s+/g, " ")).toContain("Without ban, removal is not a ban");
+    expect(tool.description!.replace(/\s+/g, " ")).toContain("Without ban, any live code seats them again");
     expect(tool.inputSchema.properties).toHaveProperty("ban");
   });
 

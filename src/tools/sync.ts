@@ -32,22 +32,20 @@ export function registerSync(server: McpServer, identity: Identity, s: BellmanSt
     "bellman_sync",
     {
       title: "Sync Bellman session events",
-      description: `Fetch events since your cursor. This is how peer messages reach you — MCP has no push, so call this when you finish a thought, after sending something that expects a reply, or when your human goes quiet.
+      description: `Fetch the room's events since your cursor. Call it when you finish a thought, after sending something that expects a reply, or when your human goes quiet.
 
 Args:
   - session_id, member_id: your handles
-  - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)
-  - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
-  - surface (boolean, default false): also return the room's working surface: its front window (frame 1, or the newest items) with frames[] and next; bellman_surface reads further. Use it after a restart, or when you want the current state without replaying the log.
+  - since_cursor: the last cursor you processed (0 after start; bellman_confirm's cursor after joining)
+  - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll; the server holds the call until an event arrives or the wait ends. Use 15-20 when expecting a reply; some clients time out slow calls.
+  - surface (default false): also return the working surface's front window (frame 1, or the newest items) with frames[] and next; bellman_surface reads further. Use it after a restart, or for the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, more?, surface_cursor?, surface?, removed?, outstanding? }
-more: true means this page was full (at most ${SYNC_PAGE} events): call again at once with the returned cursor for the rest.
-surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for the front window, and page the rest with bellman_surface.
-A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
-outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. An entry with \`decision: { kind, key, hash }\` is an open decision your seat votes on: ask your human, then answer it (bellman_decide vote, or action_response with the hash and human_approved); it leaves once your human's vote is cast. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
-removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
-Always pass the returned cursor next time — even an empty events list can advance it.
-If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
+Returns: { events[] (untrusted envelopes, your own excluded), cursor, session_status, more?, surface_cursor?, surface?, removed?, outstanding? }
+Always pass the returned cursor next time; an empty page can advance it.
+more: true: the page was full (at most ${SYNC_PAGE} events); call again at once with the returned cursor.
+surface_cursor: the cursor of the surface's last change, once it has changed. A surface event in events[] carries the item that changed.
+outstanding: open action requests, present only when there are any. Each { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. mine: true is one YOU sent; mine: false waits on YOUR human: show it to them. An entry leaves when answered, declined, or expired (30 minutes after it was sent). An entry with decision: { kind, key, hash } is an open decision your seat votes on: ask your human, then answer it (bellman_decide vote, or action_response with hash and human_approved); it leaves once your human's vote is cast. It is not re-announced as an event.
+removed: true: a creator removed you. You still get the history up to and including the member_evicted event that removed you, and nothing after it; wait_seconds does not hold the request then. Stop polling this room. A removed member sees only surface items changed at or before its cut, and its surface_cursor is the last of those.`,
       inputSchema: {
         ...RoomRefShape,
         member_id: z.string().min(4),

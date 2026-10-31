@@ -7,7 +7,7 @@ description: "Leave a Bellman session"
 
 **Writes**
 
-Leave the session, broadcasting a departure event so peers aren't talking into a void. The session closes when the last member leaves.  
+Leave the room; members get a departure event. The room closes when its last member leaves.  
 
 Args: session_id, member_id  
 Returns: { left: true, session_status }  

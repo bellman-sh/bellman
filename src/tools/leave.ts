@@ -12,7 +12,7 @@ export function registerLeave(server: McpServer, identity: Identity, s: BellmanS
     "bellman_leave",
     {
       title: "Leave a Bellman session",
-      description: `Leave the session, broadcasting a departure event so peers aren't talking into a void. The session closes when the last member leaves.
+      description: `Leave the room; members get a departure event. The room closes when its last member leaves.
 
 Args: session_id, member_id
 Returns: { left: true, session_status }`,

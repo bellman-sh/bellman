@@ -81,17 +81,17 @@ export const AgentShape = z.object({
     .describe('Model identifier, e.g. "claude-fable-5", "gpt-5"'),
   client: z.string().min(1).max(80)
     .describe('Client surface, e.g. "claude-code", "claude-chat", "cursor", "chatgpt", "gemini-cli"'),
-}).describe("Provider-neutral description of the agent writing this brief");
+}).describe("The agent writing this brief");
 
 export const BriefShape = z.object({
-  goal: z.string().min(1).max(500).describe("One sentence: what this session is trying to accomplish"),
-  state: z.string().min(1).max(2000).describe("Where things currently stand"),
+  goal: z.string().min(1).max(500).describe("One sentence: what you are trying to accomplish"),
+  state: z.string().min(1).max(2000).describe("Where things stand"),
   constraints: z.array(z.string().max(300)).max(20).default([])
     .describe("Stack, deadlines, don'ts"),
   open_questions: z.array(z.string().max(300)).max(20).default([])
-    .describe("What this session is stuck on or wants from a peer"),
+    .describe("What you are stuck on or want from peers"),
   agent: AgentShape,
-}).describe("Structured context handshake — keep it token-cheap, no transcript dumps");
+}).describe("Your context summary. Keep it short; no transcripts.");
 
 export const CapabilitiesShape = z
   .array(z.enum(["read_context", "receive_messages", "request_actions"]))

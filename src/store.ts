@@ -29,7 +29,8 @@ import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } f
 import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Placed, type Window, type WindowPage } from "./frames.js";
 import { decideApproval } from "./proposal.js";
 import {
-  applyVote, capacityOfVote, closingEvent, decideClose, decideSupersede, decisionsOf, openedPayload,
+  applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
+  dueToExpire, noteDecisions, openedPayload, removalEvents,
   type ClosedState, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
   type VoteDecision, type VoteInput,
 } from "./decision.js";
@@ -836,19 +837,22 @@ export type ApprovalWrite =
 /**
  * What `openDecision` did (ADR 0040). `superseded` is the `decision_closed` that closed the decision the draft
  * replaces, null when it names none. `not_open` refuses a draft whose `supersedes` names a decision that is not
- * open: `state` is that decision's, or null when there is none. A refusal writes nothing, not even the key's record.
+ * open: `state` is that decision's, or null when there is none. `quota` refuses a room or a seat already holding as
+ * many open decisions as `decideOpenQuota` allows. A refusal writes nothing, not even the key's record.
  */
 export type DecisionOpen =
   | { outcome: "appended"; event: SessionEvent; superseded: SessionEvent | null }
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "not_open"; state: DecisionState | null }
+  | { outcome: "quota"; scope: "room" | "seat"; limit: number }
   | { outcome: "conflict" }
   | { outcome: "frozen" };
 
 /**
  * What `castVote` did (ADR 0040, decision 3). `closed` on an append is the `decision_closed` the vote decided, null
  * while the rule leaves it open. The refusals write nothing: `stale` names the decision's hash, `closed` the state
- * a closing event already gave it, `not_electorate` a seat outside the snapshot, `unknown` a cursor with no decision.
+ * a closing event already gave it, `not_electorate` a seat outside the snapshot, `quota` a seat past its revisions,
+ * `unknown` a cursor with no decision.
  */
 export type VoteWrite =
   | { outcome: "appended"; event: SessionEvent; closed: SessionEvent | null }
@@ -856,6 +860,7 @@ export type VoteWrite =
   | { outcome: "stale"; hash: string }
   | { outcome: "closed"; state: DecisionState }
   | { outcome: "not_electorate" }
+  | { outcome: "quota"; limit: number }
   | { outcome: "unknown" }
   | { outcome: "conflict" }
   | { outcome: "frozen" };
@@ -887,6 +892,7 @@ export function electorateOf(manifest: RoomManifest, members: readonly Member[],
 export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
   if (d.kind === "stale") return { outcome: "stale", hash: d.hash };
   if (d.kind === "closed") return { outcome: "closed", state: d.state };
+  if (d.kind === "quota") return { outcome: "quota", limit: d.limit };
   return { outcome: "not_electorate" };
 }
 
@@ -1432,6 +1438,11 @@ export interface BellmanStore {
    * this — `closeSessionIfEmpty` makes that decision atomically on its own, and
    * folding it in here would close over a member who joined in the gap. The
    * creator-wide ban that `"all"` asks for is owed the same way as a room ban.
+   *
+   * A removal that records the member out also writes, after the departure, what
+   * `removalEvents` says into every decision no event has closed (ADR 0040,
+   * decision 12): the seat's votes voided, and the close that leaves due. Each
+   * with its rows, filed to the orgs `req.audit` names (`decisionAudit`).
    */
   removeMember(
     sessionId: string,
@@ -1879,21 +1890,30 @@ export interface BellmanStore {
    * that decision `failed: superseded` in the same operation, after the new one; its votes do not carry.
    *
    * A `key` names the write as `appendEventOnce`'s does; a retry returns the opening event and re-checks nothing.
-   * Throws on an expiry outside 5 minutes to 7 days, before anything is written.
+   * Throws on an expiry outside 5 minutes to 7 days, before anything is written. The quotas are checked after the
+   * key (`decideOpenQuota`), and an open also writes the `expired` close of every decision past its deadline that no
+   * event has closed (`dueToExpire`, decision 4), after its own events.
+   *
+   * `audit` is the rows `auditEntries` built for the caller, one per org: the store files one set for each decision
+   * event the operation writes (`decisionAudit`), with it. Every decision write takes one, so each transition is
+   * on the org's stream (decision 13).
    */
-  openDecision(sessionId: string, e: EventBody, key: string | null): Promise<DecisionOpen>;
+  openDecision(sessionId: string, e: EventBody, key: string | null, audit?: readonly AuditEntry[]): Promise<DecisionOpen>;
   /**
    * Cast a vote: `e` is a `decision_vote` whose payload is a `VoteInput`, and the store writes it with the capacity
    * `capacityOf` derives, never one the caller sent. `applyVote` decides from the decision as read in the operation
    * that writes, so a vote cannot land after a closing event. A vote that closes the decision writes the
-   * `decision_closed` after it. A `key` as `openDecision`'s.
+   * `decision_closed` after it. A `key` and `audit` as `openDecision`'s.
    */
-  castVote(sessionId: string, e: EventBody, key: string | null): Promise<VoteWrite>;
+  castVote(sessionId: string, e: EventBody, key: string | null, audit?: readonly AuditEntry[]): Promise<VoteWrite>;
   /**
    * Close a decision with `close`, as the server: the closing event carries the tally of the votes read with it.
    * `now` is the clock `expired` is judged by, so an expiry is refused before the deadline; the first close wins.
+   * `audit` as `openDecision`'s.
    */
-  closeDecision(sessionId: string, decision: number, close: { state: ClosedState; reason?: FailReason }, now: number): Promise<DecisionClose>;
+  closeDecision(
+    sessionId: string, decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit?: readonly AuditEntry[],
+  ): Promise<DecisionClose>;
   /** The decision opened at `cursor`, read as of `now`, or null when that cursor opened none. */
   decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null>;
   /**
@@ -2818,6 +2838,10 @@ export class MemoryStore implements BellmanStore {
       delete s.joinCodes[retiring.role];
       this.appendNow(s, retiring.event);
     }
+    // The seat's votes on every decision still unclosed, voided after the member and the door (ADR 0040, decision 12).
+    const voided = leaving
+      ? removalEvents(decisionsOf(s.events, req.now).values(), memberId, req.event).map((b) => this.appendNow(s, b))
+      : [];
     // Last, so a call that throws above leaves no ban behind.
     if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
     if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
@@ -2826,9 +2850,10 @@ export class MemoryStore implements BellmanStore {
     // rows, then the door's: the order the events were written in. The member's rows
     // are filed for a call that removed them or wrote this room's ban: a ban on someone
     // who already left is the eviction's row all the same, and a repeat writes none.
-    this.recordAudit(
-      [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
-    );
+    this.recordAudit([
+      ...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : []),
+      ...decisionAudit(req.audit, voided, decisionsOf(s.events, req.now)),
+    ].filter((e) => e.orgId));
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
   }
@@ -3690,7 +3715,17 @@ export class MemoryStore implements BellmanStore {
 
   // Each decision write below is synchronous from its first read to its last write, as approveProposal's is.
 
-  async openDecision(sessionId: string, e: EventBody, key: string | null): Promise<DecisionOpen> {
+  /**
+   * Append `bodies` at `at`, and file their rows (`decisionAudit`) with the decisions as they read after them.
+   * The Durable Objects store keeps the open decisions as a book on the record; this one reads them off its log.
+   */
+  private decisionWrites(s: Session, bodies: readonly EventBody[], at: number, audit: readonly AuditEntry[]): SessionEvent[] {
+    const written = bodies.map((b) => this.appendNow(s, b, at));
+    if (written.length > 0) this.recordAudit(decisionAudit(audit, written, decisionsOf(s.events, at)).filter((r) => r.orgId));
+    return written;
+  }
+
+  async openDecision(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<DecisionOpen> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const k = this.decisionKey(s, e, key);
@@ -3698,19 +3733,25 @@ export class MemoryStore implements BellmanStore {
     if (s.frozenAt !== null) return { outcome: "frozen" };
     const draft = e.payload as DecisionDraft;
     const at = Date.now();
+    const book = noteDecisions({}, s.events);
+    const quota = decideOpenQuota(book, e.fromMemberId, at, draft.supersedes);
+    if (quota.kind === "quota") return { outcome: "quota", scope: quota.scope, limit: quota.limit };
     const old = draft.supersedes === undefined ? undefined : this.decisionIn(s, draft.supersedes, at);
     if (draft.supersedes !== undefined) {
       const d = decideSupersede(old);
       if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
     }
     const payload = openedPayload(draft, at, isTopicRoom(s.manifest), electorateOf(s.manifest, s.members, draft.effect.kind));
-    const event = this.appendNow(s, { ...e, payload }, at);
-    const superseded = old === undefined ? null : this.appendNow(s, closingEvent(old, { state: "failed", reason: "superseded" }), at);
+    const due = dueToExpire(book, at).map((c) => closingEvent(this.decisionIn(s, c, at)!, { state: "expired" }));
+    const [event, superseded = null] = this.decisionWrites(s, [
+      { ...e, payload }, ...(old === undefined ? [] : [closingEvent(old, { state: "failed", reason: "superseded" })]),
+    ], at, audit);
+    this.decisionWrites(s, due, at, audit);
     k.remember(event.cursor);
     return { outcome: "appended", event: detach(event), superseded: superseded === null ? null : detach(superseded) };
   }
 
-  async castVote(sessionId: string, e: EventBody, key: string | null): Promise<VoteWrite> {
+  async castVote(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const k = this.decisionKey(s, e, key);
@@ -3724,7 +3765,7 @@ export class MemoryStore implements BellmanStore {
     const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote);
     if (d.kind !== "record") return voteRefusal(d);
     const event = this.appendNow(s, { ...e, payload: vote }, at);
-    const closed = d.close === null ? null : this.appendNow(s, closingEvent(this.decisionIn(s, view.cursor, at)!, d.close), at);
+    const [closed = null] = d.close === null ? [] : this.decisionWrites(s, [closingEvent(this.decisionIn(s, view.cursor, at)!, d.close)], at, audit);
     k.remember(event.cursor);
     return { outcome: "appended", event: detach(event), closed: closed === null ? null : detach(closed) };
   }
@@ -3734,6 +3775,7 @@ export class MemoryStore implements BellmanStore {
     decision: number,
     close: { state: ClosedState; reason?: FailReason },
     now: number,
+    audit: readonly AuditEntry[] = [],
   ): Promise<DecisionClose> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
@@ -3743,7 +3785,7 @@ export class MemoryStore implements BellmanStore {
     const d = decideClose(view, close.state, now);
     if (d.kind === "closed") return { outcome: "closed", state: d.state };
     if (d.kind === "not_due") return { outcome: "not_due" };
-    return { outcome: "appended", event: detach(this.appendNow(s, closingEvent(view, close))) };
+    return { outcome: "appended", event: detach(this.decisionWrites(s, [closingEvent(view, close)], Date.now(), audit)[0]) };
   }
 
   async decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null> {

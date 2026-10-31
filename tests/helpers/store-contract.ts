@@ -3693,6 +3693,127 @@ export function describeStoreContract(
         expect(await store.castVote(id, ballot(first.event.cursor, { choice: "reject" }), "vote-0001")).toEqual({ outcome: "conflict" });
         expect(await count(id)).toBe(before);
       });
+
+      // #407: what a removal does to the decisions still open, the quotas, and the org's rows for each transition.
+      const rowFor = (action: string): AuditEntry => ({ at: Date.now(), orgId: "org_codenerd", sessionId: "qs_test", actorUserId: "u_ann", action, detail: {} });
+      const evict = (): RemovalRequest => ({
+        now: Date.now(), frozen: "refuse", cut: true, audit: [rowFor("member_evicted")],
+        event: { type: "member_evicted", fromMemberId: "system", fromUserId: "u_ann", fromLabel: "ann@codenerd", payload: {}, refId: null },
+      });
+      const leave = (m: ReturnType<typeof member>): RemovalRequest => ({
+        now: Date.now(), frozen: "allow", cut: false, audit: [rowFor("member_left")],
+        event: { type: "member_left", fromMemberId: m.memberId, fromUserId: m.userId, fromLabel: m.label, payload: { label: m.label }, refId: null },
+      });
+      const since = async (id: string, n: number) => (await store.eventsAfter(id, 0)).slice(n);
+
+      it("an eviction voids the seat's votes on every unclosed decision after the departure, and leaves a closed one as it closed (T5, T6)", async () => {
+        const id = await room({ manifest: { ...voting, mode: "swarm" }, members: [ANN, BEN, DAN] });
+        const d1 = (await open(id)).event;
+        const voted = await store.castVote(id, ballot(d1.cursor, {}, BEN), null);
+        if (voted.outcome !== "appended") throw new Error(voted.outcome);
+        const d2 = (await open(id, draft({ key: "other" }))).event;
+        const d3 = (await open(id, draft({ key: "third" }))).event;
+        const third = { hash: decisionHash(draft({ key: "third" })) };
+        await store.castVote(id, ballot(d3.cursor, third), null);
+        expect(await store.castVote(id, ballot(d3.cursor, third, BEN), null)).toMatchObject({ closed: { payload: { state: "passed" } } });
+        const before = await count(id);
+        expect(await store.removeMember(id, "m_ben", evict())).toMatchObject({ refused: null, removed: true });
+        const after = await since(id, before);
+        expect(after.map((e) => [e.type, e.fromMemberId, e.payload])).toEqual([
+          ["member_evicted", "system", {}],
+          ["decision_voter_removed", "system", { decision: d1.cursor, member: "m_ben", by: "ann@codenerd", reason: "evicted", voided: [voted.event.cursor] }],
+          ["decision_voter_removed", "system", { decision: d2.cursor, member: "m_ben", by: "ann@codenerd", reason: "evicted", voided: [] }],
+        ]);
+        expect(await store.decision(id, d1.cursor, d1.at)).toMatchObject({
+          state: "open", voided: [voted.event.cursor], removed: ["m_ben"], tally: { approve: 0, unreachable: 1 },
+        });
+        expect(await store.decision(id, d3.cursor, d3.at)).toMatchObject({ state: "passed", voided: [], removed: [] });
+        expect(await store.castVote(id, ballot(d1.cursor, {}, BEN), null), "the seat back (T6)").toEqual({ outcome: "not_electorate" });
+        const rows = (await store.auditForOrg("org_codenerd", 10)).filter((a) => a.action.startsWith("decision_"));
+        expect(rows.map((a) => a.detail)).toEqual(expect.arrayContaining([
+          { decision: d1.cursor, member_id: "m_ben", user_id: "u_ben", reason: "evicted", voided: [voted.event.cursor] },
+          { decision: d2.cursor, member_id: "m_ben", user_id: "u_ben", reason: "evicted", voided: [] },
+        ]));
+        expect(rows).toHaveLength(2);
+        expect(await store.verifyAudit("org_codenerd")).toMatchObject({ ok: true, checked: 3 });
+      });
+
+      it("a leave voids while open and closes what it settles: the veto seat leaving fails it blocked, never passed; a closed one is left alone", async () => {
+        const VEE = member({ memberId: "m_vee", userId: "u_vee", label: "vee@codenerd", roomRole: "peer_b" });
+        const id = await room({ manifest: vetoing, members: [ANN, BEN, VEE] });
+        const { event } = await open(id);
+        await store.castVote(id, ballot(event.cursor), null);
+        await store.castVote(id, ballot(event.cursor, {}, BEN), null);
+        expect((await store.decision(id, event.cursor, event.at))!.state, "the veto seat has not voted").toBe("open");
+        const before = await count(id);
+        await store.removeMember(id, "m_vee", leave(VEE));
+        const after = await since(id, before);
+        expect(after.map((e) => e.type)).toEqual(["member_left", "decision_voter_removed", "decision_closed"]);
+        expect(after[1].payload).toMatchObject({ member: "m_vee", by: "vee@codenerd", reason: "left" });
+        expect(after[2].payload).toMatchObject({ decision: event.cursor, state: "failed", reason: "blocked", tally: { approve: 2, unreachable: 1 } });
+        expect(await store.decision(id, event.cursor, event.at)).toMatchObject({ state: "failed", reason: "blocked" });
+        const n = await count(id);
+        await store.removeMember(id, "m_ben", leave(BEN));
+        expect((await since(id, n)).map((e) => e.type)).toEqual(["member_left"]);
+        expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action).filter((a) => a.startsWith("decision_")).sort())
+          .toEqual(["decision_closed", "decision_voter_removed"]);
+      });
+
+      it("refuses a seat's fourth open decision and a room's twenty-first, writing nothing, and lets a seat at its limit supersede", async () => {
+        const seats = Array.from({ length: 7 }, (_, i) => member({ memberId: `m_q${i}`, userId: `u_q${i}`, label: `q${i}@codenerd`, roomRole: "peer_a" }));
+        const id = await room({ manifest: { ...voting, mode: "swarm" }, members: seats });
+        const by = (i: number, key: string, over: Partial<DecisionDraft> = {}) => store.openDecision(id, opening(draft({ key, ...over }), seats[i]), null);
+        const first = await by(0, "a");
+        if (first.outcome !== "appended") throw new Error(first.outcome);
+        for (const key of ["b", "c"]) expect(await by(0, key)).toMatchObject({ outcome: "appended" });
+        let before = await count(id);
+        expect(await by(0, "d")).toEqual({ outcome: "quota", scope: "seat", limit: 3 });
+        expect(await count(id)).toBe(before);
+        expect(await by(0, "a2", { supersedes: first.event.cursor })).toMatchObject({ outcome: "appended" });
+        for (let i = 1; i <= 5; i++) for (const key of ["a", "b", "c"]) expect(await by(i, key), `seat ${i} ${key}`).toMatchObject({ outcome: "appended" });
+        for (const key of ["a", "b"]) expect(await by(6, key)).toMatchObject({ outcome: "appended" });
+        before = await count(id);
+        expect(await by(6, "c")).toEqual({ outcome: "quota", scope: "room", limit: 20 });
+        expect(await count(id)).toBe(before);
+      });
+
+      it("lands a seat's first vote and five revisions, and refuses a sixth revision, writing nothing", async () => {
+        const id = await room({ manifest: { ...voting, mode: "swarm" }, members: [ANN, BEN, DAN] });
+        const { event } = await open(id);
+        for (let i = 0; i < 6; i++) {
+          expect(await store.castVote(id, ballot(event.cursor, { choice: "abstain" }), null), `vote ${i + 1}`).toMatchObject({ outcome: "appended", closed: null });
+        }
+        const before = await count(id);
+        expect(await store.castVote(id, ballot(event.cursor, { choice: "approve" }), null)).toEqual({ outcome: "quota", limit: 5 });
+        expect(await count(id)).toBe(before);
+      });
+
+      it("files a row for each opening and close, the close listing its binding votes' evidence, and an open writes the expired close of one past due (decision 13, T2)", async () => {
+        const id = await room();
+        const row = [rowFor("decision")];
+        const first = await store.openDecision(id, opening(), null, row);
+        if (first.outcome !== "appended") throw new Error(first.outcome);
+        await store.castVote(id, ballot(first.event.cursor, { response_cursor: 7 }), null, row);
+        await store.castVote(id, ballot(first.event.cursor, { human_approved: false }, BEN), null, row);
+        const stuck = await store.openDecision(id, opening(draft({ key: "other" })), null, row);
+        if (stuck.outcome !== "appended") throw new Error(stuck.outcome);
+        vi.setSystemTime((stuck.event.payload as { expires_at: number }).expires_at + 1);
+        const before = await count(id);
+        const third = await store.openDecision(id, opening(draft({ key: "third" })), null, row);
+        if (third.outcome !== "appended") throw new Error(third.outcome);
+        expect((await since(id, before)).map((e) => [e.type, (e.payload as { decision?: number; state?: string }).state ?? null]))
+          .toEqual([["decision_opened", null], ["decision_closed", "expired"], ["decision_closed", "expired"]]);
+        expect(await store.decision(id, stuck.event.cursor, Date.now())).toMatchObject({ state: "expired", closed: { type: "decision_closed" } });
+        const rows = await store.auditForOrg("org_codenerd", 20);
+        expect(rows.map((a) => a.action).sort()).toEqual(["decision_closed", "decision_closed", "decision_opened", "decision_opened", "decision_opened"]);
+        const closed = rows.find((a) => a.action === "decision_closed" && a.detail.decision === first.event.cursor)!;
+        expect(closed.detail).toMatchObject({
+          state: "expired", hash: decisionHash(draft()),
+          votes: [{ member_id: "m_ann", user_id: "u_ann", choice: "approve", via: "action_response", human_approved: true, response_cursor: 7 }],
+        });
+        expect(JSON.stringify(rows), "never the proposal").not.toContain("example.com");
+        expect(await store.verifyAudit("org_codenerd")).toMatchObject({ ok: true, checked: 5 });
+      });
     });
 
     /**

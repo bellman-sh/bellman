@@ -8,11 +8,12 @@
  * digest would let another append land between the read and the write that stores it.
  *
  * `evaluate` is the rule engine (#404): after each vote it closes a decision the moment the worst case for the seats yet
- * to vote decides it. Quotas and writing `decision_voter_removed` are #407.
+ * to vote decides it. `removalEvents`, the quotas and `decisionAudit` are #407's: what a leave or an eviction writes
+ * into the decisions still open, how many a room and a seat may hold, and the org's rows for each transition.
  */
 import { createHash } from "node:crypto";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, type OutstandingRequest } from "./action-state.js";
-import type { DecisionRuleName, EventType, SessionEvent } from "./types.js";
+import type { AuditEntry, DecisionRuleName, EventType, SessionEvent } from "./types.js";
 
 /** The four decision event types. Only the server writes them: none is a `bellman_send` kind. */
 export const DECISION_EVENTS = [
@@ -22,6 +23,14 @@ export const DECISION_EVENTS = [
 /** The bounds on a rule's `expires` (ADR 0040, decision 4): five minutes to a topic room's seven days. */
 export const MIN_DECISION_TTL_MS = 5 * 60_000;
 export const MAX_DECISION_TTL_MS = PROPOSAL_TTL_MS;
+
+/**
+ * The quotas (decision 18, T9): decisions open in a room, decisions open that one seat opened, and revisions of one
+ * seat's vote on one decision. A revision is a vote after the seat's first, so a seat casts at most six.
+ */
+export const MAX_OPEN_DECISIONS = 20;
+export const MAX_OPEN_PER_SEAT = 3;
+export const MAX_REVISIONS = 5;
 
 /** Derived, never stored, as `ActionState` is. `expired` is the clock's, until a closing event says it. */
 export type DecisionState = "open" | "passed" | "failed" | "expired";
@@ -212,9 +221,11 @@ function count(v: Counted) {
     quorum: quorum === null ? null : Math.ceil((quorum * all.size) / 100),
   });
   const seats = v.payload.veto?.filter(live);
+  // Blocked once any veto account is left with no veto seat: the one removed could have vetoed, and every other veto
+  // seat approving must not pass what it might have stopped (decision 12). No veto seat at all is the same case.
   const veto = seats === undefined ? null : {
     cast: [...latest.binding.values()].some((b) => b.vote.choice === "reject" && seats.includes(b.memberId)),
-    blocked: seats.length === 0,
+    blocked: seats.length === 0 || v.payload.veto!.some((m) => !seats.some((s) => accounts[s] === accounts[m])),
     pending: seats.some((m) => !bound(accounts[m])),
   };
   return { tally: t, pending: [...reachable].filter((a) => !bound(a)).length, veto };
@@ -232,7 +243,7 @@ function holds(rule: Exclude<DecisionRuleName, "single">, approve: number, rejec
 
 /**
  * The rule engine (decisions 6, 12 and 20): the close a decision's votes call for, or null to stay open. A veto
- * seat's binding reject fails it `vetoed`, and no veto seat left reachable fails it `blocked`. It fails `rejected`
+ * seat's binding reject fails it `vetoed`, and a veto account left with no reachable veto seat fails it `blocked`. It fails `rejected`
  * when the rule cannot hold even if every reachable account yet to vote approved, and `no_quorum` when turnout
  * cannot be met even if they all voted. It passes when turnout is met, no veto seat has yet to vote, and the rule
  * holds even if every account yet to vote and every unreachable one rejected. `single` is the `action_request`
@@ -342,19 +353,21 @@ export type VoteDecision =
   | { kind: "closed"; state: DecisionState }    // a closing event exists: no vote lands after it
   | { kind: "not_electorate" }                  // the seat is not in the snapshot taken at open, or was removed from it
   | { kind: "stale"; hash: string }             // the vote names another hash; `hash` is the current one
+  | { kind: "quota"; limit: number }            // the seat has revised its vote `MAX_REVISIONS` times already
   | { kind: "record"; close: { state: "passed" | "failed"; reason?: FailReason } | null };
 
 /**
  * `applyVote` decides a vote by `voter` against `view` (decision 3). In this order: a closed decision refuses it,
  * so a superseded decision's vote reads `closed` and not `stale`; then a seat outside the electorate, or one
  * `decision_voter_removed` named, since a rejoin restores neither the seat nor its vote (decision 12); then a hash
- * that is not the decision's. A vote past the deadline on a decision nobody has closed still lands (decision 4).
- * A recorded vote carries the close `evaluate` calls for with the vote counted in.
+ * that is not the decision's; then a seat past its revisions (T9). A vote past the deadline on a decision nobody
+ * has closed still lands (decision 4). A recorded vote carries the close `evaluate` calls for with the vote counted in.
  */
 export function applyVote(view: DecisionView, voter: { memberId: string; userId: string }, vote: DecisionVote): VoteDecision {
   if (view.closed !== null) return { kind: "closed", state: view.state };
   if (!view.payload.electorate.includes(voter.memberId) || view.removed.includes(voter.memberId)) return { kind: "not_electorate" };
   if (vote.hash !== view.payload.hash) return { kind: "stale", hash: view.payload.hash };
+  if (view.ballots.filter((b) => b.memberId === voter.memberId).length > MAX_REVISIONS) return { kind: "quota", limit: MAX_REVISIONS };
   const ballots = [...view.ballots, { cursor: Number.MAX_SAFE_INTEGER, ...voter, vote }];
   return { kind: "record", close: evaluate({ ...view, ballots }) };
 }
@@ -385,4 +398,116 @@ export function openedPayload(draft: DecisionDraft, at: number, topic: boolean, 
 export function closingEvent(view: DecisionView, close: { state: ClosedState; reason?: FailReason }): Omit<SessionEvent, "cursor" | "at"> {
   const payload: DecisionClosed = { decision: view.cursor, state: close.state, ...(close.reason === undefined ? {} : { reason: close.reason }), tally: view.tally };
   return { type: "decision_closed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload, refId: null };
+}
+
+/** An event as a store is handed it, before it has a cursor and a time. */
+type Body = Omit<SessionEvent, "cursor" | "at">;
+
+const fromServer = (type: EventType, payload: unknown): Body =>
+  ({ type, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload, refId: null });
+
+/**
+ * The decisions with no closing event, by opening cursor as a string: when each expires and which seat opened it.
+ * A store keeps it at the write (`noteDecisions`), so a removal and a quota find every unclosed decision without
+ * reading the log, however old.
+ */
+export type OpenDecisions = Record<string, { expires_at: number; by: string }>;
+
+/** `book` with `events` applied: an opening adds its decision, a closing event removes it. The same object when neither. */
+export function noteDecisions(book: OpenDecisions, events: readonly SessionEvent[]): OpenDecisions {
+  let next = book;
+  for (const e of events) {
+    if (e.type === "decision_opened") {
+      next = { ...next, [e.cursor]: { expires_at: (e.payload as DecisionOpened).expires_at, by: e.fromMemberId } };
+    } else if (e.type === "decision_closed" && Object.hasOwn(next, String(decisionOf(e)))) {
+      const { [String(decisionOf(e))]: _closed, ...rest } = next;
+      next = rest;
+    }
+  }
+  return next;
+}
+
+/**
+ * Whether `by` may open a decision now (decision 18): fewer than `MAX_OPEN_DECISIONS` open in the room and fewer than
+ * `MAX_OPEN_PER_SEAT` opened by the seat. Only the decisions not yet past their deadline count, and not the one the
+ * draft supersedes, which closes in the same write.
+ */
+export function decideOpenQuota(
+  book: OpenDecisions, by: string, now: number, supersedes?: number,
+): { kind: "ok" } | { kind: "quota"; scope: "room" | "seat"; limit: number } {
+  const open = Object.entries(book).filter(([cursor, d]) => d.expires_at >= now && cursor !== String(supersedes));
+  if (open.length >= MAX_OPEN_DECISIONS) return { kind: "quota", scope: "room", limit: MAX_OPEN_DECISIONS };
+  if (open.filter(([, d]) => d.by === by).length >= MAX_OPEN_PER_SEAT) return { kind: "quota", scope: "seat", limit: MAX_OPEN_PER_SEAT };
+  return { kind: "ok" };
+}
+
+/** The unclosed decisions in `book` already past their deadline: an open writes their `expired` close (decision 4). */
+export const dueToExpire = (book: OpenDecisions, now: number): number[] =>
+  Object.entries(book).filter(([, d]) => d.expires_at < now).map(([cursor]) => Number(cursor));
+
+/**
+ * What a leave or an eviction writes into the decisions it finds unclosed (decision 12): for each whose electorate
+ * holds `memberId` and has not had it removed, one `decision_voter_removed` naming the seat's votes it voids, then
+ * the close `evaluate` calls for with the seat unreachable. Never a pass: an unreachable seat is a possible reject.
+ * `departure` is the `member_left` or `member_evicted` the store writes before them; `by` is its author's label,
+ * since an account id never reaches peers.
+ */
+export function removalEvents(views: Iterable<DecisionView>, memberId: string, departure: Body): Body[] {
+  const reason: VoterRemoved["reason"] = departure.type === "member_evicted" ? "evicted" : "left";
+  const out: Body[] = [];
+  for (const v of views) {
+    if (v.closed !== null || !v.payload.electorate.includes(memberId) || v.removed.includes(memberId)) continue;
+    const voided = v.ballots.filter((b) => b.memberId === memberId && !v.voided.includes(b.cursor)).map((b) => b.cursor);
+    const after = { ...v, voided: [...v.voided, ...voided], removed: [...v.removed, memberId] };
+    after.tally = tally(after);
+    const removed: VoterRemoved = { decision: v.cursor, member: memberId, by: departure.fromLabel, reason, voided };
+    out.push(fromServer("decision_voter_removed", removed));
+    const close = evaluate(after);
+    if (close !== null) out.push(closingEvent(after, close));
+  }
+  return out;
+}
+
+/** How many votes a closing row lists. ponytail: a 5,000-seat close lists the first 200; past that, rows per vote. */
+const AUDITED_VOTES = 200;
+
+/**
+ * The org's rows for the decision events in `events` (decision 13, ADR 0035): `template` is the rows `auditEntries`
+ * built for the call, one per org, whose action and detail each event replaces. Ids, kinds, hashes and counts, never
+ * the proposal: no effect and no reason. A closing row lists the binding votes it counted from, each with its seat,
+ * account, `via`, `human_approved` and response cursor (T2); `views` holds each decision as of its close.
+ */
+export function decisionAudit(
+  template: readonly AuditEntry[], events: readonly SessionEvent[], views: ReadonlyMap<number, DecisionView>,
+): AuditEntry[] {
+  const detailOf = (e: SessionEvent): Record<string, unknown> | null => {
+    if (e.type === "decision_opened") {
+      const d = e.payload as DecisionOpened;
+      return {
+        decision: e.cursor, kind: d.effect.kind, key: d.key, hash: d.hash, ...ruleOf(d.rule), electorate: d.electorate.length,
+        expires_at: d.expires_at, ...(d.supersedes === undefined ? {} : { supersedes: d.supersedes }),
+      };
+    }
+    const v = views.get(decisionOf(e) ?? -1);
+    if (v === undefined) return null;
+    if (e.type === "decision_voter_removed") {
+      const r = e.payload as VoterRemoved;
+      return { decision: r.decision, member_id: r.member, user_id: v.payload.accounts[r.member], reason: r.reason, voided: r.voided };
+    }
+    if (e.type !== "decision_closed") return null;
+    const c = e.payload as DecisionClosed;
+    const votes = v.ballots.filter((b) => b.vote.capacity === "binding" && !v.voided.includes(b.cursor)).map((b) => ({
+      cursor: b.cursor, member_id: b.memberId, user_id: b.userId, choice: b.vote.choice, via: b.vote.via,
+      human_approved: b.vote.human_approved, ...(b.vote.response_cursor === undefined ? {} : { response_cursor: b.vote.response_cursor }),
+    }));
+    return {
+      decision: c.decision, kind: v.payload.effect.kind, hash: v.payload.hash, state: c.state,
+      ...(c.reason === undefined ? {} : { reason: c.reason }), tally: c.tally, votes: votes.slice(0, AUDITED_VOTES),
+      ...(votes.length > AUDITED_VOTES ? { votes_omitted: votes.length - AUDITED_VOTES } : {}),
+    };
+  };
+  return events.flatMap((e) => {
+    const detail = detailOf(e);
+    return detail === null ? [] : template.map((row) => ({ ...row, action: e.type, detail }));
+  });
 }

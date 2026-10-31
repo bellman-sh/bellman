@@ -1,5 +1,6 @@
 import type { AgentInfo, Brief, HostUnits, Member, RoomManifest, Session } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
+import type { OpenDecisions } from "./decision.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
 // exists only inside workerd, so a test can load it only by stubbing that module, and
@@ -108,6 +109,13 @@ export interface StoredSession extends Omit<Session, "events"> {
   memberSeq?: number;
   /** The last public number the room gave a label (ADR 0019, D6), kept and counted as `memberSeq` is. */
   labelSeq?: number;
+  /**
+   * The room's decisions that no event has closed (ADR 0040, #407), kept by `noteDecisions` in the put that writes
+   * a decision event, so a removal voids every one and an open counts them for its quota without reading the log.
+   * Absent on a record that never held a decision, and on one whose decisions opened before #407: those are not
+   * voided by a removal. MemoryStore reads its log instead.
+   */
+  openDecisions?: OpenDecisions;
 }
 
 /** The UTC calendar month a time falls in, as the hosted-seat meter keys it. */

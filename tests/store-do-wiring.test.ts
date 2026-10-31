@@ -2560,7 +2560,8 @@ describe("a failed index write does not fail the operation it indexes", () => {
   const refuse = (registryStorage: ReturnType<typeof fakeStorage>, prefixes: string[]) => {
     const realPut = registryStorage.put;
     registryStorage.put = async (keyOrEntries: unknown, value?: unknown) => {
-      if (typeof keyOrEntries === "string" && prefixes.some((p) => keyOrEntries.startsWith(p))) {
+      const keys = typeof keyOrEntries === "string" ? [keyOrEntries] : Object.keys(keyOrEntries as object);
+      if (keys.some((k) => prefixes.some((p) => k.startsWith(p)))) {
         throw new Error("registry unavailable");
       }
       return realPut(keyOrEntries, value);

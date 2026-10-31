@@ -2355,7 +2355,8 @@ treat these as plus or minus ten percent:
 **Ceiling: 11,840.** The tool listing may not pass 11,840 tokens, measured by the method below: the 10,340 that
 main (`5d4ddb48`) measured after the concise rewrite, plus 1,500 for the tracks still to land (the data layer,
 the retriever, the judge and governed config, #416). A change that grows the listing adds a row to the budget
-below with its measured delta. Raising the ceiling is a decision recorded here, not a side effect of a merge.
+below with its measured delta; `tests/tool-budget.test.ts` fails until it does. Raising the ceiling is a
+decision recorded here, not a side effect of a merge.
 
 | Change | Delta | Total | Where |
 |---|---|---|---|
@@ -2652,7 +2653,9 @@ The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as
 `tests/helpers/harness.ts` does; then for each entry count
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
-leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
+leaves non-ASCII `\u`-escaped. `tests/tool-budget.test.ts` runs it in `npm test` with js-tiktoken's
+`cl100k_base`: it fails when the listing differs from the Tool definitions row, when that row is past the
+ceiling, or when the budget table does not add up. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
 `77396879` it gives 4,962, the figure recorded after #111, on `c9789ae`
 6,008, the figure recorded after #129, and on `f79b599` 6,499, the figure

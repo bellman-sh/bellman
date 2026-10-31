@@ -76,6 +76,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.5.0",
     "esbuild": "0.28.2",
+    "js-tiktoken": "1.0.21",
     "jsdom": "^29.1.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",

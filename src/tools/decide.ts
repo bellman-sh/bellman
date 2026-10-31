@@ -5,7 +5,7 @@ import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity, Member } from "../types.js";
 import { denyVerb } from "../roles.js";
-import { FROZEN, admitSend, findMember, requestWindow, touchMember } from "../rooms.js";
+import { FROZEN, admitSend, auditEntries, findMember, requestWindow, touchMember } from "../rooms.js";
 import { DECISION_KINDS, isTopicRoom } from "../manifest.js";
 import { electorateOf, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
@@ -42,7 +42,7 @@ export async function voteOn(
   const w = await s.castVote(sessionId, {
     type: "decision_vote", fromMemberId: me.memberId, fromUserId: identity.userId, fromLabel: identity.label,
     payload: { ...vote, via: "action_response" } satisfies VoteInput, refId: null,
-  }, key ?? null);
+  }, key ?? null, auditEntries(session, identity, "decision_vote", {}));
   const n = vote.decision;
   switch (w.outcome) {
     case "appended":
@@ -65,6 +65,7 @@ export async function voteOn(
     case "closed": return fail(`decision ${n} is already ${w.state}; no vote lands after it closes.`);
     case "not_electorate":
       return fail(`your seat is not in decision ${n}'s electorate: it was fixed when the decision opened, and a seat removed since is out of it.`);
+    case "quota": return fail(`you have already revised your vote on decision ${n} ${w.limit} times, the most a seat may.`);
     case "unknown": return fail(`no decision with cursor ${n}.`);
     case "conflict": return keyReused(key!);
     case "frozen": return fail(FROZEN);
@@ -213,7 +214,7 @@ export function registerDecide(server: McpServer, identity: Identity, s: Bellman
       const w = await s.openDecision(session_id, {
         type: "decision_opened", fromMemberId: member_id, fromUserId: identity.userId, fromLabel: identity.label,
         payload: draft, refId: null,
-      }, idempotency_key ?? null);
+      }, idempotency_key ?? null, auditEntries(session, identity, "decision_opened", {}));
       switch (w.outcome) {
         case "appended":
         case "replayed": {
@@ -230,6 +231,10 @@ export function registerDecide(server: McpServer, identity: Identity, s: Bellman
         }
         case "not_open":
           return fail(`decision ${supersedes} is ${w.state ?? "not a decision"}, so it cannot be superseded.`);
+        case "quota":
+          return fail(w.scope === "room"
+            ? `this room already has ${w.limit} decisions open, the most it may hold. Wait for one to close.`
+            : `you already have ${w.limit} decisions open in this room, the most a seat may. Supersede one, or wait for one to close.`);
         case "conflict": return keyReused(idempotency_key!);
         case "frozen": return fail(FROZEN);
       }

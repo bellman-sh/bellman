@@ -4,9 +4,11 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyVote, capacityOfVote, decideClose, decideSupersede, decisionExpiry, decisionHash, decisionStates, decisionsOf, evaluate,
-  ruleOf, tally, DECISION_EVENTS, MAX_DECISION_TTL_MS, MIN_DECISION_TTL_MS,
-  type Ballot, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
+  applyVote, capacityOfVote, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
+  decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
+  MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
+  type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
+  type OpenDecisions, type VoterRemoved,
 } from "../src/decision.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "../src/action-state.js";
 import type { EventType, SessionEvent } from "../src/types.js";
@@ -315,6 +317,33 @@ describe("evaluate", () => {
     }
   });
 
+  it("fails blocked once one of several veto seats is removed, though every veto seat left approves (T5, #407)", () => {
+    const d = counted("majority", SEATS, cast("a:approve", "b:approve", "c:approve"), { veto: ["b", "c"], removed: ["c"], voided: [4] });
+    expect(evaluate(d)).toEqual(failed("blocked"));
+    // Not when the account it shared keeps a veto seat: that account can still veto.
+    const shared = counted("majority", ["a", "b", "c"], cast("a:approve", "b:approve"), { veto: ["b", "c"], accounts: { c: "u_b" }, removed: ["c"] });
+    expect(evaluate(shared)).toEqual(PASSED);
+  });
+
+  it("a decision that has lost a veto seat never passes, whatever votes follow (property, 1000 seeds)", () => {
+    for (let seed = 1; seed <= 1000; seed++) {
+      const next = rng(seed);
+      const base = randomDecision(next);
+      const seats = base.payload.electorate;
+      const veto = base.payload.veto ?? [];
+      if (veto.length === 0) continue;
+      const gone = veto[Math.floor(next() * veto.length)];
+      if (seats.some((m) => m !== gone && veto.includes(m) && base.payload.accounts[m] === base.payload.accounts[gone])) continue;
+      let d: Counted = { ...base, removed: [gone] };
+      for (let cursor = 2; cursor < 14; cursor++) {
+        const seat = seats[Math.floor(next() * seats.length)];
+        if (seat === gone) continue;
+        d = { ...d, ballots: [...d.ballots, ballot(cursor, seat, d.payload.accounts[seat], vote(choices[Math.floor(next() * 3)], next() < 0.8))] };
+        expect(evaluate(d)?.state, `seed ${seed}, vote ${cursor}`).not.toBe("passed");
+      }
+    }
+  });
+
   it("removing a seat brings back no vote its account's other seat cast before it", () => {
     // u_a holds a and b: b's reject replaced a's approve, and voiding it leaves u_a with no vote, not the approve.
     const ballots = [ballot(2, "a", "u_a", vote("approve")), ballot(3, "b", "u_a", vote("reject")), ballot(4, "c", "u_c", vote("approve"))];
@@ -494,5 +523,139 @@ describe("decisionsOf", () => {
     expect(decideClose(open, "expired", AT + ACTION_REQUEST_TTL_MS + 1)).toEqual({ kind: "close" });
     expect(decideClose(open, "failed", AT)).toEqual({ kind: "close" });
     expect(decideClose(decisionsOf([opened(1), closed(2, "passed")], AT).get(1)!, "failed", AT)).toEqual({ kind: "closed", state: "passed" });
+  });
+});
+
+describe("removals, quotas and audit rows (#407)", () => {
+  const AT = 1_000_000;
+  const opened = (cursor: number, over: Partial<DecisionOpened> = {}, by = "m_a"): SessionEvent => ({
+    cursor, type: "decision_opened", fromMemberId: by, fromUserId: `u_${by.slice(2)}`, fromLabel: by, refId: null, at: AT,
+    payload: {
+      ...draft(), rule: "majority", expires_at: AT + ACTION_REQUEST_TTL_MS, electorate: ["m_a", "m_b", "m_c"],
+      accounts: { m_a: "u_a", m_b: "u_b", m_c: "u_c" }, hash: HASH, ...over,
+    } satisfies DecisionOpened,
+  });
+  const voted = (cursor: number, memberId: string, v: DecisionVote, decision = 1): SessionEvent => ({
+    cursor, type: "decision_vote", fromMemberId: memberId, fromUserId: `u_${memberId.slice(2)}`, fromLabel: memberId,
+    refId: null, at: AT, payload: { ...v, decision },
+  });
+  const closedBy = (cursor: number, decision = 1): SessionEvent => ({
+    cursor, type: "decision_closed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null, at: AT,
+    payload: { decision, state: "failed", reason: "rejected", tally: tally({ ...decisionsOf([opened(decision)], AT).get(decision)! }) },
+  });
+  const evicted = { type: "member_evicted" as const, fromMemberId: "system", fromUserId: "u_creator", fromLabel: "creator@x", payload: {}, refId: null };
+  const left = (m: string) => ({ type: "member_left" as const, fromMemberId: m, fromUserId: `u_${m.slice(2)}`, fromLabel: m, payload: {}, refId: null });
+  const views = (events: SessionEvent[]) => decisionsOf(events, AT).values();
+
+  it("voids the seat's votes on every unclosed decision it is in, naming them, and leaves a closed one alone", () => {
+    const events = [
+      opened(1), voted(2, "m_b", vote("approve")), voted(3, "m_b", vote("reject")), voted(4, "m_a", vote("approve")),
+      opened(5, { electorate: ["m_a", "m_c"] }), opened(6), closedBy(7, 6),
+    ];
+    expect(removalEvents(views(events), "m_b", evicted)).toEqual([{
+      type: "decision_voter_removed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null,
+      payload: { decision: 1, member: "m_b", by: "creator@x", reason: "evicted", voided: [2, 3] } satisfies VoterRemoved,
+    }]);
+    // m_c leaving decision 1 with a for and an against leaves no seat to break the tie, so it closes it rejected.
+    expect(removalEvents(views(events), "m_c", left("m_c")).map((e) => [e.type, e.payload])).toEqual([
+      ["decision_voter_removed", { decision: 1, member: "m_c", by: "m_c", reason: "left", voided: [] }],
+      ["decision_closed", expect.objectContaining({ decision: 1, state: "failed", reason: "rejected" })],
+      ["decision_voter_removed", { decision: 5, member: "m_c", by: "m_c", reason: "left", voided: [] }],
+    ]);
+  });
+
+  it("writes nothing for a seat already removed, and nothing for a seat outside every electorate", () => {
+    const removed = { ...opened(2), cursor: 2, type: "decision_voter_removed" as const, fromMemberId: "system",
+      payload: { decision: 1, member: "m_b", by: "x", reason: "left", voided: [] } };
+    expect(removalEvents(views([opened(1), removed]), "m_b", evicted)).toEqual([]);
+    expect(removalEvents(views([opened(1)]), "m_late", evicted)).toEqual([]);
+  });
+
+  it("closes the decision the removal settles, with the tally after the voiding: blocked for the only veto seat", () => {
+    const out = removalEvents(views([opened(1, { veto: ["m_c"] }), voted(2, "m_c", vote("approve"))]), "m_c", left("m_c"));
+    expect(out.map((e) => e.type)).toEqual(["decision_voter_removed", "decision_closed"]);
+    expect(out[1].payload).toMatchObject({ decision: 1, state: "failed", reason: "blocked", tally: { approve: 0, unreachable: 1 } });
+  });
+
+  it("never closes a decision passed (property, 2000 seeds)", () => {
+    const seats = ["m_a", "m_b", "m_c", "m_d"];
+    for (let seed = 1; seed <= 2000; seed++) {
+      const next = rng(seed);
+      const rule = (["majority", "supermajority", "unanimous", { rule: "majority", quorum: 50 }] as DecisionRule[])[seed % 4];
+      const events: SessionEvent[] = [opened(1, {
+        rule, electorate: seats, accounts: Object.fromEntries(seats.map((m) => [m, `u_${m.slice(2)}`])),
+        ...(next() < 0.5 ? { veto: seats.filter(() => next() < 0.4) } : {}),
+      })];
+      for (let cursor = 2; cursor < 2 + Math.floor(next() * 4); cursor++) {
+        const by = seats[Math.floor(next() * seats.length)];
+        events.push(voted(cursor, by, vote((["approve", "reject", "abstain"] as const)[Math.floor(next() * 3)], next() < 0.8)));
+      }
+      if (decisionsOf(events, AT).get(1)!.state !== "open" || evaluate(decisionsOf(events, AT).get(1)!) !== null) continue;
+      const out = removalEvents(views(events), seats[Math.floor(next() * seats.length)], evicted);
+      expect(out.some((e) => (e.payload as DecisionClosed).state === "passed"), `seed ${seed}`).toBe(false);
+    }
+  });
+
+  it("keeps a book of unclosed decisions: an opening adds one, its closing event removes it, anything else is the same book", () => {
+    const book = noteDecisions({}, [opened(1), opened(5, {}, "m_b"), voted(6, "m_a", vote("approve"), 1)]);
+    expect(book).toEqual({ 1: { expires_at: AT + ACTION_REQUEST_TTL_MS, by: "m_a" }, 5: { expires_at: AT + ACTION_REQUEST_TTL_MS, by: "m_b" } });
+    expect(noteDecisions(book, [closedBy(7, 5)])).toEqual({ 1: book[1] });
+    expect(noteDecisions(book, [voted(8, "m_a", vote("approve"))])).toBe(book);
+  });
+
+  it("refuses an open at exactly 20 in the room and 3 for the seat, counting no expired decision and not the one superseded", () => {
+    const of = (n: number, by: (i: number) => string, expires = AT + 1): OpenDecisions =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [String(i + 1), { expires_at: expires, by: by(i) }]));
+    expect(MAX_OPEN_DECISIONS).toBe(20);
+    expect(MAX_OPEN_PER_SEAT).toBe(3);
+    expect(decideOpenQuota(of(19, (i) => `m_${i % 7}`), "m_x", AT)).toEqual({ kind: "ok" });
+    expect(decideOpenQuota(of(20, (i) => `m_${i % 7}`), "m_x", AT)).toEqual({ kind: "quota", scope: "room", limit: 20 });
+    expect(decideOpenQuota(of(20, (i) => `m_${i % 7}`), "m_x", AT + 2), "all past due").toEqual({ kind: "ok" });
+    expect(decideOpenQuota(of(2, () => "m_a"), "m_a", AT)).toEqual({ kind: "ok" });
+    expect(decideOpenQuota(of(3, () => "m_a"), "m_a", AT)).toEqual({ kind: "quota", scope: "seat", limit: 3 });
+    expect(decideOpenQuota(of(3, () => "m_a"), "m_b", AT)).toEqual({ kind: "ok" });
+    expect(decideOpenQuota(of(3, () => "m_a"), "m_a", AT, 2), "superseding one of the three").toEqual({ kind: "ok" });
+    expect(dueToExpire(of(3, () => "m_a"), AT + 1)).toEqual([]);
+    expect(dueToExpire(of(3, () => "m_a"), AT + 2)).toEqual([1, 2, 3]);
+  });
+
+  it("lands a seat's first vote and five revisions, and refuses the sixth revision", () => {
+    expect(MAX_REVISIONS).toBe(5);
+    const events: SessionEvent[] = [opened(1)];
+    for (let i = 0; i <= MAX_REVISIONS; i++) {
+      expect(applyVote(decisionsOf(events, AT).get(1)!, { memberId: "m_a", userId: "u_a" }, vote("abstain")).kind, `vote ${i + 1}`).toBe("record");
+      events.push(voted(2 + i, "m_a", vote("abstain")));
+    }
+    expect(applyVote(decisionsOf(events, AT).get(1)!, { memberId: "m_a", userId: "u_a" }, vote("approve"))).toEqual({ kind: "quota", limit: 5 });
+    expect(applyVote(decisionsOf(events, AT).get(1)!, { memberId: "m_b", userId: "u_b" }, vote("approve")).kind, "another seat").toBe("record");
+  });
+
+  it("files one row per org for each opening, close and removal, with ids, hashes and counts and never the proposal", () => {
+    const template = ["org_a", "org_b"].map((orgId) => ({
+      at: AT, orgId, sessionId: "qs_1", actorUserId: "u_a", action: "decision_vote", detail: { anything: true },
+    }));
+    const removal: SessionEvent = { ...removalEvents(views([opened(1), voted(2, "m_b", vote("approve"))]), "m_b", evicted)[0], cursor: 3, at: AT };
+    const close: SessionEvent = {
+      cursor: 5, at: AT, type: "decision_closed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null,
+      payload: { decision: 1, state: "failed", reason: "rejected", tally: tally(decisionsOf([opened(1)], AT).get(1)!) },
+    };
+    const vote4 = { ...voted(4, "m_a", vote("reject")), payload: { ...vote("reject"), decision: 1, response_cursor: 9 } };
+    const events = [opened(1), voted(2, "m_b", vote("approve")), removal, vote4, close];
+    const rows = decisionAudit(template, events, decisionsOf(events, AT));
+    expect(rows.map((r) => [r.orgId, r.action])).toEqual([
+      ["org_a", "decision_opened"], ["org_b", "decision_opened"],
+      ["org_a", "decision_voter_removed"], ["org_b", "decision_voter_removed"],
+      ["org_a", "decision_closed"], ["org_b", "decision_closed"],
+    ]);
+    expect(rows[0].detail).toEqual({
+      decision: 1, kind: "surface_proposal", key: "tools", hash: HASH, rule: "majority", quorum: null, electorate: 3,
+      expires_at: AT + ACTION_REQUEST_TTL_MS,
+    });
+    expect(rows[2].detail).toEqual({ decision: 1, member_id: "m_b", user_id: "u_b", reason: "evicted", voided: [2] });
+    expect(rows[4].detail).toMatchObject({
+      decision: 1, kind: "surface_proposal", hash: HASH, state: "failed", reason: "rejected",
+      votes: [{ cursor: 4, member_id: "m_a", user_id: "u_a", choice: "reject", via: "action_response", human_approved: true, response_cursor: 9 }],
+    });
+    expect(JSON.stringify(rows), "no effect content").not.toContain("example.com");
   });
 });

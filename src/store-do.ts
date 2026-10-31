@@ -21,8 +21,8 @@ import type {
 } from "./store.js";
 import { electorateOf, voteRefusal } from "./store.js";
 import {
-  applyVote, capacityOfVote, closingEvent, decideClose, decideSupersede, decisionsOf, openedPayload,
-  type ClosedState, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
+  applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
+  dueToExpire, noteDecisions, openedPayload, removalEvents, type ClosedState, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
 import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, placesAmongRows, surfaceBatchPrint, surfaceFactsOf, surfacePrint, windowUnderCut } from "./store.js";
@@ -1601,6 +1601,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const written: SessionEvent[] = [];
       if (leaving) written.push({ ...req.event, cursor: next++, at });
       if (retiring) written.push({ ...retiring.event, cursor: next++, at });
+      // The seat's votes on every decision still unclosed, voided after the member and the door (ADR 0040, decision
+      // 12). The book names them; one list of the log from the oldest reads them, as an open reads the ones it closes.
+      const book = s.openDecisions ?? {};
+      const unclosed = Object.keys(book).map(Number);
+      const log = leaving && unclosed.length > 0 ? await this.#logFrom(txn, Math.min(...unclosed)) : [];
+      const voiding: SessionEvent[] = log.length === 0
+        ? []
+        : removalEvents(decisionsOf(log, at).values(), memberId, req.event).map((b) => ({ ...b, cursor: next++, at }));
+      written.push(...voiding);
 
       // The roster is built AFTER the events, because a cut names the departure's
       // own cursor and the departure does not have one until it is numbered. The
@@ -1635,9 +1644,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // them: a ban on someone who already left is the eviction's row all the same. Not for
       // `widening`, which is owed on every ask here because the registry cannot be read from
       // this transaction, so a retry of "all" would file the row again.
-      const intents = [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])]
-        .filter((e) => e.orgId)
-        .map(auditIntent);
+      const intents = [
+        ...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : []),
+        ...decisionAudit(req.audit, voiding, decisionsOf([...log, ...voiding], at)),
+      ].filter((e) => e.orgId).map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
       // The registry's writes, the code's and the ban's, ahead of the audit rows: one enqueue, in order.
       const banRows = widening ? [creatorBanIntent(s.createdBy, widening)] : [];
@@ -1650,7 +1660,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // roster built above, so the stamp is laid on the leave and the cut and never over them.
       const kept = written.reduce<StoredSession>(
         (draft, e) => ({ ...draft, ...noteAppend(draft, e) }),
-        { ...s, members, joinCodes },
+        { ...s, members, joinCodes, ...(voiding.length > 0 ? { openDecisions: noteDecisions(book, voiding) } : {}) },
       );
       await putRows(txn, {
         ...memberRows(s, kept),
@@ -2588,41 +2598,52 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * A decision write's events in one put, with the key's row, the books (#66) folded over them in cursor order as
-   * approveProposal folds them. Answers whether the books brought a due time forward, as `#writeEvent` does.
+   * approveProposal folds them, the open decisions (`noteDecisions`), and the org's rows for them (`decisionAudit`,
+   * from `audit` and `log`, the log read before them). Answers whether the books brought a due time forward, as
+   * `#writeEvent` does, and whether rows were queued for delivery.
    */
   async #writeDecision(
     txn: DurableObjectTransaction,
     s: StoredSession,
     events: readonly SessionEvent[],
     record: Record<string, unknown>,
-  ): Promise<boolean> {
+    audit: readonly AuditEntry[],
+    log: readonly SessionEvent[],
+  ): Promise<{ forward: boolean; queued: boolean }> {
     let kept: StoredSession = s;
     for (const ev of events) {
       const books = noteAppend(kept, ev);
       if (books !== kept) kept = { ...kept, ...books };
     }
+    const forward = kept !== s && (bringsForward(s, kept, events[0].at) || tickBroughtForward(s, kept));
+    const book = noteDecisions(s.openDecisions ?? {}, events);
+    if (book !== (s.openDecisions ?? {})) kept = { ...kept, openDecisions: book };
+    const rows = decisionAudit(audit, events, decisionsOf([...log, ...events], events[0].at)).filter((e) => e.orgId);
     await putRows(txn, {
       ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
       cursor: events[events.length - 1].cursor,
       ...record,
       ...asRows(s, { session: kept === s ? undefined : kept }),
+      ...(rows.length > 0 ? await this.driver.enqueue(txn, rows.map(auditIntent)) : {}),
     });
-    return kept !== s && (bringsForward(s, kept, events[0].at) || tickBroughtForward(s, kept));
+    return { forward, queued: rows.length > 0 };
   }
 
-  /** The wake and the re-arm a decision write owes once it has committed, as approveProposal's. */
-  async #afterDecision(events: readonly SessionEvent[], members: readonly Member[], broughtForward: boolean): Promise<void> {
+  /** The wake, the delivery and the re-arm a decision write owes once it has committed, as approveProposal's. */
+  async #afterDecision(events: readonly SessionEvent[], members: readonly Member[], after: { forward: boolean; queued: boolean }): Promise<void> {
     this.#wake(events, members);
-    if (broughtForward) await this.driver.reArm();
+    if (after.queued) await this.driver.deliverNow();
+    if (after.forward) await this.driver.reArm();
   }
 
   /** `BellmanStore.openDecision`: the snapshot, the hash and the append in one transaction, and a supersession's close after it. */
-  async openDecision(e: EventBody, key: string | null): Promise<DecisionOpen> {
-    let broughtForward = false as boolean;
+  async openDecision(e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<DecisionOpen> {
+    let after = { forward: false, queued: false };
     let members: readonly Member[] = [];
+    let written: SessionEvent[] = [];
     const result = await this.ctx.storage.transaction<DecisionOpen>(async (txn) => {
       // Assigned again if the runtime runs this closure again, so a first attempt's answer cannot outlive it.
-      broughtForward = false;
+      after = { forward: false, queued: false };
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
@@ -2631,9 +2652,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.frozenAt !== null) return { outcome: "frozen" };
       const draft = e.payload as DecisionDraft;
       const at = Date.now();
-      const old = draft.supersedes === undefined
-        ? undefined
-        : decisionsOf(await this.#logFrom(txn, draft.supersedes), at).get(draft.supersedes);
+      const book = s.openDecisions ?? {};
+      const quota = decideOpenQuota(book, e.fromMemberId, at, draft.supersedes);
+      if (quota.kind === "quota") return { outcome: "quota", scope: quota.scope, limit: quota.limit };
+      // One list of the log, from the oldest decision this open reads: the one it supersedes and the ones past due.
+      const due = dueToExpire(book, at);
+      const reads = draft.supersedes === undefined ? due : [...due, draft.supersedes];
+      const log = reads.length === 0 ? [] : await this.#logFrom(txn, Math.min(...reads));
+      const views = decisionsOf(log, at);
+      const old = draft.supersedes === undefined ? undefined : views.get(draft.supersedes);
       if (draft.supersedes !== undefined) {
         const d = decideSupersede(old);
         if (d.kind === "not_open") return { outcome: "not_open", state: d.state };
@@ -2643,21 +2670,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const superseded: SessionEvent | null = old === undefined
         ? null
         : { ...closingEvent(old, { state: "failed", reason: "superseded" }), cursor: event.cursor + 1, at };
-      broughtForward = await this.#writeDecision(txn, s, superseded === null ? [event] : [event, superseded], k.record(event.cursor));
+      const expired: SessionEvent[] = due.flatMap((c, i) => {
+        const v = views.get(c);
+        return v === undefined ? [] : [{ ...closingEvent(v, { state: "expired" }), cursor: event.cursor + (superseded ? 2 : 1) + i, at }];
+      });
+      written = [event, ...(superseded === null ? [] : [superseded]), ...expired];
+      after = await this.#writeDecision(txn, s, written, k.record(event.cursor), audit, log);
       return { outcome: "appended", event, superseded };
     });
-    if (result.outcome === "appended") {
-      await this.#afterDecision(result.superseded === null ? [result.event] : [result.event, result.superseded], members, broughtForward);
-    }
+    if (result.outcome === "appended") await this.#afterDecision(written, members, after);
     return result;
   }
 
   /** `BellmanStore.castVote`: `applyVote` decides from the decision read in the transaction that writes the vote. */
-  async castVote(e: EventBody, key: string | null): Promise<VoteWrite> {
-    let broughtForward = false as boolean;
+  async castVote(e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
+    let after = { forward: false, queued: false };
     let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<VoteWrite>(async (txn) => {
-      broughtForward = false;
+      after = { forward: false, queued: false };
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
@@ -2677,35 +2707,38 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const closed: SessionEvent | null = d.close === null
         ? null
         : { ...closingEvent(decisionsOf([...log, event], at).get(view.cursor)!, d.close), cursor: event.cursor + 1, at };
-      broughtForward = await this.#writeDecision(txn, s, closed === null ? [event] : [event, closed], k.record(event.cursor));
+      after = await this.#writeDecision(txn, s, closed === null ? [event] : [event, closed], k.record(event.cursor), audit, log);
       return { outcome: "appended", event, closed };
     });
     if (result.outcome === "appended") {
-      await this.#afterDecision(result.closed === null ? [result.event] : [result.event, result.closed], members, broughtForward);
+      await this.#afterDecision(result.closed === null ? [result.event] : [result.event, result.closed], members, after);
     }
     return result;
   }
 
   /** `BellmanStore.closeDecision`: the server's close, refused once a closing event exists or before an expiry is due. */
-  async closeDecision(decision: number, close: { state: ClosedState; reason?: FailReason }, now: number): Promise<DecisionClose> {
-    let broughtForward = false as boolean;
+  async closeDecision(
+    decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit: readonly AuditEntry[] = [],
+  ): Promise<DecisionClose> {
+    let after = { forward: false, queued: false };
     let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<DecisionClose>(async (txn) => {
-      broughtForward = false;
+      after = { forward: false, queued: false };
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
       if (s.frozenAt !== null) return { outcome: "frozen" };
-      const view = decisionsOf(await this.#logFrom(txn, decision), now).get(decision);
+      const log = await this.#logFrom(txn, decision);
+      const view = decisionsOf(log, now).get(decision);
       if (view === undefined) return { outcome: "unknown" };
       const d = decideClose(view, close.state, now);
       if (d.kind === "closed") return { outcome: "closed", state: d.state };
       if (d.kind === "not_due") return { outcome: "not_due" };
       const event: SessionEvent = { ...closingEvent(view, close), cursor: await this.nextCursor(txn), at: Date.now() };
-      broughtForward = await this.#writeDecision(txn, s, [event], {});
+      after = await this.#writeDecision(txn, s, [event], {}, audit, log);
       return { outcome: "appended", event };
     });
-    if (result.outcome === "appended") await this.#afterDecision([result.event], members, broughtForward);
+    if (result.outcome === "appended") await this.#afterDecision([result.event], members, after);
     return result;
   }
 
@@ -6651,12 +6684,12 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).approveProposal(e, key, approval);
   }
 
-  async openDecision(sessionId: string, e: EventBody, key: string | null): Promise<DecisionOpen> {
-    return this.session(sessionId).openDecision(e, key);
+  async openDecision(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<DecisionOpen> {
+    return this.session(sessionId).openDecision(e, key, audit);
   }
 
-  async castVote(sessionId: string, e: EventBody, key: string | null): Promise<VoteWrite> {
-    return this.session(sessionId).castVote(e, key);
+  async castVote(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
+    return this.session(sessionId).castVote(e, key, audit);
   }
 
   async closeDecision(
@@ -6664,8 +6697,9 @@ export class DurableObjectStore implements BellmanStore {
     decision: number,
     close: { state: ClosedState; reason?: FailReason },
     now: number,
+    audit: readonly AuditEntry[] = [],
   ): Promise<DecisionClose> {
-    return this.session(sessionId).closeDecision(decision, close, now);
+    return this.session(sessionId).closeDecision(decision, close, now, audit);
   }
 
   async decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null> {

@@ -216,8 +216,11 @@ describe("outstanding in bellman_sync", () => {
     expect(ok(await sync()).outstanding).toBeUndefined();
   });
 
-  it("lists at most three open decisions from one opener", async () => {
-    for (const key of ["a", "b", "c", "d"]) ok(await open({ key }));
+  it("lists at most three open decisions from one opener, the most one seat may hold open (#407)", async () => {
+    for (const key of ["a", "b", "c"]) ok(await open({ key }));
+    const fourth = await open({ key: "d" });
+    expect(fourth.isError).toBe(true);
+    expect(fourth.text).toContain("you already have 3 decisions open");
     expect(ok(await sync()).outstanding).toHaveLength(3);
   });
 
@@ -228,5 +231,27 @@ describe("outstanding in bellman_sync", () => {
       .find((e) => e.type === "decision_opened");
     expect(Object.values(opened?.payload.accounts ?? {})).toEqual(expect.arrayContaining(["a1", "a2"]));
     expect(out.text).not.toContain(p.creator.identity.userId);
+  });
+});
+
+describe("a removal voids the seat's votes (#407)", () => {
+  it("bellman_evict voids the evicted member's approval, which cannot then help the decision pass", async () => {
+    const { decision, hash } = ok(await open());
+    const cast = ok(await answer(decision, { approved: true, hash, human_approved: true }));
+    ok(await p.creator.call("bellman_evict", { ...room(), member_id: p.joinerMemberId }));
+    const view = ok(await read("creator", decision));
+    expect(view).toMatchObject({ state: "open", tally: { approve: 0, unreachable: 1 } });
+    expect((view.votes as Record<string, unknown>[])[0]).toMatchObject({ cursor: cast.cursor, voided: true });
+    expect((view.electorate as Record<string, unknown>[]).find((m) => m.member_id === p.joinerMemberId)).toMatchObject({ unreachable: true });
+    // With the joiner's approval standing, the creator's would pass it; with it voided, the unreachable seat could still reject.
+    expect(ok(await vote("creator", decision))).toMatchObject({ state: "open" });
+  });
+
+  it("bellman_leave voids the leaver's vote while the decision is open, so the creator's reject then decides it", async () => {
+    const { decision, hash } = ok(await open());
+    ok(await answer(decision, { approved: true, hash, human_approved: true }));
+    ok(await p.joiner.call("bellman_leave", { ...room(), member_id: p.joinerMemberId }));
+    expect(ok(await read("creator", decision))).toMatchObject({ state: "open", tally: { approve: 0, unreachable: 1 } });
+    expect(ok(await vote("creator", decision, { choice: "reject" }))).toMatchObject({ state: "failed", reason: "rejected" });
   });
 });

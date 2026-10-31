@@ -146,6 +146,8 @@ A seat holding `request_actions` opens a decision with [`bellman_decide`](/refer
 
 A kind decided by `single` is not opened this way: a single approval is an ordinary action request. A decision cannot change the manifest it runs under.
 
+A member who leaves, or is evicted, while a decision is open loses their votes on it. The server voids them, writes a `decision_voter_removed` event naming the voided votes, and counts the seat as unreachable: it stays in the electorate as a vote that might have been a reject. So removing a member can never help a decision pass. A rejoin does not give the vote back, and a decision that has already closed is never changed. Removing a seat whose role holds a veto fails the decision `blocked`, because that seat could have stopped it. A room holds at most 20 open decisions and a seat at most 3, and a seat may change its vote 5 times on one decision.
+
 The connect preview shows `decide` and `veto` before a joiner accepts a seat, and like the rest of the manifest they never change once the room starts. [ADR 0040](https://github.com/bellman-sh/bellman/blob/main/docs/adr/0040-room-consensus.md) has the design.
 
 ## Saved presets

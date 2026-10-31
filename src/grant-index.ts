@@ -16,6 +16,13 @@ import type { PlanGrant } from "./types.js";
  */
 export const NO_ORG = "~none";
 
+/**
+ * The platform operator's audit stream (#472): an `AuditDO` named by this, beside one per org. Every org id is
+ * `isOrgId`'s grammar, checked where a grant names one, so no org's stream can be this one, and the `~` keeps it
+ * apart from `NO_ORG` too.
+ */
+export const OPERATOR_AUDIT_STREAM = "~operator";
+
 /** The grammar an org id must obey for the index encoding below to be sound. */
 export function isOrgId(value: string): boolean {
   return /^[A-Za-z0-9_-]{1,64}$/.test(value);

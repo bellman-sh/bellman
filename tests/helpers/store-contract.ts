@@ -7904,6 +7904,101 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------- the operator's room summary (#472)
+    describe("the operator's room summary (#472)", () => {
+      const said = (text: string): EventBody =>
+        ({ type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text }, refId: null });
+
+      it("counts a room's seats, events, surface items and blob bytes, and dates its last event", async () => {
+        const s = session({ id: "qs_sum", members: [member(), peer()] });
+        await store.createSession(s);
+        await store.appendEvent(s.id, said("one"));
+        await nameBlob(s.id, "b_sum", 7);
+        vi.advanceTimersByTime(5_000);
+        await store.appendEvent(s.id, said("two"));
+        await store.chargeBlobBytes(s.id, 60);
+        await store.updateMember(s.id, "m_peer", { leftAt: Date.now() });
+
+        expect(await store.roomSummary(s.id)).toEqual({
+          name: "test-room", status: "open", lastEventAt: Date.now(),
+          activeSeats: 1, capacity: 2, events: 3, surfaceItems: 1, blobBytes: 60,
+        });
+      });
+
+      it("names a room by its public name over its manifest's, and answers a room with no events as none", async () => {
+        const s = session({ id: "qs_sum_named", manifest: roomManifest({ public: true }) });
+        await store.createSession(s);
+        expect(await store.roomSummary(s.id)).toMatchObject({ name: "test-room", lastEventAt: null, events: 0, surfaceItems: 0, blobBytes: 0 });
+        await store.setPublicName(s.id, "open-review");
+        expect((await store.roomSummary(s.id))?.name).toBe("open-review");
+      });
+
+      // One precedence: a scheduled purge over a close, a close over a freeze, a freeze over open.
+      it("reads each room's status by one precedence, an abandoned room as closed", async () => {
+        const make = async (id: string, over: Parameters<typeof session>[0] = {}) => {
+          await store.createSession(session({ id, ...over }));
+          return id;
+        };
+        const open = await make("qs_st_open");
+        const frozen = await make("qs_st_frozen");
+        await store.freezeSession(frozen, Date.now());
+        const closed = await make("qs_st_closed");
+        await store.closeSession(closed);
+        const frozenClosed = await make("qs_st_frozen_closed");
+        await store.freezeSession(frozenClosed, Date.now());
+        await store.closeSession(frozenClosed);
+        const purging = await make("qs_st_purge", { retainAfterCloseMs: null });
+        await store.closeSession(purging);
+        expect(await store.schedulePurge(purging, Date.now() + 3_600_000, jesseActor)).toMatchObject({ ok: true });
+        const long = Date.now() - ABANDONED_AFTER_MS - 1;
+        const abandoned = await make("qs_st_abandoned", { members: [member({ joinedAt: long, lastSeenAt: long })] });
+
+        const status = async (id: string) => (await store.roomSummary(id))?.status;
+        expect(await status(open)).toBe("open");
+        expect(await status(frozen)).toBe("frozen");
+        expect(await status(closed)).toBe("closed");
+        expect(await status(frozenClosed)).toBe("closed");
+        expect(await status(purging)).toBe("purge_scheduled");
+        expect(await status(abandoned)).toBe("closed");
+      });
+
+      it("answers undefined for a room that is not there, a purged one included", async () => {
+        expect(await store.roomSummary("qs_never")).toBeUndefined();
+        const s = session({ id: "qs_sum_purged", retainAfterCloseMs: 60_000 });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id)).toBeUndefined();
+        expect(await store.roomSummary(s.id)).toBeUndefined();
+      });
+    });
+
+    // --------------------------------------------- the operator's audit stream (#472)
+    describe("the operator's audit stream (#472)", () => {
+      const read = (over: Partial<AuditEntry> = {}): AuditEntry => ({
+        at: Date.now(), orgId: null, sessionId: "operator:rooms", actorUserId: "u_jesse", action: "operator_rooms_listed",
+        detail: { room_ids: ["qs_a"] }, ...over,
+      });
+
+      it("keeps the operator's reads oldest first, the newest `limit` of them, and apart from every org's stream", async () => {
+        await store.appendOperatorAudit(read({ detail: { room_ids: ["qs_1"] } }));
+        await store.appendAudit({ ...read({ action: "room_deleted" }), orgId: "org_codenerd" });
+        // An entry naming an org still goes to the operator's stream alone: that org's stream is written by `appendAudit`.
+        await store.appendOperatorAudit(read({ orgId: "org_codenerd", sessionId: "qs_2", action: "operator_room_read", detail: { room_id: "qs_2" } }));
+        await store.appendOperatorAudit(read({ detail: { room_ids: ["qs_3"] } }));
+
+        expect((await store.operatorAudit(10)).map((e) => e.detail)).toEqual([{ room_ids: ["qs_1"] }, { room_id: "qs_2" }, { room_ids: ["qs_3"] }]);
+        expect((await store.operatorAudit(2)).map((e) => e.detail)).toEqual([{ room_id: "qs_2" }, { room_ids: ["qs_3"] }]);
+        expect((await store.operatorAudit(10))[0]).toMatchObject({ actorUserId: "u_jesse", action: "operator_rooms_listed", sessionId: "operator:rooms" });
+        expect((await store.auditForOrg("org_codenerd", 10)).map((e) => e.action)).toEqual(["room_deleted"]);
+      });
+
+      it("starts empty", async () => {
+        expect(await store.operatorAudit(10)).toEqual([]);
+      });
+    });
+
     // ----------------------------------------------------- removing a member
     const leaveEvent = (memberId: string): EventBody => ({
       type: "member_left",

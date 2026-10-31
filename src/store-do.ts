@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
-  orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
+  orgInvitesPrefix, orgKey, OPERATOR_AUDIT_STREAM, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
@@ -17,7 +17,7 @@ import type {
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
-  DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow,
+  DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow, RoomSummary,
 } from "./store.js";
 import { electorateOf, voteRefusal } from "./store.js";
 import {
@@ -29,7 +29,7 @@ import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, 
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomIndexKey, roomIndexRow,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomIndexKey, roomIndexRow, roomSummaryOf,
   seatInOrder, seatVictims, stampSeen,
 } from "./store.js";
 import {
@@ -2848,6 +2848,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async surfaceOf(): Promise<SurfaceRow[]> {
     const map = await this.ctx.storage.list<SurfaceRow>({ prefix: SURFACE_PREFIX });
     return [...map.values()];
+  }
+
+  /**
+   * `BellmanStore.roomSummary` (#472): the record, the newest event and the surface rows are read here, and only the
+   * counts go back over RPC. A read: an abandoned room reads closed by `isAbandoned`, as `readsClosed` decides it, and
+   * nothing is written.
+   */
+  async roomSummary(): Promise<RoomSummary | undefined> {
+    const s = await this.stored();
+    if (!s) return undefined;
+    const [last] = await this.recentEvents(1);
+    const rows = await this.ctx.storage.list({ prefix: SURFACE_PREFIX });
+    return roomSummaryOf(s, last, rows.size, Date.now(), await this.#connected(s));
   }
 
   /** `BellmanStore.surfaceFacts`: the rows are read here, and only the counts and the rows named go back over RPC. */
@@ -6638,6 +6651,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.listRoomsPage(limit, startAfter);
   }
 
+  async roomSummary(sessionId: string): Promise<RoomSummary | undefined> {
+    return this.session(sessionId).roomSummary();
+  }
+
   /**
    * One window of the room index's backfill (#471): reads up to `limit` account index rows past `after`, and writes
    * a row for each room they name that has a record and no row. Idempotent, so a rerun writes nothing it has
@@ -7111,6 +7128,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return this.audit(orgId).recent(limit);
+  }
+
+  async appendOperatorAudit(a: AuditEntry): Promise<void> {
+    await this.audit(OPERATOR_AUDIT_STREAM).append(a);
+  }
+
+  async operatorAudit(limit: number): Promise<AuditEntry[]> {
+    return this.audit(OPERATOR_AUDIT_STREAM).recent(limit);
   }
 
   async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {

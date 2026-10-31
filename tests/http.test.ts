@@ -144,7 +144,7 @@ describe("HTTP surface", () => {
 
   // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.
   // It mounts the stats with no operators, so even the team admin is refused. The route's own cases are in tests/stats.test.ts.
-  it.each(["/operator/stats", "/operator/accounts"])("serves %s to no one, the dev team admin included", async (at) => {
+  it.each(["/operator/stats", "/operator/accounts", "/operator/rooms", "/operator/rooms/qs_any"])("serves %s to no one, the dev team admin included", async (at) => {
     expect((await fetch(`${base}${at}`)).status).toBe(401);
     for (const key of ["qk_dev_jesse", "qk_dev_peer", "qk_dev_outsider"]) {
       const res = await fetch(`${base}${at}`, { headers: { authorization: `Bearer ${key}` } });

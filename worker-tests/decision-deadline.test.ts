@@ -113,6 +113,30 @@ describe("the decision deadline alarm (secret ballot spec, Change 1)", () => {
     expect(events.find((e) => e.type === "decision_closed")).toMatchObject({ payload: { decision: cursor, state: "expired" } });
   });
 
+  it("drops a booked decision the log does not hold, so the alarm does not fire again at once", async () => {
+    const { stub } = await room();
+    const at = Date.now() - 1;
+    await runInDurableObject(stub, (_i: SessionDO, ctx) =>
+      editRoom(ctx.storage, { record: (r) => ({ ...r, openDecisions: { "999": { expires_at: at, by: "m_creator" } } }) }));
+    await fire(stub);
+    const after = await raw(stub);
+    expect(after.book).toEqual({});
+    expect(after.alarm).not.toBe(at + 1);
+  });
+
+  it("rebooks a decision whose booked deadline disagrees with its opening event, and leaves it open", async () => {
+    const { id, store, stub } = await room();
+    const { cursor, deadline } = await opened(store, id, "a");
+    await runInDurableObject(stub, (_i: SessionDO, ctx) => editRoom(ctx.storage, {
+      record: (r) => ({ ...r, openDecisions: { [cursor]: { ...(r.openDecisions as Book)[String(cursor)], expires_at: Date.now() - 1 } } }),
+    }));
+    await fire(stub);
+    const after = await raw(stub);
+    expect(after.book[String(cursor)]?.expires_at).toBe(deadline);
+    expect(after.last).toMatchObject({ type: "decision_opened", cursor });
+    expect(after.alarm).toBe(deadline + 1);
+  });
+
   it("writes the closing audit row as the system", async () => {
     const { id, store, stub } = await room();
     const { cursor } = await opened(store, id, "a");

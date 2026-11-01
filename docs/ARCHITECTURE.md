@@ -1900,9 +1900,11 @@ loss is findable, and the sweep at close (#65) is what finds it.
 4. **Named alarms.** An object has one alarm, so handlers share it: each has a
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
-   session record, and a stored row wins. `SessionDO` has six handlers,
-   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep` and `purge`, and
-   only `outbox` is stored. The abandonment time is derived from the members'
+   session record, and a stored row wins. `SessionDO` has nine handlers,
+   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep`, `purge`, `seat`
+   (an outside question the seat stayed silent on), `expiry` (an outside task's
+   lifetime) and `decision` (the soonest open decision's deadline, plus a
+   millisecond, derived even for a closed room), and only `outbox` is stored. The abandonment time is derived from the members'
    `lastSeenAt` (`abandonedAt`, #18), so a room written before named alarms, or
    before rooms persisted, is still swept; a socket vouching for a member moves it
    a window ahead instead of closing the room.

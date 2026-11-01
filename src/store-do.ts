@@ -2767,8 +2767,29 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const audit = auditRows(
         parties, { at: now, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR,
       );
-      await this.closeDecision(cursor, { state: "expired" }, now, audit);
+      const out = await this.closeDecision(cursor, { state: "expired" }, now, audit);
+      if (out.outcome === "appended") continue;
+      // A booked decision this close could not consume would leave the derived time where it is, and the closing
+      // reArm() would fire the alarm back to back for good. So the book is set from the log: an entry for a decision
+      // the log does not hold open is dropped, and one whose deadline disagrees with its opening event takes the
+      // event's. No write path reaches either today; this is the handler deciding its next time from state it changed.
+      console.warn(`decision alarm: room ${s.id} decision ${cursor} answered ${out.outcome}; rebooking it from the log`);
+      await this.#rebook(cursor);
     }
+  }
+
+  /** The `openDecisions` entry for `cursor` set from the log: the opening event's deadline while open, else none. */
+  async #rebook(cursor: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s?.openDecisions || !Object.hasOwn(s.openDecisions, String(cursor))) return;
+      const view = decisionsOf(await this.#logFrom(txn, cursor), Date.now()).get(cursor);
+      const { [String(cursor)]: entry, ...rest } = s.openDecisions;
+      const book = view === undefined || view.closed !== null
+        ? rest
+        : { ...rest, [cursor]: { ...entry, expires_at: view.payload.expires_at } };
+      await putRows(txn, asRows(s, { session: { ...s, openDecisions: book } }));
+    });
   }
 
   /** `BellmanStore.closeDecision`: the server's close, refused once a closing event exists or before an expiry is due. */

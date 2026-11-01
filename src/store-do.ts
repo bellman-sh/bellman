@@ -22,7 +22,8 @@ import type {
 import { electorateOf, voteRefusal } from "./store.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  dueToExpire, noteDecisions, openedPayload, removalEvents, type ClosedState, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
+  decisionIndex, decisionSpans, dueToExpire, noteDecisions, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage,
+  type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
 import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, placesAmongRows, surfaceBatchPrint, surfaceFactsOf, surfacePrint, windowUnderCut } from "./store.js";
@@ -106,6 +107,17 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/**
+ * One row per decision (#411), `dx:<opening cursor>`, holding its closing event's cursor, null until it has one, put in
+ * the transaction that writes either event. A page lists these and reads the log only across its own decisions' spans.
+ * `DECISION_INDEX_BUILT` says the rows for decisions written before #411 are there too: the first page writes them.
+ */
+const DECISION_INDEX_PREFIX = "dx:";
+const decisionIndexKey = (cursor: number) => `${DECISION_INDEX_PREFIX}${String(cursor).padStart(CURSOR_PAD, "0")}`;
+const DECISION_INDEX_BUILT = "dx-built";
+interface DecisionIndexRow { closed: number | null }
+const decisionIndexRows = (events: readonly SessionEvent[]): Record<string, DecisionIndexRow> =>
+  Object.fromEntries([...decisionIndex(events)].map(([cursor, closed]) => [decisionIndexKey(cursor), { closed }]));
 /** One row per outside task, `ot:<taskId>`, and one per outside caller, `oc:<user>` (A2A). The user segment is percent-encoded, for `userPrefix`'s reason. */
 const OUTSIDE_TASK_PREFIX = "ot:";
 const OUTSIDE_CALLER_PREFIX = "oc:";
@@ -1665,6 +1677,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await putRows(txn, {
         ...memberRows(s, kept),
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
+        ...decisionIndexRows(voiding),
         // The cursor row ends at the LAST event written, or the next append takes
         // that event's cursor and overwrites it (#120). A ban on a member who was already out,
         // behind no live door, writes no event: the row stays where it is, because the last
@@ -2590,7 +2603,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The log from `cursor` on: everything a decision opened there can be read from.
    *
    * ponytail: one list of the log since the decision opened, at most its seven days, as approveProposal lists the
-   * log since `base`. The upgrade is an index of decision events, which #411's read route is the place for.
+   * log since `base`. The upgrade is an index of each decision's own events; #411's `dx:` rows name only its span.
    */
   async #logFrom(from: DurableObjectTransaction | DurableObjectStorage, cursor: number): Promise<SessionEvent[]> {
     return [...(await from.list<SessionEvent>({ prefix: "e:", start: eventKey(cursor) })).values()];
@@ -2621,6 +2634,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const rows = decisionAudit(audit, events, decisionsOf([...log, ...events], events[0].at)).filter((e) => e.orgId);
     await putRows(txn, {
       ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
+      ...decisionIndexRows(events),
       cursor: events[events.length - 1].cursor,
       ...record,
       ...asRows(s, { session: kept === s ? undefined : kept }),
@@ -2745,6 +2759,55 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /** `BellmanStore.decision`: read without a transaction, as `idempotencyRecord` is, because it writes nothing. */
   async decision(cursor: number, now: number): Promise<DecisionView | null> {
     return decisionsOf(await this.#logFrom(this.ctx.storage, cursor), now).get(cursor) ?? null;
+  }
+
+  /**
+   * `BellmanStore.decisions`: the page from the index rows, newest first, the open ones from the record's book, and the
+   * log read across their spans alone. Without a transaction, as `decision` is: each span is read whole, and a decision
+   * written between two reads is on the next page read, as a poll's is.
+   */
+  async decisions(ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
+    await this.#indexDecisions();
+    const storage = this.ctx.storage;
+    const end = Math.min(ask.before ?? Infinity, (ask.upTo ?? Infinity) + 1);
+    const listed = await storage.list<DecisionIndexRow>({
+      prefix: DECISION_INDEX_PREFIX, reverse: true, limit: ask.limit + 1,
+      ...(Number.isFinite(end) ? { end: decisionIndexKey(end) } : {}),
+    });
+    const index = new Map([...listed].map(([k, row]) => [Number(k.slice(DECISION_INDEX_PREFIX.length)), row.closed]));
+    const { page, next } = decisionPageOf([...index.keys()], ask);
+    const book = ask.upTo === undefined ? (await this.stored())?.openDecisions ?? {} : {};
+    const open = Object.entries(book).filter(([, d]) => d.expires_at >= now).map(([c]) => Number(c)).sort((a, b) => b - a);
+    const spans = decisionSpans(new Map([...page.map((c) => [c, index.get(c)!] as const), ...open.map((c) => [c, null] as const)]), ask.upTo);
+    const log: SessionEvent[] = [];
+    for (const [from, to] of spans) {
+      const read = await storage.list<SessionEvent>({
+        prefix: "e:", start: eventKey(from), ...(Number.isFinite(to) ? { end: eventKey(to + 1) } : {}),
+      });
+      log.push(...read.values());
+    }
+    const views = decisionsOf(log, now);
+    const shown = (cursors: readonly number[]) => cursors.flatMap((c) => views.get(c) ?? []);
+    return { open: shown(open).filter((v) => v.state === "open"), decisions: shown(page), next };
+  }
+
+  /** Whether this instance has seen `DECISION_INDEX_BUILT`, so a page asks storage once per wake. */
+  #decisionsIndexed = false;
+
+  /**
+   * The index rows for every decision in the log, written once, the first time a page is read: a room whose decisions
+   * opened before #411 has none. One transaction, so a decision written alongside is in the log it lists or puts its own row.
+   */
+  async #indexDecisions(): Promise<void> {
+    if (this.#decisionsIndexed || (await this.ctx.storage.get(DECISION_INDEX_BUILT)) === true) {
+      this.#decisionsIndexed = true;
+      return;
+    }
+    await this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(DECISION_INDEX_BUILT)) === true) return;
+      await putRows(txn, { ...decisionIndexRows(await this.#logFrom(txn, 0)), [DECISION_INDEX_BUILT]: true });
+    });
+    this.#decisionsIndexed = true;
   }
 
   /**
@@ -6704,6 +6767,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null> {
     return this.session(sessionId).decision(cursor, now);
+  }
+
+  async decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
+    return this.session(sessionId).decisions(ask, now);
   }
 
   async appendSurface(

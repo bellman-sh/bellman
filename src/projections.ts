@@ -12,6 +12,8 @@ import { heldName } from "./public-names.js";
 import { purgeDueAt } from "./retention.js";
 import { createdAtOf } from "./surface.js";
 import type { StoredSession } from "./stored-session.js";
+import { accountAliases } from "./public-event.js";
+import type { DecisionView } from "./decision.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
 // itself: these turn a Session into what a client sees, and server.ts imports
@@ -558,4 +560,50 @@ export function messageResult(hit: MessageHit): MessageResult {
     snippet: hit.snippet,
     at: new Date(e.at).toISOString(),
   });
+}
+
+/**
+ * A decision as a member is shown it, by `bellman_decide read` and `GET /rooms/:id/decisions` alike (#411): its
+ * peer-authored parts wrapped as untrusted, each account as its alias, never the upstream id. `full` adds the
+ * electorate, each seat with `voted` (its account has a binding vote that counts), and the votes, binding in `votes`
+ * and advisory in `advisory_votes`, since an advisory vote is shown and never counted.
+ */
+export function decisionShown(v: DecisionView, members: readonly Member[], full: boolean) {
+  const { payload: d } = v;
+  const label = (m: string) => members.find((x) => x.memberId === m)?.label ?? null;
+  const alias = accountAliases(d.accounts);
+  const by = (memberId: string) => ({ memberId, label: label(memberId) ?? memberId });
+  const counts = (b: DecisionView["ballots"][number]) => !v.voided.includes(b.cursor) && !v.removed.includes(b.memberId);
+  // Each account's latest binding vote, as the tally reads it: a voided latest leaves the account with none.
+  const latest = new Map(v.ballots.filter((b) => b.vote.capacity === "binding" && d.electorate.includes(b.memberId))
+    .map((b) => [d.accounts[b.memberId], b] as const));
+  const bound = new Set([...latest].filter(([, b]) => counts(b)).map(([account]) => account));
+  const vote = (b: DecisionView["ballots"][number]) => ({
+    cursor: b.cursor, member_id: b.memberId, label: label(b.memberId), account: alias[b.memberId] ?? null,
+    choice: b.vote.choice, capacity: b.vote.capacity, via: b.vote.via, human_approved: b.vote.human_approved,
+    ...(v.voided.includes(b.cursor) ? { voided: true } : {}),
+    ...(b.vote.reason !== undefined ? { reason: untrusted(by(b.memberId), b.vote.reason) } : {}),
+  });
+  return {
+    decision: v.cursor,
+    state: v.state,
+    ...(v.reason !== null ? { reason: v.reason } : {}),
+    kind: d.effect.kind,
+    rule: d.rule,
+    hash: d.hash,
+    opened_by: { member_id: v.opened.fromMemberId, label: v.opened.fromLabel },
+    expires_at: new Date(d.expires_at).toISOString(),
+    ...(d.supersedes !== undefined ? { supersedes: d.supersedes } : {}),
+    proposal: untrusted(by(v.opened.fromMemberId), { key: d.key, effect: d.effect }),
+    tally: v.tally,
+    ...(full ? {
+      electorate: d.electorate.map((m) => ({
+        member_id: m, label: label(m), account: alias[m], voted: bound.has(d.accounts[m]),
+        ...(d.veto?.includes(m) ? { veto: true } : {}),
+        ...(v.removed.includes(m) ? { unreachable: true } : {}),
+      })),
+      votes: v.ballots.filter((b) => b.vote.capacity === "binding").map(vote),
+      advisory_votes: v.ballots.filter((b) => b.vote.capacity === "advisory").map(vote),
+    } : {}),
+  };
 }

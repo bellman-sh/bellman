@@ -511,3 +511,59 @@ export function decisionAudit(
     return detail === null ? [] : template.map((row) => ({ ...row, action: e.type, detail }));
   });
 }
+
+/** How many decisions a page of `BellmanStore.decisions` holds when the caller names no limit, and the most it may. */
+export const DECISION_PAGE = 50;
+export const MAX_DECISION_PAGE = 100;
+
+/**
+ * A page of a room's decisions (#411): those opened below `before`, newest first, at most `limit`. `upTo` is a
+ * removed seat's cut: only what was opened at or before it, each read as of it.
+ */
+export interface DecisionPageAsk { before?: number; limit: number; upTo?: number }
+
+/**
+ * `decisions` is the page; `next` the `before` that reads on from it, null when nothing older is left. `open` is every
+ * decision open now, whichever page it falls on, so a reader never pages to find one; empty for a cut, since a seat
+ * removed votes on nothing. Closed decisions stay in the log for the room's life, so every page stays readable.
+ */
+export interface DecisionPage { open: DecisionView[]; decisions: DecisionView[]; next: number | null }
+
+/** The cursors on one page, from every decision cursor the reader may see, newest first. */
+export function decisionPageOf(cursors: readonly number[], ask: DecisionPageAsk): { page: number[]; next: number | null } {
+  const page = cursors.filter((c) => (ask.before === undefined || c < ask.before) && (ask.upTo === undefined || c <= ask.upTo));
+  const more = page.length > ask.limit;
+  const kept = page.slice(0, ask.limit);
+  return { page: kept, next: more ? kept[kept.length - 1] : null };
+}
+
+/**
+ * Each decision these events open or close: its opening cursor to its closing event's cursor, null while it has none.
+ * A store keeps it as rows beside the log, so a page finds the decisions it shows without reading the log between them.
+ */
+export function decisionIndex(events: readonly SessionEvent[]): Map<number, number | null> {
+  const out = new Map<number, number | null>();
+  for (const e of events) {
+    if (e.type === "decision_opened") out.set(e.cursor, null);
+    else if (e.type === "decision_closed") out.set(decisionOf(e) ?? -1, e.cursor);
+  }
+  out.delete(-1);
+  return out;
+}
+
+/**
+ * The log spans that hold every event of the decisions `index` names, merged where they meet: each from its opening to
+ * its close, or to the log's end (`Infinity`) while unclosed, and no further than `upTo`. Sorted, so reading them in
+ * order hands `decisionsOf` a log in cursor order.
+ */
+export function decisionSpans(index: ReadonlyMap<number, number | null>, upTo = Infinity): [number, number][] {
+  const spans = [...index].map(([opened, closed]): [number, number] => [opened, Math.min(closed ?? Infinity, upTo)]);
+  spans.sort((a, b) => a[0] - b[0]);
+  const out: [number, number][] = [];
+  for (const [from, to] of spans) {
+    const last = out[out.length - 1];
+    if (last !== undefined && from <= last[1] + 1) last[1] = Math.max(last[1], to);
+    else out.push([from, to]);
+  }
+  return out;
+}

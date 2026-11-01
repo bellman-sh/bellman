@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyVote, capacityOfVote, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
-  decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
+  decisionIndex, decisionPageOf, decisionSpans, decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
   MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
   type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
   type OpenDecisions, type VoterRemoved,
@@ -657,5 +657,30 @@ describe("removals, quotas and audit rows (#407)", () => {
       votes: [{ cursor: 4, member_id: "m_a", user_id: "u_a", choice: "reject", via: "action_response", human_approved: true, response_cursor: 9 }],
     });
     expect(JSON.stringify(rows), "no effect content").not.toContain("example.com");
+  });
+});
+
+describe("a page of decisions (#411)", () => {
+  const ev = (cursor: number, type: EventType, payload: unknown): SessionEvent =>
+    ({ cursor, type, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload, refId: null, at: 0 });
+
+  it("indexes each decision from its opening to its close, null while unclosed", () => {
+    const index = decisionIndex([
+      ev(3, "decision_opened", {}), ev(4, "message", {}), ev(5, "decision_opened", {}), ev(6, "decision_closed", { decision: 3 }),
+      ev(7, "decision_vote", { decision: 5 }),
+    ]);
+    expect([...index]).toEqual([[3, 6], [5, null]]);
+  });
+
+  it("merges the spans that meet, runs an unclosed one to the end, and stops at a cut", () => {
+    expect(decisionSpans(new Map([[20, 30], [2, 5], [6, 9], [12, null]]))).toEqual([[2, 9], [12, Infinity]]);
+    expect(decisionSpans(new Map([[2, 5], [12, null]]), 15)).toEqual([[2, 5], [12, 15]]);
+    expect(decisionSpans(new Map())).toEqual([]);
+  });
+
+  it("pages below before and to a cut, naming next only when more are left", () => {
+    expect(decisionPageOf([9, 7, 5, 3], { limit: 2 })).toEqual({ page: [9, 7], next: 7 });
+    expect(decisionPageOf([9, 7, 5, 3], { limit: 2, before: 7 })).toEqual({ page: [5, 3], next: null });
+    expect(decisionPageOf([9, 7, 5, 3], { limit: 5, upTo: 6 })).toEqual({ page: [5, 3], next: null });
   });
 });

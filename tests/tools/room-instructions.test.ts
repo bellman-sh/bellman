@@ -103,4 +103,16 @@ describe("room_instructions_rev in bellman_sync", () => {
     const after = await creator.call("bellman_sync", { session_id: sessionId, member_id: memberId, cursor: 0 });
     expect(after.data.room_instructions_rev).toBe(1);
   });
+
+  // A removed member's feed ends at its cut; that the room's settings changed afterwards is not theirs to learn.
+  it("is absent for a member removed from the room, even when the settings changed after", async () => {
+    const { creator, sessionId, memberId, code } = await room();
+    const { joiner, confirmed } = await join(code);
+    const evicted = await creator.call("bellman_evict", { session_id: sessionId, member_id: confirmed.data.member_id });
+    expect(evicted.isError, evicted.text).toBe(false);
+    await setInstructions(sessionId, memberId, "After you left.");
+    const synced = await joiner.call("bellman_sync", { session_id: sessionId, member_id: confirmed.data.member_id, cursor: 0 });
+    expect(synced.data.removed).toBe(true);
+    expect(synced.data).not.toHaveProperty("room_instructions_rev");
+  });
 });

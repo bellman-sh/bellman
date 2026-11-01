@@ -390,8 +390,11 @@ removed: true: a creator removed you. You still get the history up to and includ
           // heard of it keeps working.
           ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
           // Governed room instructions' revision (#414), off the record already read: an agent re-reads them through
-          // a new bellman_connect or the dash only when this moves.
-          ...((answering.configRevs?.room_instructions ?? 0) > 0 ? { room_instructions_rev: answering.configRevs!.room_instructions } : {}),
+          // a new bellman_connect or the dash only when this moves. Never to a removed member, whose feed ends at its
+          // cut: a later change to the room's settings is not theirs to learn.
+          ...(cut === undefined && (answering.configRevs?.room_instructions ?? 0) > 0
+            ? { room_instructions_rev: answering.configRevs!.room_instructions }
+            : {}),
           ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },
         // The surface block is peer content as the events are. A poll that asks for it

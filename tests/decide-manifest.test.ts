@@ -135,6 +135,15 @@ describe("vote and veto on a role", () => {
     expect(resolveManifest(authored({ public: true })).roles.security.can).toContain("vote");
   });
 
+  it("refuses govern on the role a public room's permanent code seats", () => {
+    const open = authored({ public: true, roles: { ...authored().roles, guest: { can: ["send", "govern"] } } });
+    expect(refusal(open)).toBe(
+      'role "guest" holds the verb "govern", but it is this public room\'s default_role, which a permanent code seats for anyone with ' +
+      "the link; give govern only to roles seated by invitation",
+    );
+    expect(resolveManifest({ ...open, public: false }).roles.guest.can).toContain("govern");
+  });
+
   it("refuses vote on the host role, which holds exactly send", () => {
     const hosted = authored({
       roles: { ...authored().roles, host: { can: ["send", "vote"] } },

@@ -25,7 +25,7 @@ import type {
  * permanent code seats.
  */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote",
+  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote", "govern",
 ] as const satisfies readonly Verb[];
 
 /** The kinds a `decide` block and a role's `veto` may name (ADR 0040, decision 10). See DecisionKind. */
@@ -445,7 +445,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       peer_a: role(
-        ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface"],
+        ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface", "govern"],
         "Creator. Equal in conversation, holds room control and writes the surface.",
       ),
       peer_b: role(
@@ -461,7 +461,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       lead: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
         "Runs the room: controls who can join, and writes the surface.",
       ),
       helper: role(
@@ -478,7 +478,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       author: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
         "Brought the work. Can ask the reviewer to do things, when the reviewer allows it. Writes the surface.",
       ),
       reviewer: role(
@@ -494,7 +494,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       lead: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
         "Opened the room: controls who can join, and writes the surface.",
       ),
       guest: role(["send"], "Answers the host's questions and talks with the room."),
@@ -511,7 +511,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       maintainer: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
         "approves proposals, writes and restores cards, and controls who joins",
       ),
       contributor: role(["send", "request_actions"], "proposes cards and talks with the room"),
@@ -849,11 +849,14 @@ function checkDecide(m: RoomManifest): void {
       if (!m.decide?.rules[kind]) throw new ManifestError(`role "${key}" vetoes ${kind}, which decide does not declare`);
     }
   }
-  // A permanent code seats only the default role, and only in a public room (rooms.ts, ADR 0020).
-  if (m.public && m.roles[m.defaultRole]?.can.includes("vote")) {
-    throw new ManifestError(
-      `role "${m.defaultRole}" holds the verb "vote", but it is this public room's default_role, which a permanent code ` +
-      "seats for anyone with the link; give vote only to roles seated by invitation",
-    );
+  // A permanent code seats only the default role, and only in a public room (rooms.ts, ADR 0020). Governing room
+  // settings (#414) is held to the same rule as voting.
+  for (const verb of ["vote", "govern"] as const) {
+    if (m.public && m.roles[m.defaultRole]?.can.includes(verb)) {
+      throw new ManifestError(
+        `role "${m.defaultRole}" holds the verb "${verb}", but it is this public room's default_role, which a permanent code ` +
+        `seats for anyone with the link; give ${verb} only to roles seated by invitation`,
+      );
+    }
   }
 }

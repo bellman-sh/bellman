@@ -652,7 +652,8 @@ export type Verb =
   | "respond_actions"
   | "write_surface"
   | "answer"
-  | "vote";
+  | "vote"
+  | "govern";
 
 /**
  * What a passed decision may do (ADR 0040, decision 10), as a manifest's `decide` and a role's `veto` name it.

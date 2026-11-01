@@ -2008,7 +2008,8 @@ export interface BellmanStore {
   /**
    * Close a decision with `close`, as the server: the closing event carries the tally of the votes read with it.
    * `now` is the clock `expired` is judged by, so an expiry is refused before the deadline; the first close wins.
-   * `audit` as `openDecision`'s.
+   * An `expired` close ignores a freeze: the clock closes a decision whatever the members may write. `audit` as
+   * `openDecision`'s.
    */
   closeDecision(
     sessionId: string, decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit?: readonly AuditEntry[],
@@ -3916,7 +3917,7 @@ export class MemoryStore implements BellmanStore {
   ): Promise<DecisionClose> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    if (s.frozenAt !== null) return { outcome: "frozen" };
+    if (s.frozenAt !== null && close.state !== "expired") return { outcome: "frozen" };
     const view = this.decisionIn(s, decision, now);
     if (view === undefined) return { outcome: "unknown" };
     const d = decideClose(view, close.state, now);

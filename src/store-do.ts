@@ -2752,7 +2752,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
-      if (s.frozenAt !== null) return { outcome: "frozen" };
+      if (s.frozenAt !== null && close.state !== "expired") return { outcome: "frozen" };
       const log = await this.#logFrom(txn, decision);
       const view = decisionsOf(log, now).get(decision);
       if (view === undefined) return { outcome: "unknown" };

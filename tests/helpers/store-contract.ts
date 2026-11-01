@@ -3655,6 +3655,18 @@ export function describeStoreContract(
         expect(await count(id)).toBe(before);
       });
 
+      it("closes an overdue decision expired in a frozen room, and still refuses any other close there", async () => {
+        const id = await room();
+        const { event } = await open(id);
+        const deadline = (event.payload as { expires_at: number }).expires_at;
+        await store.freezeSession(id, Date.now());
+        expect(await store.closeDecision(id, event.cursor, { state: "failed", reason: "rejected" }, deadline + 1))
+          .toEqual({ outcome: "frozen" });
+        expect(await store.closeDecision(id, event.cursor, { state: "expired" }, deadline + 1)).toMatchObject({
+          outcome: "appended", event: { type: "decision_closed", payload: { decision: event.cursor, state: "expired" } },
+        });
+      });
+
       it("leaves a voided vote in the log and out of the tally", async () => {
         const id = await room();
         const { event } = await open(id);

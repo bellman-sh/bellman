@@ -445,6 +445,12 @@ export function decideOpenQuota(
 export const dueToExpire = (book: OpenDecisions, now: number): number[] =>
   Object.entries(book).filter(([, d]) => d.expires_at < now).map(([cursor]) => Number(cursor));
 
+/** The soonest deadline in `book`, the time a room's alarm closes its next decision at; null for a book with none. */
+export const earliestDeadline = (book: OpenDecisions): number | null => {
+  const at = Object.values(book).map((d) => d.expires_at);
+  return at.length === 0 ? null : Math.min(...at);
+};
+
 /**
  * What a leave or an eviction writes into the decisions it finds unclosed (decision 12): for each whose electorate
  * holds `memberId` and has not had it removed, one `decision_voter_removed` naming the seat's votes it voids, then

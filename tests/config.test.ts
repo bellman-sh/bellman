@@ -1,8 +1,47 @@
 import { describe, expect, it } from "vitest";
 import {
-  CONFIG_NAMES, CONFIG_RESERVE_BYTES, bodyBytes, bodyHash, isNarrowing, parseConfigBody, restrictive,
+  CONFIG_NAMES, CONFIG_RESERVE_BYTES, bodyBytes, bodyHash, getGovernedConfig, isNarrowing, parseConfigBody, restrictive,
   truncateForDelivery,
 } from "../src/config.js";
+import { MemoryStore, type BellmanStore } from "../src/store.js";
+import type { ConfigRow } from "../src/types.js";
+
+describe("getGovernedConfig", () => {
+  const governance = { approvedBy: "u_jesse", approverMemberId: "m_1", approverLabel: "jesse", via: "dash_session" as const, atRev: 1, at: "2026-11-01T00:00:00.000Z" };
+  const good: ConfigRow = {
+    name: "room_instructions", rev: 3, body: { markdown: "Be terse." }, sha256: "h", bytes: 24, governance,
+    changedBy: "m_1", changedAt: "2026-11-01T00:00:00.000Z",
+  };
+  /** A store whose only row is `row`: the reader's rules, apart from how a row got there. */
+  const holding = (row: ConfigRow | null) => ({ getConfigRow: async () => row }) as unknown as BellmanStore;
+
+  it("reads a missing row as no instructions, at revision 0", async () => {
+    expect(await getGovernedConfig(holding(null), "qs_x", "room_instructions")).toEqual({ value: null, rev: 0, approver: null, clamped: [] });
+    expect(await getGovernedConfig(new MemoryStore(), "qs_none", "room_instructions")).toMatchObject({ value: null, rev: 0 });
+  });
+
+  it("reads a valid row with its approver's seat and label, and never the approver's user id", async () => {
+    const got = await getGovernedConfig(holding(good), "qs_x", "room_instructions");
+    expect(got).toEqual({ value: { markdown: "Be terse." }, rev: 3, approver: { memberId: "m_1", label: "jesse" }, clamped: [] });
+    expect(JSON.stringify(got)).not.toContain("u_jesse");
+  });
+
+  it("reads an invalid body as no instructions", async () => {
+    expect((await getGovernedConfig(holding({ ...good, body: { markdown: 7 } }), "qs_x", "room_instructions")).value).toBeNull();
+    expect((await getGovernedConfig(holding({ ...good, body: { markdown: "x", extra: 1 } }), "qs_x", "room_instructions")).value).toBeNull();
+  });
+
+  it("reads a row with no server-written governance as no instructions", async () => {
+    const { governance: _, ...bare } = good;
+    expect((await getGovernedConfig(holding(bare as ConfigRow), "qs_x", "room_instructions")).value).toBeNull();
+    expect((await getGovernedConfig(holding({ ...good, governance: { ...governance, approvedBy: "" } }), "qs_x", "room_instructions")).value).toBeNull();
+    expect((await getGovernedConfig(holding({ ...good, governance: { ...governance, via: "mcp" as "dash_session" } }), "qs_x", "room_instructions")).value).toBeNull();
+  });
+
+  it("reads cleared instructions as none", async () => {
+    expect((await getGovernedConfig(holding({ ...good, body: { markdown: "" } }), "qs_x", "room_instructions")).value).toBeNull();
+  });
+});
 
 describe("parseConfigBody", () => {
   it("accepts room_instructions as { markdown }", () => {

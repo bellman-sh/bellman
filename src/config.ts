@@ -6,7 +6,8 @@
 import { z } from "zod";
 import { canonical } from "./decision.js";
 import { createHash } from "node:crypto";
-import type { ConfigName } from "./types.js";
+import type { ConfigName, ConfigRow } from "./types.js";
+import type { BellmanStore } from "./store.js";
 
 export const CONFIG_NAMES = ["room_instructions"] as const satisfies readonly ConfigName[];
 
@@ -82,4 +83,29 @@ export function truncateForDelivery(markdown: string): { content: string; trunca
     content: `${kept}\n\n[truncated: ${bytes.length - used} bytes more; read the full text in the dash]`,
     truncated: true,
   };
+}
+
+/** What a governed config name reads as. `approver` is the approving seat; the approver's user id never leaves. */
+export interface GovernedValue {
+  value: RoomInstructionsBody | null;
+  rev: number;
+  approver: { memberId: string; label: string } | null;
+  /** The fields a clamp narrowed. None today: no manifest block or org policy field covers a name yet (#397). */
+  clamped: string[];
+}
+
+/**
+ * The one reader of governed config (#414; `tests/delivery-paths.test.ts` pins it). A missing row, a body its
+ * schema refuses, or a row without server-written governance reads as the most restrictive value, so nothing a
+ * row holds is trusted unless the dash route wrote it. Cleared room instructions read as none.
+ */
+export async function getGovernedConfig(store: BellmanStore, sessionId: string, name: ConfigName): Promise<GovernedValue> {
+  const row = await store.getConfigRow(sessionId, name);
+  const none: GovernedValue = { value: restrictive(name), rev: row?.rev ?? 0, approver: null, clamped: [] };
+  if (row === null) return { ...none, rev: 0 };
+  const g = row.governance as Partial<ConfigRow["governance"]> | undefined;
+  if (!g || g.via !== "dash_session" || !g.approvedBy || !g.approverMemberId) return none;
+  const parsed = parseConfigBody(name, row.body);
+  if (!parsed.ok || parsed.body.markdown === "") return none;
+  return { value: parsed.body, rev: row.rev, approver: { memberId: g.approverMemberId, label: g.approverLabel ?? "" }, clamped: [] };
 }

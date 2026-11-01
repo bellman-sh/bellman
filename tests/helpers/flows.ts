@@ -1,5 +1,6 @@
 import { expect } from "vitest";
-import type { Brief } from "../../src/types.js";
+import type { MemoryStore } from "../../src/store.js";
+import type { Brief, Session } from "../../src/types.js";
 import { brief, manifestFixture, member, openaiAgent } from "./fixtures.js";
 import { DEV_KEY, type Harness, type Outcome, type Peer } from "./harness.js";
 
@@ -163,4 +164,15 @@ export async function seatAgain(h: Harness, peer: Peer, sessionId: string, roomR
   const at = Date.now() + 1;
   const seat = member({ memberId, userId: peer.identity.userId, label: peer.identity.label, roomRole, joinedAt: at, lastSeenAt: at });
   expect(await h.store.addMember(sessionId, seat)).toBe(true);
+}
+
+/**
+ * Marks a room's `surface_proposal` kind a secret ballot on MemoryStore's stored manifest. Release 1's parser refuses
+ * `ballot: secret`, so a test reaches the secret paths this way (secret ballot release 1 plan, R1).
+ */
+export function secretBallot(store: MemoryStore, sessionId: string): void {
+  const s = (store as unknown as { sessions: Map<string, Session> }).sessions.get(sessionId);
+  const rule = s?.manifest.decide?.rules.surface_proposal;
+  if (!rule) throw new Error(`secretBallot: room ${sessionId} declares no surface_proposal rule`);
+  rule.ballot = "secret";
 }

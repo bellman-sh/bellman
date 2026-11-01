@@ -172,7 +172,11 @@ export function registerDecide(server: McpServer, identity: Identity, s: Bellman
       const draft: DecisionDraft = {
         key,
         effect: { ...effect, kind, ...(base !== undefined ? { base } : {}) },
-        rule: rule.quorum === null ? rule.rule : { rule: rule.rule, quorum: rule.quorum },
+        // A secret kind's rule names its ballot, so every vote is bound to it through the hash; an open kind keeps
+        // the shape it always had, so no open decision's hash moves.
+        rule: rule.ballot === "secret"
+          ? { rule: rule.rule, ...(rule.quorum === null ? {} : { quorum: rule.quorum }), ballot: "secret" }
+          : rule.quorum === null ? rule.rule : { rule: rule.rule, quorum: rule.quorum },
         ...(supersedes !== undefined ? { supersedes } : {}),
         ...(decide.expiresMs !== null ? { expires_ms: decide.expiresMs } : {}),
       };

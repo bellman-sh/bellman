@@ -75,6 +75,15 @@ describe("the decide block", () => {
       .toBe('decide.expires must be between 5m and 7d (got "4m")');
   });
 
+  it("refuses ballot: secret in release 1, naming the field, and accepts ballot: open", () => {
+    expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", ballot: "secret" } } })))
+      .toContain("decide.surface_proposal.ballot");
+    expect(resolveManifest(authored({ decide: { surface_proposal: { rule: "majority", ballot: "open" } } })).decide!.rules)
+      .toEqual({ surface_proposal: { rule: "majority", quorum: null, ballot: "open" } });
+    expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", ballot: "hidden" } } })))
+      .toBe('decide.surface_proposal.ballot: unknown ballot "hidden" (valid: open, secret)');
+  });
+
   it("has no relay field, and reserves require for phase 2", () => {
     expect(refusal(authored({ decide: { surface_proposal: "majority", relay: true } }))).toMatch(/^decide: Unrecognized key: "relay"/);
     expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", relay: true } } }))).toMatch(/relay/);

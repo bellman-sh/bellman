@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/store.js";
 import { Harness, envelopes, type Outcome } from "../helpers/harness.js";
-import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { pairUp, secretBallot, type PairedSession } from "../helpers/flows.js";
 import { decisionHash } from "../../src/decision.js";
 
 let h: Harness;
@@ -253,5 +253,24 @@ describe("a removal voids the seat's votes (#407)", () => {
     ok(await p.joiner.call("bellman_leave", { ...room(), member_id: p.joinerMemberId }));
     expect(ok(await read("creator", decision))).toMatchObject({ state: "open", tally: { approve: 0, unreachable: 1 } });
     expect(ok(await vote("creator", decision, { choice: "reject" }))).toMatchObject({ state: "failed", reason: "rejected" });
+  });
+});
+
+describe("secret ballots, release 1", () => {
+  const openedRule = async () =>
+    ((await h.store.eventsAfter(p.sessionId, 0)).find((e) => e.type === "decision_opened")!.payload as { rule: unknown; hash: string });
+
+  it("opens a decision on a secret kind with ballot in its rule, and an open kind as before", async () => {
+    expect((await open()).isError).toBeFalsy();
+    const plain = await openedRule();
+    expect(plain.rule).toBe("majority");
+    expect(plain.hash).toBe(hashOf());
+
+    await h.close();
+    h = new Harness(new MemoryStore());
+    p = await pairUp(h, { manifest: manifest() });
+    secretBallot(h.store as MemoryStore, p.sessionId);
+    expect((await open()).isError).toBeFalsy();
+    expect((await openedRule()).rule).toEqual({ rule: "majority", ballot: "secret" });
   });
 });

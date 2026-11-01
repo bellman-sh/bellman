@@ -46,7 +46,7 @@ import {
   type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import {
-  auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
+  SYSTEM_ACTOR, auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
 } from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -5143,6 +5143,14 @@ export class MemoryStore implements BellmanStore {
    */
   housekeep(now: number, rules: { dueFindings: (s: StoredSession, now: number) => Finding[]; clearedKeys: (s: StoredSession, now: number) => string[] }): void {
     for (const s of this.sessions.values()) {
+      // Before the skips: an overdue decision is closed in any room, an abandoned or frozen one included, as
+      // SessionDO's `decision` alarm closes it. The clock's close ignores a freeze.
+      for (const cursor of dueToExpire(noteDecisions({}, s.events), now)) {
+        const audit = auditRows(
+          rosterParties(s), { at: now, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR,
+        );
+        this.decisionWrites(s, [closingEvent(this.decisionIn(s, cursor, now)!, { state: "expired" })], now, audit);
+      }
       if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
       const cleared = rules.clearedKeys(s, now);
       const due = rules.dueFindings(s, now);

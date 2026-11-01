@@ -820,3 +820,50 @@ describe("MemoryStore.appendSurface reads the rows only when it places among the
     expect(listed, "a frame write").toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Change 1 of the secret ballot spec: the Node server's housekeeping pass is what closes an overdue decision, as
+ * SessionDO's alarm does, in a room the pass would otherwise skip as abandoned and in a frozen one.
+ */
+describe("MemoryStore.housekeep and overdue decisions", () => {
+  const pair = roomManifest();
+  const voting = roomManifest({ roles: { ...pair.roles, peer_a: { ...pair.roles.peer_a, can: [...pair.roles.peer_a.can, "vote"] } } });
+  const opening = (key: string) => ({
+    type: "decision_opened" as const, fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null,
+    payload: { key, effect: { kind: "surface_proposal", item: { key, kind: "text", body: "x" }, base: 0 }, rule: "unanimous" },
+  });
+  const quiet = { dueFindings: () => [], clearedKeys: () => [] };
+
+  it("housekeep closes every overdue decision expired, in live, abandoned and frozen rooms, as the system", async () => {
+    const store = new MemoryStore();
+    const live = session({ id: "qs_live", manifest: voting });
+    const abandoned = session({
+      id: "qs_gone", manifest: voting, members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 3_600_000 })],
+    });
+    const frozen = session({ id: "qs_frozen", manifest: voting });
+    const opened: { id: string; cursor: number; deadline: number }[] = [];
+    for (const s of [live, abandoned, frozen]) {
+      await store.createSession(s);
+      const out = await store.openDecision(s.id, opening(s.id), null);
+      if (out.outcome !== "appended") throw new Error(out.outcome);
+      opened.push({ id: s.id, cursor: out.event.cursor, deadline: (out.event.payload as { expires_at: number }).expires_at });
+    }
+    await store.freezeSession(frozen.id, Date.now());
+    const now = Math.max(...opened.map((o) => o.deadline)) + 1;
+
+    store.housekeep(now, quiet);
+
+    for (const { id, cursor } of opened) {
+      expect((await store.decision(id, cursor, now))!.state, id).toBe("expired");
+      const closing = (await store.eventsAfter(id, 0)).find((e) => e.type === "decision_closed");
+      expect(closing, id).toMatchObject({ fromMemberId: "system", payload: { decision: cursor, state: "expired" } });
+    }
+    const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "decision_closed");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((a) => a.actorUserId === "system" && a.direction === null)).toBe(true);
+
+    const counts = await Promise.all(opened.map(async ({ id }) => (await store.eventsAfter(id, 0)).length));
+    store.housekeep(now, quiet);
+    expect(await Promise.all(opened.map(async ({ id }) => (await store.eventsAfter(id, 0)).length))).toEqual(counts);
+  });
+});

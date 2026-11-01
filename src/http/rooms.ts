@@ -16,6 +16,7 @@
  * to a status, the way rooms.ts says a route should; `RoomFailure` is a closed
  * union, so a code the table below forgets is a compile error.
  */
+import { createHash } from "node:crypto";
 import { auditRefusal } from "../audit.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
@@ -24,9 +25,10 @@ import {
 } from "../blobs.js";
 import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
 import { joinUrl } from "../codes.js";
+import { DECISION_PAGE, MAX_DECISION_PAGE } from "../decision.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
+import { decisionMembers, decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
@@ -72,6 +74,7 @@ const LIST = /^\/rooms$/;
 const DETAIL = /^\/rooms\/([^/]+)$/;
 const SURFACE = /^\/rooms\/([^/]+)\/surface$/;
 const EVENTS = /^\/rooms\/([^/]+)\/events$/;
+const DECISIONS = /^\/rooms\/([^/]+)\/decisions$/;
 const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
@@ -205,6 +208,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (events) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await readEventsRoute(request, url, events[1], origin, deps);
+    }
+    const decisions = DECISIONS.exec(path);
+    if (decisions) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await readDecisionsRoute(request, url, decisions[1], origin, deps);
     }
     const item = SURFACE_ITEM.exec(path);
     if (item) {
@@ -1009,6 +1017,50 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
     events: events.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
     cursor: read.at(-1)?.cursor ?? after ?? 0,
   }, origin);
+}
+
+/**
+ * The room's decisions (#411): `{ open, decisions, next }` from `BellmanStore.decisions`, each in `decisionShown`'s
+ * full shape, the one `bellman_decide read` gives one decision. `?before=` pages on from a `next`, `?limit=` sizes
+ * the page. Every closed decision stays readable for the room's life; the log's replay cap does not reach this read.
+ * The caller rule is the events read's: membership, a removed member to its cut (with nothing open), and #65's
+ * fallback for an org admin reading a closed room. A read and nothing else. The membership and the page are two
+ * reads, so an eviction that commits between them leaves this one read uncut, and the next reads to the cut, as on
+ * the surface and events reads.
+ *
+ * The ETag is a hash of the body, so a client that sends it back gets a 304 whenever nothing it would be shown
+ * changed, an expiry by the clock included. ponytail: the 304 still costs the read; a decision cursor on the record
+ * answers from the record alone, as the surface's does, once a poller makes this hot.
+ */
+async function readDecisionsRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const session = await deps.store.getSession(sessionId);
+  const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
+  const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
+  if (!session || (mine.length === 0 && !asAdmin)) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const rawBefore = url.searchParams.get("before");
+  if (rawBefore !== null && !/^[1-9]\d{0,14}$/.test(rawBefore)) {
+    return problem(400, "invalid_request", "before is a decision's cursor: a whole number, 1 or more", origin);
+  }
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? DECISION_PAGE : Number(rawLimit);
+  if (rawLimit !== null && !(/^\d{1,3}$/.test(rawLimit) && limit >= 1 && limit <= MAX_DECISION_PAGE)) {
+    return problem(400, "invalid_request", `limit is a whole number from 1 to ${MAX_DECISION_PAGE}`, origin);
+  }
+  const cut = asAdmin ? undefined : cutFor(mine);
+  const page = await deps.store.decisions(sessionId, {
+    limit, ...(rawBefore === null ? {} : { before: Number(rawBefore) }), ...(cut === undefined ? {} : { upTo: cut }),
+  }, Date.now());
+  const members = await decisionMembers(deps.store, sessionId, session.members, [...page.open, ...page.decisions]);
+  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true);
+  const body = JSON.stringify({ open: page.open.map(shown), decisions: page.decisions.map(shown), next: page.next });
+  const tag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+  const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag", "cache-control": "no-store", etag: tag };
+  if (etagMatches(request.headers.get("if-none-match"), tag)) return new Response(null, { status: 304, headers: exposed });
+  return new Response(body, { status: 200, headers: { "content-type": "application/json", ...exposed } });
 }
 
 /**

@@ -3516,6 +3516,43 @@ export function describeStoreContract(
         expect(await store.decision(id, event.cursor - 1, event.at), "a cursor that opened nothing").toBeNull();
       });
 
+      it("pages its decisions newest first, closed ones included, and lists every open one on each page (#411)", async () => {
+        const id = await room();
+        const a = (await open(id)).event;
+        const b = (await open(id, draft({ key: "notes" }))).event;
+        const hash = decisionHash(draft({ key: "notes" }));
+        await store.castVote(id, ballot(b.cursor, { hash }), null);
+        expect(await store.castVote(id, ballot(b.cursor, { hash }, BEN), null)).toMatchObject({ closed: { type: "decision_closed" } });
+        const first = await store.decisions(id, { limit: 1 }, Date.now());
+        expect(first.decisions.map((v) => [v.cursor, v.state])).toEqual([[b.cursor, "passed"]]);
+        expect(first.open.map((v) => v.cursor)).toEqual([a.cursor]);
+        expect(first.next).toBe(b.cursor);
+        const second = await store.decisions(id, { limit: 1, before: b.cursor }, Date.now());
+        expect(second.decisions.map((v) => [v.cursor, v.state])).toEqual([[a.cursor, "open"]]);
+        expect(second.open.map((v) => v.cursor)).toEqual([a.cursor]);
+        expect(second.next).toBeNull();
+        expect((await store.decisions(id, { limit: 5 }, Date.now())).decisions.map((v) => v.cursor)).toEqual([b.cursor, a.cursor]);
+        const c = (await open(id, draft({ key: "later" }))).event;
+        expect((await store.decisions(id, { limit: 5 }, Date.now())).decisions.map((v) => v.cursor), "one opened after a page was read")
+          .toEqual([c.cursor, b.cursor, a.cursor]);
+      });
+
+      it("reads a page to a cut as of the cut, with nothing open, and an unclosed decision past due as expired", async () => {
+        const id = await room();
+        const a = (await open(id)).event;
+        const hash = decisionHash(draft());
+        await store.castVote(id, ballot(a.cursor, { hash }), null);
+        const cut = (await store.eventsAfter(id, 0)).at(-1)!.cursor;
+        await store.castVote(id, ballot(a.cursor, { hash }, BEN), null);
+        await open(id, draft({ key: "later" }));
+        const asOfCut = await store.decisions(id, { limit: 5, upTo: cut }, Date.now());
+        expect(asOfCut.decisions.map((v) => [v.cursor, v.state, v.ballots.length])).toEqual([[a.cursor, "open", 1]]);
+        expect(asOfCut.open).toEqual([]);
+        const late = await store.decisions(id, { limit: 5 }, Date.now() + PROPOSAL_TTL_MS);
+        expect(late.open).toEqual([]);
+        expect(late.decisions.map((v) => v.state)).toEqual(["expired", "passed"]);
+      });
+
       it("leaves out of the electorate a present seat whose role does not hold vote, and refuses its vote", async () => {
         const CAL = member({ memberId: "m_cal", userId: "u_cal", label: "cal@codenerd", roomRole: "peer_b" });
         const id = await room({ manifest: { ...voting, mode: "swarm" }, members: [ANN, BEN, CAL] });

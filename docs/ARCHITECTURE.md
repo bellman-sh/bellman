@@ -210,7 +210,9 @@ than MCP: `GET /rooms` for the rooms a person created or holds a handle in,
 the working surface with the surface cursor as its `ETag`, `GET
 /rooms/:id/events` for the room's log, the newest 200 events or the next 200
 past `?after`, in the envelopes `bellman_sync` returns with the caller's own
-included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
+included, `GET /rooms/:id/decisions` for the room's decisions, every open one
+and a page of all of them newest first, closed ones kept for the room's life
+(#411), `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
 (#184), `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
 saved presets, `GET`, `PUT` and `DELETE /account/handle` to read, claim or
 change, and release a person's public handle, `PUT`/`DELETE

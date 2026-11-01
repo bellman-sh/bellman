@@ -511,3 +511,38 @@ export function decisionAudit(
     return detail === null ? [] : template.map((row) => ({ ...row, action: e.type, detail }));
   });
 }
+
+/** How many decisions a page of `BellmanStore.decisions` holds when the caller names no limit, and the most it may. */
+export const DECISION_PAGE = 50;
+export const MAX_DECISION_PAGE = 100;
+
+/**
+ * A page of a room's decisions (#411): those opened below `before`, newest first, at most `limit`. `upTo` is a
+ * removed seat's cut: only what was opened at or before it, each read as of it.
+ */
+export interface DecisionPageAsk { before?: number; limit: number; upTo?: number }
+
+/**
+ * `decisions` is the page; `next` the `before` that reads on from it, null when nothing older is left. `open` is every
+ * decision open now, whichever page it falls on, so a reader never pages to find one; empty for a cut, since a seat
+ * removed votes on nothing. Closed decisions stay in the log for the room's life, so every page stays readable.
+ */
+export interface DecisionPage { open: DecisionView[]; decisions: DecisionView[]; next: number | null }
+
+/** The cursors on one page, from every decision cursor the reader may see, newest first. */
+export function decisionPageOf(cursors: readonly number[], ask: DecisionPageAsk): { page: number[]; next: number | null } {
+  const page = cursors.filter((c) => (ask.before === undefined || c < ask.before) && (ask.upTo === undefined || c <= ask.upTo));
+  const more = page.length > ask.limit;
+  const kept = page.slice(0, ask.limit);
+  return { page: kept, next: more ? kept[kept.length - 1] : null };
+}
+
+/**
+ * The decision `e` belongs to: an opening's own cursor, the one a vote, voiding or close names, null for any other
+ * event. A store keeps a copy of each decision's events under its cursor, so a page reads them and none of the log
+ * between them.
+ */
+export function decisionOwning(e: SessionEvent): number | null {
+  if (e.type === "decision_opened") return e.cursor;
+  return (DECISION_EVENTS as readonly string[]).includes(e.type) ? decisionOf(e) ?? null : null;
+}

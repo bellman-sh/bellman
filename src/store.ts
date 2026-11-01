@@ -30,8 +30,8 @@ import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Pla
 import { decideApproval } from "./proposal.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  dueToExpire, noteDecisions, openedPayload, removalEvents,
-  type ClosedState, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
+  dueToExpire, noteDecisions, openedPayload, decisionPageOf, removalEvents,
+  type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
   type VoteDecision, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
@@ -2016,6 +2016,12 @@ export interface BellmanStore {
   /** The decision opened at `cursor`, read as of `now`, or null when that cursor opened none. */
   decision(sessionId: string, cursor: number, now: number): Promise<DecisionView | null>;
   /**
+   * A page of the room's decisions, read as of `now` (#411): every one the room ever opened, closed ones included, for
+   * as long as the room is kept, so a page reads them however far back the log they lie. `DecisionPage` says what each
+   * part holds. Reads only the spans of the log the page's decisions cover, never the log between them.
+   */
+  decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage>;
+  /**
    * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
    * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
    * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
@@ -3924,6 +3930,15 @@ export class MemoryStore implements BellmanStore {
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const view = this.decisionIn(s, cursor, now);
     return view === undefined ? null : detach(view);
+  }
+
+  async decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`Unknown session ${sessionId}`);
+    const views = decisionsOf(s.events.filter((e) => ask.upTo === undefined || e.cursor <= ask.upTo), now);
+    const { page, next } = decisionPageOf([...views.keys()].reverse(), ask);
+    const open = ask.upTo === undefined ? [...views.values()].filter((v) => v.state === "open").reverse() : [];
+    return detach({ open, decisions: page.map((c) => views.get(c)!), next });
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {

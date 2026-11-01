@@ -9,11 +9,10 @@ import { FROZEN, admitSend, auditEntries, findMember, requestWindow, touchMember
 import { DECISION_KINDS, isTopicRoom } from "../manifest.js";
 import { electorateOf, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
-import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
-import { accountAliases } from "../public-event.js";
+import { UNTRUSTED_PREAMBLE, decisionMembers, decisionShown } from "../projections.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 import {
-  decisionTtlMs, decisionsOf, type DecisionClosed, type DecisionDraft, type DecisionOpened, type DecisionView,
+  decisionTtlMs, decisionsOf, type DecisionClosed, type DecisionDraft, type DecisionOpened,
   type DecisionVote, type VoteInput,
 } from "../decision.js";
 
@@ -72,40 +71,6 @@ export async function voteOn(
   }
 }
 
-/** A decision as `read` shows it: its peer-authored parts wrapped as untrusted, each account as its alias. */
-function shown(v: DecisionView, members: readonly Member[], full: boolean) {
-  const { payload: d } = v;
-  const label = (m: string) => members.find((x) => x.memberId === m)?.label ?? null;
-  const alias = accountAliases(d.accounts);
-  const by = (memberId: string) => ({ memberId, label: label(memberId) ?? memberId });
-  return {
-    decision: v.cursor,
-    state: v.state,
-    ...(v.reason !== null ? { reason: v.reason } : {}),
-    kind: d.effect.kind,
-    rule: d.rule,
-    hash: d.hash,
-    opened_by: { member_id: v.opened.fromMemberId, label: v.opened.fromLabel },
-    expires_at: new Date(d.expires_at).toISOString(),
-    ...(d.supersedes !== undefined ? { supersedes: d.supersedes } : {}),
-    proposal: untrusted(by(v.opened.fromMemberId), { key: d.key, effect: d.effect }),
-    tally: v.tally,
-    ...(full ? {
-      electorate: d.electorate.map((m) => ({
-        member_id: m, label: label(m), account: alias[m],
-        ...(d.veto?.includes(m) ? { veto: true } : {}),
-        ...(v.removed.includes(m) ? { unreachable: true } : {}),
-      })),
-      votes: v.ballots.map((b) => ({
-        cursor: b.cursor, member_id: b.memberId, label: label(b.memberId), account: alias[b.memberId] ?? null,
-        choice: b.vote.choice, capacity: b.vote.capacity, via: b.vote.via, human_approved: b.vote.human_approved,
-        ...(v.voided.includes(b.cursor) ? { voided: true } : {}),
-        ...(b.vote.reason !== undefined ? { reason: untrusted(by(b.memberId), b.vote.reason) } : {}),
-      })),
-    } : {}),
-  };
-}
-
 export function registerDecide(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
     "bellman_decide",
@@ -152,11 +117,11 @@ export function registerDecide(server: McpServer, identity: Identity, s: Bellman
         if (args.decision !== undefined) {
           const view = await s.decision(session_id, args.decision, now);
           if (view === null) return fail(`no decision with cursor ${args.decision}.`);
-          return ok(shown(view, session.members, true), UNTRUSTED_PREAMBLE);
+          return ok(decisionShown(view, await decisionMembers(s, session_id, session.members, [view]), true), UNTRUSTED_PREAMBLE);
         }
         const window = await requestWindow(s, session_id, now - decisionTtlMs(decide?.expiresMs, topic));
         const views = [...decisionsOf(window, now).values()].reverse().slice(0, DECISIONS_LISTED);
-        return ok({ decisions: views.map((v) => shown(v, session.members, false)) }, views.length > 0 ? UNTRUSTED_PREAMBLE : undefined);
+        return ok({ decisions: views.map((v) => decisionShown(v, session.members, false)) }, views.length > 0 ? UNTRUSTED_PREAMBLE : undefined);
       }
 
       if (session.frozenAt !== null) return fail(FROZEN);

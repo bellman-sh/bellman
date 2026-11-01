@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.js";
+import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, roomInstructionsField } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
@@ -34,7 +34,7 @@ Args:
 
 Your seat is the role the previewed code carried, fixed at bellman_connect: revoking the code since does not change it.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (as previewed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, cursor }
+Returns: { session_id, member_id, members[] (each with room_role), room (as previewed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, room_instructions? (as in bellman_connect), cursor }
 surface is the front window. bellman_sync carries each later change as a surface event and returns the front window with surface: true; bellman_surface pages with next or reads a frame.
 Verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor: bellman_sync and bellman_send need them.
@@ -190,6 +190,7 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
           // Every item, in the writer's envelope (#129): the joiner is a member
           // now, as `briefs` already treats them.
           surface: await readSurface(s, joined),
+          ...(await roomInstructionsField(s, joined.id)),
         },
         UNTRUSTED_PREAMBLE
       );

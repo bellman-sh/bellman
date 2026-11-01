@@ -109,3 +109,4 @@ export async function getGovernedConfig(store: BellmanStore, sessionId: string, 
   if (!parsed.ok || parsed.body.markdown === "") return none;
   return { value: parsed.body, rev: row.rev, approver: { memberId: g.approverMemberId, label: g.approverLabel ?? "" }, clamped: [] };
 }
+

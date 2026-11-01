@@ -2353,9 +2353,9 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,340** | every request, whether or not you are in a room |
+| Tool definitions | **~10,408** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
-| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
+| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~345 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~819 | every request, as every tool is; inside the total above |
@@ -2375,6 +2375,7 @@ below with its measured delta. Raising the ceiling is a decision recorded here, 
 | Surface `widget` kind and `{ items }` batch (`bellman_send`) | +127 | 11,225 | #480 (ADR 0043) |
 | `bellman_decide` (485), a decision vote in `bellman_send` and `bellman_sync` | +578 | 11,803 | #482 (#405) |
 | Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
+| `govern` verb (`bellman_start`); `room_instructions` in `bellman_connect`/`bellman_confirm`, `room_instructions_rev` in `bellman_sync` | +68 | 10,408 | (#414) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

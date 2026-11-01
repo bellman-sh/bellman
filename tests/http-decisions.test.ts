@@ -221,6 +221,16 @@ describe("decisionShown on a secret ballot (release 1)", () => {
     expect(decisionShown(view, [JESSE, PEER], true).electorate!.every((row) => !("voted" in row)), "no reader, no voted").toBe(true);
   });
 
+  it("gives a member who has voted and one who has not different ETags", async () => {
+    const d = await openSecret();
+    await castSecret(d, JESSE);
+    const tag = async (key: string) => (await call(key, `/rooms/${ROOM}/decisions`))!.headers.get("etag");
+    expect(await tag(DEV_KEY.jesse)).not.toBe(await tag(DEV_KEY.peer));
+    const body = await read(DEV_KEY.jesse);
+    expect(body.open[0]!.electorate.find((r) => r.member_id === "m_creator")).toMatchObject({ voted: true });
+    expect(body.open[0]!.electorate.find((r) => r.member_id === "m_peer")).not.toHaveProperty("voted");
+  });
+
   it("shows every seat's voted from the closing payload once closed", async () => {
     const d = await openSecret();
     await castSecret(d, JESSE);

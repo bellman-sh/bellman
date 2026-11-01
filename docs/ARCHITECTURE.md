@@ -2386,7 +2386,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,444** | every request, whether or not you are in a room |
+| Tool definitions | **~10,523** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
@@ -2411,6 +2411,7 @@ decision recorded here, not a side effect of a merge.
 | Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
 | `govern` verb (`bellman_start`); `room_instructions` in `bellman_connect`/`bellman_confirm`, `room_instructions_rev` and a changed text in `bellman_sync` | +84 | 10,424 | #512 (#414) |
 | Secret ballot release 1: the decide rule's `ballot` field (`bellman_start`, `bellman_connect`) | +20 | 10,444 | (#469) |
+| Secret ballot release 1: `bellman_decide`'s secret-ballot sentence and read list, `bellman_send`'s secret vote answer | +79 | 10,523 | (#469) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

@@ -1823,6 +1823,80 @@ export function describeStoreContract(
       expect(await store.listRoomsPage(2, second.at(-1))).toEqual([]);
     });
 
+    // The operator's filters and counts over the same index (dash#94).
+    describe("the room index's filters and counts", () => {
+      const make = async (id: string, createdBy: string, orgId: string | null, hosted = false) => {
+        await store.createSession(session({
+          id, createdBy, orgId,
+          ...(hosted
+            ? { manifest: { ...hostedManifest(), public: true }, members: [member({ userId: createdBy, roomRole: "lead", orgId })] }
+            : { members: [member({ userId: createdBy, orgId })] }),
+        }));
+        vi.advanceTimersByTime(1);
+      };
+      beforeEach(async () => {
+        await make("qs_a1", "u_a", "org_x");
+        await make("qs_a2", "u_a", null);
+        await make("qs_a3", "u_a", "org_x", true);
+        await make("qs_b1", "u_b", "org_y");
+        await make("qs_b2", "u_b", null);
+      });
+      const ids = (rows: { sessionId: string }[]) => rows.map((r) => r.sessionId);
+
+      it.each([
+        [{ createdBy: "u_a" }, ["qs_a3", "qs_a2", "qs_a1"]],
+        [{ org: "org_x" }, ["qs_a3", "qs_a1"]],
+        [{ org: null }, ["qs_b2", "qs_a2"]],
+        [{ hosted: true }, ["qs_a3"]],
+        [{ publicTrue: true }, ["qs_a3"]],
+        [{ createdBy: "u_a", org: "org_x" }, ["qs_a3", "qs_a1"]],
+        [{ createdBy: "u_b", org: null }, ["qs_b2"]],
+        [{ createdBy: "u_a", hosted: false }, ["qs_a2", "qs_a1"]],
+      ] as const)("filters by %o, newest first, a cursor going on where the page before stopped", async (filter, want) => {
+        expect(ids(await store.listRoomsFiltered(10, undefined, filter))).toEqual(want);
+        const first = await store.listRoomsFiltered(1, undefined, filter);
+        const rest = await store.listRoomsFiltered(10, first.at(-1), filter);
+        expect([...ids(first), ...ids(rest)]).toEqual(want);
+      });
+
+      it("counts by owner and by org, largest first, ties by key, the no-org group keyed ~none", async () => {
+        expect(await store.roomCounts("owner", 10)).toEqual({
+          total: 5, next: null, orgs: expect.arrayContaining([null, "org_x", "org_y"]),
+          groups: [{ key: "u_a", label: null, rooms: 3 }, { key: "u_b", label: null, rooms: 2 }],
+        });
+        expect((await store.roomCounts("owner", 10)).orgs).toHaveLength(3);
+        const byOrg = await store.roomCounts("org", 10);
+        expect(byOrg.groups).toEqual([
+          { key: "org_x", label: null, rooms: 2 }, { key: "~none", label: null, rooms: 2 }, { key: "org_y", label: null, rooms: 1 },
+        ]);
+        expect(byOrg.orgs).toEqual(["org_x", null, "org_y"]);
+      });
+
+      it("pages the counts by `<rooms>:<key>`, every group once", async () => {
+        const first = await store.roomCounts("org", 2);
+        expect(first.next).toBe("2:~none");
+        expect(first.orgs).toEqual(["org_x", null]);
+        const rest = await store.roomCounts("org", 2, { rooms: 2, key: "~none" });
+        expect(rest).toMatchObject({ groups: [{ key: "org_y", rooms: 1 }], next: null });
+      });
+
+      it("labels an owner by handle, and handlesOf answers only the ids that have one", async () => {
+        await store.claimHandle("u_b", "bee");
+        expect((await store.roomCounts("owner", 10)).groups.map((g) => g.label)).toEqual([null, "bee"]);
+        expect(await store.handlesOf(["u_a", "u_b", "u_nobody"])).toEqual(new Map([["u_b", "bee"]]));
+        expect(await store.handlesOf([])).toEqual(new Map());
+      });
+
+      it("drops a room from the list and the counts, a second drop resolving and changing nothing", async () => {
+        await store.dropRoomIndex("qs_b1");
+        await store.dropRoomIndex("qs_b1");
+        expect(ids(await store.listRoomsPage(10))).not.toContain("qs_b1");
+        const counts = await store.roomCounts("org", 10);
+        expect(counts.total).toBe(4);
+        expect(counts.groups.map((g) => g.key)).toEqual(["org_x", "~none"]);
+      });
+    });
+
     it("forgets a closed room's row, so the walk pays for it once", async () => {
       (await store.createSession(session({ id: "qs_gone", createdBy: "u_jesse" })));
       await store.closeSession("qs_gone");

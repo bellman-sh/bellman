@@ -282,18 +282,30 @@ panel session as well, for the accounts pane on the dash's stats page, on
 `/operator/stats`' gate. They are the routes that answer rows of accounts,
 which `/operator/stats` was built never to do (#259); where such reads live
 next is #61's question. The registry also indexes every room for the operator
-(#471): `rm:<createdAt>:<sessionId>` holds what the room was created as, written
-with the creator's `us:` row, kept through a close and removed by the purge, and
-`ri:<sessionId>` points at it. It starts at its deploy, so
-`POST /admin/rooms/backfill`, on the same gate, writes one window of the
-missing rows a call from the rooms `us:`, `um:` and `uo:` still name; the
-operator reruns it with `?after=` until `next` is null. `GET /operator/rooms` reads that
-index for the panel on `/operator/stats`' gate (#472): fifty rows a page, newest first, each
-the index row beside `roomSummary`, one `SessionDO` call a row in parallel that answers counts and
-states and never what a member wrote, and `GET /operator/rooms/:id` one room with its purpose and
-role names. Every page and every detail read writes an entry to the operator's own stream, an
+(#471) in a SQL table, `rooms`: one row a room, what it was created as (creator,
+org, preset, mode, public, hosted, created time), written in one transaction
+with the creator's `us:` row, kept through a close and deleted by the purge, with
+an index newest first, one by creator and one by org (dash#94). It replaced KV
+rows (`rm:`/`ri:`), which `RegistryDO`'s constructor moves into the table on
+wake, inside `blockConcurrencyWhile`, so a rollback's rows move on the next
+deploy. It starts at #471's deploy, so `POST /admin/rooms/backfill`, on the same
+gate, writes one window of the missing rows a call from the rooms `us:`, `um:`
+and `uo:` still name; the operator reruns it with `?after=` until `next` is
+null. `GET /operator/rooms` reads that table for the panel on `/operator/stats`'
+gate (#472): fifty rows a page, newest first, one query whose `WHERE` holds only
+the filters given (`created_by`, `org`, `org=~none` for no org, `hosted`,
+`public=true`), so a filtered page is full; each row beside `roomSummary`, one
+`SessionDO` call a row in parallel that answers counts and states and never what
+a member wrote, and `status` and `public=false` filter after it. A row whose room
+is gone is skipped and deleted from the table. `GET /operator/room-counts?by=owner|org`
+answers how many rooms each creator or org has, largest first, from one
+`GROUP BY` (O(rooms) inside SQLite; a counts table written with each insert and
+delete is the upgrade), paged by `<rooms>:<key>`, owners labelled by handle and
+never by email. `GET /operator/rooms/:id` answers one room with its purpose and
+role names. Every page, count and detail read writes an entry to the operator's own stream, an
 `AuditDO` named `~operator`, which no org id can spell, and a detail read one to each org that sat
-in the room; a write that fails answers 500 and no room.
+in the room; a write that fails answers 500 and no room. A registry still on the
+code before a deploy answers the filtered list and the counts 503 `not_ready`.
 
 **A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The room read carries `preset` (ADR 0032). The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 0034): `src/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a card search's ETag carries its query and the room's link. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
@@ -1538,7 +1550,7 @@ loud:
   An operator suspends an account with `POST /admin/suspensions/:userId`, through the
   bearer-only gate that releases a handle (`BELLMAN_OPERATORS`; with it unset, nobody
   passes). The Worker then answers `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`,
-  `/org*`, `/account/handle`, `/account/bans*`, `/operator/stats`, `/operator/accounts` and `/operator/rooms*` with `This account is suspended.`, and leaves
+  `/org*`, `/account/handle`, `/account/bans*`, `/operator/stats`, `/operator/accounts`, `/operator/rooms*` and `/operator/room-counts` with `This account is suspended.`, and leaves
   `/auth/*`, the `/account` page, `/token`, `/authorize`, `/upgrade` and `/admin/*` alone,
   so the person can still sign out. It asks the registry once per identity per isolate a
   minute (`SuspensionCache`).

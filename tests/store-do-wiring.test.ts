@@ -22,6 +22,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { DatabaseSync } from "node:sqlite";
 import { serialize } from "node:v8";
 import { legacyRows, memberKey } from "../src/member-rows.js";
 import { PING, PONG } from "../src/keepalive.js";
@@ -176,7 +177,27 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
      * worker-tests/join-code-outbox.test.ts. Nothing in this file throws mid-transaction.
      */
     transaction: async <T>(closure: (txn: unknown) => Promise<T>): Promise<T> => closure(storage),
+    /** No rollback either; see `transaction`. */
+    transactionSync: <T>(closure: () => T): T => closure(),
+    /** The synchronous KV API a SQLite-backed object has, over the same rows. */
+    kv: {
+      put: (key: string, value: unknown) => { writes++; rows.set(key, structuredClone(value)); },
+      delete: (key: string) => { writes++; return rows.delete(key); },
+      list: (opts: { prefix?: string; startAfter?: string; limit?: number } = {}) => {
+        let keys = [...rows.keys()].filter((k) => k.startsWith(opts.prefix ?? "") && (opts.startAfter === undefined || k > opts.startAfter)).sort();
+        if (opts.limit !== undefined) keys = keys.slice(0, opts.limit);
+        return new Map(keys.map((k) => [k, structuredClone(rows.get(k))]));
+      },
+    },
+    /** The SQL API, over an in-memory SQLite of the object's own (RegistryDO's `rooms` table). */
+    sql: {
+      exec: (query: string, ...bindings: unknown[]) => {
+        const out = db.prepare(query).all(...(bindings as never[])) as Record<string, unknown>[];
+        return { toArray: () => out, one: () => out[0] };
+      },
+    },
   };
+  const db = new DatabaseSync(":memory:");
   return storage;
 }
 
@@ -348,6 +369,14 @@ function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
 }
 
 /**
+ * A RegistryDO on fake storage. Its constructor moves the room index into SQL before any call (dash#94); nothing
+ * else runs here at that moment, so `blockConcurrencyWhile` just runs it.
+ */
+function registryOn({ RegistryDO }: Pick<StoreDo, "RegistryDO">, storage: ReturnType<typeof fakeStorage>) {
+  return new RegistryDO({ storage, blockConcurrencyWhile: (run: () => Promise<unknown>) => run() } as never, {} as never);
+}
+
+/**
  * A DurableObjectStore over real SessionDO and RegistryDO instances on fake
  * storage, with the legacy session already stored and its join code already
  * registered, as a session created just before manifests shipped would be.
@@ -361,7 +390,7 @@ async function worldOn(
 ) {
   const legacyStorage = fakeStorage({ session: row, cursor: 0 });
   const registryStorage = fakeStorage();
-  const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
+  const registry = registryOn({ RegistryDO } as StoreDo, registryStorage);
   const sessions = new Map<string, InstanceType<typeof SessionDO>>();
   const env = {
     SESSION: {
@@ -501,7 +530,7 @@ describe("a current row is untouched by the guard", () => {
     // Its join code is registered on the way in and dropped on the way out, so it needs
     // a registry to deliver to: without one every delivery would fail and be retried,
     // and the test would pass over a failing path.
-    const registry = new storeDo.RegistryDO({ storage: fakeStorage() } as never, {} as never);
+    const registry = registryOn(storeDo, fakeStorage());
     const env = { REGISTRY: { idFromName: (name: string) => name, get: () => registry } };
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, env as never);
     await doi.createSession(session({ id: "qs_expired", members: [member({ lastSeenAt: 1 })] }));
@@ -2558,6 +2587,12 @@ describe("a failed index write does not fail the operation it indexes", () => {
    * Every other registry write, the join code above all, still goes through.
    */
   const refuse = (registryStorage: ReturnType<typeof fakeStorage>, prefixes: string[]) => {
+    // `us:` is written through the synchronous KV API, in the same transaction as the room's `rooms` row.
+    const realKvPut = registryStorage.kv.put;
+    registryStorage.kv.put = (key: string, value: unknown) => {
+      if (prefixes.some((p) => key.startsWith(p))) throw new Error("registry unavailable");
+      realKvPut(key, value);
+    };
     const realPut = registryStorage.put;
     registryStorage.put = async (keyOrEntries: unknown, value?: unknown) => {
       const keys = typeof keyOrEntries === "string" ? [keyOrEntries] : Object.keys(keyOrEntries as object);

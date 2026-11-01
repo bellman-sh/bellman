@@ -429,8 +429,8 @@ export default {
     // with applyPlans), off the same OAuth config. The route requires all three keys; it cannot check the
     // values, so worker-tests/stats-routes.test.ts reads the count through each.
     // `/operator/accounts`, the stats page's accounts pane, takes the same gate and guard, and so do
-    // `/operator/rooms` and one room by id under it (#472).
-    if (/^\/operator\/(stats|accounts|rooms)\/?$|^\/operator\/rooms\/[^/]+\/?$/.test(url.pathname)) {
+    // `/operator/rooms` and one room by id under it (#472), and `/operator/room-counts` (dash#94).
+    if (/^\/operator\/(stats|accounts|rooms|room-counts)\/?$|^\/operator\/rooms\/[^/]+\/?$/.test(url.pathname)) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await statsRoutes(request, {

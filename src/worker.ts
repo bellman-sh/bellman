@@ -633,6 +633,9 @@ export default {
       hostIdOf: (id) => env.HOST.idFromName(id).toString(),
       costs: costStore(env.COST),
       blobs: new R2BlobStore(env.BLOBS),
+      cloudflare: env.CF_ANALYTICS_TOKEN && env.CF_ACCOUNT_ID
+        ? { accountId: env.CF_ACCOUNT_ID, token: env.CF_ANALYTICS_TOKEN, fetch: (input, init) => fetch(input, init) }
+        : undefined,
     }, Date.now()).then(() => undefined, (err: unknown) => console.error("cost job failed:", err)));
   },
 } satisfies ExportedHandler<WorkerEnv>;

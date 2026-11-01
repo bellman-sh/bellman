@@ -7,7 +7,7 @@
  * method, and a direct `rm:` list would then find nothing and every object would go unmatched without an error. This
  * test passes whichever of the two merges second.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, createScheduledController } from "cloudflare:test";
 import worker from "../src/worker.js";
 import { DurableObjectStore } from "../src/store-do.js";
@@ -45,5 +45,30 @@ describe("the cost capture's scheduled run", () => {
     expect(month.plans.at(-1)?.creators).toEqual([{ userId: "u_jesse", plan: "team", via: "keyed", grantSource: null, grantOrgId: null }]);
     expect(month.blobs).toEqual([expect.objectContaining({ sessionId: s.id, bytes: 5 })]);
     expect(month.lastRun).toMatchObject({ plansStatus: "written", blobsStatus: "written", error: null });
+  });
+
+  it("with the analytics secrets, maps Cloudflare's row for the room's SessionDO to the room, not to unmatched", async () => {
+    const on = { ...env, CF_ANALYTICS_TOKEN: "tok", CF_ACCOUNT_ID: "acct" } as unknown as WorkerEnv;
+    const store = new DurableObjectStore(on);
+    const s = session({ id: "qs_metered", members: [member()] });
+    await store.createSession(s);
+    const objectId = on.SESSION.idFromName(s.id).toString();
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ data: { viewer: { accounts: [{
+      periodic: [{ dimensions: { objectId, namespaceId: "ns_s" }, sum: { duration: 12.8, activeTime: 100_000_000 }, avg: { sampleInterval: 1 } }],
+      invocations: [{ dimensions: { objectId, namespaceId: "ns_s", type: "jsrpc" }, sum: { requests: 7, wallTime: 70 }, avg: { sampleInterval: 1 } }],
+      periodicTotals: [], invocationTotals: [],
+    }] } } }));
+
+    const waits: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => waits.push(p), passThroughOnException() {} } as unknown as ExecutionContext;
+    await worker.scheduled(createScheduledController({ scheduledTime: Date.now(), cron: "17 3 * * *" }), on, ctx);
+    await Promise.all(waits);
+    spy.mockRestore();
+
+    const month = await costStore(on.COST).month(new Date().toISOString().slice(0, 7));
+    expect(month.usage).toEqual([expect.objectContaining({
+      objectId, kind: "session", sessionId: s.id, byType: { jsrpc: { requests: 7, wallTime: 70 } },
+    })]);
+    expect(Object.values(month.lastRun!.usageStatus)).toEqual(["written", "written"]);
   });
 });

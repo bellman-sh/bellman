@@ -7,12 +7,16 @@
  */
 import type { BlobStore } from "../blobs.js";
 import { monthKey } from "../stored-session.js";
+import { GRAPHQL_URL, parseUsage, usageQuery } from "./graphql.js";
 import { capturePlans, type CapturePlansDeps } from "./plans.js";
+import { mapUsage } from "./usage.js";
 import { dayKey, previousMonth, type CostStore, type RunRecord } from "./records.js";
 
 export type CostJobDeps = CapturePlansDeps & {
   costs: CostStore;
   blobs: Pick<BlobStore, "bytesByRoom">;
+  /** Unset without both CF_ANALYTICS_TOKEN and CF_ACCOUNT_ID: the run records `skipped_no_token` for usage. */
+  cloudflare?: { accountId: string; token: string; fetch: typeof fetch };
 };
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -47,8 +51,41 @@ export async function runCostJob(deps: CostJobDeps, now: number): Promise<RunRec
     errors.push(`blobs: ${message(err)}`);
   }
 
-  // Usage from Cloudflare is step 2b (design section 2). Until it lands, every run says so for both months.
-  for (const month of [previousMonth(monthKey(now)), monthKey(now)]) run.usageStatus[month] = "skipped_no_token";
+  // After the plans half, so rooms first seen today map too. Each month stands alone.
+  const cf = deps.cloudflare;
+  const rooms = cf ? await deps.costs.knownRooms().catch((err: unknown) => (errors.push(`usage: ${message(err)}`), null)) : null;
+  for (const month of [previousMonth(monthKey(now)), monthKey(now)]) {
+    if (!cf) {
+      run.usageStatus[month] = "skipped_no_token";
+      continue;
+    }
+    if (!rooms) {
+      run.usageStatus[month] = "error";
+      continue;
+    }
+    try {
+      const response = await cf.fetch(GRAPHQL_URL, {
+        method: "POST",
+        headers: { authorization: `Bearer ${cf.token}`, "content-type": "application/json" },
+        body: JSON.stringify(usageQuery(cf.accountId, month)),
+      });
+      if (!response.ok) throw new Error(`Cloudflare answered ${response.status}`);
+      const answer = parseUsage(await response.json());
+      if ("error" in answer) throw new Error(answer.error);
+      if ("fullPage" in answer) {
+        run.usageStatus[month] = "skipped_full_page";
+        continue;
+      }
+      const { usage, totals } = mapUsage(month, answer, rooms);
+      const stored = await deps.costs.replaceUsage(month, usage, totals, now);
+      run.usageStatus[month] = stored.ok ? "written" : "error";
+      if (!stored.ok) errors.push(`usage ${month}: ${stored.reason}`);
+      run.counts[`usage_${month}`] = usage.length;
+    } catch (err) {
+      run.usageStatus[month] = "error";
+      errors.push(`usage ${month}: ${message(err)}`);
+    }
+  }
 
   run.finishedAt = Date.now();
   run.error = errors.length > 0 ? errors.join("; ") : null;

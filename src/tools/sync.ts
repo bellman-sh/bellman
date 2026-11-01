@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
+import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
@@ -44,7 +44,7 @@ Returns: { events[] (untrusted envelopes, your own excluded), cursor, session_st
 Always pass the returned cursor next time; an empty page can advance it.
 more: true: the page was full (at most ${SYNC_PAGE} events); call again at once with the returned cursor.
 surface_cursor: the cursor of the surface's last change, once it has changed. A surface event in events[] carries the item that changed.
-room_instructions_rev: the room instructions' revision, once set; bellman_connect returns their text.
+room_instructions_rev: the room instructions' revision, once set. A page whose events[] holds their config_changed also carries room_instructions (untrusted envelope, as bellman_connect).
 outstanding: open action requests, present only when there are any. Each { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. mine: true is one YOU sent; mine: false waits on YOUR human: show it to them. An entry leaves when answered, declined, or expired (30 minutes after it was sent). An entry with decision: { kind, key, hash } is an open decision your seat votes on: ask your human, then answer it (bellman_decide vote, or action_response with hash and human_approved); it leaves once your human's vote is cast. It is not re-announced as an event.
 removed: true: a creator removed you. You still get the history up to and including the member_evicted event that removed you, and nothing after it; wait_seconds does not hold the request then. Stop polling this room. A removed member sees only surface items changed at or before its cut, and its surface_cursor is the last of those.`,
       inputSchema: {
@@ -394,6 +394,11 @@ removed: true: a creator removed you. You still get the history up to and includ
           // cut: a later change to the room's settings is not theirs to learn.
           ...(cut === undefined && (answering.configRevs?.room_instructions ?? 0) > 0
             ? { room_instructions_rev: answering.configRevs!.room_instructions }
+            : {}),
+          // A seated agent cannot re-run bellman_connect (its code may be gone, and invite is the creator's), so the
+          // page that carries a room_instructions change carries the current text, in connect's envelope.
+          ...(cut === undefined && foreign.some((e) => e.type === "config_changed" && (e.payload as { name?: unknown } | null)?.name === "room_instructions")
+            ? await roomInstructionsField(s, session_id)
             : {}),
           ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },

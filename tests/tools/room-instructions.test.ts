@@ -104,6 +104,24 @@ describe("room_instructions_rev in bellman_sync", () => {
     expect(after.data.room_instructions_rev).toBe(1);
   });
 
+  // A seated agent cannot re-run bellman_connect (its code may have expired, and invite is the creator's), so the
+  // poll that carries the change carries the text, in the same envelope.
+  it("hands a seated member the new text on the poll that carries config_changed, and only then", async () => {
+    const { sessionId, memberId, code } = await room();
+    const { joiner, confirmed } = await join(code);
+    const seat = String(confirmed.data.member_id);
+    const first = await joiner.call("bellman_sync", { session_id: sessionId, member_id: seat, since_cursor: confirmed.data.cursor });
+    expect(first.data).not.toHaveProperty("room_instructions");
+    await setInstructions(sessionId, memberId, "Write tests first.");
+    const changed = await joiner.call("bellman_sync", { session_id: sessionId, member_id: seat, since_cursor: first.data.cursor });
+    expect(instructionsOf(changed)).toEqual({
+      trust: "untrusted", origin: { memberId, label: "jesse@codenerd" }, data: { rev: 1, content: "Write tests first.", truncated: false },
+    });
+    const quiet = await joiner.call("bellman_sync", { session_id: sessionId, member_id: seat, since_cursor: changed.data.cursor });
+    expect(quiet.data).not.toHaveProperty("room_instructions");
+    expect(quiet.data.room_instructions_rev).toBe(1);
+  });
+
   // A removed member's feed ends at its cut; that the room's settings changed afterwards is not theirs to learn.
   it("is absent for a member removed from the room, even when the settings changed after", async () => {
     const { creator, sessionId, memberId, code } = await room();

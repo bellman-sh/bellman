@@ -616,7 +616,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>governed config rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>governed config rows,<br/>bans, one alarm for abandonment,<br/>decision deadlines,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms, org-rooms and<br/>every-room indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -1927,9 +1927,11 @@ loss is findable, and the sweep at close (#65) is what finds it.
 4. **Named alarms.** An object has one alarm, so handlers share it: each has a
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
-   session record, and a stored row wins. `SessionDO` has six handlers,
-   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep` and `purge`, and
-   only `outbox` is stored. The abandonment time is derived from the members'
+   session record, and a stored row wins. `SessionDO` has nine handlers,
+   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep`, `purge`, `seat`
+   (an outside question the seat stayed silent on), `expiry` (an outside task's
+   lifetime) and `decision` (the soonest open decision's deadline, plus a
+   millisecond, derived even for a closed room), and only `outbox` is stored. The abandonment time is derived from the members'
    `lastSeenAt` (`abandonedAt`, #18), so a room written before named alarms, or
    before rooms persisted, is still swept; a socket vouching for a member moves it
    a window ahead instead of closing the room.

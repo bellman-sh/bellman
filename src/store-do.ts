@@ -24,7 +24,7 @@ import type {
 import { electorateOf, voteRefusal } from "./store.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  decisionOwning, dueToExpire, noteDecisions, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage,
+  decisionOwning, dueToExpire, earliestDeadline, noteDecisions, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage,
   type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
@@ -46,7 +46,7 @@ import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent, readableEvent, readableEvents } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import {
-  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, entryView, recordOf,
+  AUDIT_COLUMNS, FACET_LIMIT, SYSTEM_ACTOR, auditRows, auditWhere, entryOf, entryView, recordOf,
   type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
 } from "./audit.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "./grant-audit.js";
@@ -204,6 +204,13 @@ const SEAT_HANDLER = "seat";
  * under `due:`, for the reason SEAT_HANDLER gives. `#expireOutsideIfDue` consumes it, and always moves it on or clears it.
  */
 const EXPIRY_HANDLER = "expiry";
+/**
+ * A decision's deadline (secret ballot spec, Change 1): derived from the record's `openDecisions`, one millisecond
+ * past the soonest deadline, since a decision is overdue only once the clock is past it. Never stored under `due:`,
+ * for the reason SEAT_HANDLER gives. `#expireDecisionsIfDue` consumes it: it closes every overdue decision, which
+ * takes each out of the book, so the time moves on.
+ */
+const DECISION_HANDLER = "decision";
 
 /** A long poll: woken with the events past `after`, at most `limit` of them when the poll gave one. */
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?: number };
@@ -2652,6 +2659,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const forward = kept !== s && (bringsForward(s, kept, events[0].at) || tickBroughtForward(s, kept));
     const book = noteDecisions(s.openDecisions ?? {}, events);
     if (book !== (s.openDecisions ?? {})) kept = { ...kept, openDecisions: book };
+    // A decision that ends sooner than the armed alarm moves it, or that decision closes late.
+    const soonest = earliestDeadline(book);
+    const before = earliestDeadline(s.openDecisions ?? {});
+    const sooner = soonest !== null && (before === null || soonest < before);
     const rows = decisionAudit(audit, events, decisionsOf([...log, ...events], events[0].at)).filter((e) => e.orgId);
     await putRows(txn, {
       ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
@@ -2660,7 +2671,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       ...asRows(s, { session: kept === s ? undefined : kept }),
       ...(rows.length > 0 ? await this.driver.enqueue(txn, rows.map(auditIntent)) : {}),
     });
-    return { forward, queued: rows.length > 0 };
+    return { forward: forward || sooner, queued: rows.length > 0 };
   }
 
   /** The wake, the delivery and the re-arm a decision write owes once it has committed, as approveProposal's. */
@@ -2750,6 +2761,46 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /**
+   * Every decision past its deadline closed `expired`, each through `closeDecision`, written as the system: the
+   * room's alarm, and not the next decision to open, is what closes one (secret ballot spec, Change 1). Nothing is
+   * written when none is due. `#private`, for the reason #purgeIfDue gives.
+   */
+  async #expireDecisionsIfDue(now: number): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    const due = dueToExpire(s.openDecisions ?? {}, now);
+    if (due.length === 0) return;
+    const parties = rosterParties({ members: await this.#everyone() });
+    for (const cursor of due) {
+      const audit = auditRows(
+        parties, { at: now, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR,
+      );
+      const out = await this.closeDecision(cursor, { state: "expired" }, now, audit);
+      if (out.outcome === "appended") continue;
+      // A booked decision this close could not consume would leave the derived time where it is, and the closing
+      // reArm() would fire the alarm back to back for good. So the book is set from the log: an entry for a decision
+      // the log does not hold open is dropped, and one whose deadline disagrees with its opening event takes the
+      // event's. No write path reaches either today; this is the handler deciding its next time from state it changed.
+      console.warn(`decision alarm: room ${s.id} decision ${cursor} answered ${out.outcome}; rebooking it from the log`);
+      await this.#rebook(cursor);
+    }
+  }
+
+  /** The `openDecisions` entry for `cursor` set from the log: the opening event's deadline while open, else none. */
+  async #rebook(cursor: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s?.openDecisions || !Object.hasOwn(s.openDecisions, String(cursor))) return;
+      const view = decisionsOf(await this.#logFrom(txn, cursor), Date.now()).get(cursor);
+      const { [String(cursor)]: entry, ...rest } = s.openDecisions;
+      const book = view === undefined || view.closed !== null
+        ? rest
+        : { ...rest, [cursor]: { ...entry, expires_at: view.payload.expires_at } };
+      await putRows(txn, asRows(s, { session: { ...s, openDecisions: book } }));
+    });
+  }
+
   /** `BellmanStore.closeDecision`: the server's close, refused once a closing event exists or before an expiry is due. */
   async closeDecision(
     decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit: readonly AuditEntry[] = [],
@@ -2761,7 +2812,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
-      if (s.frozenAt !== null) return { outcome: "frozen" };
+      if (s.frozenAt !== null && close.state !== "expired") return { outcome: "frozen" };
       const log = await this.#logFrom(txn, decision);
       const view = decisionsOf(log, now).get(decision);
       if (view === undefined) return { outcome: "unknown" };
@@ -3674,6 +3725,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
         if (name === SEAT_HANDLER) await this.#seatSilenceIfDue(now);
         if (name === EXPIRY_HANDLER) await this.#expireOutsideIfDue(now);
+        if (name === DECISION_HANDLER) await this.#expireDecisionsIfDue(now);
       } catch (error) {
         // The runtime retries a throwing alarm a few times and then leaves it with nothing armed
         // (a read of the room arms it again: getSession), and it says nothing of which object it
@@ -3727,6 +3779,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const s = read ?? await this.stored();
     if (!s) return new Map();
     const due = new Map<string, number>();
+    // Before the closed room's early return, and in a frozen room too: a room that closed or froze with a decision
+    // open still owes it its close, and the clock's close ignores a freeze.
+    const deadline = earliestDeadline(s.openDecisions ?? {});
+    if (deadline !== null) due.set(DECISION_HANDLER, deadline + 1);
     if (s.closed) {
       // A closed room owes two things and nothing else (#65): the sweep of its unnamed
       // objects, once, and the purge at its window's end or when a delete asked.

@@ -48,7 +48,7 @@ import {
   type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import {
-  auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
+  SYSTEM_ACTOR, auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
 } from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -2058,7 +2058,8 @@ export interface BellmanStore {
   /**
    * Close a decision with `close`, as the server: the closing event carries the tally of the votes read with it.
    * `now` is the clock `expired` is judged by, so an expiry is refused before the deadline; the first close wins.
-   * `audit` as `openDecision`'s.
+   * An `expired` close ignores a freeze: the clock closes a decision whatever the members may write. `audit` as
+   * `openDecision`'s.
    */
   closeDecision(
     sessionId: string, decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit?: readonly AuditEntry[],
@@ -4010,7 +4011,7 @@ export class MemoryStore implements BellmanStore {
   ): Promise<DecisionClose> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    if (s.frozenAt !== null) return { outcome: "frozen" };
+    if (s.frozenAt !== null && close.state !== "expired") return { outcome: "frozen" };
     const view = this.decisionIn(s, decision, now);
     if (view === undefined) return { outcome: "unknown" };
     const d = decideClose(view, close.state, now);
@@ -5236,6 +5237,14 @@ export class MemoryStore implements BellmanStore {
    */
   housekeep(now: number, rules: { dueFindings: (s: StoredSession, now: number) => Finding[]; clearedKeys: (s: StoredSession, now: number) => string[] }): void {
     for (const s of this.sessions.values()) {
+      // Before the skips: an overdue decision is closed in any room, an abandoned or frozen one included, as
+      // SessionDO's `decision` alarm closes it. The clock's close ignores a freeze.
+      for (const cursor of dueToExpire(noteDecisions({}, s.events), now)) {
+        const audit = auditRows(
+          rosterParties(s), { at: now, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR,
+        );
+        this.decisionWrites(s, [closingEvent(this.decisionIn(s, cursor, now)!, { state: "expired" })], now, audit);
+      }
       if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
       const cleared = rules.clearedKeys(s, now);
       const due = rules.dueFindings(s, now);

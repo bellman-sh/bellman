@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyVote, capacityOfVote, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
-  decisionOwning, decisionPageOf, decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
+  decisionOwning, decisionPageOf, decisionStates, decisionsOf, dueToExpire, earliestDeadline, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
   MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
   type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
   type OpenDecisions, type VoterRemoved,
@@ -617,6 +617,11 @@ describe("removals, quotas and audit rows (#407)", () => {
     expect(decideOpenQuota(of(3, () => "m_a"), "m_a", AT, 2), "superseding one of the three").toEqual({ kind: "ok" });
     expect(dueToExpire(of(3, () => "m_a"), AT + 1)).toEqual([]);
     expect(dueToExpire(of(3, () => "m_a"), AT + 2)).toEqual([1, 2, 3]);
+  });
+
+  it("earliestDeadline is the smallest expires_at, null for an empty book", () => {
+    expect(earliestDeadline({})).toBeNull();
+    expect(earliestDeadline({ "7": { expires_at: 300, by: "m_a" }, "9": { expires_at: 200, by: "m_b" } })).toBe(200);
   });
 
   it("lands a seat's first vote and five revisions, and refuses the sixth revision", () => {

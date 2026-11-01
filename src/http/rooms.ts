@@ -36,6 +36,7 @@ import {
   sessionStatus, writeSurface, writeSurfaceBatch, type RoomFailure, type SurfaceBlock,
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
+import { configRoutes } from "./config.js";
 import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -254,6 +255,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
       if (request.method !== "POST") return methodNotAllowed("POST", origin);
       return await mintCode(request, codes[1], origin, deps);
     }
+    const config = await configRoutes(request, url, path, origin, deps);
+    if (config) return config;
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);
@@ -540,7 +543,7 @@ const readsAsAdmin = (session: StoredSession, identity: Identity, mine: readonly
  * One answer for every door that writes, the surface's and the upload's, so one fact is not two statuses.
  * Undefined for everyone else, who keeps the 404.
  */
-const adminWriteRefusal = async (
+export const adminWriteRefusal = async (
   store: BellmanStore, found: StoredSession | undefined, identity: Identity, origin: string | undefined,
 ): Promise<Response | undefined> =>
   found && admitsAdmin(found, identity) && (await handlesOf(store, found, identity)).length === 0

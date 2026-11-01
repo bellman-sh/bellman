@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
+import type { BellmanStore, ConfigWrite, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
@@ -4473,6 +4473,82 @@ export function describeStoreContract(
         for (let i = 0; i < 2; i++) await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW());
         expect(await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW()), "the premise: the count is full").toMatchObject({ ok: false });
         expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: true });
+      });
+    });
+
+    // ------------------------------------------------ governed config (#414)
+    describe("writeConfig", () => {
+      const governance = { approvedBy: "u_jesse", approverMemberId: "m_creator", approverLabel: "jesse", via: "dash_session" as const, at: "2026-11-01T00:00:00.000Z" };
+      const write = (markdown: string, baseRev: number, over: Partial<ConfigWrite> = {}): ConfigWrite => ({
+        name: "room_instructions", body: { markdown }, sha256: `h_${markdown.length}`, bytes: markdown.length + 15,
+        baseRev, narrowing: markdown === "", governance, ...over,
+      });
+      const cfgRow = (sessionId: string): AuditEntry => ({
+        at: Date.now(), orgId: "org_codenerd", sessionId, actorUserId: "u_jesse", action: "config_write",
+        detail: { name: "room_instructions", rev: 1 },
+      });
+
+      it("writes revision 1, reads it back with server-written governance, and appends one body-free event", async () => {
+        const s = session({ id: "qs_cfg_write" });
+        await store.createSession(s);
+        expect(await store.writeConfig(s.id, write("Be terse.", 0), [cfgRow(s.id)])).toEqual({ ok: true, rev: 1 });
+        const row = await store.getConfigRow(s.id, "room_instructions");
+        expect(row).toMatchObject({
+          name: "room_instructions", rev: 1, body: { markdown: "Be terse." }, sha256: "h_9", bytes: 24, changedBy: "m_creator",
+          governance: { ...governance, atRev: 1 },
+        });
+        const events = (await store.eventsAfter(s.id, 0)).filter((e) => e.type === "config_changed");
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ fromMemberId: "system", payload: { name: "room_instructions", rev: 1, by: "m_creator" } });
+        expect(Object.keys(events[0].payload as object).sort()).toEqual(["by", "name", "rev"]);
+        expect((await store.getSession(s.id))!.configRevs).toEqual({ room_instructions: 1 });
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id && a.action === "config_write")).toHaveLength(1);
+      });
+
+      it("refuses a stale base_rev with the current revision, and writes nothing", async () => {
+        const s = session({ id: "qs_cfg_stale" });
+        await store.createSession(s);
+        await store.writeConfig(s.id, write("first", 0), []);
+        const before = await store.eventsAfter(s.id, 0);
+        expect(await store.writeConfig(s.id, write("second", 0), [cfgRow(s.id)])).toEqual({ ok: false, reason: "stale", currentRev: 1 });
+        expect((await store.getConfigRow(s.id, "room_instructions"))?.body).toEqual({ markdown: "first" });
+        expect(await store.eventsAfter(s.id, 0)).toEqual(before);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([]);
+      });
+
+      it("keeps the last 20 revisions, newest first", async () => {
+        const s = session({ id: "qs_cfg_history" });
+        await store.createSession(s);
+        for (let rev = 0; rev < 21; rev++) expect(await store.writeConfig(s.id, write(`v${rev + 1}`, rev), [])).toEqual({ ok: true, rev: rev + 1 });
+        const history = await store.configHistory(s.id, "room_instructions");
+        expect(history.map((r) => r.rev)).toEqual(Array.from({ length: 20 }, (_, i) => 21 - i));
+      });
+
+      it("refuses a widening write past the reserve and accepts a narrowing one", async () => {
+        const s = session({ id: "qs_cfg_reserve" });
+        await store.createSession(s);
+        expect(await store.writeConfig(s.id, write("x", 0, { bytes: 65_536 }), [])).toEqual({ ok: true, rev: 1 });
+        expect(await store.writeConfig(s.id, write("y", 1, { bytes: 65_537 }), [])).toEqual({ ok: false, reason: "over_reserve" });
+        expect(await store.writeConfig(s.id, write("", 1, { bytes: 65_537 }), [])).toEqual({ ok: true, rev: 2 });
+      });
+
+      it("refuses a closed room and a missing one", async () => {
+        const s = session({ id: "qs_cfg_closed" });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        expect(await store.writeConfig(s.id, write("x", 0), [])).toEqual({ ok: false, reason: "closed" });
+        expect(await store.writeConfig("qs_nobody", write("x", 0), [])).toEqual({ ok: false, reason: "not_found" });
+        expect(await store.getConfigRow(s.id, "room_instructions")).toBeNull();
+      });
+
+      it("changes the config and nothing else in the room", async () => {
+        const s = session({ id: "qs_cfg_only" });
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!;
+        await store.writeConfig(s.id, write("Be terse.", 0), []);
+        const after = (await store.getSession(s.id))!;
+        expect(after.manifest).toEqual(before.manifest);
+        expect(after.members).toEqual(before.members);
       });
     });
 

@@ -600,6 +600,11 @@ in real workerd, with real Durable Objects. That second program exists because
 root test can load those classes over a stub and a fake storage
 (`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 
+**Governed config (ADR 0044, #414)** is the one part of a room a person changes inside its fixed manifest:
+`cfg:<name>` rows in `SessionDO`, the last 20 revisions as `cfgh:<name>:<rev>`, and `configRevs`/`configBytes` on
+the record. `writeConfig` writes the row, its history, a `config_changed` event and its audit rows in one
+transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/store.ts<br/>every method async"]
@@ -611,12 +616,16 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>decision deadlines,<br/>sweep and purge, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>governed config rows,<br/>bans, one alarm for abandonment,<br/>decision deadlines,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms, org-rooms and<br/>every-room indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
+        CDO["CostDO — singleton<br/>the room cost capture's records:<br/>rooms, plans by day, blob levels,<br/>runs (SQL tables)"]
     end
+
+    CRON["daily cron<br/>runCostJob, src/cost/job.ts"] --> CDO
+    CRON -.->|"listRoomsPage, grants, orgs"| RDO
 
     SDO -.->|"outbox: host wakes"| HDO
 
@@ -665,6 +674,16 @@ Why the split is shaped that way:
   room's object must never wait on one: the room stays a record of events, and
   the seat that calls the model is an object of its own, keyed by the room's
   session id. See [the hosted seat](#the-hosted-seat).
+- **`CostDO` is a singleton** (`idFromName("cost")`) holding what the room cost capture records (#473): each
+  room it has seen with its object ids, kept after a purge; who held which plan each day, raw (`planOf` with
+  `raw: true`, so `honourPurchases` and an org's standing are applied when the cost page is read); each room's
+  blob bytes each day, from a listing of the bucket; and one row per run. Its rows are SQL tables
+  (`src/cost/records.ts`). A daily cron (`[triggers]` in `wrangler.toml`, the Worker's `scheduled` export) is
+  the only writer, so none of this load lands on `RegistryDO`, which every join and sign-in waits on. The run
+  wakes no room. It does read the registry: the room index through `listRoomsPage` only, one capped grant list,
+  each org, and up to four calls per creator, and those reads delete a lapsed grant when they meet one, as every
+  sign-in does. Cloudflare's per-object usage, read with `CF_ANALYTICS_TOKEN`, a read-only Account Analytics
+  token held as a Worker secret, is the capture's next step; without the token a run records the rest.
 
 ### Presence is derived, membership is stored
 
@@ -1697,6 +1716,14 @@ loud:
 
 **A client can read the MCP server before it connects.** The Worker serves Bellman's MCP Server Card (SEP-2127, `src/server-card.ts`) at `GET /mcp/server-card`, where the spec reserves it: the streamable HTTP URL plus `/server-card`, as `application/mcp-server-card+json` with open CORS and an ETag. It names the server, its version (`SERVER_VERSION`, the one `serverInfo` reports) and its one remote with the protocol versions the SDK accepts. It lists no tools, because what a caller is shown depends on who signs in. Like Bellman's own agent card, the Node server does not serve it.
 
+**Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
+instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token
+is refused even on a seat that holds `govern`), the request's Origin checked, and the caller's own seat holding
+`govern`. The server, not the body, writes who approved a revision. Every joining agent is handed
+`room_instructions` by `bellman_connect` and `bellman_confirm`, inside the untrusted envelope with the approving seat
+as origin and never the approver's user id: a person wrote it, but to an agent it is still another member's text, and
+it grants nothing.
+
 ## 8. Where this is going
 
 The roadmap groups into five tracks. Each is architecture rather than features.
@@ -1771,7 +1798,7 @@ a member, sensitive values readable by membership — has something to be built 
 
 **A Durable Object's input gate covers one invocation. Nothing spans two.**
 
-Bellman's state is deliberately split across five object types, so any
+Bellman's state is deliberately split across six object types, so any
 operation touching two of them has a window in the middle. That window produced
 three filed bugs, and they were two different problems:
 
@@ -2355,9 +2382,9 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,340** | every request, whether or not you are in a room |
+| Tool definitions | **~10,424** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
-| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
+| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~345 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~819 | every request, as every tool is; inside the total above |
@@ -2366,7 +2393,8 @@ treat these as plus or minus ten percent:
 **Ceiling: 11,840.** The tool listing may not pass 11,840 tokens, measured by the method below: the 10,340 that
 main (`5d4ddb48`) measured after the concise rewrite, plus 1,500 for the tracks still to land (the data layer,
 the retriever, the judge and governed config, #416). A change that grows the listing adds a row to the budget
-below with its measured delta. Raising the ceiling is a decision recorded here, not a side effect of a merge.
+below with its measured delta; `tests/tool-budget.test.ts` fails until it does. Raising the ceiling is a
+decision recorded here, not a side effect of a merge.
 
 | Change | Delta | Total | Where |
 |---|---|---|---|
@@ -2377,6 +2405,7 @@ below with its measured delta. Raising the ceiling is a decision recorded here, 
 | Surface `widget` kind and `{ items }` batch (`bellman_send`) | +127 | 11,225 | #480 (ADR 0043) |
 | `bellman_decide` (485), a decision vote in `bellman_send` and `bellman_sync` | +578 | 11,803 | #482 (#405) |
 | Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
+| `govern` verb (`bellman_start`); `room_instructions` in `bellman_connect`/`bellman_confirm`, `room_instructions_rev` and a changed text in `bellman_sync` | +84 | 10,424 | #512 (#414) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the
@@ -2663,7 +2692,9 @@ The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as
 `tests/helpers/harness.ts` does; then for each entry count
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
-leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
+leaves non-ASCII `\u`-escaped. `tests/tool-budget.test.ts` runs it in `npm test` with js-tiktoken's
+`cl100k_base`: it fails when the listing differs from the Tool definitions row, when that row is past the
+ceiling, or when the budget table does not add up. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
 `77396879` it gives 4,962, the figure recorded after #111, on `c9789ae`
 6,008, the figure recorded after #129, and on `f79b599` 6,499, the figure

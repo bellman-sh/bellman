@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import {
-  BlobLengthError, OCTET_STREAM, blobKey, exactLength,
+  BlobLengthError, OCTET_STREAM, blobKey, exactLength, roomOfBlobKey,
   type BlobMeta, type BlobPut, type BlobRead, type BlobStore,
 } from "./blobs.js";
 
@@ -102,6 +102,22 @@ export class R2BlobStore implements BlobStore {
     do {
       const page = await this.bucket.list({ prefix, cursor, limit: 1000 });
       for (const o of page.objects) out.push({ id: o.key.slice(prefix.length), bytes: o.size });
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    return out;
+  }
+
+  // ponytail: one list call per 1,000 objects in the whole bucket, each a subrequest of the cost job's invocation.
+  // Fine at today's few hundred blobs; past roughly 100,000 the listing needs a run of its own.
+  async bytesByRoom(): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    let cursor: string | undefined;
+    do {
+      const page = await this.bucket.list({ prefix: "rooms/", cursor, limit: 1000 });
+      for (const o of page.objects) {
+        const room = roomOfBlobKey(o.key);
+        if (room !== null) out.set(room, (out.get(room) ?? 0) + o.size);
+      }
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);
     return out;

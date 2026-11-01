@@ -13,10 +13,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import type { HostAppend } from "./store.js";
-import { keyedPlan } from "./auth.js";
 import { billingSettings, type BillingEnv } from "./billing/config.js";
 import { parseOverrides } from "./oauth/providers.js";
-import { signedInPlan } from "./oauth/routes.js";
+import { planOf } from "./oauth/routes.js";
 import { answerQuestion } from "./outside.js";
 
 /** What the seat reads beyond the room's own bindings: what resolving a room creator's plan needs (I7). */
@@ -71,13 +70,12 @@ export class HostDO extends DurableObject<HostEnv> {
     // As the Worker resolves a caller (`resolveCaller`): the key map when one is set and names
     // them, never the dev keys; else what their next token refresh would carry; else free.
     plan: async (userId) =>
-      (this.env.BELLMAN_KEYS ? keyedPlan(userId, this.env.BELLMAN_KEYS) : null) ??
-      (await signedInPlan(userId, {
+      (await planOf(userId, {
+        keys: this.env.BELLMAN_KEYS,
         overrides: parseOverrides(this.env.BELLMAN_USERS),
         plans: new DurableObjectStore(this.env),
         honourPurchases: billingSettings(this.env).applyPlans,
-      })) ??
-      "free",
+      })).plan,
     renew: async (sessionId, month, units) => { await this.#room(sessionId).renewHostAllowance(month, units); },
     // Through the store the tools use, so the seat's answer is decided and written as a member's is.
     answer: (sessionId, refId, text, units, now) =>

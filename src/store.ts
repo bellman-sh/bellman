@@ -2,8 +2,10 @@ import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, PresetName, SessionMode,
+  ConfigGovernance, ConfigName, ConfigRow,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
+import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -1178,6 +1180,54 @@ export type HostInstructionsSet =
   | { ok: true; instructions: string | null }
   | { ok: false; reason: "not_found" | "no_host" | "closed" };
 
+/** A governed config write (#414), validated and hashed by the caller; the store adds the revision. */
+export interface ConfigWrite {
+  name: ConfigName;
+  body: unknown;
+  sha256: string;
+  bytes: number;
+  /** The revision the writer read: 0 when creating. */
+  baseRev: number;
+  /** Narrowing writes are accepted past the room's config reserve. */
+  narrowing: boolean;
+  governance: Omit<ConfigGovernance, "atRev">;
+}
+
+/** What `writeConfig` answered. */
+export type ConfigWriteResult =
+  | { ok: true; rev: number }
+  | { ok: false; reason: "not_found" | "closed" | "over_reserve" }
+  | { ok: false; reason: "stale"; currentRev: number };
+
+/**
+ * The shared rules of a config write, decided before anything is written, so both stores refuse alike: `stale`
+ * when `baseRev` is not the current revision, then `over_reserve` when a widening write would take the room's
+ * config bytes past the reserve. Returns the row to write and the record's new numbers.
+ */
+export function decideConfigWrite(
+  s: Pick<Session, "configRevs" | "configBytes">,
+  prev: ConfigRow | null,
+  w: ConfigWrite,
+  at: string,
+): { ok: false; result: ConfigWriteResult } | { ok: true; row: ConfigRow; configRevs: Partial<Record<ConfigName, number>>; configBytes: number } {
+  const current = s.configRevs?.[w.name] ?? 0;
+  if (w.baseRev !== current) return { ok: false, result: { ok: false, reason: "stale", currentRev: current } };
+  const configBytes = (s.configBytes ?? 0) - (prev?.bytes ?? 0) + w.bytes;
+  if (!w.narrowing && configBytes > CONFIG_RESERVE_BYTES) return { ok: false, result: { ok: false, reason: "over_reserve" } };
+  const rev = current + 1;
+  const row: ConfigRow = {
+    name: w.name, rev, body: w.body, sha256: w.sha256, bytes: w.bytes,
+    governance: { ...w.governance, atRev: rev }, changedBy: w.governance.approverMemberId, changedAt: at,
+  };
+  return { ok: true, row, configRevs: { ...s.configRevs, [w.name]: rev }, configBytes };
+}
+
+/** The `config_changed` event a write appends: the name, the revision and the approving seat, never the body. */
+export const configEvent = (row: ConfigRow): Omit<SessionEvent, "cursor" | "at"> => ({
+  type: "config_changed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+  payload: { name: row.name, rev: row.rev, by: row.changedBy }, refId: null,
+});
+
 /**
  * The meter's decision (hosted seat spec, D3), shared by both stores so they
  * cannot charge differently. Returns the refusal, or the units record to write.
@@ -2195,6 +2245,21 @@ export interface BellmanStore {
    */
   setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet>;
 
+  /**
+   * Governed config (#414). Read `getGovernedConfig` (src/config.ts), never these rows: it is the one reader, and it
+   * reads a missing, invalid or unapproved row as the most restrictive value.
+   */
+  getConfigRow(sessionId: string, name: ConfigName): Promise<ConfigRow | null>;
+  /** The kept revisions of `name`, newest first, at most `CONFIG_HISTORY`. */
+  configHistory(sessionId: string, name: ConfigName): Promise<ConfigRow[]>;
+  /**
+   * Write one config revision: `decideConfigWrite`'s checks, the `cfg:` row, its `cfgh:` history row (history past
+   * `CONFIG_HISTORY` deleted), `configRevs`/`configBytes` on the record, a `config_changed` event and `audit`, in one
+   * transaction. Refused, nothing is written: a missing room, a closed room, a stale `baseRev`, a widening write
+   * past the reserve. A frozen room is refused before the store by `gateSeat`.
+   */
+  writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult>;
+
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
 
@@ -2588,6 +2653,8 @@ export class MemoryStore implements BellmanStore {
    * the members in the room now, and the member reads reach the rest.
    */
   private sessions = new Map<string, Session>();
+  /** Governed config (#414): room → name → revisions, newest first, at most CONFIG_HISTORY. */
+  private configs = new Map<string, Map<ConfigName, ConfigRow[]>>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3496,6 +3563,33 @@ export class MemoryStore implements BellmanStore {
       this.recordAudit([...audit]);
     }
     return { ok: true, instructions };
+  }
+
+  async getConfigRow(sessionId: string, name: ConfigName): Promise<ConfigRow | null> {
+    const row = this.configs.get(sessionId)?.get(name)?.[0];
+    return row === undefined ? null : detach(row);
+  }
+
+  async configHistory(sessionId: string, name: ConfigName): Promise<ConfigRow[]> {
+    return detach(this.configs.get(sessionId)?.get(name) ?? []);
+  }
+
+  async writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found" };
+    if (s.closed) return { ok: false, reason: "closed" };
+    // No await from the read to the write, as setHostInstructions.
+    const room = this.configs.get(sessionId) ?? new Map<ConfigName, ConfigRow[]>();
+    const kept = room.get(w.name) ?? [];
+    const decided = decideConfigWrite(s, kept[0] ?? null, detach(w), new Date().toISOString());
+    if (!decided.ok) return decided.result;
+    room.set(w.name, [decided.row, ...kept].slice(0, CONFIG_HISTORY));
+    this.configs.set(sessionId, room);
+    s.configRevs = decided.configRevs;
+    s.configBytes = decided.configBytes;
+    this.appendNow(s, configEvent(decided.row));
+    this.recordAudit([...audit]);
+    return { ok: true, rev: decided.row.rev };
   }
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
@@ -5195,6 +5289,7 @@ export class MemoryStore implements BellmanStore {
     this.roomBanned.delete(s.id);
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);
+    this.configs.delete(s.id);
     this.outsideTasks.delete(s.id);
     this.outsideCallerRows.delete(s.id);
     this.outsideVisitors.delete(s.id);

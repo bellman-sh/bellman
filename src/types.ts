@@ -138,7 +138,9 @@ export type EventType =
   | "decision_opened"
   | "decision_vote"
   | "decision_closed"
-  | "decision_voter_removed";
+  | "decision_voter_removed"
+  /** A governed config name changed (#414): `{ name, rev, by }`, never the body. Written by the server. */
+  | "config_changed";
 
 /**
  * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
@@ -275,6 +277,13 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /**
+   * Each governed config name's current revision (#414), moved in the same write as its `cfg:` row, so a poll reports
+   * `room_instructions_rev` off the record it already read. Absent until the first write; readers use `?? {}`.
+   */
+  configRevs?: Partial<Record<ConfigName, number>>;
+  /** Bytes of every current config body together, held under `CONFIG_RESERVE_BYTES`. Absent reads as 0. */
+  configBytes?: number;
   /**
    * Units the hosted seat may spend this calendar month: the creator's plan's
    * `hostUnitsPerRoom`, stamped at creation and read from the creator's plan again at each
@@ -652,7 +661,8 @@ export type Verb =
   | "respond_actions"
   | "write_surface"
   | "answer"
-  | "vote";
+  | "vote"
+  | "govern";
 
 /**
  * What a passed decision may do (ADR 0040, decision 10), as a manifest's `decide` and a role's `veto` name it.
@@ -922,4 +932,36 @@ export interface SurfaceRow extends SurfaceItem {
    * words that write replaced.
    */
   approvedBy?: ApprovedBy;
+}
+
+/**
+ * Governed room config (#414): room settings a human with `govern` changes in a dash session, inside the manifest
+ * it never writes. `src/config.ts` holds the closed set of names, and `getGovernedConfig` is their only reader.
+ */
+export type ConfigName = "room_instructions";
+
+/** Who approved a config revision. Always written by the server; a body that carries it is refused. */
+export interface ConfigGovernance {
+  /** The approver's user id. Kept server-side: deliveries show `approverMemberId` and `approverLabel` instead. */
+  approvedBy: string;
+  approverMemberId: string;
+  approverLabel: string;
+  via: "dash_session";
+  atRev: number;
+  at: string;
+}
+
+/** A `cfg:<name>` row, and each `cfgh:<name>:<rev>` history row (the last 20 revisions). */
+export interface ConfigRow {
+  name: ConfigName;
+  rev: number;
+  body: unknown;
+  /** sha256 hex of the canonical body. */
+  sha256: string;
+  /** UTF-8 bytes of the canonical body, charged against the room's 64 KiB config reserve. */
+  bytes: number;
+  governance: ConfigGovernance;
+  /** The approving seat's member id. */
+  changedBy: string;
+  changedAt: string;
 }

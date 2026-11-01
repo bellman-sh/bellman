@@ -78,6 +78,18 @@ const BRIEF_READS: Listing = {
   "src/tools/confirm.ts": { calls: 1, serves: "the briefs a joiner is handed: peers who grant read_context, and the joiner's account's other handles" },
 };
 
+/** Each reader of a governed config row (#414). Everything else goes through getGovernedConfig. */
+const CONFIG_READS: Listing = {
+  "src/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
+  "src/config.ts": { calls: 1, serves: "getGovernedConfig, the one reader: a missing, invalid or unapproved row reads as the most restrictive value" },
+};
+
+describe("the one reader of governed config (#414)", () => {
+  it("lists every module that reads a cfg: row, and how many times", () => {
+    expect(callsIn(/\.getConfigRow\(/)).toEqual(pinned(CONFIG_READS));
+  });
+});
+
 describe("the paths a brief can leave by (read_context spec, section 3)", () => {
   it("lists every module that calls publicEvent, and how many times", () => {
     expect(callsIn(/\bpublicEvent\(/)).toEqual(pinned(PUBLIC_EVENT));

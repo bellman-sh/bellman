@@ -13,7 +13,7 @@ const swarm = resolveManifest({ room: "r", preset: "swarm" });
 describe("verbsOfRole", () => {
   it("returns the verbs a defined role holds", () => {
     expect(verbsOfRole(swarm, "lead")).toEqual([
-      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern",
     ]);
   });
 

@@ -75,6 +75,8 @@ export const ATTENTION = {
   decision_voter_removed: "interrupt",
   /** A vote does not: a member who cares is watching the decision, and every vote mid-turn in a swarm is noise. */
   decision_vote: "ambient",
+  /** A settings change is read when the agent next needs it; `bellman_sync` carries the revision (#414). */
+  config_changed: "ambient",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

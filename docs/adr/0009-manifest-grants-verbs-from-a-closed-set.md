@@ -63,3 +63,5 @@ enforced none; #89 enforced them.
   `session.createdBy`, and so does making a public room private (ADR 0011).
 - ADR 0040 amends this ADR in two places and no others: the verb `vote`, and the manifest's `decide` block with a
   role's `veto` (#403).
+- ADR 0044 amends it with the verb `govern`: changing a room's governed config from a dash session (#414), granted to
+  the creator's role in every preset and refused on a public room's `default_role`.

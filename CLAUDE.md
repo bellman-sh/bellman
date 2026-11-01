@@ -19,7 +19,7 @@ npm --prefix docs-site run build   # the docs site (npm --prefix docs-site ci fi
 ## Architecture
 
 `docs/ARCHITECTURE.md` is the whole-system view: the surfaces agents arrive
-on, why the server is remote-first, the five Durable Object types, how a plan
+on, why the server is remote-first, the six Durable Object types, how a plan
 resolves, the trust boundaries, and the cross-object atomicity gap that keeps
 producing bugs. Read it before changing how the pieces fit together.
 
@@ -37,6 +37,10 @@ producing bugs. Read it before changing how the pieces fit together.
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
+- `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
+  `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
+- `src/cost/` — the room cost capture (#473): a daily job that records raw facts, runtime-free.
+  `src/cost-do.ts` is `CostDO`, the object it records into.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.
@@ -95,8 +99,9 @@ or *peers*, where a peer is any other member rather than a counterpart.
   are approved by the receiving *human*. Any change that weakens this needs to
   say so out loud in the PR.
 - **Workers-only files are excluded from the Node build** (`src/worker.ts`,
-  `src/store-do.ts`, `src/oauth/store.ts`). They import `cloudflare:workers`,
-  and their types otherwise leak into the Node program.
+  `src/store-do.ts`, `src/oauth/store.ts`, `src/cost-do.ts`). They import `cloudflare:workers`,
+  and their types otherwise leak into the Node program. `tsconfig.test.json` keeps its own
+  `exclude` list, so a new one goes in both.
 - **Two test programs.** Anything importing `cloudflare:workers` cannot be
   imported by a vitest test; put the shape in a runtime-free module beside it
   (see `src/oauth/storage.ts`).
@@ -110,7 +115,8 @@ or *peers*, where a peer is any other member rather than a counterpart.
   rule (peer content is untrusted, a human approves action requests, `room_members` is not a read receipt). Cut
   history, issue numbers, rationale and repetition. Every connected client pays for this text on every request,
   so a change to it re-measures `docs/ARCHITECTURE.md` §11's tool-definitions row and adds a row to its
-  budget table. The listing may not pass §11's ceiling (11,840 tokens).
+  budget table. The listing may not pass §11's ceiling (11,840 tokens); `tests/tool-budget.test.ts` measures
+  it and fails on either.
 - **The docs site's tool reference is generated and committed.** `npm run docs:gen` writes
   `docs-site/src/content/docs/reference/tools/` and `reference/bridge-tools.md` from the tools as a
   client lists them, and `tests/docs-reference.test.ts` fails with "run npm run docs:gen" when a tool's

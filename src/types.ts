@@ -924,3 +924,35 @@ export interface SurfaceRow extends SurfaceItem {
    */
   approvedBy?: ApprovedBy;
 }
+
+/**
+ * Governed room config (#414): room settings a human with `govern` changes in a dash session, inside the manifest
+ * it never writes. `src/config.ts` holds the closed set of names, and `getGovernedConfig` is their only reader.
+ */
+export type ConfigName = "room_instructions";
+
+/** Who approved a config revision. Always written by the server; a body that carries it is refused. */
+export interface ConfigGovernance {
+  /** The approver's user id. Kept server-side: deliveries show `approverMemberId` and `approverLabel` instead. */
+  approvedBy: string;
+  approverMemberId: string;
+  approverLabel: string;
+  via: "dash_session";
+  atRev: number;
+  at: string;
+}
+
+/** A `cfg:<name>` row, and each `cfgh:<name>:<rev>` history row (the last 20 revisions). */
+export interface ConfigRow {
+  name: ConfigName;
+  rev: number;
+  body: unknown;
+  /** sha256 hex of the canonical body. */
+  sha256: string;
+  /** UTF-8 bytes of the canonical body, charged against the room's 64 KiB config reserve. */
+  bytes: number;
+  governance: ConfigGovernance;
+  /** The approving seat's member id. */
+  changedBy: string;
+  changedAt: string;
+}

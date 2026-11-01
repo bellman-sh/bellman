@@ -1,4 +1,4 @@
-import { ENTITLEMENTS, entitlementsFor } from "../auth.js";
+import { ENTITLEMENTS, entitlementsFor, keyedPlan } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
 import { handleFromSegment } from "../handles.js";
 import { operatorReportView } from "../reports.js";
@@ -318,7 +318,7 @@ export async function replanOnRefresh(
   stored: Identity,
   keys: string[],
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
-): Promise<{ identity: Identity; source: PlanSource; key: string | null }> {
+): Promise<{ identity: Identity; source: PlanSource; key: string | null; grant?: PlanGrant }> {
   const base: Identity = { ...stored, plan: "free", role: "member", orgId: null };
   // The subject and nothing else. These keys were written down at sign-in and
   // any of the others may have been reassigned since — an address handed to a
@@ -352,7 +352,8 @@ export async function replanOnRefresh(
     const identity: Identity = { ...base, plan: grant.plan, role: grant.role, orgId: grant.orgId };
     // The stored keys, addresses included, for the domain half of the check: a stale address refuses, which is the closed direction.
     await refuseUnlessSso(config.plans, identity, keys);
-    return { identity, source: "grant", key: match.key };
+    // `grant` is the record as stored, before the org's standing: the cost capture reads it raw (`planOf`).
+    return { identity, source: "grant", key: match.key, grant: match.stored };
   }
   await refuseUnlessSso(config.plans, base, keys);
   return { identity: base, source: "default", key: null };
@@ -381,6 +382,53 @@ export async function signedInPlan(
   }
 }
 
+/** Which plan a user holds and what decided it: the key table, an override, a stored grant, or nothing. */
+export type PlanOf = {
+  plan: Plan;
+  via: "keyed" | "override" | "grant" | "default";
+  /** The deciding grant's `source` and `orgId`, set only when `via` is "grant". */
+  grantSource: string | null;
+  grantOrgId: string | null;
+};
+
+export type PlanOfDeps = Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases"> & {
+  /** BELLMAN_KEYS as the Worker holds it. Unset, the key table is skipped, never the dev keys read. */
+  keys?: string;
+};
+
+const NO_PLAN: PlanOf = { plan: "free", via: "default", grantSource: null, grantOrgId: null };
+
+/**
+ * A user's plan from their id alone, as the Worker resolves a caller: the key table when it names them, else what
+ * their next token refresh would carry (`replanOnRefresh`), else free. A hosted room's seat and the cost capture
+ * (#473) both read it.
+ *
+ * `raw` is the cost capture's: it applies neither `honourPurchases` nor the org's standing, and answers the deciding
+ * grant's own plan, so the cost page decides both when it is read and a corrected rule reprices every past day.
+ */
+export async function planOf(userId: string, deps: PlanOfDeps, opts: { raw?: boolean } = {}): Promise<PlanOf> {
+  const keyed = deps.keys ? keyedPlan(userId, deps.keys) : null;
+  if (keyed) return { plan: keyed, via: "keyed", grantSource: null, grantOrgId: null };
+  const subject = /^u_(github|google)_(\d+)$/.exec(userId);
+  const key = subject ? `${subject[1]}:${subject[2]}` : ssoKeyForUser(userId);
+  if (!key) return NO_PLAN;
+  const stored: Identity = { userId, orgId: null, plan: "free", role: "member", label: "" };
+  try {
+    const found = await replanOnRefresh(stored, [key], opts.raw ? { ...deps, honourPurchases: true } : deps);
+    if (found.source === "operator") return { plan: found.identity.plan, via: "override", grantSource: null, grantOrgId: null };
+    if (found.source === "grant" && found.grant) {
+      return {
+        plan: opts.raw ? found.grant.plan : found.identity.plan,
+        via: "grant", grantSource: found.grant.source, grantOrgId: found.grant.orgId,
+      };
+    }
+    return NO_PLAN;
+  } catch (err) {
+    if (err instanceof SignInRefused) return NO_PLAN;
+    throw err;
+  }
+}
+
 /**
  * The grant for the most specific key that has one.
  *
@@ -397,7 +445,7 @@ async function firstGrant(
   plans: PlanStore,
   keys: string[],
   honourPurchases: boolean
-): Promise<{ grant: PlanGrant; key: string } | undefined> {
+): Promise<{ grant: PlanGrant; stored: PlanGrant; key: string } | undefined> {
   const stable = grantKeys(keys);
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
@@ -410,7 +458,7 @@ async function firstGrant(
     // The org's standing is applied here and nowhere else (orgs spec, D5): sign-in, a token
     // refresh, a panel session's re-check and a hosted room's month turn all come through
     // this function, so a lapse reaches each of them as a revocation does.
-    return { grant: standingOf(grant, org), key: stable[i] };
+    return { grant: standingOf(grant, org), stored: grant, key: stable[i] };
   }
   return undefined;
 }

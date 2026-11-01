@@ -20,6 +20,7 @@
     "src/host-do.ts",
     "src/oauth/store.ts",
     "src/blobs-r2.ts",
+    "src/cost-do.ts",
     "tests/store-do-wiring.test.ts",
     "tests/worker-ws.test.ts",
     "tests/hosted-seat-wiring.test.ts"

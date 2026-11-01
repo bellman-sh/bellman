@@ -175,6 +175,14 @@ export interface BlobStore {
   list(sessionId: string): Promise<{ id: string; bytes: number }[]>;
   /** Delete every object under this room's prefix; the count removed. Idempotent. */
   deleteAll(sessionId: string): Promise<number>;
+  /** Bytes held per room, across every room: the cost capture's daily level (#473). Rooms holding nothing are absent. */
+  bytesByRoom(): Promise<Map<string, number>>;
+}
+
+/** The room a blob key belongs to, or null for a key outside `rooms/`. */
+export function roomOfBlobKey(key: string): string | null {
+  const m = /^rooms\/([^/]+)\//.exec(key);
+  return m ? m[1] : null;
 }
 
 /** A body whose length is not the one declared. The route answers 400 from it. */
@@ -335,6 +343,15 @@ export class MemoryBlobStore implements BlobStore {
     return [...this.objects]
       .filter(([key]) => key.startsWith(prefix))
       .map(([key, object]) => ({ id: key.slice(prefix.length), bytes: object.meta.bytes }));
+  }
+
+  async bytesByRoom(): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    for (const [key, object] of this.objects) {
+      const room = roomOfBlobKey(key);
+      if (room !== null) out.set(room, (out.get(room) ?? 0) + object.meta.bytes);
+    }
+    return out;
   }
 
   async deleteAll(sessionId: string): Promise<number> {

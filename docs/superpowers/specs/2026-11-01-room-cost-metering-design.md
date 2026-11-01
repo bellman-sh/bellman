@@ -2,653 +2,861 @@
 
 *   **Author:** mcfearsome
 *   **Status:** Proposed
-*   **Date:** 2026-11-01
+*   **Date:** 2026-11-01 (revised after the EGM review the same day)
 
 --------------------------------------------------------------------------------
 
 ## Overview
 
 The operator needs to know what each room costs to run and what each plan earns, so plan prices can be set from
-evidence. This design computes, once a day, two monthly figures:
+evidence. Once a day, a scheduled job records raw facts in a new Durable Object, `CostDO`:
 
-*   **Each room's cost** at published Cloudflare and Anthropic rates, broken down by cost driver.
-*   **Each plan's margin**: the plan's list-price revenue for the month minus the cost of every room its accounts
-    created.
+*   each room's Durable Object usage for the current and previous month, as Cloudflare measured it per object;
+*   each room's R2 blob bytes, from a listing of the blob bucket;
+*   who held which plan that day: each room creator's plan, each org's seats and standing, and a count of individual
+    purchase grants.
 
-Cloudflare already measures most of a room's usage per Durable Object and keeps it for 90 days. A daily job reads
-those figures, maps each object back to its room, and writes the month's totals into the registry, where they are
-kept after Cloudflare's data expires and after the room is deleted. Bellman adds its own measurement only for the
-drivers Cloudflare does not report per object.
+Nothing is priced or classified when it is written. When the operator reads the cost page, a runtime-free module
+applies #475's list prices and the rules below and returns two monthly figures:
 
-This is part of epic #477 (operator rooms list and room cost). It supplies the numbers that `GET /operator/rooms`
-(#472) and the dash's rooms page (bellman-sh/dash#94) display, priced by #475's cost function.
+*   **each room's cost**, by driver;
+*   **each plan's margin**: the plan's list-price revenue, prorated by the days accounts held it, minus the cost of
+    the rooms charged to it.
+
+This is part of epic [#477](https://github.com/bellman-sh/bellman/issues/477). It supplies the numbers that the
+operator rooms routes ([#472](https://github.com/bellman-sh/bellman/issues/472)) and the dash's rooms page
+(bellman-sh/dash#94) display, priced by [#475](https://github.com/bellman-sh/bellman/issues/475)'s cost function.
 
 ## The Problem
 
 Bellman cannot tell what any room costs, or whether any plan earns more than its users cost.
 
 *   **Cloudflare bills the account, not the room.** The invoice shows one total per product. A room held resident by
-    one member's long poll all month costs about $4 in Durable Object duration (ADR 0005), and a hosted seat's model
-    tokens likely cost more, but nothing shows which rooms those are or which plans they belong to.
-*   **Cloudflare's per-object data expires.** Its GraphQL Analytics reports duration, active time, requests, rows
-    read and written, and WebSocket messages for each Durable Object, but keeps them for 90 days. A pricing decision
-    that compares a plan's cost across a year needs the figures copied somewhere that keeps them.
-*   **Revenue history is not kept.** `BillingLedger` (`src/billing/ledger.ts`) holds each customer's current
-    subscription state only. An upgrade, cancellation or lapse overwrites the previous state, so last month's
-    revenue for a plan cannot be rebuilt. Every month that passes without a snapshot is lost for good.
+    one member's long poll all month costs about $4 in Durable Object duration
+    ([ADR 0005](../../adr/0005-watch-and-delivery-paths.md)), but nothing shows which rooms those are or which plans
+    they belong to.
+*   **Cloudflare's per-object data expires after 90 days.** Its GraphQL Analytics reports duration, requests and rows
+    for each Durable Object, but a year of pricing history needs those figures copied somewhere that keeps them.
+*   **Plan membership is not kept by day.** Grants and org records hold only their current state. Which accounts held
+    which plan last month, including comped operator grants, `BELLMAN_KEYS` accounts and `BELLMAN_USERS` overrides,
+    cannot be rebuilt once it changes. Paid revenue could be rebuilt from Stripe's invoices, but this design uses list
+    price (see Alternative B), so it needs the membership record.
 *   **Plans carry no price in the code.** `ENTITLEMENTS` and `ON_SALE` (`src/auth.ts`) name plans and Stripe lookup
-    keys. The prices themselves come from #475.
-
-The proposal: a daily job reads Cloudflare's per-object usage for the `SessionDO` and `HostDO` namespaces, rolls it
-into one row per room per month, and attributes each room to its creator's plan (or its org's plan). A separate
-snapshot records which plan each paying account held each month. Margin per plan is computed from the two when the
-operator reads it.
+    keys. Prices come from #475.
 
 ## Goals
 
-*   **Margin per plan, monthly.** For each plan and month: revenue (plan price times seats, from the plan-month
-    snapshot) minus the cost of the rooms created by that plan's accounts. A room with an `orgId` is charged to the
-    org's plan. A room whose creator held no paid plan that month falls on a free-plan line. Accounts with a plan
-    granted by an operator or a key, without payment, fall on a comped line: cost with no revenue.
-*   **Cost per room, monthly, by driver.** Durable Object duration, requests, rows read and written (SQL), storage
-    read and write units and deletes (the key-value API, which `SessionDO` uses), and incoming WebSocket messages for
-    the room's `SessionDO` and its `HostDO`, taken from Cloudflare per object; hosted-seat
-    model tokens, exact, from #474. Each driver is priced by #475's cost function when it is read, so a price change
-    reprices past months.
-*   **Figures that outlive their sources.** Room-month rows (`cm:`) and plan-month rows (`pm:`) are kept forever,
-    including after the room is purged.
-*   **The plan-month snapshot starts first.** It is the one input that is lost by waiting, so it ships ahead of
-    everything else.
-*   **Each number says where it came from.** Every driver is labeled Cloudflare-measured, Bellman-measured or
-    estimated, with the month it covers and the date of the price table.
-*   **Success check:** for each month, the sum of room costs plus the overhead line equals Cloudflare's namespace
-    totals at the same rates, and two runs of the daily job over the same month write identical rows.
+*   **Margin per plan, monthly.** For each plan and month: revenue prorated by plan-days, minus the cost of the rooms
+    charged to that plan. Free-plan, comped and unattributed rooms are their own lines.
+*   **Cost per room, monthly, by driver.** Requests, duration, rows read and rows written for the room's `SessionDO`
+    and its `HostDO`, as Cloudflare measured them per object, and the room's R2 blob bytes.
+*   **Figures that outlive their sources.** Usage and plan records are kept in `CostDO` after Cloudflare's 90 days
+    and after the room is purged.
+*   **Wrong rules are fixable.** Classification and pricing run at read time over raw records, so a corrected rule or
+    a new price table reprices every past month.
+*   **Each number names its source and price date.** Every driver carries one of three labels (`cloudflare`, `listing`
+    or `not_metered`) and the date of #475's price table.
+*   **Success check (can fail):** each month, the rooms' share of Cloudflare's `SessionDO` and `HostDO` namespace
+    totals is reported for duration and requests. A share below 95% means objects are going unmatched, and the page
+    says so.
 
 ## Non-Goals
 
-*   **Amount actually paid.** Revenue is the plan's list price. Coupons, annual discounts and refunds are not seen.
-*   **Measuring Durable Object usage inside the room.** No wrapper around storage calls, no residency timer, no
-    per-invocation data points. Cloudflare reports these drivers per object; Bellman reads them.
-*   **Workers Analytics Engine for this work.** With Cloudflare's per-object data available, #473 no longer depends on
-    #452.
-*   **Charging registry, auth, audit or Worker costs to rooms.** `RegistryDO`, `AuthDO`, `AuditDO` and the Worker's
-    own requests and CPU form one overhead line, computed as Cloudflare's account totals minus the sum of room costs.
-*   **Invite email as a room cost.** Invites are sent from an org, not a room (ADR 0036).
-*   **Waking rooms to measure them.** The job reads Cloudflare and the registry index; it never calls a room.
-*   **Real-time cost.** The figures are as fresh as the last daily run.
-*   **The dash page.** This work supplies the stored rows and the operator routes; bellman-sh/dash#94 draws them.
+*   **Amount actually paid.** Revenue is list price. Coupons, annual discounts and refunds are not seen.
+*   **Metering inside the room.** No storage wrapper, no residency timer, no room-side reports. Cloudflare and the R2
+    listing supply every per-room figure.
+*   **Workers Analytics Engine** ([#452](https://github.com/bellman-sh/bellman/issues/452)). Not needed for this work.
+*   **An overhead line.** Registry, auth and audit objects, the Worker's own requests and CPU, SQLite storage, R2
+    operations and Cloudflare's free allowances are read off the monthly invoice by hand, once a month if needed.
+*   **Hosted-seat model tokens.** [#474](https://github.com/bellman-sh/bellman/issues/474) adds them. Until then a
+    hosted room's cost carries `tokens: not_metered`.
+*   **Invite email as a room cost.** Invites are sent from an org, not a room
+    ([ADR 0036](../../adr/0036-invites-by-email.md)).
+*   **Waking rooms to measure them.** The job reads Cloudflare, R2, the registry and `CostDO`; it never calls a room.
+*   **Real-time cost.** Figures are as fresh as the last daily run.
+*   **The dash page.** This work supplies the routes; bellman-sh/dash#94 draws them.
 
 ## Open Questions
 
-*   **How does a Cloudflare row map to a room?** Both per-object datasets carry `objectId` and `name`. If `name` holds
-    the string passed to `idFromName` (the room id), the mapping needs no computation; otherwise check that
-    `objectId` equals `env.SESSION.idFromName(sessionId).toString()`. Test against one known room, for `SessionDO` and
-    for `HostDO` (keyed by the room id).
-*   **Which field is billed duration?** The periodic dataset has both `duration` and `activeTime`. Confirm the units of
-    each and which one Cloudflare's GB-s charge is computed from.
-*   **Are sums already corrected for sampling?** Both datasets expose `avg.sampleInterval` and confidence intervals.
-    Confirm whether `sum` values are sample-weighted before use.
-*   **Does the uncleared long-poll timer extend billed duration?** `waitForEvents` (`src/store-do.ts`) never clears its
-    `setTimeout`. Cloudflare's per-object `duration` before and after a fix will show it.
-*   **Do joiner-heavy plans look too profitable?** Under creator-pays, a paid account that only joins others' rooms
-    carries no cost. If per-plan margins look wrong, compare against a view weighted by `SessionEvent.fromUserId`.
+Step zero, run on 2026-11-01, was a manual GraphQL schema introspection of Bellman's Cloudflare account with an
+Account Analytics: Read token. It established which datasets report per object (`objectId`) and their limits: 32 days
+per query, 90 days of retention, 10,000 rows per page. These questions remain. The first must be answered before the
+usage capture ships; the rest only change how stored data is read.
+
+1.  **Paging and filters (before capture).** Do the per-object queries accept `filter: { objectId_gt }` with
+    `orderBy: [objectId_ASC]`, and what are the date filter field names (`datetime_geq` / `datetime_lt` or `date_geq`)?
+2.  **Object-to-room mapping.** Does a row's `name` hold the room id, or must the job match `objectId` against
+    `env.SESSION.idFromName(sessionId).toString()`? Check one known room, for `SessionDO` and `HostDO`.
+3.  **Billed duration.** Which of `sum.duration` and `sum.activeTime` is the GB-s charge computed from, and in what
+    unit? Cloudflare's Durable Objects pricing page should say.
+4.  **Sampling.** Are `sum` values already weighted for sampling, or must they be multiplied by `avg.sampleInterval`?
+5.  **Key-value meters on SQLite objects.** Are `storageReadUnits`, `storageWriteUnits` and `storageDeletes` non-zero
+    and billed for SQLite-backed classes, where key-value calls bill as rows?
+6.  **Requests and WebSocket messages.** Does `requests` already include WebSocket messages and alarms (the
+    invocations `type` dimension), which would double-count against `inboundWebsocketMsgCount`?
+7.  **Creator-pays and joiners.** Under creator-pays, a paid account that only joins other accounts' rooms carries no
+    cost. Compare each plan's margin with a view weighted by `SessionEvent.fromUserId`; a difference above 20% of
+    the plan's cost is the signal to revisit the rule.
 
 ## Critical User Journeys (CUJs)
 
 ### CUJ 1: The operator compares plan margins for last month
 
-*   **Given**: The daily job has run since the month ended, and the plan-month snapshot covered that month.
-*   **When**: The operator opens the cost summary on the dash for October 2026.
-*   **Then**: Each plan shows revenue, the cost of its accounts' rooms by driver, and margin, beside the free-plan,
-    comped and overhead lines, all labeled with their sources and the price table's date. The read is in the
+*   **Given**: The job has run every day of October 2026 and the first day of November.
+*   **When**: The operator opens the cost page for October.
+*   **Then**: Each plan shows prorated revenue, the cost of its rooms by driver, and margin, beside the free-plan and
+    comped lines, with each driver's source label, the price table's date and the coverage share. The read is in the
     operator audit stream.
 
-### CUJ 2: The operator investigates one costly room
+### CUJ 2: The operator finds the costliest rooms
 
-*   **Given**: A room sorts near the top of `/operator/rooms` by this month's cost.
-*   **When**: The operator opens the room's detail.
-*   **Then**: The detail shows the room's cost by driver and by month, the plan it is charged to, and when the job
-    last ran. No briefs, messages or surface content appear, and the read is audited.
+*   **Given**: The current month has usage recorded.
+*   **When**: The operator opens the cost page.
+*   **Then**: It lists the 20 rooms with the highest cost this month, each with its plan and cost by driver, and links
+    to that room's detail, which shows its cost by month. No briefs, messages or surface content appear, and each read
+    is audited.
 
-### CUJ 3: A room is purged
+### CUJ 3: A room is purged mid-month
 
-*   **Given**: A room with three months of `cm:` rows reaches its retention limit and is purged.
-*   **When**: The operator reads lifetime cost for its creator's plan.
-*   **Then**: The purged room's months still count, shown under the room's id because its name is gone.
+*   **Given**: A room charged to the `pro` plan has three months of usage and is purged on 15 October.
+*   **When**: The operator reads October and lifetime figures for `pro`.
+*   **Then**: The room's usage up to its purge still counts toward `pro`, shown under its room id because its name is
+    gone.
 
 ## Technical Plan (Architecture)
 
-Four parts. Three run inside a new daily job; one runs inside each room.
+The work runs in three places: a daily scheduled job (sections 1–4), a new Durable Object that stores what the job
+captures (section 5), and the operator routes, which price and classify at read time (sections 6–7).
 
 ```text
-                         daily cron (scheduled handler, src/worker.ts)
-                                        |
-        +-------------------------------+--------------------------------+
-        |                               |                                |
-        v                               v                                v
- Cloudflare GraphQL              RegistryDO (singleton)            RegistryDO
- per-object usage,               room index      -> object ids     gr: grants, orgs
- current + previous month        ru: room size levels              -> pm:<month>:<key>
-        |                               |                          (plan-month snapshot)
-        +---------------+---------------+
-                        v
-           cost-rollup reducer (runtime-free)
-                        |
-                        v
-     RegistryDO  cm:<month>:<sessionId>  (one row per room per month, quantities only)
-                 cx:<month>              (namespace and Worker totals, for overhead)
-
- SessionDO, after a committed append, at most once a day:
-     reportRoomUsage(sessionId, databaseBytes, blobBytes)  -->  RegistryDO ru:<sessionId>
-
- GET /operator/costs?month=  and  /operator/rooms/:id
-     read cm:, cx:, pm:  ->  #475 cost function and plan prices  ->  margin per plan, cost per room
+              daily cron, 03:17 UTC  (scheduled handler, src/worker.ts)
+                                 |
+                       runCostJob (src/cost/job.ts)
+     +---------------+-----------+-------------+-------------------+
+     |               |                         |                   |
+     v               v                         v                   v
+ RegistryDO       Cloudflare GraphQL       R2 bellman-blobs    planOf (shared resolver)
+ rm: room index   per-object usage,        list rooms/*        per distinct room creator
+ gr: grants       current + previous       -> bytes per room
+ org records      month
+     |               |                         |                   |
+     +---------------+-----------+-------------+-------------------+
+                                 v
+                 CostDO  (one object, SQL tables, src/cost-do.ts)
+          rooms | usage | totals | blobs | creator_plans | org_days | solo_grants | days | runs
+                                 |
+     GET /operator/costs   and   GET /operator/rooms/:id
+                                 |
+            src/cost/margin.ts: #475 prices + read-time rules
+                                 v
+              margin per plan, cost per room, coverage share
 ```
 
-### 1. Usage from Cloudflare, per object
+### 1. Plans, captured daily
 
-The job queries Cloudflare's GraphQL Analytics (`viewer.accounts(accountTag)`) for the current UTC month to date and
-the whole previous month. Each query covers at most one month, inside the 32-day `maxDuration` and the 90-day
-`notOlderThan` the account reported.
+The job reaches rooms only through `listRoomsPage`, never by listing `rm:` keys. The operator rooms design (dash
+`docs/superpowers/specs/2026-11-01-operator-rooms-design.md`, its PR 2) moves the index from `rm:` rows into a SQLite
+`rooms` table and keeps `listRoomsPage`'s signature. A direct `rm:` list would then return nothing, and every object
+would go unmatched without an error; `worker-tests/cost-job-room-index.test.ts` guards this.
 
-*   **`durableObjectsPeriodicGroups`**, grouped by `objectId`: `sum { duration, activeTime, cpuTime, rowsRead,
-    rowsWritten, storageReadUnits, storageWriteUnits, storageDeletes, inboundWebsocketMsgCount }`.
-*   **`durableObjectsInvocationsAdaptiveGroups`**, grouped by `objectId`: `sum { requests }`.
-*   **Totals for overhead**: the same two datasets grouped by `namespaceId` with no object dimension, plus
-    `durableObjectsSqlStorageGroups` `max { storedBytes }` per namespace and the Worker's own request and CPU totals.
-    These go into one `cx:<month>` row.
+Each run reads the registry's room index once (`BellmanStore.listRoomsPage`, 500 rows a call, until a short page)
+and records, for the current UTC day:
 
-Results are paged at `maxPageSize` (10,000 rows) with `orderBy: objectId_ASC` and an `objectId_gt` filter carrying the
-last id seen. The introspection listed the filter input types but not their fields; if `objectId_gt` is not
-accepted, the job pages by splitting the month into day-long windows instead. The job stores the sums exactly as Cloudflare returns them; whether they need weighting by
-`avg.sampleInterval` is an open question settled before the first deploy.
+*   **Room creators.** For each distinct `createdBy`, the result of `planOf(userId, deps, { raw: true })`:
+    `{ plan, via, grantSource, grantOrgId }`. `planOf` is the resolution `HostDO`'s `plan` closure performs today,
+    moved into one shared function: `BELLMAN_KEYS` first, then `BELLMAN_USERS` overrides, then stored grants through
+    `replanOnRefresh`, then `free`. `via` says which answered (`"keyed"`, `"override"`, `"grant"`, `"default"`).
+    With `raw: true` it applies neither `honourPurchases` nor the org's standing: it returns the first usable grant's
+    own plan, its `source` and its `orgId`, so the read side applies both rules and can change them later. `HostDO`
+    calls it without `raw`, and its behaviour is unchanged.
+*   **Orgs.** For each distinct `orgId` among the grants (`BellmanStore.listGrants`, capped at `MAX_GRANTS_COUNTED`)
+    and among the room index's `orgId`s: the org record's `seats`, `source` and `active` (all null when `getOrg`
+    finds no record), and the count of its grants per plan.
+*   **Individual grants.** For grants with no org, a count per `(plan, source)`, leaving out grant keys that a
+    `BELLMAN_USERS` override shadows, as `statsRoutes` already does.
+*   **The day's settings.** Whether purchases are honoured (`billingSettings(env).applyPlans`), whether the grant read
+    hit its cap, and whether the creator read hit its cap (below).
+*   **Rooms.** Each room in the index not yet in `CostDO.rooms`, with its two object ids, so a room's ids are kept
+    even on days the usage capture cannot run.
 
-### 2. Mapping objects to rooms
+Rows hold user ids, org ids, plans, sources and counts only: no grant keys, names, labels or emails.
 
-Object ids are computed, not stored. The job pages through the registry's room index (every room,
-`RegistryDO.listRoomsPage`), only ever through that method, never by listing `rm:` keys. The operator
-rooms design (dash `docs/superpowers/specs/2026-11-01-operator-rooms-design.md`, its PR 2) moves the index from `rm:`
-rows into a SQLite `rooms` table and keeps `listRoomsPage`'s signature. A direct `rm:` list would then return nothing,
-and every object would fall to overhead without an error; item 24a guards this. For each room the job computes `env.SESSION.idFromName(sessionId)` and
-`env.HOST.idFromName(sessionId)`. `idFromName` is a local hash with no network call. A Cloudflare row whose `objectId` matches a room's
-`SessionDO` id is that room's room usage; one matching its `HostDO` id is that room's hosted-seat usage. A row
-matching nothing (the registry, auth, audit objects, and any object not in the index) is not attributed and is
-left to overhead.
+**Registry reads, and the subrequest budget.** A scheduled invocation may make 1,000 subrequests, the limit the
+codebase already budgets against (`MAX_BACKFILL_WINDOW`, `src/oauth/routes.ts`). Each creator costs up to four
+registry calls (`getGrant` per identity key, `getOrg`, `scimUserByKey` inside the SSO check). Those reads behave as
+they do at every sign-in: `getGrant` and `listGrants` delete a lapsed grant when they meet one, so the job's reads
+can cause registry writes. The run resolves at most `MAX_COST_CREATORS = 150` creators, about 600 subrequests,
+leaving room for the index pages, `getOrg` per org, the R2 listing, eight GraphQL fetches and the `CostDO` calls.
+Past the cap it records `plans_status = "capped"` and leaves the remaining creators unrecorded that day
+(`ponytail:` ceiling; the upgrade is a cursor that resumes the next creators in a second invocation).
 
-This needs no namespace ids in configuration: ids are namespace-specific, so a `SessionDO` id never collides with a
-`HostDO` id for the same room.
+### 2. Usage, captured daily from Cloudflare
 
-### 3. Storage reported by the room
+The job posts to `https://api.cloudflare.com/client/v4/graphql` under `viewer { accounts(filter: { accountTag }) }`.
+Every run covers both the previous month and the current month to date, with four queries per month (each inside the
+32-day limit):
 
-Cloudflare reports stored bytes per namespace only, and R2 bytes live in the room's own `blobBytes` count. So each
-room reports its two storage levels.
+1.  `durableObjectsPeriodicGroups` grouped by `objectId` and `namespaceId`: every `sum` field (`duration`,
+    `activeTime`, `cpuTime`, `rowsRead`, `rowsWritten`, `storageReadUnits`, `storageWriteUnits`, `storageDeletes`,
+    `inboundWebsocketMsgCount`, `outboundWebsocketMsgCount`, `subrequests`) and `avg.sampleInterval`.
+2.  `durableObjectsInvocationsAdaptiveGroups` grouped by `objectId`, `namespaceId` and `type`: `sum.requests`,
+    `sum.wallTime` and `avg.sampleInterval`. One object returns one row per invocation type.
+3.  Query 1 grouped by `namespaceId` alone.
+4.  Query 2 grouped by `namespaceId` and `type`.
 
-*   **When.** After any append that commits (`appendEvent`, `appendEventOnce`, `appendHostEvent`, `appendSurface`,
-    `appendSurfaces`) and after a blob charge or credit, if the last report was more than 24 hours ago. The time of
-    the last report is a field on the room's stored session record, which every one of those transactions already
-    writes, so the check adds no storage operation.
-*   **What.** `{ sessionId, databaseBytes: ctx.storage.sql.databaseSize, blobBytes, at }`, sent to a new
-    `RegistryDO.reportRoomUsage`, which overwrites `ru:<sessionId>`.
-*   **How it is sent.** Directly, after the transaction commits, not through the outbox, and the caller's reply
-    does not wait for it. A failure is logged and dropped. Sizes are levels: the next report replaces the last, so
-    a lost one only leaves the value a day staler. The outbox would be wrong here: it delivers in order and an
-    undeliverable row holds every row behind it (`SessionDO.#deliver` throws on an unknown kind), so a deploy lag
-    (#361) or a rollback would delay join codes and audit entries behind a size report.
-*   **Rooms that never report.** A room that has not written since this ships has no `ru:` row. Its bytes stay in
-    the namespace total, so they land in overhead by subtraction.
-*   **The purge.** `RegistryDO.dropRoomIndex` deletes `ru:<sessionId>` with the index rows, so a purged room stops
-    accruing storage.
+Every raw field is stored, so the open questions about billed duration, sampling, key-value meters and request types
+are answered at read time without recapturing. Each query asks for at most 10,000 rows. There is no paging: a query
+that returns exactly 10,000 rows marks that month `skipped_full_page` and writes nothing for it (`ponytail:` ceiling
+in `src/cost/graphql.ts`; the upgrade is paging with the `objectId_gt` filter Open Question 1 confirms). A month whose
+four queries all succeed is written; the other month's result does not depend on it.
 
-R2 operations are not counted per room. Downloads run in the Worker (`src/http/rooms.ts`, `src/http/public.ts`), and
-recording each one per room would cost a row write (about $1 per million) to count an operation that costs about
-$0.36 per million. Uploads are rarer still. R2 operations stay in overhead, taken from the account's R2 totals.
+### 3. Mapping objects to rooms
 
-### 4. Room-month rows
+Each object id is computed with `env.SESSION.idFromName(sessionId)` and `env.HOST.idFromName(sessionId)` for every
+room in `CostDO`'s `rooms` table, which the plans half fills from the room index every day (section 1) and never
+deletes. `idFromName` is a local hash with no network call. So a room purged mid-month keeps its object ids, and its
+usage up to the purge still maps to it. A room created and purged between two daily runs is never recorded, and its
+usage stays unmatched.
 
-The runtime-free reducer turns the Cloudflare rows, the room map and the `ru:` levels into one row per room per
-month:
+A row matching a room's `SessionDO` id is that room's room usage; one matching its `HostDO` id is its hosted-seat
+usage. Rows matching nothing (the registry, auth and audit singletons, and anything else) are stored as unmatched.
+The `namespaceId` of any matched row identifies Bellman's `SessionDO` and `HostDO` namespaces, so no namespace id is
+configured.
 
-```text
-cm:<YYYY-MM>:<sessionId> = {
-  room:   { duration, activeTime, cpuTime, requests, rowsRead, rowsWritten,
-            storageReadUnits, storageWriteUnits, storageDeletes, inboundWebsocketMsgs },   // SessionDO
-  host:   { duration, requests, rowsRead, rowsWritten, ... },                              // HostDO
-  tokens: { input, output, cacheRead, cacheWrite } | null,                                 // from #474
-  databaseByteDays, blobByteDays, storageThroughDay,
-  chargedTo: { kind: "org" | "account", key },   // fixed when the row is first written
-  sources: { cloudflare: true, storage: "reported" | "none", tokens: "metered" | "none" },
-  version: 1, writtenAt
-}
+### 4. Blob bytes, from a bucket listing
+
+Blob objects are keyed `rooms/<sessionId>/<blobId>` (`src/blobs.ts:blobKey`). The job lists the bucket under `rooms/`
+1,000 objects a call and sums sizes per room, recording one level per room per day. It runs whether or not the
+analytics token is set, because a missed day cannot be listed later. Rooms that never write again are covered,
+because the bucket still holds their blobs. SQLite database bytes are not per room (Cloudflare reports them
+per namespace only) and stay off the room figures.
+
+### 5. `CostDO`
+
+One SQLite-backed Durable Object, `idFromName("cost")`, holds every captured record in SQL tables. It answers to the
+scheduled job and the operator routes only, so it adds no load to `RegistryDO`, which serves joins and sign-ins.
+
+```sql
+CREATE TABLE rooms (session_id TEXT PRIMARY KEY, created_by TEXT NOT NULL, org_id TEXT,
+  session_object_id TEXT NOT NULL, host_object_id TEXT NOT NULL, first_seen_day TEXT NOT NULL);
+-- One row per object per month. kind: 'session' | 'host' | 'unmatched'; session_id is null when unmatched.
+-- periodic: JSON of every sum field from query 1. by_type: JSON {type: {requests, wall_time}} from query 2.
+CREATE TABLE usage (month TEXT NOT NULL, object_id TEXT NOT NULL, kind TEXT NOT NULL, session_id TEXT,
+  namespace_id TEXT NOT NULL, periodic TEXT NOT NULL, by_type TEXT NOT NULL,
+  periodic_sample_interval REAL, invocations_sample_interval REAL, PRIMARY KEY (month, object_id));
+CREATE TABLE totals (month TEXT NOT NULL, namespace_id TEXT NOT NULL, periodic TEXT NOT NULL,
+  by_type TEXT NOT NULL, periodic_sample_interval REAL, invocations_sample_interval REAL,
+  PRIMARY KEY (month, namespace_id));
+CREATE TABLE blobs (day TEXT NOT NULL, session_id TEXT NOT NULL, bytes INTEGER NOT NULL,
+  PRIMARY KEY (day, session_id));
+-- via: 'keyed' | 'override' | 'grant' | 'default'; grant_* null unless via = 'grant'.
+CREATE TABLE creator_plans (day TEXT NOT NULL, user_id TEXT NOT NULL, plan TEXT NOT NULL, via TEXT NOT NULL,
+  grant_source TEXT, grant_org_id TEXT, PRIMARY KEY (day, user_id));
+-- seats, source, active null when the org has no record. plans: JSON {plan: grant count}.
+CREATE TABLE org_days (day TEXT NOT NULL, org_id TEXT NOT NULL, seats INTEGER, source TEXT, active INTEGER,
+  plans TEXT NOT NULL, PRIMARY KEY (day, org_id));
+CREATE TABLE solo_grants (day TEXT NOT NULL, plan TEXT NOT NULL, source TEXT NOT NULL, count INTEGER NOT NULL,
+  PRIMARY KEY (day, plan, source));
+CREATE TABLE days (day TEXT PRIMARY KEY, honour_purchases INTEGER NOT NULL, grants_capped INTEGER NOT NULL,
+  creators_capped INTEGER NOT NULL);
+-- *_status: 'written' | 'capped' | 'skipped_no_token' | 'skipped_full_page' | 'error'.
+-- usage_status: JSON {month: status}. counts: JSON of rows written per table.
+CREATE TABLE runs (started_at INTEGER PRIMARY KEY, finished_at INTEGER, plans_status TEXT, blobs_status TEXT,
+  usage_status TEXT, error TEXT, counts TEXT);
 ```
 
-*   **Cloudflare fields are replaced on every run** with the month's current sums, so a rerun writes the same values.
-*   **Storage accrues with a watermark.** Each run adds `bytes x (today - storageThroughDay)` days and moves the
-    watermark to today, inside the same registry transaction that reads the row. A second run on the same day adds
-    zero days; a missed day is filled at the next run from the last known level. Closed rooms keep accruing until
-    the purge, because they still store bytes.
-*   **Months older than the previous one are never rewritten**, so a late run cannot overwrite good totals with the
-    shorter sums left in Cloudflare's 90-day window.
-*   **Quantities, not dollars.** Pricing happens at read time, so a new price table reprices every past month.
-*   **Writes go in batches** to a new `RegistryDO.putCostMonths(rows)`. Only rooms with usage or a storage level in
-    that month get a row.
+`rooms` rows are inserted if absent and never deleted. `usage` and `totals` are replaced per month on each run for
+the current and previous month. The daily tables are replaced per day. `runs` gains one row per run.
 
-### 5. The plan-month snapshot
+Replacing a month's `usage` and `totals` is one SQL transaction: delete that month's rows, insert the new ones. A
+daily table's rows for a day are replaced the same way, so a second run on the same day leaves the same rows.
+Months older than the previous one are never rewritten, so a late run cannot overwrite complete totals with the
+shorter sums left in Cloudflare's window.
 
-Each run calls a new `RegistryDO.snapshotPlans(month)`, which reads every `gr:` grant and every org record inside one
-registry transaction and writes `pm:<YYYY-MM>:<grantKey>` with `{ plan, source, orgId, seats, expiresAt }`. Expired
-grants are skipped. The current month's rows are overwritten on every run, so the last run of a month records the
-plan in force at month end. Earlier months are never touched.
+### 6. Read-time rules
 
-*   **Paid or comped.** `source: "purchase"` is paid. Any other source (operator grants) is comped. Accounts on a
-    plan through `BELLMAN_KEYS` have no grant; the job, which can read the Worker's environment, adds them as
-    comped.
-*   **This ships first, alone**, since every month without it loses its revenue side.
+`src/cost/margin.ts` is runtime-free. It takes one month's records from `CostDO`, #475's price table and cost
+function, and returns the cost page. Its rules:
 
-### 6. Attribution and margin, at read time
+*   **Who a room is charged to.** A room with an `org_id` is charged to its org; otherwise to its creator.
+*   **The owner's standing on a day.** Each owner-day resolves to one `(plan, class)`, where class is `paid`,
+    `comped` or `free`:
+    *   **Org.** No `org_days` row: no standing that day. A row with no record (`source` null): comped, at the
+        highest-ranked plan among its grants. `active` false: `free`. `source = "operator"`: comped. `source =
+        "purchase"`: paid if purchases were honoured that day, else `free`. The plan is the highest-ranked among its
+        grants (`ENTITLEMENTS` order); an org with no grants has no plan and no standing.
+    *   **Creator.** No `creator_plans` row: no standing. `via = "keyed"` or `"override"`: comped. `via = "default"`:
+        free. `via = "grant"`: if `grant_org_id`'s `org_days` row says inactive, `free`; else if `grant_source =
+        "purchase"`, paid when purchases were honoured that day and `free` when not; any other source is comped.
+*   **Which plan a room's month goes to.** The `(plan, class)` its owner held on the most days of the month on which
+    the room had usage recorded; a tie goes to the one held later in the month. An owner with no standing on any day
+    of the month puts the room on the **unattributed** line, beside free and comped.
+*   **Revenue.** For each captured day of the month: each paid org's `planRevenue(plan, seats)` and each paid
+    individual purchase grant's `planRevenue(plan, 1)`, divided by the month's days. A day with no `days` row (the
+    job did not run) takes the previous day's rows; the first day of a month may take the previous month's last day.
+    The current month counts only days up to today, so its revenue is month to date. The page reports plan coverage:
+    the captured days divided by the days elapsed.
+*   **Room cost.** #475's cost function over requests, billed duration (Open Question 3), rows read and rows written
+    for both of the room's objects, weighted by `sample_interval` if Open Question 4 says so, plus blob GB-months
+    (the sum of the room's daily levels divided by the month's days). Other stored fields are shown as diagnostics,
+    not priced.
+*   **Coverage.** For duration and requests in each namespace: matched usage divided by the namespace total.
 
-A room is charged to `chargedTo`: its `orgId` if it has one, otherwise `grantKeyForUser(createdBy)`. It is set when
-the room's first `cm:` row is written and copied forward, so a room keeps its owner across months.
+Because these rules run on every read, changing one changes every month at once.
 
-For a month, margin per plan is computed from the `cm:`, `pm:` and `cx:` rows:
+### 7. Operator routes
 
-*   **Revenue** for a plan = the sum over its paid `pm:` rows of #475's plan price times seats.
-*   **Cost** for a plan = the sum, over rooms whose `chargedTo` held that plan in that month's `pm:` rows, of #475's
-    cost function applied to the room's quantities.
-*   **Free-plan line**: rooms whose `chargedTo` has no `pm:` row. **Comped line**: rooms charged to comped rows.
-*   **Overhead** = the `cx:` totals priced the same way, minus the sum of every room's cost. A negative value means
-    the attribution counted something twice and is shown as an error, not hidden.
+*   **`GET /operator/costs?month=YYYY-MM`.** `month` defaults to the current UTC month. A malformed month, a month
+    after the current one, or any other query parameter is a 400. A month with no records returns empty lines.
+    Returns the per-plan table, the free, comped and unattributed lines, the 20 costliest rooms (ids, plans and
+    costs, no names, so no room is woken), coverage, lifetime totals per plan, the price table's date, and the last
+    run. Lifetime totals compute every month `CostDO` holds through the same rules, one `month()` read each
+    (`ponytail:` ceiling; the upgrade is a stored per-month summary once months number in the dozens).
+*   **`GET /operator/rooms/:id`** gains `cost`: the room's cost by driver for each month it has usage, and the plan
+    and class it was charged to each month. For a purged room (no session, but a `CostDO.rooms` row) it answers 200
+    with `{ id, purged: true, org_id, cost }`. An id neither knows is a 404, as today.
 
-`GET /operator/costs?month=YYYY-MM` returns that table. `GET /operator/rooms/:id` (#472) gains the room's `cm:`
-rows priced per driver, its `chargedTo` and the job's last run time. Both sit behind `BELLMAN_OPERATORS` and append
-to `OPERATOR_AUDIT_STREAM`, as #472's routes do.
+Both sit behind `BELLMAN_OPERATORS` (401 with no caller, 403 `not_available` for a non-operator) and append to
+`OPERATOR_AUDIT_STREAM` before answering, failing closed with a 500 as #472's routes do.
 
-### 7. The job
-
-*   **Trigger.** `[triggers] crons` in `wrangler.toml`, once a day, and a `scheduled` export in `src/worker.ts`.
-*   **Order.** Snapshot plans, read the room index, query Cloudflare, read `ru:` levels, reduce, write `cm:` and `cx:`,
-    write a `cost:last-run` row with the time and counts.
-*   **Secrets.** `CF_ANALYTICS_TOKEN` (Account Analytics: Read) and `CF_ACCOUNT_ID`. If either is missing, the job
-    still writes the plan snapshot, logs that it skipped the usage half, and writes nothing else.
-*   **Failure.** A failed run writes nothing partial for that month's Cloudflare fields: rows are written only after
-    every page is read. The next day's run covers it; a cron run that fails is not retried.
+*   **Cost page audit.** One platform entry: action `operator_costs_read`, sentinel session id `"operator:costs"`,
+    `detail: { month }`, `roomName: null`, parties the operator's org plus the org of each of the 20 rooms shown.
+    Each of those orgs also gets its own entry through `auditRows`, as the room detail writes today.
+*   **Purged-room audit.** The detail's existing `operator_room_read` entry, with `roomName: null` and parties the
+    operator's org and `rooms.org_id`.
 
 ### Data sizes
 
-The registry singleton gains one `cm:` row per active room per month, one `pm:` row per grant per month, and one
-`ru:` row per room. At 10,000 rooms that is about 20,000 row writes a day (two months recomputed), about $0.60 a
-month. The cost summary route reads every `cm:` row of one month per request, which is fine at that size and is the
-first thing to cache if the room count grows by ten times.
+At today's scale (`MAX_GRANTS_COUNTED`'s note counts three paid accounts) every table is small. At 10,000 rooms the
+`usage` table gains about 20,000 rows a month and the daily tables about 10,000 rows a day; one SQLite object holds
+that for years. The cost page reads one month's `usage` rows and up to 31 days of plan rows per request.
+
+## Risks and Mitigations
+
+| Risk | Signal | Mitigation |
+| --- | --- | --- |
+| The job stops running (deploy error, cron removed) | The last run's age on the cost page, flagged past 36 hours | Run it by hand through `wrangler`'s scheduled test endpoint |
+| The analytics token is missing, expired or revoked | `usage_status` shows `skipped_no_token` or `error` | Plans, rooms and blobs keep being captured; replace the secret; the next run refills the current and previous month |
+| Cloudflare renames a field or dataset | The GraphQL error text in `runs.error` | Fix the query; up to 90 days can be recovered |
+| More than 10,000 objects in one query | `usage_status` shows `skipped_full_page` | Add paging (the `ponytail:` ceiling in `src/cost/graphql.ts`) |
+| Objects go unmatched (index gaps, rooms created and purged between runs) | Coverage below 95% | List unmatched object ids from `usage` and fix the mapping |
+| Grants or creators exceed a read cap | `days.grants_capped`, `days.creators_capped`, `plans_status = capped` | Raise the cap, or resume creators in a second invocation |
+| Owners with no plan record | The unattributed line, and plan coverage below 100% | Months before the capture started show here; nothing to fix for those |
+| `CostDO` stores user ids forever | — | Same identifiers the registry already holds; an account erasure path, when one exists, must cover `creator_plans` and `rooms` |
 
 ## Alternatives Considered
 
 ### Alternative A: Measure usage inside the room (the original #473 design)
 
-A counting wrapper around `SessionDO`'s storage and methods, a residency timer for active time, and one Workers
-Analytics Engine point per invocation.
+A counting wrapper around `SessionDO`'s storage and methods, a residency timer, and Workers Analytics Engine points.
 
-*   **Pros**: Works without a Cloudflare API token; data arrives within seconds.
-*   **Cons**: Summing per-invocation wall time counts a room's resident time once per overlapping long poll, so the
-    busiest rooms are overstated most. `SessionDO` has no `sql.exec` call, so row counts would be inferred. About 65
-    to 80 RPC methods and three entry paths need covering. Analytics Engine samples heavily written indexes and
-    costs more per point than the requests it would count.
-*   **Reason for Rejection**: Step zero showed `durableObjectsPeriodicGroups` reports duration, active time, rows and
-    WebSocket messages per `objectId`. Cloudflare's numbers are the ones it bills from.
+*   **Pros**: Needs no Cloudflare token; data arrives within seconds.
+*   **Cons**: Summing per-invocation wall time counts a room's resident time once per overlapping long poll. About 65
+    to 80 RPC methods and three entry paths need covering. Analytics Engine samples heavily written indexes and costs
+    more per point than a request.
+*   **Reason for Rejection**: Step zero showed Cloudflare reports duration, rows and requests per object, from the same
+    meters it bills.
 
-### Alternative B: Split plan revenue by each member's written activity
+### Alternative B: Revenue from Stripe invoices
+
+*   **Pros**: The amount actually paid, after discounts, annual billing and refunds.
+*   **Cons**: `STRIPE_API_KEY` is restricted to reading subscriptions; invoices need a wider or second key. Team
+    invoices must be mapped to orgs. Comped, keyed and free accounts still need the plan record.
+*   **Reason for Rejection**: Owner chose list price (2026-11-01).
+
+### Alternative C: Split revenue by each member's written activity
 
 *   **Pros**: A paid account that only joins others' rooms would carry part of their cost.
-*   **Cons**: The formula has two readings; hosted rooms show the largest losses because the host writes and has no
-    account; a room's margin moves when its members get busier elsewhere; account ids would have to travel with
-    usage records. Pricing needs margin per plan, which creator-pays gives directly.
-*   **Reason for Rejection**: Owner chose creator-pays (2026-11-01). The activity-weighted view stays available from
-    `SessionEvent.fromUserId` as a check.
+*   **Cons**: Hosted rooms show the largest losses, because the host writes and has no account; a room's margin moves
+    when its members get busier elsewhere; account ids would travel with usage.
+*   **Reason for Rejection**: Owner chose creator-pays. Open Question 7 keeps the activity-weighted view as a check.
 
-### Alternative C: Room storage reported through the outbox
+### Alternative D: Room-reported storage
 
-*   **Pros**: A report queued in the write's own transaction is never lost.
-*   **Cons**: The outbox delivers in order and holds every row behind one it cannot deliver. A deploy lag on the new
-    `RegistryDO` method (#361), or a rollback past the deploy that added the intent kind, would hold join codes and
-    audit entries behind a size report.
-*   **Reason for Rejection**: Sizes are levels. A lost report is replaced by the next one, so durable delivery buys
-    nothing and risks the rows that need it.
+Each room sends its database and blob bytes to the registry after an append, at most daily.
 
-### Alternative D: Stored bytes left in overhead, or apportioned by rows written
+*   **Pros**: Database bytes per room.
+*   **Cons**: Hooks at seven append sites, a call outside the outbox, a stamp written only when the record changes,
+    and rooms that stop writing never report again. The figure is worth about $0.01 per full room-month.
+*   **Reason for Rejection**: The R2 listing covers blob bytes for every room with no room code (owner, 2026-11-01).
 
-*   **Pros**: No room code.
-*   **Cons**: Overhead hides rooms that hold most of the bytes. Apportioning by rows written is wrong for rooms that
-    wrote little but store much (large uploads, old long-lived rooms).
-*   **Reason for Rejection**: Owner chose room-reported storage.
+### Alternative E: Cost rows in `RegistryDO`
 
-### Alternative E: R2 operations counted per room in the Worker
+*   **Pros**: No new class.
+*   **Cons**: Batch writes and full scans on the object every join and sign-in waits on, and about 11 new
+    `BellmanStore` methods.
+*   **Reason for Rejection**: Owner chose a dedicated `CostDO`.
 
-*   **Pros**: R2 cost per room would be complete.
-*   **Cons**: Each counted download needs a row write somewhere, about $1 per million, to record an operation that
-    costs about $0.36 per million.
-*   **Reason for Rejection**: The meter would cost more than what it measures. R2 operations stay in overhead.
+### Alternative F: One R2 file per month
 
-### Alternative F: A `due:` handler on `RegistryDO.alarm` instead of a cron trigger
+*   **Pros**: No new Durable Object class.
+*   **Cons**: Every read parses a whole month's file, and room lookups and lifetime totals are scans in code rather
+    than queries.
+*   **Reason for Rejection**: Owner chose `CostDO`'s SQL tables.
 
-*   **Pros**: No `[triggers]` entry; reuses the registry's alarm machinery.
-*   **Cons**: A new saved alarm name fires repeatedly on a build without its branch after a rollback, as the
-    `SessionDO.alarm` comment warns.
-*   **Reason for Rejection**: A daily cron has no rollback hazard, and a failed run is covered the next day.
+### Alternative G: Plan at month end
 
-### Alternative G: A daily alarm in every room to sample its size
+*   **Pros**: The simplest read.
+*   **Cons**: An account that cancels on the 30th shows no revenue for the month.
+*   **Reason for Rejection**: Owner chose prorated revenue, with each room's month charged to the plan held most days.
 
-*   **Pros**: Every room's size is known, including rooms that never write.
-*   **Cons**: Wakes idle rooms, which is a cost in itself, and adds a saved alarm name with the same rollback hazard.
-    The only rooms it would add are ones that have not written since this ships, whose size changes little.
-*   **Reason for Rejection**: Waking rooms to measure them is a non-goal.
+### Alternative H: A computed overhead line
 
-### Alternative J: Room-kept monthly counters delivered to the registry
+Overhead as Cloudflare's account totals minus the sum of room costs.
 
-Each room counts its own usage per month and hands the totals to the registry through the outbox.
+*   **Pros**: Every dollar would sit somewhere.
+*   **Cons**: The check "rooms plus overhead equal the total" cannot fail, room and namespace storage are in different
+    units, and the Worker and R2 totals come from datasets never introspected.
+*   **Reason for Rejection**: Margin per plan does not need it; coverage share is a check that can fail.
 
-*   **Pros**: Exact for what the room counts; no API token, no cron.
-*   **Cons**: Has the same in-process measurement problems as Alternative A and the same delivery hazard as
-    Alternative C.
-*   **Reason for Rejection**: Cloudflare already counts the same drivers per object.
+### Alternative I: Room-kept monthly counters, or a daily alarm per room
 
-### Alternative H: Log export only
-
-A week of Workers Logs (`$workers.durableObjectId`, wall time) exported by hand and priced offline.
-
-*   **Pros**: No code at all; good for a first look.
-*   **Cons**: Logs are kept for days and exported by hand, so they cannot feed a monthly view.
-*   **Reason for Rejection**: GraphQL gives the same per-object figures for 90 days through an API.
-
-### Alternative I: Invite email as a room cost
-
-*   **Pros**: Every outbound cost would sit on a room.
-
-*   **Reason for Rejection**: Invites are sent from an org through `POST /org/members`, not from a room (ADR 0036).
+*   **Pros**: Exact for what the room counts; every room's size known.
+*   **Cons**: The in-process problems of Alternative A, and an alarm per room wakes idle rooms and adds a stored alarm
+    name that a rollback can leave firing.
+*   **Reason for Rejection**: Cloudflare and the R2 listing cover the same drivers without touching rooms.
 
 --------------------------------------------------------------------------------
 
 ## Non-Functional Requirements
 
-*   **Security & Privacy.** `CF_ANALYTICS_TOKEN` is read-only (Account Analytics: Read), a Worker secret, used only
-    by the scheduled handler, and never returned by any route. No `cm:`, `pm:`, `ru:` or `cx:` row holds content,
-    room names, labels or emails: only room ids, grant keys, org ids and numbers. Cost routes sit behind
-    `BELLMAN_OPERATORS` and every read is audited.
-*   **Performance.** The job never wakes a room. Room-side cost is one `databaseSize` read and one registry call per
-    room per day at most, off the reply path.
-*   **Rollout & Rollback.** Each part ships alone (see Delivery order). The registry methods ship a deploy ahead of
-    the room code that calls them (#361). Rolling back the room code only stops reports; rolling back the job
-    leaves the rows it wrote, which nothing else reads.
+*   **Security & Privacy.** `CF_ANALYTICS_TOKEN` (Account Analytics: Read) is a Worker secret, read only by the
+    scheduled handler and never returned by a route. `CostDO` holds ids, plans and numbers only. Cost routes are
+    operator-only and every read is audited.
+*   **Performance.** The job never wakes a room. Its registry reads are the room index, one capped grant list,
+    `getOrg` per org, and up to four calls per creator; like every sign-in, they may delete lapsed grants. The run
+    stays under 1,000 subrequests through `MAX_COST_CREATORS` (section 1).
+*   **Rollout & Rollback.** `CostDO` is a new class with its own migration tag. Rolling back the read side leaves the
+    capture running; rolling back the capture leaves `CostDO`'s rows, which only the cost routes read. A migration
+    that adds a class cannot be rolled back by redeploying an older build that lacks the class; leave the class in
+    place and disable the cron instead.
+
+--------------------------------------------------------------------------------
+
+### Additional Resources
+
+*   `docs/ARCHITECTURE.md`: the Durable Object types and the cross-object atomicity gap.
+*   [ADR 0005](../../adr/0005-watch-and-delivery-paths.md): a held long poll keeps the object resident.
+*   [ADR 0036](../../adr/0036-invites-by-email.md): invites are sent from an org.
+*   Issues: #361 (a new Durable Object method lags a deploy), #452, #472, #474, #475, #476, #477; bellman-sh/dash#94.
+*   Cloudflare: GraphQL Analytics for Durable Objects; Durable Objects pricing.
+
+### Future Improvements
+
+*   **Tokens per room**, when #474 records them somewhere the job can read without waking a room.
+*   **Database bytes per room**, if namespace SQLite storage becomes a material share of the invoice.
+*   **Amount actually paid**, from Stripe invoices (Alternative B).
+
+--------------------------------------------------------------------------------
 
 ## Detailed Implementation Plan
 
 ### Delivery order
 
-Each step is one PR on its own branch, merged and deployed before the next unless marked independent.
+Steps 1 and 5 change no code. Steps 2 and 3 are two PRs each, merged and deployed in order.
 
-1.  **Clear the long-poll timer** (independent, any time). Small and harmless either way.
-2.  **Plan-month snapshot + daily cron** (first, now). Starts the only record lost by waiting.
-3.  **Pre-checks for the rollup** (no code, done by hand with the step-zero token). Settles the three open
-    GraphQL questions before step 5 is written:
-    *   Query `durableObjectsPeriodicGroups` grouped by `objectId` and `name` for one day; check that `name` is the
-        room id, or that `objectId` equals `SESSION.idFromName(<a known room id>).toString()`, for one room and its
-        `HostDO`.
-    *   Compare `sum.duration` and `sum.activeTime` for that room with its Workers Logs wall time for the same hour,
-        and read Cloudflare's billing docs for which one GB-s is computed from.
-    *   Run the same query with `filter: { objectId_gt: "<id>" }` and `orderBy: [objectId_ASC]`; check that it is
-        accepted, and whether `avg.sampleInterval` is above 1 for rooms with few requests.
-    *   Record the answers on #473 before step 5 starts.
-4.  **Registry storage levels, then room reports** (two PRs, a deploy apart). The `RegistryDO` method first, the
-    `SessionDO` caller second.
-5.  **Cloudflare usage rollup** (after step 3). Writes `cm:` and `cx:` rows.
-6.  **Margin and operator routes** (after #475 lands its price table and cost function).
-7.  **Issue bookkeeping** (with step 5): edit #473's body to this design; edit #477 to drop #452 as a dependency of
-    #473; reduce #476 to the coverage display, since per-object data and the overhead line now come from this work.
+1.  **Pre-check (manual, before step 2b).** With an Account Analytics: Read token, run query 1 of section 2 for one day
+    once for each candidate date filter name (`datetime_geq` / `datetime_lt`, `date_geq` / `date_lt`), and record the
+    working form on #473. Answer Open Questions 2–6 by query or from Cloudflare's pricing documentation, and record the
+    answers on #473 before step 3.
+2.  **Capture.**
+    *   **2a: `CostDO`, the cron, plans, rooms and blobs.** Begins the daily plan, room and blob records, none of which
+        needs the analytics token.
+    *   **2b: usage.** Every run captures the previous month as well as the current one, so no usage is lost while 2b
+        waits on step 1.
+3.  **Read side.** Re-plan 3a and 3b when #475 merges, against its actual exports. The minimum they need from #475:
+    `planRevenue(plan, seats): number` for a month, a cost per driver and quantity, and the price table's date.
+    *   **3a: `margin.ts`.**
+    *   **3b: the routes.**
+4.  **Separate issue (any time): the long-poll timer.** `waitForEvents` never clears its `setTimeout`. File it with the
+    call sites (`SessionDO.#wake`, `SessionDO.#settleWatchers`), a `timer` field on `Waiter`, and a test in
+    `tests/store-do-wiring.test.ts` that uses `vi.useFakeTimers()` and asserts `vi.getTimerCount() === 0` after an
+    early answer and after a purge. Comparing Cloudflare's per-object `duration` before and after the fix shows
+    whether the fix changed the bill.
+5.  **Issue bookkeeping (with 2a).** Edit #473's body to match this design; drop #452 from #473's dependencies in #477;
+    reduce #476 to comparing coverage with the invoice by hand.
+
+### Interfaces
+
+The types the steps below implement. Days are `YYYY-MM-DD` and months `YYYY-MM`, both UTC; months come from
+`monthKey` (`src/stored-session.ts`).
+
+```ts
+// src/oauth/routes.ts
+type PlanOf = {
+  plan: Plan;
+  via: "keyed" | "override" | "grant" | "default";
+  grantSource: string | null;  // set only when via is "grant"
+  grantOrgId: string | null;   // set only when via is "grant"
+};
+type PlanOfDeps = Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases"> & { keys: string | undefined };
+function planOf(userId: string, deps: PlanOfDeps, opts?: { raw?: boolean }): Promise<PlanOf>;
+
+// src/cost/records.ts
+type RoomRecord = { sessionId: string; createdBy: string; orgId: string | null;
+  sessionObjectId: string; hostObjectId: string; firstSeenDay: string };
+type UsageRecord = { month: string; objectId: string; kind: "session" | "host" | "unmatched";
+  sessionId: string | null; namespaceId: string; periodic: Record<string, number>;
+  byType: Record<string, { requests: number; wallTime: number }>;
+  periodicSampleInterval: number | null; invocationsSampleInterval: number | null };
+type TotalsRecord = Omit<UsageRecord, "objectId" | "kind" | "sessionId">;
+type PlansDay = { day: string; honourPurchases: boolean; grantsCapped: boolean; creatorsCapped: boolean;
+  creators: { userId: string; plan: string; via: PlanOf["via"]; grantSource: string | null; grantOrgId: string | null }[];
+  orgs: { orgId: string; seats: number | null; source: "purchase" | "operator" | null; active: boolean | null;
+    plans: Record<string, number> }[];
+  soloGrants: { plan: string; source: string; count: number }[] };
+type RunStatus = "written" | "capped" | "skipped_no_token" | "skipped_full_page" | "error";
+type RunRecord = { startedAt: number; finishedAt: number | null; plansStatus: RunStatus | null;
+  blobsStatus: RunStatus | null; usageStatus: Record<string, RunStatus>; error: string | null;
+  counts: Record<string, number> };
+type MonthRecords = { month: string; rooms: RoomRecord[]; usage: UsageRecord[]; totals: TotalsRecord[];
+  blobs: { day: string; sessionId: string; bytes: number }[];
+  plans: PlansDay[];          // every captured day of the month, plus the previous month's last captured day
+  lastRun: RunRecord | null };
+
+interface CostStore {
+  putRooms(rooms: RoomRecord[]): Promise<void>;                       // insert if absent
+  knownRooms(): Promise<RoomRecord[]>;
+  replaceUsage(month: string, usage: UsageRecord[], totals: TotalsRecord[], now: number):
+    Promise<{ ok: true } | { ok: false; reason: "too_old" }>;        // refuses months before monthKey(now)'s previous
+  putBlobs(day: string, rows: { sessionId: string; bytes: number }[]): Promise<void>;   // replaces the day
+  putPlans(plans: PlansDay): Promise<void>;                           // replaces the day
+  putRun(run: RunRecord): Promise<void>;                              // insert or replace by startedAt
+  month(month: string): Promise<MonthRecords>;
+  roomMonths(sessionId: string): Promise<string[]>;                   // months with usage for the room
+  months(): Promise<string[]>;                                        // months with any usage, ascending
+}
+```
+
+A refusal is a returned value, not a throw, so it crosses RPC unchanged.
 
 ### Target Files to Create/Modify
 
-#### Step 1: the long-poll timer
+#### Step 2a: `CostDO`, the cron, plans, rooms and blobs
 
-##### 1. `src/store-do.ts` (Modify)
+##### 1. `src/oauth/routes.ts` (Modify)
 
-*   **Type / Scope**: Workers module, `SessionDO`.
-*   **Proposed Changes**: The `Waiter` type gains the timer handle returned by `setTimeout` in `waitForEvents`. Every
-    place a waiter is resolved early (the wake path that answers polls, and close) calls `clearTimeout` on it. The
-    read-then-register order in `waitForEvents` is unchanged: the handle is stored on the waiter object after the
-    synchronous push, with no await between.
+*   **Type / Scope**: TypeScript module (Node and Workers builds).
+*   **Proposed Changes**:
+    *   `replanOnRefresh` also returns the matched `grant` (or `null`). Its three callers ignore the new field.
+    *   `firstGrant` gains a `standing: boolean` argument (default `true`). Only `raw` resolution passes `false`.
+    *   Add `planOf` (Interfaces). Order: when `deps.keys` is set and `keyedPlan(userId, deps.keys)` returns a plan,
+        `via: "keyed"`; otherwise continue. `keyedPlan` is never called with `undefined`, which would fall back to
+        the dev keys. Next, derive the identity key as `signedInPlan` does (github or google subject, else
+        `ssoKeyForUser`); with none, return `{ plan: "free", via: "default", grantSource: null, grantOrgId: null }`.
+        Then call `replanOnRefresh` with `honourPurchases: true` and grant standing off when `opts.raw`, else with
+        `deps` as given. Map its `source`: `"operator"` to `"override"`; `"grant"` to `"grant"`, with `grantSource`
+        and `grantOrgId` from the returned grant; `"default"` to `"default"`. `SignInRefused` resolves to the same
+        free result.
+    *   `signedInPlan` becomes `planOf(...).plan` with `keys` unset, so its tests keep passing unchanged.
 
-##### 2. `worker-tests/session-append-race.test.ts` or a new `worker-tests/poll-timer.test.ts` (Modify or Create)
+##### 2. `src/host-do.ts` (Modify)
 
-*   **Type / Scope**: workerd test.
-*   **Proposed Changes**: A poll answered early leaves no pending timer: after the answer, advancing past the wait
-    does not resolve anything twice and the waiter list is empty. The existing race test must still pass.
+*   **Type / Scope**: Workers module.
+*   **Proposed Changes**: The `plan` dep returns `(await planOf(userId, { keys: env.BELLMAN_KEYS, overrides,
+    plans, honourPurchases })).plan`. Behaviour unchanged.
 
-#### Step 2: plan-month snapshot and the cron
-
-##### 3. `src/cost/plan-snapshot.ts` (Create)
+##### 3. `src/cost/records.ts` (Create)
 
 *   **Type / Scope**: runtime-free module.
-*   **Proposed Changes**: `planMonthRows(month, grants, orgs, keyedPlans, now)` returns the `pm:` rows for a month:
-    one per unexpired grant, keyed by grant key, with `{ plan, source, paid: source === "purchase", orgId, seats,
-    expiresAt }`. Seats come from the org record for org-scoped grants and are 1 otherwise. `keyedPlans` are the
-    plans `BELLMAN_KEYS` grants, added as comped. `monthOf(epochMs)` returns `YYYY-MM` in UTC.
+*   **Proposed Changes**: The Interfaces types, the `CREATE TABLE` statements from section 5 as constants, and
+    `isTooOld(month, now)`, which both stores use to refuse `replaceUsage`.
 
-##### 4. `src/cost/EGM.md` (Create)
+##### 4. `src/cost/memory.ts` (Create)
 
-*   **Type / Scope**: directory contract.
-*   **Proposed Changes**: Interface, invariants and side effects for every file in `src/cost/`, with
-    `[file:symbol]` citations, written as each step lands. Invariants: no row holds content, names, labels or
-    emails; only the current and previous month are ever written; `pm:` and `cm:` rows are never deleted.
+*   **Type / Scope**: runtime-free module.
+*   **Proposed Changes**: `MemoryCostStore implements CostStore`, backed by `Map`s, for tests and the Node server.
 
-##### 5. `src/store.ts` (Modify)
+##### 5. `src/cost-do.ts` (Create)
 
-*   **Type / Scope**: `BellmanStore` interface and `MemoryStore`.
-*   **Proposed Changes**: `snapshotPlans(month, keyedPlans): Promise<number>` reads every grant and org and writes
-    that month's `pm:` rows in one step, returning the count; `planMonths(month): Promise<PlanMonthRow[]>`;
-    `putCostLastRun(row)` and `costLastRun()`. `MemoryStore` implements each with a `Map`.
+*   **Type / Scope**: Workers-only module.
+*   **Proposed Changes**:
+    *   `CostDO extends DurableObject`. It creates the tables in its constructor inside `blockConcurrencyWhile`, and
+        implements each `CostStore` method with `ctx.storage.sql.exec`. Each replace runs inside
+        `ctx.storage.transactionSync`, as a delete followed by inserts.
+    *   `DurableObjectCostStore` takes a stub and delegates each method through `reviving` (`src/rpc-error.ts`), as
+        `DurableObjectStore` does.
 
-##### 6. `src/store-do.ts` (Modify)
+##### 6. `src/cost/plans.ts` (Create)
 
-*   **Type / Scope**: `RegistryDO` and `DurableObjectStore`.
-*   **Proposed Changes**: `RegistryDO.snapshotPlans` lists `gr:` and org rows and writes `pm:<month>:<grantKey>` rows
-    in one transaction, through `planMonthRows`. `planMonths` lists by prefix. `DurableObjectStore` delegates both.
+*   **Type / Scope**: runtime-free module.
+*   **Proposed Changes**: `capturePlans(day, deps)` returns a `PlansDay` and the day's new `RoomRecord`s. It:
+    *   pages the room index with `listRoomsPage(500, after)` until a page comes back shorter than 500;
+    *   resolves each distinct creator once through `planOf(..., { raw: true })`, up to `MAX_COST_CREATORS = 150`,
+        with a `ponytail:` comment naming the 1,000-subrequest ceiling and resuming creators in a second invocation
+        as the upgrade;
+    *   reads grants with one `listGrants(MAX_GRANTS_COUNTED)` call (the constant is exported from
+        `src/http/stats.ts`);
+    *   calls `getOrg` once for each distinct `orgId` found in the grants or the room index;
+    *   counts individual grants after dropping keys that an override shadows;
+    *   computes object ids with the `sessionIdOf` and `hostIdOf` functions it is given.
 
-##### 7. `src/worker.ts` (Modify)
+##### 7. `src/cost/blobs.ts` (Create)
 
-*   **Type / Scope**: Worker entry.
-*   **Proposed Changes**: The default export gains `scheduled(controller, env, ctx)`, which calls `runCostJob` (step
-    5) or, in this step, only the snapshot and `putCostLastRun`. `WorkerEnv` gains optional `CF_ANALYTICS_TOKEN` and
-    `CF_ACCOUNT_ID`.
+*   **Type / Scope**: runtime-free module.
+*   **Proposed Changes**: `captureBlobs(day, blobs: BlobStore)` returns the day's rows from `bytesByRoom()`.
 
-##### 8. `src/cost/job.ts` (Create)
+##### 8. `src/blobs.ts`, `src/blobs-r2.ts` (Modify)
 
-*   **Type / Scope**: runtime-free orchestrator taking a `BellmanStore`, an env slice and a `fetch`.
-*   **Proposed Changes**: `runCostJob(deps, now)`. In this step: snapshot the current month, write the last-run row.
-    Step 5 adds the usage half.
+*   **Proposed Changes**: `BlobStore` gains `bytesByRoom(): Promise<Map<string, number>>`. `R2BlobStore` lists
+    `rooms/` 1,000 objects a call and sums `size` per `sessionId`. `MemoryBlobStore` sums its map.
 
-##### 9. `wrangler.toml` (Modify)
+##### 9. `src/cost/job.ts` (Create)
+
+*   **Type / Scope**: runtime-free orchestrator.
+*   **Proposed Changes**:
+    *   `runCostJob(deps: CostJobDeps, now: number): Promise<RunRecord>`. `CostJobDeps` holds:
+        *   `store: BellmanStore`;
+        *   `costs: CostStore`;
+        *   `blobs: BlobStore`;
+        *   `planDeps: PlanOfDeps`;
+        *   `sessionIdOf` and `hostIdOf`, each `(sessionId: string) => string`;
+        *   `honourPurchases: boolean`;
+        *   `cloudflare`, with `{ accountId, token, fetch }`, or `undefined`.
+    *   In 2a, the plans half (`putPlans`, then `putRooms`) and the blobs half (`putBlobs`) run independently. A
+        failure in one is recorded in its status and does not stop the other.
+    *   It writes one `RunRecord` with `putRun` at the start and again at the end, and logs one line:
+        `cost job: plans=<status> blobs=<status> usage=<month>:<status>,… counts=<json>`.
+
+##### 10. `src/worker.ts` (Modify)
+
+*   **Type / Scope**: Workers entry.
+*   **Proposed Changes**:
+    *   Export `CostDO`.
+    *   Add `scheduled(controller, env, ctx)`, which calls `ctx.waitUntil(runCostJob(…, Date.now()))`.
+    *   `sessionIdOf` is `(id) => env.SESSION.idFromName(id).toString()`, and `hostIdOf` is the same over `env.HOST`.
+    *   `WorkerEnv` gains `COST: DurableObjectNamespace`, and optional `CF_ANALYTICS_TOKEN` and `CF_ACCOUNT_ID`.
+
+##### 11. `wrangler.toml` (Modify)
 
 *   **Type / Scope**: deploy configuration.
-*   **Proposed Changes**: `[triggers] crons = ["17 3 * * *"]` (once a day, off the hour).
+*   **Proposed Changes**:
+    *   A `[[durable_objects.bindings]]` block with `name = "COST"` and `class_name = "CostDO"`.
+    *   `[[migrations]] tag = "v4"`, `new_sqlite_classes = ["CostDO"]`.
+    *   `[triggers] crons = ["17 3 * * *"]`, which runs daily at 03:17 UTC.
+    *   `CF_ANALYTICS_TOKEN` and `CF_ACCOUNT_ID` in the `wrangler secret put` comment block.
 
-##### 10. `tests/plan-snapshot.test.ts` (Create)
+##### 12. `worker-tests/wrangler.toml` (Modify)
 
-*   **Type / Scope**: vitest.
-*   **Proposed Changes**: Purchase grants are paid and operator grants comped; expired grants are skipped; org seats
-    are read from the org; keyed plans appear as comped; no row carries a field outside the declared shape.
+*   **Proposed Changes**: Add a `COST` binding for `CostDO`, and append `"CostDO"` to its single `v1` migration's
+    `new_sqlite_classes`, as `worker-tests/README.md` asks for every class.
 
-##### 11. `tests/helpers/store-contract.ts` (Modify)
+##### 13. `tsconfig.json`, `tsconfig.test.json`, `CLAUDE.md` (Modify)
 
-*   **Type / Scope**: store conformance suite.
-*   **Proposed Changes**: `snapshotPlans` twice in a month gives identical rows; a grant deleted mid-month is gone
-    from the current month after the next snapshot and still present in the previous month's rows.
+*   **Proposed Changes**:
+    *   `tsconfig.json` and `tsconfig.test.json`: add `src/cost-do.ts` to `exclude` in both. The test config replaces
+        the inherited list rather than extending it.
+    *   `CLAUDE.md`: add `src/cost-do.ts` to the Workers-only file list, and change "the five Durable Object types"
+        to six.
 
-##### 12. `tests/cost-job.test.ts` (Create)
+##### 14. Tests (Create or Modify)
 
-*   **Type / Scope**: vitest over `MemoryStore`.
-*   **Proposed Changes**: With no Cloudflare secrets the job writes the snapshot and the last-run row and nothing
-    else, and logs that it skipped the usage half.
+*   **`tests/plan-of.test.ts`.**
+    *   Precedence runs keyed, then override, then grant, then default.
+    *   A user set in `BELLMAN_KEYS` but missing from it falls through to the grant lookup.
+    *   Without `raw`, an inactive org's grant resolves `free`, and a purchase grant is skipped when
+        `honourPurchases` is false.
+    *   With `raw`, both return the grant's own plan, `grantSource` and `grantOrgId`.
+    *   An SSO user resolves through `ssoKeyForUser`.
+    *   `signedInPlan` returns what it did before.
+*   **`tests/helpers/cost-store-contract.ts`**, covering every `CostStore` method:
+    *   replacing a month twice leaves the same rows;
+    *   `replaceUsage` for a month before the previous one returns `{ ok: false, reason: "too_old" }`;
+    *   a second `putRooms` for a known room leaves its first record unchanged;
+    *   `putPlans` for a day replaces that day's rows rather than adding to them;
+    *   `month()` includes the previous month's last captured day.
+*   **`tests/cost-store.test.ts`** runs the contract against `MemoryCostStore`, and
+    **`worker-tests/cost-do.test.ts`** runs it against `CostDO`, each case on a unique object name.
+*   **`tests/cost-plans.test.ts`.**
+    *   Each distinct creator is resolved once, and creators past the cap set `creatorsCapped`.
+    *   Each org's seat count, source, active flag and plan counts are recorded; an org with no record is recorded
+        with nulls.
+    *   An org named only in the room index is read.
+    *   An overridden key's purchase grant is not counted.
+    *   No row carries a grant key, label or email.
+*   **`tests/cost-job.test.ts`.**
+    *   A failing plans half still writes blobs, and the reverse.
+    *   The run record and the log line carry each status.
+*   **`tests/helpers/blob-store-contract.ts`.** `bytesByRoom` sums per room. Assert only on the case's own session
+    ids, because the bucket is shared across cases.
+*   **`worker-tests/cost-scheduled.test.ts`.** The `scheduled` export, driven with `createScheduledController`,
+    writes a plans day to `CostDO`.
+*   **`worker-tests/cost-job-room-index.test.ts`.** Runs in the Durable Object runtime against the real
+    `RegistryDO` index. It creates a room, runs the job, and checks that `CostDO.rooms` holds that room with its
+    object ids. The test must pass whichever of this work and the operator rooms PR 2 merges second: before PR 2 the
+    index is `rm:`, and after it the `rooms` table. A job that lists `rm:` keys directly fails this test once PR 2
+    is in. In 2b, the same test also checks that a fake Cloudflare row for that room's `SessionDO` id maps to the
+    room and not to `unmatched`.
 
-#### Step 4: storage levels
+#### Step 2b: usage
 
-##### 13. `src/store.ts` (Modify)
-
-*   **Type / Scope**: `BellmanStore`, `MemoryStore`, and a runtime-free rule.
-*   **Proposed Changes**: `reportRoomUsage({ sessionId, databaseBytes, blobBytes, at })` overwrites the room's level;
-    `roomUsagePage(limit, after?)` lists levels; `dropRoomIndex` also deletes the level.
-    `USAGE_REPORT_INTERVAL_MS = 24 h` and `usageReportDue(lastAt, now)`.
-
-##### 14. `src/store-do.ts` (Modify, first PR)
-
-*   **Type / Scope**: `RegistryDO`, `DurableObjectStore`.
-*   **Proposed Changes**: `RegistryDO.reportRoomUsage` puts `ru:<sessionId>`; `roomUsagePage` lists `ru:`;
-    `dropRoomIndex` deletes `ru:<sessionId>` in its existing transaction.
-
-##### 15. `src/stored-session.ts` (Modify, second PR)
-
-*   **Type / Scope**: stored record type.
-*   **Proposed Changes**: Optional `usageReportedAt?: number`. Absent on old records, which reads as due.
-
-##### 16. `src/store-do.ts` (Modify, second PR)
-
-*   **Type / Scope**: `SessionDO`.
-*   **Proposed Changes**: In `appendEvent`, `appendEventOnce`, `appendHostEvent`, `appendSurface`, `appendSurfaces`
-    and the blob charge and credit paths: when `usageReportDue(s.usageReportedAt, now)`, set `usageReportedAt` in the
-    record the transaction already writes. After the transaction commits, call the registry's `reportRoomUsage` with
-    `ctx.storage.sql.databaseSize` and the record's `blobBytes`, without awaiting it in the reply path and with a
-    `.catch` that logs. One private helper does both halves so the seven sites stay one line each.
-
-##### 17. `worker-tests/room-usage-report.test.ts` (Create)
-
-*   **Type / Scope**: workerd test.
-*   **Proposed Changes**: The first append reports; a second append within 24 h does not; a registry that throws
-    leaves the append committed and its reply unchanged; a purged room's level is gone.
-
-##### 18. `tests/helpers/store-contract.ts` (Modify)
-
-*   **Type / Scope**: store conformance suite.
-*   **Proposed Changes**: A report overwrites, never adds; `dropRoomIndex` removes the level.
-
-#### Step 5: the usage rollup
-
-##### 19. `src/cost/graphql.ts` (Create)
+##### 15. `src/cost/graphql.ts` (Create)
 
 *   **Type / Scope**: runtime-free module.
-*   **Proposed Changes**: `usageQuery(accountTag, from, to, afterObjectId?)` builds the two per-object queries and
-    the namespace totals query from section 1 of the Technical Plan; `parseUsage(json)` returns typed rows or a
-    refusal carrying Cloudflare's error text. Field names live in one place.
+*   **Proposed Changes**:
+    *   `usageQueries(accountTag, from, to)` builds section 2's four queries, with the date filter form recorded by the
+        pre-check.
+    *   `parseUsage(json)` returns typed rows, `{ error: string }` carrying Cloudflare's message, or
+        `{ fullPage: true }` when a query returns 10,000 rows.
+    *   No other module names a Cloudflare field.
+    *   The `ponytail:` comment names the no-paging ceiling and `objectId_gt` paging as the upgrade.
 
-##### 20. `src/cost/rollup.ts` (Create)
-
-*   **Type / Scope**: runtime-free module.
-*   **Proposed Changes**: The `CostMonthRow` type with `version: 1`; `reduceMonth(month, usageRows, rooms,
-    levels, existing, today)` returns the `cm:` rows. Cloudflare fields replaced, storage accrued with the
-    `storageThroughDay` watermark, `chargedTo` kept from `existing` or set from `orgId` / `grantKeyForUser(createdBy)`.
-    Rows only for rooms with usage or a level. `objectIdsFor(sessionId)` takes the two `idFromName` functions as
-    arguments so the module stays runtime-free.
-
-##### 21. `src/cost/job.ts` (Modify)
-
-*   **Type / Scope**: orchestrator.
-*   **Proposed Changes**: The usage half: for the current and previous month, page Cloudflare, page the room index through `listRoomsPage` and `ru:`,
-    reduce, write `cm:` in batches and `cx:`; write rows only after every page is read; refuse to write any month
-    older than the previous one.
-
-##### 22. `src/store.ts` and `src/store-do.ts` (Modify)
-
-*   **Type / Scope**: `BellmanStore`, `MemoryStore`, `RegistryDO`, `DurableObjectStore`.
-*   **Proposed Changes**: `putCostMonths(rows)` (one transaction per batch, reading the existing row for the storage
-    watermark), `costMonths(month, limit, after?)`, `costMonthsForRoom(sessionId)`, `putCostTotals(month, row)`,
-    `costTotals(month)`.
-
-##### 23. `tests/cost-rollup.test.ts`, `tests/cost-graphql.test.ts` (Create)
-
-*   **Type / Scope**: vitest.
-*   **Proposed Changes**: A fixture of Cloudflare rows for three rooms, a registry object and a `HostDO`; the reducer
-    attributes each correctly and leaves the registry row unattributed; a rerun on the same day gives identical rows;
-    a two-day gap accrues two days at the last level; an org room is charged to its org; `chargedTo` survives across
-    months; parsing a Cloudflare error returns a refusal, not a throw.
-
-##### 24. `tests/cost-job.test.ts` (Modify)
-
-*   **Type / Scope**: vitest with a fake `fetch`.
-*   **Proposed Changes**: Paging follows `objectId_gt`; a failure on page two writes nothing; the month two back is
-    never written; no request body or stored row carries anything but ids and numbers.
-
-##### 24a. `worker-tests/cost-job-room-index.test.ts` (Create)
-
-*   **Type / Scope**: Worker test in the Durable Object runtime, so it reads the real `RegistryDO` index.
-*   **Proposed Changes**: Create a room, then run the usage job with a fake Cloudflare answer that has a row for that
-    room's `SessionDO` id (`env.SESSION.idFromName(sessionId)`). The month's `cm:` row for the room carries the usage,
-    and overhead does not. The test must pass whichever of this PR and the operator rooms PR 2 merges second: before
-    PR 2 the index is `rm:`, after it the `rooms` table, and the job reaches both only through `listRoomsPage`. A job
-    that lists `rm:` keys directly fails this test once PR 2 is in.
-
-#### Step 6: margin and routes
-
-##### 25. `src/cost/margin.ts` (Create)
+##### 16. `src/cost/usage.ts` (Create)
 
 *   **Type / Scope**: runtime-free module.
-*   **Proposed Changes**: `marginByPlan(cmRows, pmRows, cxRow, prices)` returns per-plan revenue, cost by driver and
-    margin, plus the free-plan, comped and overhead lines. Takes #475's cost function and plan prices as arguments.
-    A negative overhead is returned as an error field.
+*   **Proposed Changes**: `mapUsage(month, rows, rooms, sessionIdOf, hostIdOf)` returns `UsageRecord`s (each matched
+    or `unmatched`, with `byType` assembled from query 2's rows) and `TotalsRecord`s from queries 3 and 4.
 
-##### 26. `src/http/operator-costs.ts` (Create)
+##### 17. `src/cost/job.ts` (Modify)
 
-*   **Type / Scope**: HTTP route.
-*   **Proposed Changes**: `GET /operator/costs?month=YYYY-MM` returns `marginByPlan`'s table, the price table's date,
-    each driver's source, and the job's last run. Refuses a malformed month (400). Appends
-    `operator_costs_read` to `OPERATOR_AUDIT_STREAM`.
+*   **Proposed Changes**: The usage half.
+    *   With `cloudflare` undefined, it records `skipped_no_token` for both months and skips the queries. Plans,
+        rooms and blobs are unaffected.
+    *   Otherwise, for the previous month and then the current month, it runs the four queries and handles the
+        results:
+        *   any `{ error }` records `error` for that month;
+        *   any `{ fullPage }` records `skipped_full_page`;
+        *   otherwise it maps the rows against `knownRooms()` and calls `replaceUsage` once, recording `written`.
+    *   One month's result never blocks the other.
 
-##### 27. `src/http/stats.ts` (Modify)
+##### 18. Tests (Create or Modify)
 
-*   **Type / Scope**: operator route dispatch.
-*   **Proposed Changes**: Routes `/operator/costs` beside `/operator/rooms`, on the same `BELLMAN_OPERATORS` gate.
+*   **`tests/cost-graphql.test.ts`.** It checks the query text and parsing, that a Cloudflare error returns
+    `{ error }`, and that a 10,000-row result returns `{ fullPage }`.
+*   **`tests/cost-usage.test.ts`.** The fixture has three rooms, one `HostDO`, a registry object and a purged room
+    known only from `rooms`. Each room and the `HostDO` map to their session ids, the purged room maps through
+    `rooms`, the registry object is `unmatched`, and `byType` holds one entry per invocation type.
+*   **`tests/cost-job.test.ts`.** With a fake `fetch`:
+    *   with no secrets, the job writes plans, blobs and `skipped_no_token`;
+    *   a failing query writes nothing for its month and leaves the other month written;
+    *   no month older than the previous one is requested.
 
-##### 28. `src/http/operator-rooms.ts` (Modify)
+#### Step 3: read side (re-plan when #475 merges)
 
-*   **Type / Scope**: HTTP route.
-*   **Proposed Changes**: The room detail adds `cost`: its `cm:` rows priced per driver, `chargedTo`, and the job's
-    last run. The list adds this month's cost per row from the current month's `cm:` rows, for sorting on the dash.
+These are the files and the obligations 3a and 3b must meet. The signatures that touch #475 are fixed then.
 
-##### 29. `tests/cost-margin.test.ts`, `tests/operator-costs.test.ts`, `tests/operator-rooms.test.ts` (Create, Create, Modify)
+##### 19. `src/cost/margin.ts` (Create, 3a)
 
-*   **Type / Scope**: vitest.
-*   **Proposed Changes**: Room totals plus overhead equal the `cx:` total; free-plan and comped lines are separate;
-    a non-operator gets 404 as #472's routes do; every read appends one audit entry; no response field holds a
-    brief, message or surface content.
+*   **Proposed Changes**: `costPage(records: MonthRecords, prices, now): CostPageBody` applies section 6's rules.
+    `lifetime(costs: CostStore, prices, now)` loops over `months()`.
+*   **Body.** Snake case, typed as `CostPageBody`:
+    *   `month`, `price_table_date`, `month_to_date: boolean`;
+    *   `plans[]`: `{ plan, revenue, cost: { requests, duration, rows_read, rows_written, blob_storage }, margin,
+        rooms }`;
+    *   `free`, `comped` and `unattributed`, each `{ cost, rooms }`;
+    *   `top_rooms[]`: `{ id, plan, class, cost }`;
+    *   `coverage`: `{ namespaces: [{ namespace_id, kind, duration_share, requests_share }], plan_days_share,
+        below_threshold: boolean }`;
+    *   `lifetime[]`: `{ plan, revenue, cost, margin }`;
+    *   `sources`: `{ requests: "cloudflare", duration: "cloudflare", rows_read: "cloudflare", rows_written:
+        "cloudflare", blob_storage: "listing", tokens: "not_metered" }`;
+    *   `last_run`: `{ at, stale: boolean, plans_status, blobs_status, usage_status }`, where `stale` means more than
+        36 hours old;
+    *   `grants_capped` and `creators_capped`.
+*   **Tests: `tests/cost-margin.test.ts`.** One case for each rule and edge case in section 6:
+    *   org and creator charging;
+    *   the most-days rule and a tie going to the later plan;
+    *   an owner with no standing going to unattributed;
+    *   an org with no record;
+    *   an inactive org's purchase grant;
+    *   purchases not honoured;
+    *   carry-forward across a missed day and across a month boundary;
+    *   month-to-date revenue;
+    *   coverage below 95% flagged.
+
+##### 20. `src/http/operator-costs.ts` (Create, 3b)
+
+*   **Proposed Changes**:
+    *   `GET /operator/costs` with section 7's query rules and audit entries.
+    *   It appends before answering and fails closed with a 500.
+*   **Tests: `tests/operator-costs.test.ts`.**
+    *   401, and 403 with `not_available`, each writing no audit row.
+    *   One platform entry, plus one per org shown.
+    *   A failed append returns a 500.
+    *   No response field holds a brief, message, surface content, label or email.
+
+##### 21. `src/http/operator-rooms.ts` (Modify, 3b)
+
+*   **Proposed Changes**:
+    *   Export `operatorEntry`.
+    *   `operatorRooms(url, path, who, store, origin, costs?, prices?)`: the detail adds `cost` and answers purged
+        rooms as section 7 says.
+    *   Update the file's "No cost yet" header comment.
+*   **Tests.** Extend `tests/operator-rooms.test.ts` and `worker-tests/operator-rooms-routes.test.ts`:
+    *   the `cost` field;
+    *   a purged room's 200 body and its audit parties;
+    *   a 404 when neither store knows the id.
+
+##### 22. `src/http/stats.ts`, `src/worker.ts`, `src/app.ts` (Modify, 3b)
+
+*   **Proposed Changes**:
+    *   `StatsRouteDeps` gains `costs?: CostStore` and `prices?`.
+    *   `statsRoutes` adds `/operator/costs` to its path check, before the 401/403, and passes `costs` to
+        `operatorRooms`.
+    *   `src/worker.ts`:
+        *   adds `costs` to the `/operator/(…)` regex;
+        *   passes `costs: new DurableObjectCostStore(env.COST.get(env.COST.idFromName("cost")))` in its
+            `statsRoutes` deps.
+    *   `src/app.ts` adds `/operator/costs` to its mount list and passes one `MemoryCostStore`.
+*   **Tests.**
+    *   `worker-tests/operator-costs-route.test.ts`: an operator's `GET /operator/costs` returns 200 with a
+        `CostPageBody` from the Worker.
+    *   Add `/operator/costs` to the path list in `worker-tests/panel-wiring.test.ts` and to the suspended-operator
+        `it.each` in `worker-tests/moderation-routes.test.ts`.
 
 #### Documentation (with the step that changes each)
 
-##### 30. `docs/ARCHITECTURE.md` (Modify)
+##### 23. `docs/ARCHITECTURE.md` (Modify, 2a)
 
-*   **Proposed Changes**: The registry's new prefixes (`pm:`, `ru:`, `cm:`, `cx:`, `cost:last-run`); the cron as a
-    new entry point; the analytics token as a new secret and trust boundary; the room-to-registry report as a
-    non-durable cross-object write and why it is not on the outbox.
+*   **Proposed Changes**:
+    *   `CostDO` as the sixth Durable Object type.
+    *   The cron as an entry point.
+    *   The analytics token as a secret and a trust boundary.
+    *   The job's registry reads, and the lapsed-grant deletes they can cause.
 
-##### 31. `src/EGM.md`, `src/http/EGM.md` (Modify)
+##### 24. `src/cost/EGM.md` (Create, 2a), `src/EGM.md`, `src/http/EGM.md`, root `EGM.md` (Modify)
 
-*   **Proposed Changes**: `src/EGM.md`: the new `BellmanStore` methods, `BellmanEnv`/`WorkerEnv` secrets, the purge
-    deleting `ru:`, the `scheduled` handler under Side Effects. `src/http/EGM.md`: the `/operator/costs` route and the
-    detail's new field.
+*   **Proposed Changes**:
+    *   `src/cost/EGM.md`, the `src/cost/` contract:
+        *   no record holds a grant key, label or email;
+        *   months older than the previous one are never rewritten;
+        *   read-time rules live only in `margin.ts`;
+        *   the job wakes no room.
+    *   `src/EGM.md`:
+        *   `planOf`, `CostDO`, the `scheduled` handler and `bytesByRoom`;
+        *   "five Durable" object types becomes six;
+        *   `src/cost-do.ts` joins the Workers-only file list.
+    *   `src/http/EGM.md` (3b): `/operator/costs`, the detail's `cost` field, and the purged-room answer.
+    *   Root `EGM.md`: `cost` in the subdirectory list.
 
-##### 32. `docs/adr/NNNN-room-cost-from-cloudflare.md` (Create, with step 5)
+##### 25. `docs/adr/NNNN-room-cost-from-cloudflare.md` (Create, 2a)
 
-*   **Proposed Changes**: The decision to read Cloudflare's per-object usage instead of metering in-process, to charge
-    rooms to their creator's plan, and to send storage levels outside the outbox. Number it against `origin/main`,
-    every open PR and every local branch when the PR opens.
+*   **Proposed Changes**: The ADR records four decisions:
+    *   read Cloudflare's per-object analytics instead of metering in the room;
+    *   a dedicated `CostDO`;
+    *   creator-pays, with prorated revenue;
+    *   raw capture with classification at read time.
+
+    When the PR opens, take the next number not used on `origin/main`, in any open PR, or on any local branch.
 
 ### Verification Plan
 
-*   **Build and types**: `npm run verify` and `npm run typecheck:worker` on every PR.
-*   **Unit and contract tests**: the vitest files above, plus `tests/helpers/store-contract.ts` for each new
-    `BellmanStore` method; `worker-tests/` for the poll timer and room reports.
-*   **Deploy path**: `npx wrangler deploy --dry-run` before merging steps 2, 4 and 5 (a new cron trigger and new
-    registry methods), then read the main deploy run after merge.
-*   **Scheduled handler locally**: `npx wrangler dev --test-scheduled` and `curl "http://localhost:8787/__scheduled?cron=17+3+*+*+*"`;
-    the `pm:` rows and last-run row appear.
-*   **After the step 5 deploy**: for one known room, the `cm:` row's `duration` and `requests` match a hand-run
-    GraphQL query for the same month; a second run on the same day leaves every row byte-identical; the sum of room
-    rows plus unattributed objects equals the namespace totals in `cx:`.
-*   **After the step 6 deploy**: `/operator/costs` for the current month returns a table whose room costs plus overhead
-    equal the priced `cx:` total, and the read appears in the operator audit stream.
+*   **Every PR**: `npm run verify`, which runs `typecheck:worker` and the workerd tests. CI also runs
+    `wrangler deploy --dry-run`.
+*   **After merging 2a and 2b**: confirm the deploy workflow run on `main` succeeds.
+*   **Locally**:
+    1.  Run `npx wrangler dev --test-scheduled`.
+    2.  Run `curl "http://localhost:8787/__scheduled?cron=17+3+*+*+*"`.
+    3.  Check the `cost job:` log line, which gives each half's status and row counts.
+*   **After 2a deploys**: the next day's run writes plans, rooms and blobs with `usage = skipped_no_token`.
+*   **After 2b deploys**:
+    *   For one known room, its `usage` rows match a hand-run GraphQL query for the same month.
+    *   A second run on the same day leaves the same rows.
+    *   Coverage is reported for the `SessionDO` and `HostDO` namespaces.
+*   **After 3b deploys**:
+    *   `/operator/costs` returns a body whose plan, free, comped and unattributed costs add up to the priced sum of
+        every matched room.
+    *   The read appears in the operator audit stream.
 
 --------------------------------------------------------------------------------
 

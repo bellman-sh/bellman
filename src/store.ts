@@ -5,7 +5,7 @@ import type {
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
-import { MemoryBlobStore, type BlobStore } from "./blobs.js";
+import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import {
@@ -242,6 +242,56 @@ export const roomIndexRow = (
 /** A row's place in both stores' order: the time zero-padded, then the id, so newest first is this, descending. */
 export const roomIndexKey = (r: Pick<RoomIndexRow, "createdAt" | "sessionId">): string =>
   `${String(r.createdAt).padStart(16, "0")}:${r.sessionId}`;
+
+/**
+ * A room's state as the operator reads it (#472), one word by one precedence: a purge a delete asked for
+ * (`purgeAt`) over a close, a close over a freeze, a freeze over open. A close is the record's, or abandonment
+ * the alarm has not yet acted on (`isAbandoned`), as every read that refuses a closed room decides it. A closed
+ * room whose window will purge it is `closed`: only a delete schedules a purge before the window does.
+ */
+export type RoomStatus = "open" | "closed" | "frozen" | "purge_scheduled";
+
+/**
+ * Counts and states, read where the room is (#472): the operator's row beside its index facts, and nothing a
+ * member wrote. `events` is the last cursor, which is how many events the room has appended, since cursors run
+ * from 1 without a gap. `activeSeats` is the members in the room now, the hosted seat among them.
+ */
+export interface RoomSummary {
+  /** The public name the record holds, else the manifest's. */
+  name: string | null;
+  /** Whether the room is public now (`isPublic`): the index row keeps the flag it was created with, and unpublishing is one way. */
+  public: boolean;
+  status: RoomStatus;
+  lastEventAt: number | null;
+  activeSeats: number;
+  capacity: number;
+  events: number;
+  surfaceItems: number;
+  blobBytes: number;
+}
+
+/** Both stores' summary, from what each reads where the room is. `connected` is the members a socket vouches for. */
+export function roomSummaryOf(
+  s: StoredSession,
+  last: Pick<SessionEvent, "cursor" | "at"> | undefined,
+  surfaceItems: number,
+  now: number,
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): RoomSummary {
+  const closed = s.closed || isAbandoned(s, now, connected);
+  const status: RoomStatus = closed ? (s.purgeAt !== null ? "purge_scheduled" : "closed") : s.frozenAt !== null ? "frozen" : "open";
+  return {
+    name: s.publicName ?? (s.manifest.room || null),
+    public: isPublic(s),
+    status,
+    lastEventAt: last?.at ?? null,
+    activeSeats: s.members.filter(isActiveMember).length,
+    capacity: capacityOf(s.manifest),
+    events: last?.cursor ?? 0,
+    surfaceItems,
+    blobBytes: blobBytesUsed(s),
+  };
+}
 
 /**
  * What `departedMembers` answers, from every member a room has seated (ADR 0019, D7): those
@@ -1822,6 +1872,12 @@ export interface BellmanStore {
    * null is the end. Idempotent. MemoryStore indexes every room at its create, so it has nothing to write.
    */
   backfillRoomIndex(limit: number, after?: string): Promise<{ indexed: number; next: string | null }>;
+  /**
+   * One room's counts and states for the operator's list (#472), read where the room is, in one hop: undefined for
+   * a room that is not there, a purged one included, which is how a list skips an index row its purge left. A
+   * read: an abandoned room reads closed without being closed by it.
+   */
+  roomSummary(sessionId: string): Promise<RoomSummary | undefined>;
 
   /**
    * Append an event. Null means the session is frozen, for the same reason.
@@ -2434,6 +2490,13 @@ export interface BellmanStore {
   appendAudit(a: AuditEntry): Promise<void>;
   /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
+  /**
+   * Append to the platform operator's stream (#472), whatever `a.orgId` says: the operator's reads of rooms, kept
+   * apart from every org's (`OPERATOR_AUDIT_STREAM`). An org a read concerns is written its own row by `appendAudit`.
+   */
+  appendOperatorAudit(a: AuditEntry): Promise<void>;
+  /** The newest `limit` rows of the operator's stream, oldest first, as `auditForOrg` reads an org's. */
+  operatorAudit(limit: number): Promise<AuditEntry[]>;
   /** One page of an org's stream under the filters, newest first (audit trail spec, D6). */
   queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
   /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
@@ -2556,6 +2619,8 @@ export class MemoryStore implements BellmanStore {
   /** Each org's stream, with each row's seq and chain link: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry; prevHash: string; hash: string }[] = [];
   private auditSeq = new Map<string, number>();
+  /** The operator's stream (#472): apart from `audit`, which is filed by org, as its own AuditDO is in production. */
+  private operatorStream: AuditEntry[] = [];
   private auditState = new Map<string, { retentionDays: number | null; anchor: ChainAnchor; sweepAt: number | null; sink: AuditSink | null; sinkAt: number | null }>();
   private waiters = new Map<string, Waiter[]>();
   /**
@@ -2635,6 +2700,12 @@ export class MemoryStore implements BellmanStore {
 
   async backfillRoomIndex(): Promise<{ indexed: number; next: string | null }> {
     return { indexed: 0, next: null };
+  }
+
+  async roomSummary(sessionId: string): Promise<RoomSummary | undefined> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return undefined;
+    return detach(roomSummaryOf(s, s.events.at(-1), this.surfaces.get(sessionId)?.size ?? 0, Date.now()));
   }
 
   /**
@@ -4865,6 +4936,14 @@ export class MemoryStore implements BellmanStore {
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return detach(this.audit.filter((r) => r.entry.orgId === orgId).slice(-limit).map((r) => r.entry));
+  }
+
+  async appendOperatorAudit(a: AuditEntry): Promise<void> {
+    this.operatorStream.push(detach(a));
+  }
+
+  async operatorAudit(limit: number): Promise<AuditEntry[]> {
+    return detach(this.operatorStream.slice(-limit));
   }
 
   async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {

@@ -12,6 +12,7 @@ import { PURCHASE } from "../billing/grants.js";
 import { allowedOrigin, preflightResponse } from "../oauth/browser.js";
 import type { Identity } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
+import { operatorRooms, ROOMS_PATH } from "./operator-rooms.js";
 
 export type StatsRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
   /** The user ids BELLMAN_OPERATORS names. Undefined or empty admits nobody. */
@@ -68,7 +69,9 @@ export const MAX_ACCOUNTS_ANSWERED = 500;
 export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promise<Response | undefined> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");
-  if (path !== PATH && path !== ACCOUNTS_PATH) return undefined;
+  // The rooms pane (#472) is on this gate too: the list, and one room by id, with nothing past the id.
+  const rooms = path === ROOMS_PATH || (path.startsWith(`${ROOMS_PATH}/`) && !path.slice(ROOMS_PATH.length + 1).includes("/"));
+  if (path !== PATH && path !== ACCOUNTS_PATH && !rooms) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   // Before the caller is read: a browser sends no credential on a preflight.
   if (request.method === "OPTIONS") return preflightResponse(origin);
@@ -90,6 +93,8 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
       return problem(403, "not_available", "this account has no platform stats", origin);
     }
     if (request.method !== "GET") return methodNotAllowed("GET", origin);
+
+    if (rooms) return await operatorRooms(url, path, who, deps.store, origin);
 
     if (path === ACCOUNTS_PATH) {
       const [total, users] = await Promise.all([deps.store.countUsers(), deps.store.listUsers(MAX_ACCOUNTS_ANSWERED)]);

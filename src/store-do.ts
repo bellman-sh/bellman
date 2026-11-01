@@ -12,10 +12,12 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy,
-  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow,
 } from "./types.js";
+import { CONFIG_HISTORY } from "./config.js";
+import { configEvent, decideConfigWrite } from "./store.js";
 import type {
-  AppendExtras, ApprovalWrite, BellmanStore, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
+  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
   DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow, RoomSummary,
 } from "./store.js";
@@ -167,6 +169,13 @@ function asRows(read: StoredSession, rows: Record<string, unknown>): Record<stri
  * map nobody validated, and grant-index.ts makes the same argument at more length.
  */
 const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)}:`;
+/**
+ * Governed config (#414): `cfg:<name>` is the current revision, `cfgh:<name>:<rev>` the kept history, the revision
+ * zero-padded so a reverse list reads newest first. Purged with the room's storage.
+ */
+const configKey = (name: ConfigName): string => `cfg:${name}`;
+const configHistoryPrefix = (name: ConfigName): string => `cfgh:${name}:`;
+const configHistoryKey = (name: ConfigName, rev: number): string => `${configHistoryPrefix(name)}${String(rev).padStart(10, "0")}`;
 /** The operator's index of every room (#471); `RegistryDO.listRoomsPage` says what the rows hold. */
 const ROOM_INDEX_PREFIX = "rm:";
 const roomIdKey = (sessionId: string): string => `ri:${sessionId}`;
@@ -2875,6 +2884,55 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return { ok: true, instructions };
     });
     if (queued) await this.driver.deliverNow();
+    return result;
+  }
+
+  /** `BellmanStore.getConfigRow`, for this room: the `cfg:<name>` row. */
+  async getConfigRow(name: ConfigName): Promise<ConfigRow | null> {
+    return (await this.ctx.storage.get<ConfigRow>(configKey(name))) ?? null;
+  }
+
+  /** `BellmanStore.configHistory`, for this room: the `cfgh:<name>:` rows, newest first. */
+  async configHistory(name: ConfigName): Promise<ConfigRow[]> {
+    const rows = await this.ctx.storage.list<ConfigRow>({ prefix: configHistoryPrefix(name), reverse: true, limit: CONFIG_HISTORY });
+    return [...rows.values()];
+  }
+
+  /**
+   * `BellmanStore.writeConfig`, for this room: `decideConfigWrite` on the record and the current row read in the
+   * transaction, then the row, its history row, the record's revisions and bytes, the `config_changed` event and
+   * the audit intents in one put, and the history row past `CONFIG_HISTORY` deleted. The wake, the delivery and the
+   * re-arm after the commit, as a decision write's.
+   */
+  async writeConfig(w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
+    let after = { forward: false, queued: false };
+    let members: readonly Member[] = [];
+    let written: SessionEvent | null = null;
+    const result = await this.ctx.storage.transaction<ConfigWriteResult>(async (txn) => {
+      // Assigned again if the runtime runs this closure again.
+      after = { forward: false, queued: false };
+      written = null;
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found" };
+      members = s.members;
+      if (s.closed) return { ok: false, reason: "closed" };
+      const at = Date.now();
+      const decided = decideConfigWrite(s, (await txn.get<ConfigRow>(configKey(w.name))) ?? null, w, new Date(at).toISOString());
+      if (!decided.ok) return decided.result;
+      const { row } = decided;
+      const intents = audit.filter((e) => e.orgId).map(auditIntent);
+      after.queued = intents.length > 0;
+      const rows = await this.driver.enqueue(txn, intents);
+      const e: SessionEvent = { ...configEvent(row), cursor: await this.nextCursor(txn), at };
+      const session: StoredSession = { ...s, configRevs: decided.configRevs, configBytes: decided.configBytes };
+      const pruned = row.rev > CONFIG_HISTORY ? [configHistoryKey(w.name, row.rev - CONFIG_HISTORY)] : [];
+      after.forward = await this.#writeEvent(
+        txn, s, e, { session, [configKey(w.name)]: row, [configHistoryKey(w.name, row.rev)]: row, ...rows }, pruned,
+      );
+      written = e;
+      return { ok: true, rev: row.rev };
+    });
+    if (written !== null) await this.#afterDecision([written], members, after);
     return result;
   }
 
@@ -6897,6 +6955,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
     return this.session(sessionId).setHostInstructions(instructions, audit);
+  }
+
+  async getConfigRow(sessionId: string, name: ConfigName): Promise<ConfigRow | null> {
+    return this.session(sessionId).getConfigRow(name);
+  }
+
+  async configHistory(sessionId: string, name: ConfigName): Promise<ConfigRow[]> {
+    return this.session(sessionId).configHistory(name);
+  }
+
+  async writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
+    return this.session(sessionId).writeConfig(w, audit);
   }
 
   async waitForEvents(

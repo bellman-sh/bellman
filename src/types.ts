@@ -138,7 +138,9 @@ export type EventType =
   | "decision_opened"
   | "decision_vote"
   | "decision_closed"
-  | "decision_voter_removed";
+  | "decision_voter_removed"
+  /** A governed config name changed (#414): `{ name, rev, by }`, never the body. Written by the server. */
+  | "config_changed";
 
 /**
  * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
@@ -275,6 +277,13 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /**
+   * Each governed config name's current revision (#414), moved in the same write as its `cfg:` row, so a poll reports
+   * `room_instructions_rev` off the record it already read. Absent until the first write; readers use `?? {}`.
+   */
+  configRevs?: Partial<Record<ConfigName, number>>;
+  /** Bytes of every current config body together, held under `CONFIG_RESERVE_BYTES`. Absent reads as 0. */
+  configBytes?: number;
   /**
    * Units the hosted seat may spend this calendar month: the creator's plan's
    * `hostUnitsPerRoom`, stamped at creation and read from the creator's plan again at each

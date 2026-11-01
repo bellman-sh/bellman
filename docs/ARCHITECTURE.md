@@ -611,7 +611,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>decision deadlines,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms, org-rooms and<br/>every-room indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]

@@ -35,7 +35,9 @@ const ballot = (decision: number, key: string): EventBody => ({
 });
 
 describe("decision pages in SessionDO (#411)", () => {
-  it("indexes nothing on append, and on a page read each decision and its own events, a batch at a time", async () => {
+  // A thousand appends in sequence: under a full workerd run it takes about ten seconds of the default fifteen, so it
+  // has its own budget rather than failing on whatever else the run is doing.
+  it("indexes nothing on append, and on a page read each decision and its own events, a batch at a time", { timeout: 30_000 }, async () => {
     const { id, store, stub } = await room();
     const closed = await store.openDecision(id, opening("a"), null);
     if (closed.outcome !== "appended") throw new Error(closed.outcome);

@@ -3,7 +3,7 @@
  * its deadline, in a frozen room and a closed one too, instead of waiting for another decision to open.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { env, reset, runInDurableObject } from "cloudflare:test";
 import { MIN_DECISION_TTL_MS, type DecisionDraft } from "../src/decision.js";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { EventBody, SessionEvent } from "../src/types.js";
@@ -12,15 +12,19 @@ import { editRoom } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   await reset();
-  await abortAllDurableObjects();
 });
 
-/** A room whose creator may vote. No join codes, so no outbox row arms the alarm before a decision does. */
+/**
+ * A room whose creator may vote, under its own id: the fixture's default id would share one Durable Object with
+ * every other file that uses it, in the same run. No join codes, so no outbox row arms the alarm before a decision
+ * does.
+ */
+let rooms = 0;
 async function room() {
   const store = new DurableObjectStore(env as never);
   const pair = roomManifest();
   const manifest = roomManifest({ roles: { ...pair.roles, peer_a: { ...pair.roles.peer_a, can: [...pair.roles.peer_a.can, "vote"] } } });
-  const s = session({ manifest, joinCodes: {} });
+  const s = session({ id: `qs_deadline_${++rooms}`, manifest, joinCodes: {} });
   await store.createSession(s);
   return { id: s.id, store, stub: env.SESSION.get(env.SESSION.idFromName(s.id)) };
 }

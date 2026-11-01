@@ -158,8 +158,20 @@ export function describeBlobStoreContract(name: string, makeStore: () => BlobSto
       }
 
       expect((await store.list(sid)).map((o) => o.id).sort()).toEqual(ids);
+      expect((await store.bytesByRoom()).get(sid), "the cost capture's sum follows the cursor too").toBe(ids.length);
       expect(await store.deleteAll(sid)).toBe(ids.length);
       expect(await store.list(sid)).toEqual([]);
+    });
+
+    // The bucket is shared across cases, so this asserts on its own rooms only.
+    it("sums each room's bytes across the whole store, for the cost capture (#473)", async () => {
+      await store.put(sid, "c1".repeat(16), stream(text("12345")), meta(5));
+      await store.put(sid, "c2".repeat(16), stream(text("123")), meta(3));
+      await store.put(`${sid}_other`, "c3".repeat(16), stream(text("1234567")), meta(7));
+      const bytes = await store.bytesByRoom();
+      expect(bytes.get(sid)).toBe(8);
+      expect(bytes.get(`${sid}_other`)).toBe(7);
+      expect(bytes.get(`${sid}_never`)).toBeUndefined();
     });
   });
 }

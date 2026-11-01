@@ -55,6 +55,11 @@ class_name = "AuthDO"
 name = "HOST"
 class_name = "HostDO"
 
+# One object, idFromName("cost"): the room cost capture's records (#473, src/cost-do.ts).
+[[durable_objects.bindings]]
+name = "COST"
+class_name = "CostDO"
+
 # The room blob store (#183): one bucket, keyed rooms/<sessionId>/<blobId>, and
 # private — every byte leaves through the download route, under membership.
 # `npx wrangler r2 bucket create bellman-blobs` once, before the first deploy.
@@ -87,6 +92,16 @@ new_sqlite_classes = ["AuthDO"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["HostDO"]
+
+# The room cost capture's one object (#473, src/cost-do.ts). A class a migration adds cannot be undone by
+# redeploying a build without it: to stop the capture, remove the cron below, not the class.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["CostDO"]
+
+# The room cost capture, daily (#473, src/cost/job.ts).
+[triggers]
+crons = ["17 3 * * *"]
 
 [observability.logs]
 enabled = true
@@ -154,3 +169,7 @@ BELLMAN_PUBLIC_PAGE_ORIGINS = "https://bellman.sh"
 # And BELLMAN_SEAL_SECRET, which seals an org's IdP client secret at rest (ADR 0025). Optional: unset,
 # BELLMAN_TOKEN_SECRET seals it, and rotating that then means every org re-enters its secret.
 #   npx wrangler secret put BELLMAN_SEAL_SECRET
+# The room cost capture (#473) reads Cloudflare's per-object usage with a read-only token (Account Analytics:
+# Read) and the account's id. Both secrets; without either, the daily job still records plans, rooms and blobs.
+#   npx wrangler secret put CF_ANALYTICS_TOKEN
+#   npx wrangler secret put CF_ACCOUNT_ID

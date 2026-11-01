@@ -106,6 +106,11 @@ import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
 const CURSOR_PAD = 12;
 const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0")}`;
+/**
+ * A secret ballot's row for one account (secret ballot spec): its current choice, its vote count and the
+ * idempotency keys its votes used. The only place a secret choice is kept; every close deletes the decision's rows.
+ */
+const ballotKey = (decision: number, account: string) => `bv:${decision}:${account}`;
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
@@ -2828,6 +2833,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /** `BellmanStore.decision`: its own events from the index, read without a transaction, as `decisions` is. */
+  /** `BellmanStore.votedOn`: one read of the account's ballot row in each named decision. */
+  async votedOn(userId: string, decisions: number[]): Promise<number[]> {
+    const rows = await this.ctx.storage.get(decisions.map((d) => ballotKey(d, userId)));
+    return decisions.filter((d) => rows.has(ballotKey(d, userId)));
+  }
+
   async decision(cursor: number, now: number): Promise<DecisionView | null> {
     await this.#indexDecisions();
     const own = await this.ctx.storage.list<SessionEvent>({ prefix: decisionEventPrefix(cursor) });
@@ -6908,6 +6919,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
     return this.session(sessionId).decisions(ask, now);
+  }
+
+  async votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]> {
+    return this.session(sessionId).votedOn(userId, decisions);
   }
 
   async appendSurface(

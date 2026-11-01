@@ -20,7 +20,7 @@ import type { SurfaceWrite } from "../../src/surface.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
 import {
-  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type VoteInput,
+  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput,
 } from "../../src/decision.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
@@ -113,6 +113,12 @@ export interface StoreContractHarness {
    * of one goes on to the user it names, so a row left on a key no user names any longer shows only here.
    */
   scimIndexRows: () => Promise<string[]>;
+  /**
+   * Every row a room's store holds, key and value, as the Durable Objects store names them: `e:<cursor>` events,
+   * `bv:<decision>:<account>` ballot rows, `ik:<member>:<key>` idempotency records (secret ballot spec). It is how a case
+   * proves a closed secret ballot left no choice anywhere, which `BellmanStore` cannot show.
+   */
+  roomRows: (sessionId: string) => Promise<[string, unknown][]>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -3598,7 +3604,7 @@ export function describeStoreContract(
         await store.castVote(id, ballot(event.cursor, { choice: "reject" }), null);
         await store.castVote(id, ballot(event.cursor, { choice: "approve" }), null);
         const view = (await store.decision(id, event.cursor, event.at))!;
-        expect(view.ballots.map((b) => b.vote.choice)).toEqual(["reject", "approve"]);
+        expect(view.ballots.map((b) => (b.vote as DecisionVote).choice)).toEqual(["reject", "approve"]);
         expect(view.tally).toMatchObject({ approve: 1, reject: 0 });
       });
 
@@ -3898,6 +3904,127 @@ export function describeStoreContract(
         });
         expect(JSON.stringify(rows), "never the proposal").not.toContain("example.com");
         expect(await store.verifyAudit("org_codenerd")).toMatchObject({ ok: true, checked: 5 });
+      });
+
+      describe("secret ballots (release 1)", () => {
+        const SECRET = { rule: "majority", ballot: "secret" };
+        const secretDraft = (over: Partial<DecisionDraft> = {}) => draft({ rule: SECRET, ...over });
+        const secretBallot = (decision: number, choice: "approve" | "reject" | "abstain", by = ANN, d = secretDraft()) =>
+          ballot(decision, { hash: decisionHash(d), choice }, by);
+        const ANN2 = member({ memberId: "m_ann2", userId: "u_ann", label: "ann2@codenerd", roomRole: "peer_a" });
+        const voteOf = (e: unknown) => e as { type: string; fromMemberId: string; payload: Record<string, unknown> };
+
+        /** What a closed secret decision must leave: no ballot row, no key of its votes, and no event naming a voter or a choice. */
+        const erased = async (id: string, decision: number, keys: string[]) => {
+          const rows = await harness.roomRows(id);
+          expect(rows.map(([k]) => k).filter((k) => k.startsWith(`bv:${decision}:`)), "no ballot row").toEqual([]);
+          expect(rows.map(([k]) => k).filter((k) => keys.some((key) => k.endsWith(`:${key}`))), "no idempotency record").toEqual([]);
+          for (const [, v] of rows) {
+            const e = voteOf(v);
+            if (e?.type !== "decision_vote") continue;
+            expect(e.payload, "no choice in a stored vote").not.toHaveProperty("choice");
+            expect(e.fromMemberId, "no voter on a stored vote").toBe("system");
+          }
+          const closes = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "decision_closed" && a.detail.decision === decision);
+          expect(closes).toHaveLength(1);
+          expect(closes[0]).toMatchObject({ actorUserId: "system", actorLabel: null, actorOrgId: null });
+          expect(closes[0]!.detail).not.toHaveProperty("votes");
+        };
+
+        it("close path 1: a vote that settles the rule erases every choice, and the close lists the seats that voted", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann")).toMatchObject({ outcome: "appended", closed: null });
+          const settled = await store.castVote(id, secretBallot(event.cursor, "approve", BEN), "k-ben");
+          expect(settled).toMatchObject({ outcome: "appended", closed: { payload: { state: "passed", voted: ["m_ann", "m_ben"], tally: { approve: 2, turnout: 2 } } } });
+          await erased(id, event.cursor, ["k-ann", "k-ben"]);
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject"), "k-ann"), "a retry after the close").toEqual({ outcome: "closed", state: "passed" });
+        });
+
+        it("close path 2: a supersession erases the old decision's choices", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann");
+          await open(id, secretDraft({ key: "other", supersedes: event.cursor }));
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("close path 3: an open that finds a secret decision overdue erases it", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann");
+          vi.setSystemTime((event.payload as { expires_at: number }).expires_at + 1);
+          await open(id, secretDraft({ key: "later" }));
+          expect((await store.decision(id, event.cursor, Date.now()))!.state).toBe("expired");
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("close path 5: a removal that settles a secret decision erases it, and keeps the removed seat's vote", async () => {
+          const id = await room({ members: [ANN, BEN, DAN], manifest: { ...voting, mode: "swarm" } });
+          const d = secretDraft({ rule: { ...SECRET, quorum: 100 } });
+          const { event } = await open(id, d);
+          await store.castVote(id, secretBallot(event.cursor, "approve", BEN, d), "k-ben");
+          const before = await count(id);
+          expect(await store.removeMember(id, "m_ben", evict())).toMatchObject({ removed: true });
+          expect((await since(id, before)).map((e) => [e.type, (e.payload as Record<string, unknown>).voided ?? null])).toEqual([
+            ["member_evicted", null], ["decision_voter_removed", []],
+          ]);
+          expect((await store.decision(id, event.cursor, Date.now()))!.tally).toMatchObject({ approve: 1, unreachable: 1 });
+          expect(await store.removeMember(id, "m_dan", evict())).toMatchObject({ removed: true });
+          expect((await store.decision(id, event.cursor, Date.now()))).toMatchObject({ state: "failed", reason: "no_quorum" });
+          await erased(id, event.cursor, ["k-ben"]);
+        });
+
+        it("close path 6: a direct closeDecision erases it", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "abstain"), "k-ann");
+          const deadline = (event.payload as { expires_at: number }).expires_at;
+          expect(await store.closeDecision(id, event.cursor, { state: "expired" }, deadline + 1, [rowFor("decision")]))
+            .toMatchObject({ outcome: "appended", event: { payload: { voted: ["m_ann"] } } });
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("answers a retry while open with recorded, whatever its choice, and a key from another decision with conflict", async () => {
+          const id = await room();
+          const other = (await open(id)).event;
+          await store.castVote(id, ballot(other.cursor), "k-used");
+          const { event } = await open(id, secretDraft({ key: "secret" }));
+          const d = secretDraft({ key: "secret" });
+          await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-ann");
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-ann")).toEqual({ outcome: "recorded" });
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject", ANN, d), "k-ann")).toEqual({ outcome: "recorded" });
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-used")).toEqual({ outcome: "conflict" });
+        });
+
+        it("counts one account's two seats once, under one cap of six votes", async () => {
+          const id = await room({ members: [ANN, ANN2, BEN] });
+          const { event } = await open(id, secretDraft());
+          for (let i = 0; i < 6; i++) {
+            const by = i % 2 === 0 ? ANN : ANN2;
+            expect(await store.castVote(id, secretBallot(event.cursor, i % 2 === 0 ? "approve" : "abstain", by), null), `vote ${i + 1}`).toMatchObject({ outcome: "appended" });
+          }
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject", ANN2), null)).toEqual({ outcome: "quota", limit: 5 });
+          expect((await store.decision(id, event.cursor, Date.now()))!.tally).toMatchObject({ abstain: 1, turnout: 1 });
+        });
+
+        it("shows a live tally with no ballot book, answers votedOn for one account only, and leaves an open ballot as it was", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          const plain = (await open(id, draft({ key: "plain" }))).event;
+          await store.castVote(id, secretBallot(event.cursor, "abstain"), null);
+          await store.castVote(id, ballot(plain.cursor, { hash: decisionHash(draft({ key: "plain" })) }), null);
+          const live = (await store.decision(id, event.cursor, Date.now()))!;
+          expect(live.tally).toMatchObject({ abstain: 1, turnout: 1 });
+          expect(live).not.toHaveProperty("book");
+          expect((await store.decisions(id, { limit: 10 }, Date.now())).open.every((v) => !("book" in v))).toBe(true);
+          expect(await store.votedOn(id, "u_ann", [event.cursor, plain.cursor])).toEqual([event.cursor]);
+          expect(await store.votedOn(id, "u_ben", [event.cursor])).toEqual([]);
+          const plainVote = (await store.eventsAfter(id, 0)).find((e) => e.type === "decision_vote" && (e.payload as { decision: number }).decision === plain.cursor)!;
+          expect(plainVote).toMatchObject({ fromMemberId: "m_ann", payload: { choice: "approve" } });
+          const closed = await store.closeDecision(id, event.cursor, { state: "expired" }, (event.payload as { expires_at: number }).expires_at + 1);
+          expect(closed).toMatchObject({ event: { payload: { tally: live.tally } } });
+        });
       });
     });
 

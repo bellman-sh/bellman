@@ -68,6 +68,10 @@ export async function voteOn(
     case "unknown": return fail(`no decision with cursor ${n}.`);
     case "conflict": return keyReused(key!);
     case "frozen": return fail(FROZEN);
+    case "recorded":
+      return ok({ ballot: "secret", recorded: true, note: "Recorded under this key. To change your vote, vote again with a new key." });
+    case "advisory_secret":
+      return fail("Advisory votes are not taken in a secret ballot. Ask your human, then vote with human_approved: true.");
   }
 }
 

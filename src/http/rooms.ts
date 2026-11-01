@@ -28,7 +28,7 @@ import { joinUrl } from "../codes.js";
 import { DECISION_PAGE, MAX_DECISION_PAGE } from "../decision.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
+import { decisionMembers, decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import {
@@ -1024,7 +1024,9 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
  * full shape, the one `bellman_decide read` gives one decision. `?before=` pages on from a `next`, `?limit=` sizes
  * the page. Every closed decision stays readable for the room's life; the log's replay cap does not reach this read.
  * The caller rule is the events read's: membership, a removed member to its cut (with nothing open), and #65's
- * fallback for an org admin reading a closed room. A read and nothing else.
+ * fallback for an org admin reading a closed room. A read and nothing else. The membership and the page are two
+ * reads, so an eviction that commits between them leaves this one read uncut, and the next reads to the cut, as on
+ * the surface and events reads.
  *
  * The ETag is a hash of the body, so a client that sends it back gets a 304 whenever nothing it would be shown
  * changed, an expiry by the clock included. ponytail: the 304 still costs the read; a decision cursor on the record
@@ -1052,7 +1054,8 @@ async function readDecisionsRoute(request: Request, url: URL, sessionId: string,
   const page = await deps.store.decisions(sessionId, {
     limit, ...(rawBefore === null ? {} : { before: Number(rawBefore) }), ...(cut === undefined ? {} : { upTo: cut }),
   }, Date.now());
-  const shown = (v: (typeof page.open)[number]) => decisionShown(v, session.members, true);
+  const members = await decisionMembers(deps.store, sessionId, session.members, [...page.open, ...page.decisions]);
+  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true);
   const body = JSON.stringify({ open: page.open.map(shown), decisions: page.decisions.map(shown), next: page.next });
   const tag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
   const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag", "cache-control": "no-store", etag: tag };

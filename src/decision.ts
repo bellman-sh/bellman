@@ -538,32 +538,11 @@ export function decisionPageOf(cursors: readonly number[], ask: DecisionPageAsk)
 }
 
 /**
- * Each decision these events open or close: its opening cursor to its closing event's cursor, null while it has none.
- * A store keeps it as rows beside the log, so a page finds the decisions it shows without reading the log between them.
+ * The decision `e` belongs to: an opening's own cursor, the one a vote, voiding or close names, null for any other
+ * event. A store keeps a copy of each decision's events under its cursor, so a page reads them and none of the log
+ * between them.
  */
-export function decisionIndex(events: readonly SessionEvent[]): Map<number, number | null> {
-  const out = new Map<number, number | null>();
-  for (const e of events) {
-    if (e.type === "decision_opened") out.set(e.cursor, null);
-    else if (e.type === "decision_closed") out.set(decisionOf(e) ?? -1, e.cursor);
-  }
-  out.delete(-1);
-  return out;
-}
-
-/**
- * The log spans that hold every event of the decisions `index` names, merged where they meet: each from its opening to
- * its close, or to the log's end (`Infinity`) while unclosed, and no further than `upTo`. Sorted, so reading them in
- * order hands `decisionsOf` a log in cursor order.
- */
-export function decisionSpans(index: ReadonlyMap<number, number | null>, upTo = Infinity): [number, number][] {
-  const spans = [...index].map(([opened, closed]): [number, number] => [opened, Math.min(closed ?? Infinity, upTo)]);
-  spans.sort((a, b) => a[0] - b[0]);
-  const out: [number, number][] = [];
-  for (const [from, to] of spans) {
-    const last = out[out.length - 1];
-    if (last !== undefined && from <= last[1] + 1) last[1] = Math.max(last[1], to);
-    else out.push([from, to]);
-  }
-  return out;
+export function decisionOwning(e: SessionEvent): number | null {
+  if (e.type === "decision_opened") return e.cursor;
+  return (DECISION_EVENTS as readonly string[]).includes(e.type) ? decisionOf(e) ?? null : null;
 }

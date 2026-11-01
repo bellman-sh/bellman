@@ -1,12 +1,11 @@
 /**
- * #411 in the real SessionDO: the `dx:` index a page of decisions is read from, written for decisions opened before
- * it by the first page read, and a vote reaching a room socket as an ordinary frame the panel refetches on.
- * Decisions from before the deploy are made here by opening them and then deleting their `dx:` rows and the marker.
+ * #411 in the real SessionDO: the index a page of decisions is read from, which page reads write and appends never do,
+ * and a vote reaching a room socket as an ordinary frame the panel refetches on.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, SELF, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { decisionHash, type DecisionDraft } from "../src/decision.js";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DECISION_INDEX_BATCH, DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { EventBody } from "../src/types.js";
 import { roomManifest, session } from "../tests/helpers/fixtures.js";
 
@@ -36,29 +35,35 @@ const ballot = (decision: number, key: string): EventBody => ({
 });
 
 describe("decision pages in SessionDO (#411)", () => {
-  it("writes the index for decisions opened before it on the first page read, once", async () => {
+  it("indexes nothing on append, and on a page read each decision and its own events, a batch at a time", async () => {
     const { id, store, stub } = await room();
     const closed = await store.openDecision(id, opening("a"), null);
     if (closed.outcome !== "appended") throw new Error(closed.outcome);
     await store.castVote(id, ballot(closed.event.cursor, "a"), null);
     const open = await store.openDecision(id, opening("b"), null);
     if (open.outcome !== "appended") throw new Error(open.outcome);
-    const rows = () => runInDurableObject(stub, async (_i: SessionDO, ctx) => [...(await ctx.storage.list({ prefix: "dx" })).entries()]);
-    expect(await rows()).toEqual([
-      [`dx:${String(closed.event.cursor).padStart(12, "0")}`, { closed: closed.event.cursor + 2 }],
-      [`dx:${String(open.event.cursor).padStart(12, "0")}`, { closed: null }],
-    ]);
-
-    await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-      await ctx.storage.delete([...(await ctx.storage.list({ prefix: "dx" })).keys()]);
-    });
-    expect(await rows()).toEqual([]);
+    for (let i = 0; i < DECISION_INDEX_BATCH; i++) {
+      await store.appendEvent(id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: `n${i}` }, refId: null });
+    }
+    const late = await store.castVote(id, ballot(open.event.cursor, "b"), null);
+    if (late.outcome !== "appended") throw new Error(late.outcome);
+    const rows = () => runInDurableObject(stub, async (_i: SessionDO, ctx) =>
+      [...(await ctx.storage.list({ prefix: "d" })).entries()].map(([k, v]) => [k, typeof v === "object" && v !== null ? (v as { cursor: number }).cursor : v]));
+    expect(await rows(), "no append writes the index").toEqual([]);
 
     const page = await store.decisions(id, { limit: 10 }, Date.now());
-    expect(page.decisions.map((v) => [v.cursor, v.state])).toEqual([[open.event.cursor, "open"], [closed.event.cursor, "passed"]]);
-    expect(page.open.map((v) => v.cursor)).toEqual([open.event.cursor]);
-    expect((await rows()).map(([k]) => k)).toEqual([
-      `dx-built`, `dx:${String(closed.event.cursor).padStart(12, "0")}`, `dx:${String(open.event.cursor).padStart(12, "0")}`,
+    expect(page.decisions.map((v) => [v.cursor, v.state])).toEqual([[open.event.cursor, "passed"], [closed.event.cursor, "passed"]]);
+    const pad = (c: number) => String(c).padStart(12, "0");
+    expect(await rows(), "a decision's rows hold its own events and not the messages between them").toEqual([
+      ["dv:" + pad(closed.event.cursor) + ":" + pad(closed.event.cursor), closed.event.cursor],
+      ["dv:" + pad(closed.event.cursor) + ":" + pad(closed.event.cursor + 1), closed.event.cursor + 1],
+      ["dv:" + pad(closed.event.cursor) + ":" + pad(closed.event.cursor + 2), closed.event.cursor + 2],
+      ["dv:" + pad(open.event.cursor) + ":" + pad(open.event.cursor), open.event.cursor],
+      ["dv:" + pad(open.event.cursor) + ":" + pad(late.event.cursor), late.event.cursor],
+      ["dv:" + pad(open.event.cursor) + ":" + pad(late.event.cursor + 1), late.event.cursor + 1],
+      ["dx-at", late.event.cursor + 1],
+      ["dx:" + pad(closed.event.cursor), true],
+      ["dx:" + pad(open.event.cursor), true],
     ]);
   });
 

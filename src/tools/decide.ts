@@ -9,7 +9,7 @@ import { FROZEN, admitSend, auditEntries, findMember, requestWindow, touchMember
 import { DECISION_KINDS, isTopicRoom } from "../manifest.js";
 import { electorateOf, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
-import { UNTRUSTED_PREAMBLE, decisionShown } from "../projections.js";
+import { UNTRUSTED_PREAMBLE, decisionMembers, decisionShown } from "../projections.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 import {
   decisionTtlMs, decisionsOf, type DecisionClosed, type DecisionDraft, type DecisionOpened,
@@ -117,7 +117,7 @@ export function registerDecide(server: McpServer, identity: Identity, s: Bellman
         if (args.decision !== undefined) {
           const view = await s.decision(session_id, args.decision, now);
           if (view === null) return fail(`no decision with cursor ${args.decision}.`);
-          return ok(decisionShown(view, session.members, true), UNTRUSTED_PREAMBLE);
+          return ok(decisionShown(view, await decisionMembers(s, session_id, session.members, [view]), true), UNTRUSTED_PREAMBLE);
         }
         const window = await requestWindow(s, session_id, now - decisionTtlMs(decide?.expiresMs, topic));
         const views = [...decisionsOf(window, now).values()].reverse().slice(0, DECISIONS_LISTED);

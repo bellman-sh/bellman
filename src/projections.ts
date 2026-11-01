@@ -5,7 +5,7 @@ import type { CardHit, MessageHit } from "./search.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
-import { asked, capacityOf, codeIsLive, isActiveMember } from "./store.js";
+import { asked, capacityOf, codeIsLive, isActiveMember, type BellmanStore } from "./store.js";
 import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import { heldName } from "./public-names.js";
@@ -560,6 +560,19 @@ export function messageResult(hit: MessageHit): MessageResult {
     snippet: hit.snippet,
     at: new Date(e.at).toISOString(),
   });
+}
+
+/**
+ * The member rows `decisionShown` labels `views` from: the room's, and each seat they name that has left since, read
+ * by id (ADR 0019), because a session holds only the members still in it.
+ */
+export async function decisionMembers(
+  store: Pick<BellmanStore, "getMember">, sessionId: string, members: readonly Member[], views: readonly DecisionView[],
+): Promise<Member[]> {
+  const here = new Set(members.map((m) => m.memberId));
+  const gone = new Set(views.flatMap((v) => [...v.payload.electorate, ...v.ballots.map((b) => b.memberId)]).filter((m) => !here.has(m)));
+  const rows = await Promise.all([...gone].map((m) => store.getMember(sessionId, m)));
+  return [...members, ...rows.filter((m) => m !== undefined)];
 }
 
 /**

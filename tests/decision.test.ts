@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyVote, capacityOfVote, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
-  decisionIndex, decisionPageOf, decisionSpans, decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
+  decisionOwning, decisionPageOf, decisionStates, decisionsOf, dueToExpire, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
   MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
   type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
   type OpenDecisions, type VoterRemoved,
@@ -664,18 +664,12 @@ describe("a page of decisions (#411)", () => {
   const ev = (cursor: number, type: EventType, payload: unknown): SessionEvent =>
     ({ cursor, type, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload, refId: null, at: 0 });
 
-  it("indexes each decision from its opening to its close, null while unclosed", () => {
-    const index = decisionIndex([
-      ev(3, "decision_opened", {}), ev(4, "message", {}), ev(5, "decision_opened", {}), ev(6, "decision_closed", { decision: 3 }),
-      ev(7, "decision_vote", { decision: 5 }),
-    ]);
-    expect([...index]).toEqual([[3, 6], [5, null]]);
-  });
-
-  it("merges the spans that meet, runs an unclosed one to the end, and stops at a cut", () => {
-    expect(decisionSpans(new Map([[20, 30], [2, 5], [6, 9], [12, null]]))).toEqual([[2, 9], [12, Infinity]]);
-    expect(decisionSpans(new Map([[2, 5], [12, null]]), 15)).toEqual([[2, 5], [12, 15]]);
-    expect(decisionSpans(new Map())).toEqual([]);
+  it("names the decision each decision event belongs to, and none for any other event", () => {
+    const owners = [
+      ev(3, "decision_opened", {}), ev(4, "message", { decision: 3 }), ev(5, "decision_vote", { decision: 3 }),
+      ev(6, "decision_voter_removed", { decision: 3, member: "m", voided: [5] }), ev(7, "decision_closed", { decision: 3 }),
+    ].map(decisionOwning);
+    expect(owners).toEqual([3, null, 3, 3, 3]);
   });
 
   it("pages below before and to a cut, naming next only when more are left", () => {

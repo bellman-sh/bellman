@@ -45,8 +45,8 @@ interface Shown {
   decision: number;
   state: string;
   tally: { approve: number; advisory: { approve: number } };
-  electorate: { member_id: string; voted: boolean }[];
-  votes: { cursor: number; capacity: string }[];
+  electorate: { member_id: string; label: string | null; voted: boolean }[];
+  votes: { cursor: number; label: string | null; capacity: string }[];
   advisory_votes: { cursor: number; capacity: string }[];
 }
 interface Page { open: Shown[]; decisions: Shown[]; next: number | null }
@@ -163,6 +163,23 @@ describe("GET /rooms/:id/decisions", () => {
     const body = await read(DEV_KEY.peer);
     expect(body.decisions.map((v) => v.decision)).toEqual([before]);
     expect(body.open).toEqual([]);
+  });
+
+  it("labels a seat that has left, in the route and in bellman_decide read alike", async () => {
+    const d = await open();
+    await vote(d, PEER);
+    const h = new Harness(store, blobs);
+    const jesse = await h.connect(DEV_KEY.jesse);
+    expect((await jesse.call("bellman_evict", { session_id: ROOM, member_id: "m_peer" })).isError).toBe(false);
+    const told = await jesse.call("bellman_decide", { session_id: ROOM, member_id: "m_creator", action: "read", decision: d });
+    await h.close();
+    const [shown] = (await read(DEV_KEY.jesse)).decisions;
+    expect(told.isError, told.text).toBe(false);
+    const tool = JSON.parse(told.text.slice(told.text.indexOf("{"))) as Shown;
+    for (const v of [shown, tool]) {
+      expect(v.electorate.find((e) => e.member_id === "m_peer")?.label).toBe("peer@codenerd");
+      expect(v.votes.map((b) => b.label)).toEqual(["peer@codenerd"]);
+    }
   });
 
   it("refuses a before or limit that is not a whole number in range", async () => {

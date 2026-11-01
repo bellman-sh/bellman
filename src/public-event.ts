@@ -101,6 +101,8 @@ export function briefAuthors(events: readonly SessionEvent[]): string[] {
  * - A `brief_update` whose author keeps their brief is dropped, for every reader but the author's own account.
  * - A `member_joined` still goes out, so peers know who joined. Only `payload.brief` becomes null;
  *   the member block keeps its agent and capabilities (R10).
+ * - An `fs` event about an account's memory (ADR 0046) is judged by `seesMemory` from every seat that account has
+ *   held (`accountSeats`), not the one that wrote it, and dropped when it refuses or no seats are passed.
  * - Every other event comes back as it was.
  */
 export function readableEvent(
@@ -121,7 +123,8 @@ export function readableEvent(
 /**
  * `readableEvent` over a list, each author looked up by `fromMemberId`; a dropped event is left out
  * and the order kept. A grant belongs to a handle, so one account's two handles can differ, and each
- * event is judged by the row of the handle that wrote it.
+ * brief is judged by the row of the handle that wrote it. A memory event is judged by every seat of its account,
+ * looked up in `seatsByUser` by `fromUserId` (ADR 0046).
  */
 export function readableEvents(
   events: readonly SessionEvent[],
@@ -137,8 +140,12 @@ export function readableEvents(
 export const isMemoryPath = (path: string): boolean => path.startsWith("/members/");
 
 /** An `fs` event about an account's memory. */
-export const isMemoryEvent = (e: SessionEvent): boolean =>
-  e.type === "fs" && isMemoryPath(String((e.payload as { path?: unknown } | null)?.path ?? ""));
+export function isMemoryEvent(e: SessionEvent): boolean {
+  if (e.type !== "fs") return false;
+  const path = (e.payload as { path?: unknown } | null)?.path;
+  // A path that cannot be read is treated as memory: a privacy filter fails closed.
+  return typeof path === "string" ? isMemoryPath(path) : true;
+}
 
 /** The accounts whose seats `readableEvents` needs for these events' memory: each once, in first-seen order. */
 export function memoryAuthors(events: readonly SessionEvent[]): string[] {

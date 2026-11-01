@@ -33,6 +33,11 @@ describe("isMemoryPath and isMemoryEvent", () => {
     expect(isMemoryEvent(fsEvent("/plans/launch.md"))).toBe(false);
     expect(isMemoryEvent({ ...fsEvent(MEMORY), type: "message" })).toBe(false);
   });
+
+  it("treats an fs event with no readable path as memory, so the filter fails closed", () => {
+    expect(isMemoryEvent({ ...fsEvent(MEMORY), payload: { path: 7 } })).toBe(true);
+    expect(isMemoryEvent({ ...fsEvent(MEMORY), payload: null })).toBe(true);
+  });
 });
 
 describe("seesMemory", () => {

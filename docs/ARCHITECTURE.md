@@ -682,8 +682,12 @@ Why the split is shaped that way:
   the only writer, so none of this load lands on `RegistryDO`, which every join and sign-in waits on. The run
   wakes no room. It does read the registry: the room index through `listRoomsPage` only, one capped grant list,
   each org, and up to four calls per creator, and those reads delete a lapsed grant when they meet one, as every
-  sign-in does. Cloudflare's per-object usage, read with `CF_ANALYTICS_TOKEN`, a read-only Account Analytics
-  token held as a Worker secret, is the capture's next step; without the token a run records the rest.
+  sign-in does. Each run also reads Cloudflare's GraphQL Analytics for the current and previous month: per-object
+  duration, rows and requests by invocation type, and each namespace's totals, one request a month
+  (`src/cost/graphql.ts`). It maps each object to a room through the ids `CostDO` keeps, so a purged room's usage
+  still maps; the rest is stored as unmatched. That read needs `CF_ANALYTICS_TOKEN`, a read-only Account Analytics
+  token held as a Worker secret, beside `CF_ACCOUNT_ID`; without them a run records everything else. Usage is
+  stored raw: which fields are priced, and at what rate, is the cost page's to decide.
 
 ### Presence is derived, membership is stored
 

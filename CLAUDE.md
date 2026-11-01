@@ -19,7 +19,7 @@ npm --prefix docs-site run build   # the docs site (npm --prefix docs-site ci fi
 ## Architecture
 
 `docs/ARCHITECTURE.md` is the whole-system view: the surfaces agents arrive
-on, why the server is remote-first, the five Durable Object types, how a plan
+on, why the server is remote-first, the six Durable Object types, how a plan
 resolves, the trust boundaries, and the cross-object atomicity gap that keeps
 producing bugs. Read it before changing how the pieces fit together.
 
@@ -37,6 +37,8 @@ producing bugs. Read it before changing how the pieces fit together.
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
+- `src/cost/` — the room cost capture (#473): a daily job that records raw facts, runtime-free.
+  `src/cost-do.ts` is `CostDO`, the object it records into.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.
@@ -95,8 +97,9 @@ or *peers*, where a peer is any other member rather than a counterpart.
   are approved by the receiving *human*. Any change that weakens this needs to
   say so out loud in the PR.
 - **Workers-only files are excluded from the Node build** (`src/worker.ts`,
-  `src/store-do.ts`, `src/oauth/store.ts`). They import `cloudflare:workers`,
-  and their types otherwise leak into the Node program.
+  `src/store-do.ts`, `src/oauth/store.ts`, `src/cost-do.ts`). They import `cloudflare:workers`,
+  and their types otherwise leak into the Node program. `tsconfig.test.json` keeps its own
+  `exclude` list, so a new one goes in both.
 - **Two test programs.** Anything importing `cloudflare:workers` cannot be
   imported by a vitest test; put the shape in a runtime-free module beside it
   (see `src/oauth/storage.ts`).

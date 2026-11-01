@@ -616,7 +616,11 @@ flowchart LR
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
+        CDO["CostDO — singleton<br/>the room cost capture's records:<br/>rooms, plans by day, blob levels,<br/>runs (SQL tables)"]
     end
+
+    CRON["daily cron<br/>runCostJob, src/cost/job.ts"] --> CDO
+    CRON -.->|"listRoomsPage, grants, orgs"| RDO
 
     SDO -.->|"outbox: host wakes"| HDO
 
@@ -665,6 +669,16 @@ Why the split is shaped that way:
   room's object must never wait on one: the room stays a record of events, and
   the seat that calls the model is an object of its own, keyed by the room's
   session id. See [the hosted seat](#the-hosted-seat).
+- **`CostDO` is a singleton** (`idFromName("cost")`) holding what the room cost capture records (#473): each
+  room it has seen with its object ids, kept after a purge; who held which plan each day, raw (`planOf` with
+  `raw: true`, so `honourPurchases` and an org's standing are applied when the cost page is read); each room's
+  blob bytes each day, from a listing of the bucket; and one row per run. Its rows are SQL tables
+  (`src/cost/records.ts`). A daily cron (`[triggers]` in `wrangler.toml`, the Worker's `scheduled` export) is
+  the only writer, so none of this load lands on `RegistryDO`, which every join and sign-in waits on. The run
+  wakes no room. It does read the registry: the room index through `listRoomsPage` only, one capped grant list,
+  each org, and up to four calls per creator, and those reads delete a lapsed grant when they meet one, as every
+  sign-in does. Cloudflare's per-object usage, read with `CF_ANALYTICS_TOKEN`, a read-only Account Analytics
+  token held as a Worker secret, is the capture's next step; without the token a run records the rest.
 
 ### Presence is derived, membership is stored
 
@@ -1771,7 +1785,7 @@ a member, sensitive values readable by membership — has something to be built 
 
 **A Durable Object's input gate covers one invocation. Nothing spans two.**
 
-Bellman's state is deliberately split across five object types, so any
+Bellman's state is deliberately split across six object types, so any
 operation touching two of them has a window in the middle. That window produced
 three filed bugs, and they were two different problems:
 

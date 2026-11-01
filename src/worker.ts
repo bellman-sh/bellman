@@ -21,6 +21,8 @@ import { buildServer } from "./server.js";
 import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
+import { costStore, type CostDO } from "./cost-do.js";
+import { runCostJob } from "./cost/job.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
@@ -46,6 +48,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 export { SessionDO, RegistryDO, AuditDO } from "./store-do.js";
 export { AuthDO } from "./oauth/store.js";
 export { HostDO } from "./host-do.js";
+export { CostDO } from "./cost-do.js";
 
 /** Worker bindings: the session stores, plus the authorization server's. */
 export interface WorkerEnv extends BellmanEnv {
@@ -107,6 +110,11 @@ export interface WorkerEnv extends BellmanEnv {
   STRIPE_API_KEY?: string;
   /** Optional JSON: link name -> Stripe Payment Link URL, served at /upgrade/<name>. */
   STRIPE_PAYMENT_LINKS?: string;
+  /** The room cost capture's records (#473): one object, `idFromName("cost")`. */
+  COST: DurableObjectNamespace<CostDO>;
+  /** Read-only (Account Analytics: Read): Cloudflare's per-object usage, for the cost capture's usage half (#473). */
+  CF_ANALYTICS_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
 }
 
 /**
@@ -611,5 +619,20 @@ export default {
         { status: 500 }
       );
     }
+  },
+
+  /** The daily room cost capture (#473), from `[triggers] crons` in wrangler.toml. It wakes no room. */
+  async scheduled(_controller: ScheduledController, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
+    const store = new DurableObjectStore(env);
+    const honourPurchases = billingSettings(env).applyPlans;
+    ctx.waitUntil(runCostJob({
+      store,
+      planDeps: { keys: env.BELLMAN_KEYS, overrides: parseOverrides(env.BELLMAN_USERS), plans: store, honourPurchases },
+      honourPurchases,
+      sessionIdOf: (id) => env.SESSION.idFromName(id).toString(),
+      hostIdOf: (id) => env.HOST.idFromName(id).toString(),
+      costs: costStore(env.COST),
+      blobs: new R2BlobStore(env.BLOBS),
+    }, Date.now()).then(() => undefined, (err: unknown) => console.error("cost job failed:", err)));
   },
 } satisfies ExportedHandler<WorkerEnv>;

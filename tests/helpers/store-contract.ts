@@ -3880,11 +3880,14 @@ export function describeStoreContract(
         const stuck = await store.openDecision(id, opening(draft({ key: "other" })), null, row);
         if (stuck.outcome !== "appended") throw new Error(stuck.outcome);
         vi.setSystemTime((stuck.event.payload as { expires_at: number }).expires_at + 1);
-        const before = await count(id);
         const third = await store.openDecision(id, opening(draft({ key: "third" })), null, row);
         if (third.outcome !== "appended") throw new Error(third.outcome);
-        expect((await since(id, before)).map((e) => [e.type, (e.payload as { decision?: number; state?: string }).state ?? null]))
-          .toEqual([["decision_opened", null], ["decision_closed", "expired"], ["decision_closed", "expired"]]);
+        // Each overdue decision is closed `expired` exactly once. Which path writes it is not pinned: the open writes
+        // it (close path 3), unless the room's deadline alarm got there first (close path 4), as SessionDO's does
+        // once the clock has passed the deadline.
+        const closes = (await store.eventsAfter(id, 0)).filter((e) => e.type === "decision_closed")
+          .map((e) => [(e.payload as { decision: number }).decision, (e.payload as { state: string }).state]);
+        expect(closes.sort()).toEqual([[first.event.cursor, "expired"], [stuck.event.cursor, "expired"]].sort());
         expect(await store.decision(id, stuck.event.cursor, Date.now())).toMatchObject({ state: "expired", closed: { type: "decision_closed" } });
         const rows = await store.auditForOrg("org_codenerd", 20);
         expect(rows.map((a) => a.action).sort()).toEqual(["decision_closed", "decision_closed", "decision_opened", "decision_opened", "decision_opened"]);

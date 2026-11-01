@@ -600,6 +600,11 @@ in real workerd, with real Durable Objects. That second program exists because
 root test can load those classes over a stub and a fake storage
 (`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 
+**Governed config (ADR 0044, #414)** is the one part of a room a person changes inside its fixed manifest:
+`cfg:<name>` rows in `SessionDO`, the last 20 revisions as `cfgh:<name>:<rev>`, and `configRevs`/`configBytes` on
+the record. `writeConfig` writes the row, its history, a `config_changed` event and its audit rows in one
+transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/store.ts<br/>every method async"]
@@ -611,7 +616,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>governed config rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms, org-rooms and<br/>every-room indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -1711,6 +1716,14 @@ loud:
 
 **A client can read the MCP server before it connects.** The Worker serves Bellman's MCP Server Card (SEP-2127, `src/server-card.ts`) at `GET /mcp/server-card`, where the spec reserves it: the streamable HTTP URL plus `/server-card`, as `application/mcp-server-card+json` with open CORS and an ETag. It names the server, its version (`SERVER_VERSION`, the one `serverInfo` reports) and its one remote with the protocol versions the SDK accepts. It lists no tools, because what a caller is shown depends on who signs in. Like Bellman's own agent card, the Node server does not serve it.
 
+**Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
+instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token
+is refused even on a seat that holds `govern`), the request's Origin checked, and the caller's own seat holding
+`govern`. The server, not the body, writes who approved a revision. Every joining agent is handed
+`room_instructions` by `bellman_connect` and `bellman_confirm`, inside the untrusted envelope with the approving seat
+as origin and never the approver's user id: a person wrote it, but to an agent it is still another member's text, and
+it grants nothing.
+
 ## 8. Where this is going
 
 The roadmap groups into five tracks. Each is architecture rather than features.
@@ -2367,9 +2380,9 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~10,340** | every request, whether or not you are in a room |
+| Tool definitions | **~10,424** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
-| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
+| Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~345 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~819 | every request, as every tool is; inside the total above |
@@ -2389,6 +2402,7 @@ below with its measured delta. Raising the ceiling is a decision recorded here, 
 | Surface `widget` kind and `{ items }` batch (`bellman_send`) | +127 | 11,225 | #480 (ADR 0043) |
 | `bellman_decide` (485), a decision vote in `bellman_send` and `bellman_sync` | +578 | 11,803 | #482 (#405) |
 | Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
+| `govern` verb (`bellman_start`); `room_instructions` in `bellman_connect`/`bellman_confirm`, `room_instructions_rev` and a changed text in `bellman_sync` | +84 | 10,424 | #512 (#414) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

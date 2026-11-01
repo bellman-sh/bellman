@@ -142,7 +142,7 @@ export interface DecisionView {
 }
 
 /** JSON with every object's keys sorted, so two payloads that differ only in key order hash alike. */
-function canonical(v: unknown): string {
+export function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
   if (v !== null && typeof v === "object") {
     const o = v as Record<string, unknown>;

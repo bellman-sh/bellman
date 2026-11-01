@@ -3,6 +3,8 @@ import { SEAT_STATUSES, SEND_KINDS, type SendKind, type SessionEvent, type Verb 
 import { FROZEN } from "../rooms.js";
 import { MAX_PAYLOAD_CHARS } from "../payload.js";
 import type { AppendExtras, BellmanStore } from "../store.js";
+import { getGovernedConfig, truncateForDelivery } from "../config.js";
+import { untrusted } from "../projections.js";
 
 // What every tool file shares: the MCP result shape, the zod shapes a tool's
 // inputSchema is built from, and the two send-side tables. Split out of
@@ -219,3 +221,14 @@ export async function appendOrFrozen(
   return event;
 }
 
+/**
+ * `room_instructions` as bellman_connect and bellman_confirm deliver it (#414): inside the untrusted envelope, its
+ * origin the approving seat, cut to 8 KiB. Empty when the room has none. It grants nothing and sits outside every
+ * trusted field: what a person wrote in the dash is still peer text to an agent (ADR 0008).
+ */
+export async function roomInstructionsField(store: BellmanStore, sessionId: string) {
+  const got = await getGovernedConfig(store, sessionId, "room_instructions");
+  if (got.value === null || got.approver === null) return {};
+  const { content, truncated } = truncateForDelivery(got.value.markdown);
+  return { room_instructions: untrusted(got.approver, { rev: got.rev, content, truncated }) };
+}

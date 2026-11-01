@@ -109,25 +109,25 @@ describe("presets", () => {
   // leaves or joins a role should show up as an edit to this table, not only to the catalog.
   const catalog: Record<PresetName, Record<string, string[]>> = {
     pair: {
-      peer_a: ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface"],
+      peer_a: ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface", "govern"],
       peer_b: ["send", "request_actions", "respond_actions"],
     },
     swarm: {
-      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
       helper: ["send", "request_actions", "respond_actions"],
       observer: [],
     },
     review: {
-      author: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      author: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
       reviewer: ["send", "respond_actions"],
     },
     social: {
-      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
       guest: ["send"],
       host: ["send"],
     },
     topic: {
-      maintainer: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      maintainer: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "govern"],
       contributor: ["send", "request_actions"],
     },
   };
@@ -152,8 +152,16 @@ describe("the verb enum", () => {
   // PR, not before.
   it("holds exactly the verbs whose operations exist room-scoped", () => {
     expect([...VERBS]).toEqual([
-      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote",
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface", "answer", "vote", "govern",
     ]);
+  });
+
+  // Governed room config (#414): only the creator's role may change room settings in the dash.
+  it.each(PRESET_NAMES)("grants govern to the %s preset's creator role and no other", (preset) => {
+    const m = resolveManifest({ room: "r", preset });
+    for (const [key, def] of Object.entries(m.roles)) {
+      expect(def.can.includes("govern"), key).toBe(key === m.creatorRole);
+    }
   });
 
   it.each(["audit", "close_room"])("rejects %s from a role, and from the tool's own schema", (verb) => {

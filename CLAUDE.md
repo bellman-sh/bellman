@@ -37,6 +37,8 @@ producing bugs. Read it before changing how the pieces fit together.
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
+- `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
+  `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
 - `src/cost/` — the room cost capture (#473): a daily job that records raw facts, runtime-free.
   `src/cost-do.ts` is `CostDO`, the object it records into.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.

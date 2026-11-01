@@ -23,6 +23,10 @@ on, why the server is remote-first, the five Durable Object types, how a plan
 resolves, the trust boundaries, and the cross-object atomicity gap that keeps
 producing bugs. Read it before changing how the pieces fit together.
 
+An `EGM.md` is its directory's contract: interface, invariants and side effects, with `[file:symbol]` citations
+into the code. Read one only when the work is in its directory or below it. Before changing `src/oauth/routes.ts`,
+read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
+
 ## Layout
 
 - `src/server.ts` — `buildServer` and nothing else: one `McpServer` per request,

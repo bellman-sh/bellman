@@ -178,6 +178,37 @@ describe("GET /operator/rooms", () => {
     expect(second.next).toBeNull();
   });
 
+  // The index row keeps the flag a room was created with; unpublishing is one way, and the record is what says it now.
+  it("reads public off the room as it is now, an unpublished room included, in the row and in both public filters", async () => {
+    await room("qs_was_public", 0, { manifest: roomManifest({ public: true }) });
+    await room("qs_still_public", 1, { manifest: roomManifest({ public: true }) });
+    await room("qs_private", 2);
+    await store.unpublishSession("qs_was_public", Date.now());
+
+    const { rooms } = await listOf();
+    expect(Object.fromEntries(rooms.map((r) => [r.id, r.public]))).toEqual({ qs_private: false, qs_still_public: true, qs_was_public: false });
+    const ids = async (q: string) => (await listOf(`/operator/rooms?${q}`)).rooms.map((r) => r.id);
+    expect(await ids("public=false")).toEqual(["qs_private", "qs_was_public"]);
+    expect(await ids("public=true")).toEqual(["qs_still_public"]);
+    expect((await bodyOf(await call(DEV_KEY.jesse, "/operator/rooms/qs_was_public"))).public).toBe(false);
+  });
+
+  it("reads a sparse filter's index in windows of a page and one more, however few rows the page still wants", async () => {
+    await room("qs_match", 0, { manifest: roomManifest({ public: true }) });
+    for (let i = 1; i <= 150; i++) await room(`qs_miss_${String(i).padStart(4, "0")}`, i);
+    const list = store.listRoomsPage.bind(store);
+    const windows: number[] = [];
+    store.listRoomsPage = async (limit, after) => {
+      windows.push(limit);
+      return list(limit, after);
+    };
+    const { rooms, next } = await listOf("/operator/rooms?limit=1&public=true");
+    expect(rooms.map((r) => r.id)).toEqual(["qs_match"]);
+    expect(next).toBeNull();
+    // 151 rows in windows of 51: 51, 51 and a short 49 that ends the index.
+    expect(windows).toEqual([51, 51, 51]);
+  });
+
   it("skips a row whose room is gone: an index row the purge did not remove", async () => {
     await room("qs_kept", 0);
     await room("qs_gone", 1);
@@ -283,6 +314,39 @@ describe("the operator's reads are audited (#472)", () => {
         expect.objectContaining({ orgId: org, sessionId: s.id, actorUserId: "u_jesse", action: "operator_room_read", detail: { room_id: s.id } }),
       ]);
     }
+  });
+
+  it("files the platform entries with the operator's label and org, the room, and the orgs the read crossed", async () => {
+    await room("qs_mine", 0);
+    await room("qs_theirs", 1, { orgId: "org_customer" });
+    await room("qs_nobodys", 2, { orgId: null });
+    await listOf();
+    await call(DEV_KEY.jesse, "/operator/rooms/qs_mine");
+    await call(DEV_KEY.jesse, "/operator/rooms/qs_theirs");
+    const common = { orgId: null, actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd" };
+    expect(await store.operatorAudit(10)).toEqual([
+      expect.objectContaining({
+        ...common, sessionId: "operator:rooms", roomName: null,
+        parties: ["org_codenerd", "org_customer", null], crossing: "cross_org", direction: "outbound",
+      }),
+      expect.objectContaining({ ...common, sessionId: "qs_mine", roomName: "test-room", parties: ["org_codenerd"], crossing: "internal", direction: null }),
+      expect.objectContaining({
+        ...common, sessionId: "qs_theirs", roomName: "test-room", parties: ["org_codenerd", "org_customer"], crossing: "cross_org", direction: "outbound",
+      }),
+    ]);
+  });
+
+  it.each([
+    { operator: "an operator in another org", key: DEV_KEY.jesse, userId: "u_jesse", parties: ["org_codenerd", "org_customer"] },
+    { operator: "an operator in no org", key: DEV_KEY.outsider, userId: "u_outsider", parties: ["org_customer", null] },
+  ])("files a customer's row for $operator as an inbound crossing, and nothing in the operator's own org", async ({ key, userId, parties }) => {
+    deps = { ...deps, operators: new Set([userId]) };
+    await room("qs_customer", 0, { orgId: "org_customer" });
+    expect((await call(key, "/operator/rooms/qs_customer"))!.status).toBe(200);
+    expect(await store.auditForOrg("org_customer", 10)).toEqual([
+      expect.objectContaining({ orgId: "org_customer", actorUserId: userId, parties, crossing: "cross_org", direction: "inbound" }),
+    ]);
+    expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
   });
 
   it.each([

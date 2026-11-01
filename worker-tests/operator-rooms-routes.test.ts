@@ -50,6 +50,11 @@ describe("the operator's rooms through the Worker", () => {
       ["operator_rooms_listed", "u_jesse", { room_ids: [s.id], filters: {} }],
       ["operator_room_read", "u_jesse", { room_id: s.id }],
     ]);
+    // AuditDO keeps an entry's label, room and parties only beside a `crossing`, so the route has to give one.
+    expect((await store.operatorAudit(1))[0]).toMatchObject({
+      actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd", roomName: "test-room",
+      parties: ["org_codenerd", "org_other"], crossing: "cross_org", direction: "outbound",
+    });
     for (const org of ["org_codenerd", "org_other"]) {
       expect((await store.auditForOrg(org, 10)).filter((e) => e.action === "operator_room_read"), org).toHaveLength(1);
     }

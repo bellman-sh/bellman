@@ -7920,7 +7920,7 @@ export function describeStoreContract(
         await store.updateMember(s.id, "m_peer", { leftAt: Date.now() });
 
         expect(await store.roomSummary(s.id)).toEqual({
-          name: "test-room", status: "open", lastEventAt: Date.now(),
+          name: "test-room", public: false, status: "open", lastEventAt: Date.now(),
           activeSeats: 1, capacity: 2, events: 3, surfaceItems: 1, blobBytes: 60,
         });
       });
@@ -7928,9 +7928,11 @@ export function describeStoreContract(
       it("names a room by its public name over its manifest's, and answers a room with no events as none", async () => {
         const s = session({ id: "qs_sum_named", manifest: roomManifest({ public: true }) });
         await store.createSession(s);
-        expect(await store.roomSummary(s.id)).toMatchObject({ name: "test-room", lastEventAt: null, events: 0, surfaceItems: 0, blobBytes: 0 });
+        expect(await store.roomSummary(s.id)).toMatchObject({ name: "test-room", public: true, lastEventAt: null, events: 0, surfaceItems: 0, blobBytes: 0 });
         await store.setPublicName(s.id, "open-review");
         expect((await store.roomSummary(s.id))?.name).toBe("open-review");
+        await store.unpublishSession(s.id, Date.now());
+        expect((await store.roomSummary(s.id))?.public, "unpublished, whatever the manifest says").toBe(false);
       });
 
       // One precedence: a scheduled purge over a close, a close over a freeze, a freeze over open.
@@ -7996,6 +7998,16 @@ export function describeStoreContract(
 
       it("starts empty", async () => {
         expect(await store.operatorAudit(10)).toEqual([]);
+      });
+
+      it("reads an entry back with who acted, the room and the orgs it crossed", async () => {
+        const entry = read({
+          sessionId: "qs_2", action: "operator_room_read", detail: { room_id: "qs_2" },
+          actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd", roomName: "test-room",
+          parties: ["org_codenerd", "org_other", null], crossing: "cross_org", direction: "outbound",
+        });
+        await store.appendOperatorAudit(entry);
+        expect(await store.operatorAudit(1)).toEqual([entry]);
       });
     });
 

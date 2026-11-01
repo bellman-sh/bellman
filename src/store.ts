@@ -259,6 +259,8 @@ export type RoomStatus = "open" | "closed" | "frozen" | "purge_scheduled";
 export interface RoomSummary {
   /** The public name the record holds, else the manifest's. */
   name: string | null;
+  /** Whether the room is public now (`isPublic`): the index row keeps the flag it was created with, and unpublishing is one way. */
+  public: boolean;
   status: RoomStatus;
   lastEventAt: number | null;
   activeSeats: number;
@@ -280,6 +282,7 @@ export function roomSummaryOf(
   const status: RoomStatus = closed ? (s.purgeAt !== null ? "purge_scheduled" : "closed") : s.frozenAt !== null ? "frozen" : "open";
   return {
     name: s.publicName ?? (s.manifest.room || null),
+    public: isPublic(s),
     status,
     lastEventAt: last?.at ?? null,
     activeSeats: s.members.filter(isActiveMember).length,

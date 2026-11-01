@@ -12,7 +12,7 @@
  */
 import { auditRows, partiesOf } from "../audit.js";
 import { isOrgId } from "../grant-index.js";
-import { roomIndexKey, roomIndexRow, type BellmanStore, type RoomIndexRow, type RoomStatus, type RoomSummary } from "../store.js";
+import { isPublic, roomIndexKey, roomIndexRow, type BellmanStore, type RoomIndexRow, type RoomStatus, type RoomSummary } from "../store.js";
 import type { AuditEntry } from "../types.js";
 import { json, problem, type RoomCaller } from "./rooms.js";
 
@@ -47,7 +47,7 @@ function rowOf(r: RoomIndexRow, s: RoomSummary | null) {
     org_id: r.orgId,
     preset: r.preset,
     mode: r.mode,
-    public: r.public,
+    public: s?.public ?? r.public,
     hosted: r.hosted,
     created_at: iso(r.createdAt),
     last_event_at: iso(s?.lastEventAt ?? null),
@@ -96,16 +96,19 @@ function parseQuery(params: URLSearchParams): ListQuery | { invalid: string } {
 /**
  * The index rows of one page, and the cursor past the last row read, or null at the index's end. The filters read
  * the index rows, so a scan runs in windows until the page is full or `MAX_ROOMS_SCANNED` rows are read. Each
- * window asks for one row more than the page still needs, so a page that ends at the index's end knows it.
+ * window is a full page and one more, whatever the page still wants, so a sparse filter costs a read per 51 rows
+ * and not one per row, and a page that ends at the index's end knows it.
  */
 async function scanIndex(store: BellmanStore, q: ListQuery): Promise<{ rows: RoomIndexRow[]; next: string | null }> {
+  // An index row says public as the room was created, and unpublishing is one way: a row that says false is never
+  // public now, so only public=true can be read off the index. public=false is decided on the summary.
   const keeps = (r: RoomIndexRow) =>
-    (q.public === undefined || r.public === q.public) && (q.hosted === undefined || r.hosted === q.hosted) && (q.org === undefined || r.orgId === q.org);
+    (q.public !== true || r.public) && (q.hosted === undefined || r.hosted === q.hosted) && (q.org === undefined || r.orgId === q.org);
   const rows: RoomIndexRow[] = [];
   let cursor = q.after;
   let scanned = 0;
   for (;;) {
-    const want = Math.min(q.limit - rows.length + 1, MAX_ROOMS_SCANNED - scanned);
+    const want = Math.min(MAX_ROOMS_PAGE + 1, MAX_ROOMS_SCANNED - scanned);
     const window = await store.listRoomsPage(want, cursor);
     for (const r of window) {
       if (rows.length === q.limit) return { rows, next: roomIndexKey(cursor!) };
@@ -135,11 +138,18 @@ async function summarised(store: BellmanStore, rows: readonly RoomIndexRow[]): P
   });
 }
 
-/** The operator's entry, in the platform stream: who read, what, and when. */
-function operatorEntry(who: RoomCaller, sessionId: string, action: string, detail: Record<string, unknown>, roomName: string | null): AuditEntry {
+/**
+ * The operator's entry, in the platform stream: who read, what, when, and the orgs the read concerns, seen from the
+ * operator's side. AuditDO keeps the label, the room and the parties only beside a `crossing`, so every entry has one.
+ */
+function operatorEntry(
+  who: RoomCaller, sessionId: string, action: string, detail: Record<string, unknown>, roomName: string | null, parties: (string | null)[],
+): AuditEntry {
+  const crossing = parties.some((p) => p !== who.identity.orgId) ? "cross_org" : "internal";
   return {
     at: Date.now(), orgId: null, sessionId, actorUserId: who.identity.userId, action, detail,
     actorLabel: who.identity.label, actorOrgId: who.identity.orgId, roomName,
+    parties, crossing, direction: crossing === "cross_org" ? "outbound" : null,
   };
 }
 
@@ -151,13 +161,16 @@ export async function operatorRooms(
     const q = parseQuery(url.searchParams);
     if ("invalid" in q) return problem(400, "invalid_request", q.invalid, origin);
     const { rows, next } = await scanIndex(store, q);
-    // `status` is the summary's, so it filters the page after the summaries: a page it filters may be short too.
-    const page = (await summarised(store, rows)).filter((p) => q.status === undefined || p.summary?.status === q.status);
+    // `status` is the summary's, and so is `public` as the room is now, so both filter the page after the summaries:
+    // a page they filter may be short too. A row with no summary falls back to its index flag.
+    const page = (await summarised(store, rows)).filter((p) =>
+      (q.status === undefined || p.summary?.status === q.status) &&
+      (q.public === undefined || (p.summary?.public ?? p.index.public) === q.public));
     const { limit: _limit, after: _after, ...filters } = q;
     const asked = { ...(url.searchParams.has("limit") ? { limit: q.limit } : {}), ...filters };
     await store.appendOperatorAudit(operatorEntry(who, "operator:rooms", "operator_rooms_listed", {
       room_ids: page.map((p) => p.index.sessionId), filters: asked,
-    }, null));
+    }, null, partiesOf([who.identity.orgId, ...page.map((p) => p.index.orgId)])));
     return json(200, { rooms: page.map((p) => rowOf(p.index, p.summary)), next }, origin);
   }
 
@@ -172,16 +185,19 @@ export async function operatorRooms(
   const [summary] = await Promise.allSettled([store.roomSummary(id)]);
   if (summary.status === "rejected") console.error(`roomSummary failed for ${id}:`, summary.reason);
   const s = summary.status === "fulfilled" ? summary.value ?? null : null;
-  // The read is the platform's record and, as #61 decided, each customer's whose org sat in the room.
+  // The read is the platform's record and, as #61 decided, each customer's whose org sat in the room. The parties
+  // are the operator's org and the room's, as `auditEntries` counts them, so a customer's row reads as an inbound
+  // crossing; the operator's own org is written no row unless it sat in the room.
   const detail = { room_id: id };
   const facts = { at: Date.now(), sessionId: id, action: "operator_room_read", roomName: session.manifest.room, detail };
   const actor = { userId: who.identity.userId, label: who.identity.label, orgId: who.identity.orgId };
+  const parties = partiesOf([who.identity.orgId, ...session.orgs]);
   await Promise.all([
-    store.appendOperatorAudit(operatorEntry(who, id, "operator_room_read", detail, session.manifest.room)),
-    ...auditRows(partiesOf(session.orgs), facts, actor).map((e) => store.appendAudit(e)),
+    store.appendOperatorAudit(operatorEntry(who, id, "operator_room_read", detail, session.manifest.room, parties)),
+    ...auditRows(parties, facts, actor).filter((e) => session.orgs.includes(e.orgId!)).map((e) => store.appendAudit(e)),
   ]);
   return json(200, {
-    ...rowOf(roomIndexRow(session), s),
+    ...rowOf({ ...roomIndexRow(session), public: isPublic(session) }, s),
     purpose: session.manifest.purpose,
     roles: Object.keys(session.manifest.roles),
   }, origin);

@@ -600,6 +600,11 @@ in real workerd, with real Durable Objects. That second program exists because
 root test can load those classes over a stub and a fake storage
 (`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 
+**Governed config (ADR 0044, #414)** is the one part of a room a person changes inside its fixed manifest:
+`cfg:<name>` rows in `SessionDO`, the last 20 revisions as `cfgh:<name>:<rev>`, and `configRevs`/`configBytes` on
+the record. `writeConfig` writes the row, its history, a `config_changed` event and its audit rows in one
+transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/store.ts<br/>every method async"]
@@ -611,7 +616,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>governed config rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>org records,<br/>create counts, creator index,<br/>joined-rooms, org-rooms and<br/>every-room indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -1696,6 +1701,14 @@ loud:
 **An outside agent can ask a public room (ADR 0033).** `POST /a2a` on the Worker, and on the Node server for Bellman keys, takes A2A v1.0 JSON-RPC from an agent that holds no seat. The route (`a2aRoutes`, `src/a2a/routes.ts`) names the room by `tenant`, and only a public, open room answers. The caller is a stranger: it gets the stranger's send limit, the three-open-task cap, and the room's bans, and it appears as its handle or `visitor N`, never by the label it signed in with. Each question is a task stored in the room's `SessionDO` next to the log and an `outside_question` event, and the room's voice (a member whose role holds `answer`, else the creator) completes it with an `outside_answer` sent through `bellman_send`. The two places caller text goes both wrap it untrusted: to members through the usual delivery paths, and to readers through the public read. The question and the answer are public like the rest of the log, and every room's card says so. A blocking `SendMessage` waits at most `BLOCK_CAP_MS`, 395 seconds, then hands back the task still working. Audit rows record the question's length and task id, under a `system` actor labelled with the caller's origin, so the asker's account never reaches an org's stream. The room cards are `GET /public/rooms/:id/agent-card.json`, served by `publicRoutes` on both servers; the Worker alone offers OAuth in them. An A2A v0.3 client, which has no `tenant`, posts to the room's own URL, `/a2a/<room>`, which each room card lists as its 0.3 interface, and reads a 0.3-shaped card of the same room at `/a2a/<room>/.well-known/agent-card.json`, where a 0.3 resolver looks, also served by `publicRoutes` with the same 404. The same route serves it by translation: the 0.3 method names, parts and `blocking` go in as their v1.0 forms, the v1.0 handlers run unchanged, and each answer and stream event comes back in 0.3's shape. So the rules above, the one not-found, text only, the asker's own tasks after the room goes private, and `/a2a` as the OAuth resource, hold there with no second copy of them.
 
 **A client can read the MCP server before it connects.** The Worker serves Bellman's MCP Server Card (SEP-2127, `src/server-card.ts`) at `GET /mcp/server-card`, where the spec reserves it: the streamable HTTP URL plus `/server-card`, as `application/mcp-server-card+json` with open CORS and an ETag. It names the server, its version (`SERVER_VERSION`, the one `serverInfo` reports) and its one remote with the protocol versions the SDK accepts. It lists no tools, because what a caller is shown depends on who signs in. Like Bellman's own agent card, the Node server does not serve it.
+
+**Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
+instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token
+is refused even on a seat that holds `govern`), the request's Origin checked, and the caller's own seat holding
+`govern`. The server, not the body, writes who approved a revision. Every joining agent is handed
+`room_instructions` by `bellman_connect` and `bellman_confirm`, inside the untrusted envelope with the approving seat
+as origin and never the approver's user id: a person wrote it, but to an agent it is still another member's text, and
+it grants nothing.
 
 ## 8. Where this is going
 

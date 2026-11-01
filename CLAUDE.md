@@ -37,6 +37,8 @@ producing bugs. Read it before changing how the pieces fit together.
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
+- `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
+  `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.

@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { ManifestError, ManifestShape, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
-import { roomPreview } from "../src/projections.js";
+import { SECRET_BALLOT_PROMISE, roomPreview } from "../src/projections.js";
 import type { StoredSession } from "../src/stored-session.js";
 import { member, session } from "./helpers/fixtures.js";
 
@@ -198,8 +198,17 @@ describe("the joiner's preview", () => {
     const p = preview(resolveManifest(authored({ decide: { surface_proposal: { rule: "majority", quorum: "60%" }, expires: "1h" } })), "security");
     expect(p.your_verbs).toEqual(["send", "vote"]);
     expect(p.roles.security).toContain("vote");
-    expect(p.decide).toEqual({ rules: { surface_proposal: { rule: "majority", quorum_percent: 60 } }, expires_seconds: 3600 });
+    expect(p.decide).toEqual({ rules: { surface_proposal: { rule: "majority", quorum_percent: 60, ballot: "open" } }, expires_seconds: 3600 });
     expect(p.veto).toEqual({ security: ["surface_proposal"] });
+  });
+
+  it("shows every kind's ballot, and a secret kind's promise in the server's own words", () => {
+    const m = resolveManifest(authored());
+    expect(preview(m, "security").decide!.rules.surface_proposal).toEqual({ rule: "majority", quorum_percent: null, ballot: "open" });
+    m.decide!.rules.surface_proposal!.ballot = "secret";
+    expect(preview(m, "security").decide!.rules.surface_proposal)
+      .toEqual({ rule: "majority", quorum_percent: null, ballot: "secret", ballot_promise: SECRET_BALLOT_PROMISE });
+    for (const line of ["P1.", "P2.", "P3.", "L1.", "L2.", "L3.", "L4.", "L5.", "L6.", "L7."]) expect(SECRET_BALLOT_PROMISE).toContain(line);
   });
 
   it("is byte for byte what it was for a room that declares no decide block", () => {

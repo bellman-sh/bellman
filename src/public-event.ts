@@ -60,7 +60,9 @@ const publicOpened = (payload: unknown) => {
  * field a payload gains later is not shown by default (plan ruling R4).
  */
 export function publicReadEvent(e: SessionEvent) {
-  if (e.type === "brief_update") return null;
+  // No room file reaches the public page (ADR 0046): not its content, which no event carries, and not its path,
+  // revision or size, which for memory would name an account's notes.
+  if (e.type === "brief_update" || e.type === "fs") return null;
   const shown = publicEvent(e);
   if (e.type !== "member_joined") return shown;
   const joiner = (e.payload as { member?: Record<string, unknown> | null } | null)?.member;
@@ -105,7 +107,11 @@ export function readableEvent(
   e: SessionEvent,
   author: Pick<Member, "capabilities"> | undefined,
   reader: string | null,
+  accountSeats?: readonly Pick<Member, "capabilities" | "leftAt">[],
 ): SessionEvent | null {
+  // An account's memory (ADR 0046, decision 7), judged from every seat the account has held, not the one that wrote it.
+  // No seats passed fails closed: the two single-event readers in rooms.ts refuse every type an fs event could be.
+  if (isMemoryEvent(e)) return seesMemory(accountSeats ?? [], e.fromUserId, reader) ? e : null;
   if (!carriesBrief(e)) return e;
   if (seesBrief({ userId: e.fromUserId, capabilities: author?.capabilities ?? [] }, reader)) return e;
   if (e.type === "brief_update") return null;
@@ -121,7 +127,39 @@ export function readableEvents(
   events: readonly SessionEvent[],
   members: readonly Pick<Member, "memberId" | "capabilities">[],
   reader: string | null,
+  seatsByUser?: ReadonlyMap<string, readonly Pick<Member, "capabilities" | "leftAt">[]>,
 ): SessionEvent[] {
   const rows = new Map(members.map((m) => [m.memberId, m]));
-  return events.flatMap((e) => readableEvent(e, rows.get(e.fromMemberId), reader) ?? []);
+  return events.flatMap((e) => readableEvent(e, rows.get(e.fromMemberId), reader, seatsByUser?.get(e.fromUserId)) ?? []);
+}
+
+/** A room file under `/members/`: an account's memory (ADR 0046). */
+export const isMemoryPath = (path: string): boolean => path.startsWith("/members/");
+
+/** An `fs` event about an account's memory. */
+export const isMemoryEvent = (e: SessionEvent): boolean =>
+  e.type === "fs" && isMemoryPath(String((e.payload as { path?: unknown } | null)?.path ?? ""));
+
+/** The accounts whose seats `readableEvents` needs for these events' memory: each once, in first-seen order. */
+export function memoryAuthors(events: readonly SessionEvent[]): string[] {
+  return [...new Set(events.filter(isMemoryEvent).map((e) => e.fromUserId))];
+}
+
+/**
+ * Whether `reader` may see an account's memory (ADR 0046, decision 7). Its own account may, unless `ownAccount` is
+ * false (app code, ADR B). A null reader, a path every member shares, may not. Anyone else may only when every seat
+ * the account holds grants read_context; a seat that left or was evicted is not held, and with none held, every seat
+ * it held must have granted. No seats is no.
+ */
+export function seesMemory(
+  seats: readonly Pick<Member, "capabilities" | "leftAt">[],
+  ownerUserId: string,
+  reader: string | null,
+  opts: { ownAccount?: boolean } = {},
+): boolean {
+  if (reader === null) return false;
+  if ((opts.ownAccount ?? true) && reader === ownerUserId) return true;
+  const held = seats.filter((m) => m.leftAt === null);
+  const judged = held.length > 0 ? held : seats;
+  return judged.length > 0 && judged.every((m) => m.capabilities.includes("read_context"));
 }

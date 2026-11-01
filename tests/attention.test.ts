@@ -48,7 +48,7 @@ describe("attention", () => {
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))
       .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping", "outside_question", "outside_notice", "outside_answer",
-        "decision_opened", "decision_vote", "decision_closed", "decision_voter_removed", "config_changed"]));
+        "decision_opened", "decision_vote", "decision_closed", "decision_voter_removed", "config_changed", "fs"]));
   });
 
   // A settings change waits for the agent's next read; sync carries its revision (#414).

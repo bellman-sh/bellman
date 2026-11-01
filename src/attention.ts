@@ -77,6 +77,8 @@ export const ATTENTION = {
   decision_vote: "ambient",
   /** A settings change is read when the agent next needs it; `bellman_sync` carries the revision (#414). */
   config_changed: "ambient",
+  /** A file change, as a surface write: a peer that cares reads the file (ADR 0046). */
+  fs: "ambient",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

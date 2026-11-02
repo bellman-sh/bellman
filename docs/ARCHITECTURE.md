@@ -106,7 +106,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the fourteen tools work over plain remote MCP. The bridge exists
+use Bellman** — the fifteen tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first

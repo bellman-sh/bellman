@@ -74,7 +74,8 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
   - the surface: `appendSurface`, `appendSurfaces`, `approveProposal`, `surfaceOf`, `surfaceFacts`,
     `surfaceWindow`, `surfaceNamesBlob`, `sweepBlobs`, `chargeBlobBytes`.
   - decisions (ADR 0040): `openDecision`, `castVote`, `closeDecision` (each taking the caller's `audit` rows),
-    `decision`, and `decisions`, a page of the room's decisions with every open one beside it.
+    `decision`, and `decisions`, a page of the room's decisions with every open one beside it, and `votedOn`, which
+    open secret ballots one account has voted in (the only way to ask, since a secret vote names no seat).
   - outside tasks (A2A): `askOutside`, `answerOutside`, `cancelOutside`, `seatSkipped`, `outsideTask*`.
   - hosted seat: `appendHostEvent`, `hostEventFor`, `renewHostAllowance`, `setHostInstructions`,
     `reserveHostedRoom`, `releaseHostedRoom`.
@@ -104,9 +105,11 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - `[store-do.ts:SessionDO]` one Durable Object per room: the session record (with `openDecisions`, the book of
   unclosed decisions), the `e:` event log, member rows, `sf:` surface rows, the decision index (`dx:` one row per
   decision, `dv:<decision>:<cursor>` a copy of each of its events, `dx-at` the last cursor indexed, written by a
-  read in batches of `DECISION_INDEX_BATCH` = 1,000 events and never by an append), bans, outside tasks and an
-  outbox; `roomSummary` answers the operator's counts; `fetch` is the `/ws` upgrade; `alarm` multiplexes the
-  handlers `outbox`, `abandoned`, `heartbeat`, `housekeep`, `purge`, `sweep`, `seat` and `expiry` through one
+  read in batches of `DECISION_INDEX_BATCH` = 1,000 events and never by an append), `bv:<decision>:<account>` a
+  secret ballot's row per voting account (its choice, vote count and idempotency keys, deleted by every close),
+  bans, outside tasks and an outbox; `roomSummary` answers the operator's counts; `fetch` is the `/ws` upgrade; `alarm` multiplexes the
+  handlers `outbox`, `abandoned`, `heartbeat`, `housekeep`, `purge`, `sweep`, `seat`, `expiry` and `decision` (the
+  soonest open decision's deadline, plus a millisecond, derived even for a closed room) through one
   `OutboxDriver`. `REPLAY_LIMIT = 1_000`.
 - `[store-do.ts:RegistryDO]` the singleton: join codes `jc:`, public names `pn:`, connect tokens `pc:`, grants
   `gr:`/`go:`, orgs, IdPs, domains, invites, SCIM users and tokens, created/joined/org room indexes

@@ -30,7 +30,7 @@ import {
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
-import { briefAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
+import { briefAuthors, memoryAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
@@ -508,7 +508,10 @@ export async function eventsFor(
   reader: string | null,
 ): Promise<SessionEvent[]> {
   const authors = briefAuthors(events);
-  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader);
+  // Each account whose memory these events touch, with every seat it has held (ADR 0046): one read per account.
+  const accounts = memoryAuthors(events);
+  const seats = new Map(await Promise.all(accounts.map(async (u) => [u, await s.membersOfUser(sessionId, u)] as const)));
+  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader, seats);
 }
 
 /**

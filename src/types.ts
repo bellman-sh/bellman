@@ -140,7 +140,9 @@ export type EventType =
   | "decision_closed"
   | "decision_voter_removed"
   /** A governed config name changed (#414): `{ name, rev, by }`, never the body. Written by the server. */
-  | "config_changed";
+  | "config_changed"
+  /** A room file was written, deleted or restored (ADR 0046): `FsEventPayload`, never the content. */
+  | "fs";
 
 /**
  * The event types a member writes, by calling `bellman_send`: the tool's `type` enum is built from this list. Every other
@@ -964,4 +966,12 @@ export interface ConfigRow {
   /** The approving seat's member id. */
   changedBy: string;
   changedAt: string;
+}
+
+/** The payload of an `fs` event (ADR 0046): what changed and how big it is now, never its content. */
+export interface FsEventPayload {
+  path: string;
+  rev: number;
+  size: number;
+  op: "write" | "delete" | "restore";
 }

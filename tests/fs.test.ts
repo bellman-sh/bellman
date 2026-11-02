@@ -74,14 +74,22 @@ describe("decideFsCharge", () => {
 describe("diffText", () => {
   it("writes a unified diff with three lines of context", () => {
     const a = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
-    const { diff, truncated } = diffText(a, a.replace("5", "five"));
+    const { diff, truncated } = diffText(a, a.replace("5", "five"))!;
     expect(truncated).toBe(false);
     expect(diff).toContain("-5\n+five");
     expect(diff).toContain(" 2\n 3\n 4\n");
     expect(diff).not.toContain(" 1\n");
   });
+  it("gives up on two revisions too different to diff cheaply, rather than spend the CPU", () => {
+    const a = Array.from({ length: 30_000 }, (_, i) => `a${i}`).join("\n");
+    const b = Array.from({ length: 30_000 }, (_, i) => `b${i}`).join("\n");
+    const started = Date.now();
+    expect(diffText(a, b)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
   it("cuts at 64 KiB and says so", () => {
-    const { diff, truncated } = diffText("", "x\n".repeat(FS_FILE_MAX_BYTES));
+    // 1,200 changed lines, under the edit bound, and about 73 KB of output.
+    const { diff, truncated } = diffText("a".repeat(60).concat("\n").repeat(600), "b".repeat(60).concat("\n").repeat(600))!;
     expect(truncated).toBe(true);
     expect(utf8Bytes(diff)).toBeLessThanOrEqual(FS_FILE_MAX_BYTES);
   });

@@ -103,9 +103,17 @@ export function decideFsCharge(
   return { ok: true, next: Math.max(0, used + delta) };
 }
 
-/** A unified diff of two revisions, three lines of context, cut at 64 KiB. */
-export function diffText(a: string, b: string): { diff: string; truncated: boolean } {
-  const full = createPatch("file", a, b, "", "", { context: 3 });
+// ponytail: Myers diff is O(N·D); two unrelated 64 KiB revisions ran past two minutes. These bounds give up instead.
+const DIFF_MAX_EDIT_LINES = 2000;
+const DIFF_TIMEOUT_MS = 250;
+
+/**
+ * A unified diff of two revisions, three lines of context, cut at 64 KiB; or null when the revisions are too
+ * different to diff within `DIFF_MAX_EDIT_LINES` changed lines or `DIFF_TIMEOUT_MS`, so the caller returns both instead.
+ */
+export function diffText(a: string, b: string): { diff: string; truncated: boolean } | null {
+  const full = createPatch("file", a, b, "", "", { context: 3, maxEditLength: DIFF_MAX_EDIT_LINES, timeout: DIFF_TIMEOUT_MS });
+  if (full === undefined) return null;
   const diff = cutBytes(full, FS_FILE_MAX_BYTES);
   return { diff, truncated: diff.length < full.length };
 }

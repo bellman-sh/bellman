@@ -91,6 +91,26 @@ export interface VoteInput {
 /** A `decision_vote` payload: the input and the capacity the server derived from it. */
 export interface DecisionVote extends VoteInput { capacity: Capacity }
 
+/**
+ * A secret ballot's `decision_vote` payload (secret ballot spec): what the log keeps of a vote whose choice lives in
+ * the store's ballot row. No choice, no reason, no response cursor; the event's author is the system, never the voter.
+ */
+export interface SecretVote {
+  decision: number;
+  hash: string;
+  via: VoteVia;
+  human_approved: boolean;
+  capacity: Capacity;
+  ballot: "secret";
+}
+
+/** Each open secret decision's ballot book, by opening cursor: every voting account and its current choice. */
+export type BallotBook = ReadonlyMap<number, ReadonlyMap<string, Choice>>;
+
+/** Whether a decision is a secret ballot: its rule, fixed at open and hashed, names `ballot: "secret"`. */
+export const isSecret = (p: Pick<DecisionOpened, "rule">): boolean =>
+  typeof p.rule === "object" && p.rule !== null && p.rule.ballot === "secret";
+
 export interface Counts { approve: number; reject: number; abstain: number }
 /**
  * Binding counts at the top, advisory ones beside them; each account counted once (decision 3). `electorate` and
@@ -111,6 +131,8 @@ export interface DecisionClosed {
   state: ClosedState;
   reason?: FailReason;
   tally: Tally;
+  /** A secret ballot's seats whose account voted, in electorate order: who voted, never in vote order. */
+  voted?: string[];
 }
 
 /** A `decision_voter_removed` payload (decision 12). The voided votes stay in the log and leave the tally. */
@@ -120,10 +142,12 @@ export interface VoterRemoved {
   by: string;
   reason: "evicted" | "left";
   voided: number[];
+  /** On a secret ballot: nothing is voided, so the count does not move and gives the seat's choice away. */
+  ballot?: "secret";
 }
 
 /** One vote as the tally reads it. */
-export interface Ballot { cursor: number; memberId: string; userId: string; vote: DecisionVote }
+export interface Ballot { cursor: number; memberId: string; userId: string; vote: DecisionVote | SecretVote }
 
 /** Everything the log says about one decision. */
 export interface DecisionView {
@@ -139,6 +163,8 @@ export interface DecisionView {
   removed: string[];
   tally: Tally;
   closed: SessionEvent | null;
+  /** An open secret ballot's book, which only a store folds in. Every store read deletes it before returning. */
+  book?: ReadonlyMap<string, Choice>;
 }
 
 /** JSON with every object's keys sorted, so two payloads that differ only in key order hash alike. */
@@ -185,7 +211,7 @@ export function ruleOf(rule: DecisionRule): { rule: DecisionRuleName | null; quo
   return { rule: name, quorum: typeof o.quorum === "number" ? o.quorum : null };
 }
 
-type Counted = Pick<DecisionView, "payload" | "ballots" | "voided" | "removed">;
+type Counted = Pick<DecisionView, "payload" | "ballots" | "voided" | "removed"> & Pick<Partial<DecisionView>, "book">;
 
 /**
  * The count `tally` and `evaluate` share. The latest vote of each account counts, so a revision replaces the vote
@@ -197,6 +223,7 @@ type Counted = Pick<DecisionView, "payload" | "ballots" | "voided" | "removed">;
  * vetoes the kind.
  */
 function count(v: Counted) {
+  if (isSecret(v.payload)) return countSecret(v);
   const { electorate, accounts } = v.payload;
   const live = (m: string) => electorate.includes(m) && !v.removed.includes(m);
   const latest = { binding: new Map<string, Ballot>(), advisory: new Map<string, Ballot>() };
@@ -210,8 +237,8 @@ function count(v: Counted) {
     for (const [account, b] of of) if (v.voided.includes(b.cursor) || !live(b.memberId)) of.delete(account);
   }
   const t: Tally = { ...noCounts(), advisory: noCounts(), electorate: 0, unreachable: 0, turnout: 0, quorum: null };
-  for (const { vote } of latest.binding.values()) t[vote.choice] += 1;
-  for (const { vote } of latest.advisory.values()) t.advisory[vote.choice] += 1;
+  for (const { vote } of latest.binding.values()) t[(vote as DecisionVote).choice] += 1;
+  for (const { vote } of latest.advisory.values()) t.advisory[(vote as DecisionVote).choice] += 1;
   const all = new Set(electorate.map((m) => accounts[m]));
   const reachable = new Set(electorate.filter(live).map((m) => accounts[m]));
   const bound = (account: string) => latest.binding.has(account);
@@ -224,11 +251,35 @@ function count(v: Counted) {
   // Blocked once any veto account is left with no veto seat: the one removed could have vetoed, and every other veto
   // seat approving must not pass what it might have stopped (decision 12). No veto seat at all is the same case.
   const veto = seats === undefined ? null : {
-    cast: [...latest.binding.values()].some((b) => b.vote.choice === "reject" && seats.includes(b.memberId)),
+    cast: [...latest.binding.values()].some((b) => (b.vote as DecisionVote).choice === "reject" && seats.includes(b.memberId)),
     blocked: seats.length === 0 || v.payload.veto!.some((m) => !seats.some((s) => accounts[s] === accounts[m])),
     pending: seats.some((m) => !bound(accounts[m])),
   };
-  return { tally: t, pending: [...reachable].filter((a) => !bound(a)).length, veto };
+  return { tally: t, pending: [...reachable].filter((a) => !bound(a)).length, veto, unvotedUnreachable: t.unreachable };
+}
+
+/**
+ * A secret ballot's count (secret ballot spec): one choice per snapshot account, read from the ballot book. A removed
+ * seat's account keeps its vote, since voiding it would move the count and give the choice away. `unvotedUnreachable`
+ * is the removed accounts with no vote, the only ones `evaluate` may assume reject: counting a voter there too would
+ * count it twice. A veto is refused on a secret kind, so none is read.
+ */
+function countSecret(v: Counted) {
+  const { electorate, accounts } = v.payload;
+  const book = v.book ?? new Map<string, Choice>();
+  const live = (m: string) => electorate.includes(m) && !v.removed.includes(m);
+  const all = new Set(electorate.map((m) => accounts[m]));
+  const reachable = new Set(electorate.filter(live).map((m) => accounts[m]));
+  const t: Tally = { ...noCounts(), advisory: noCounts(), electorate: all.size, unreachable: all.size - reachable.size, turnout: 0, quorum: null };
+  for (const [account, choice] of book) if (all.has(account)) t[choice] += 1;
+  const { quorum } = ruleOf(v.payload.rule);
+  Object.assign(t, { turnout: t.approve + t.reject + t.abstain, quorum: quorum === null ? null : Math.ceil((quorum * all.size) / 100) });
+  return {
+    tally: t,
+    pending: [...reachable].filter((a) => !book.has(a)).length,
+    veto: null,
+    unvotedUnreachable: [...all].filter((a) => !reachable.has(a) && !book.has(a)).length,
+  };
 }
 
 /** The tally of a decision's votes (decision 3), with its electorate, unreachable seats, turnout and quorum. */
@@ -252,18 +303,18 @@ function holds(rule: Exclude<DecisionRuleName, "single">, approve: number, rejec
 export function evaluate(v: Counted): { state: "passed" | "failed"; reason?: FailReason } | null {
   const { rule } = ruleOf(v.payload.rule);
   if (rule === null || rule === "single") return null;
-  const { tally: t, pending, veto } = count(v);
+  const { tally: t, pending, veto, unvotedUnreachable } = count(v);
   if (veto?.cast) return { state: "failed", reason: "vetoed" };
   if (veto?.blocked) return { state: "failed", reason: "blocked" };
   if (!holds(rule, t.approve + pending, t.reject)) return { state: "failed", reason: "rejected" };
   if (t.quorum !== null && t.turnout + pending < t.quorum) return { state: "failed", reason: "no_quorum" };
   const turnoutMet = t.quorum === null || t.turnout >= t.quorum;
-  if (turnoutMet && !veto?.pending && holds(rule, t.approve, t.reject + pending + t.unreachable)) return { state: "passed" };
+  if (turnoutMet && !veto?.pending && holds(rule, t.approve, t.reject + pending + unvotedUnreachable)) return { state: "passed" };
   return null;
 }
 
 const ballotOf = (e: SessionEvent): Ballot =>
-  ({ cursor: e.cursor, memberId: e.fromMemberId, userId: e.fromUserId, vote: e.payload as DecisionVote });
+  ({ cursor: e.cursor, memberId: e.fromMemberId, userId: e.fromUserId, vote: e.payload as DecisionVote | SecretVote });
 
 const decisionOf = (e: SessionEvent): number | undefined => (e.payload as { decision?: number } | null)?.decision;
 
@@ -271,8 +322,13 @@ const decisionOf = (e: SessionEvent): number | undefined => (e.payload as { deci
  * Every decision in `events`, keyed by its opening cursor, read as of `now`. The first closing event wins, and
  * a vote or a voiding that lands after it is not read: the stores refuse both, and a closed decision's tally is
  * the one its closing event stored. Payloads are read as the store wrote them, since no member writes these types.
+ *
+ * An open secret ballot is counted from `ballots`, which only a store holds, and the view carries its `book`. Folding
+ * one without it throws, so no caller shows a silent zero; a caller that never reads the tally passes "untallied".
  */
-export function decisionsOf(events: readonly SessionEvent[], now: number): Map<number, DecisionView> {
+export function decisionsOf(
+  events: readonly SessionEvent[], now: number, ballots?: BallotBook | "untallied",
+): Map<number, DecisionView> {
   const views = new Map<number, DecisionView>();
   for (const e of events) {
     if (e.type === "decision_opened") {
@@ -298,7 +354,11 @@ export function decisionsOf(events: readonly SessionEvent[], now: number): Map<n
       const c = v.closed.payload as DecisionClosed;
       Object.assign(v, { state: c.state, reason: c.reason ?? null, tally: c.tally });
     } else {
-      v.tally = tally(v);
+      if (isSecret(v.payload)) {
+        if (ballots === undefined) throw new Error(`decision ${v.cursor} is a secret ballot folded without its ballot book`);
+        if (ballots !== "untallied") v.book = ballots.get(v.cursor) ?? new Map<string, Choice>();
+      }
+      if (!isSecret(v.payload) || ballots !== "untallied") v.tally = tally(v);
       if (now > v.payload.expires_at) v.state = "expired";
     }
   }
@@ -307,7 +367,7 @@ export function decisionsOf(events: readonly SessionEvent[], now: number): Map<n
 
 /** The state of every decision in `events`, keyed by cursor, as `actionStates` gives a request's. */
 export function decisionStates(events: readonly SessionEvent[], now: number): Map<number, DecisionState> {
-  return new Map([...decisionsOf(events, now)].map(([cursor, v]) => [cursor, v.state]));
+  return new Map([...decisionsOf(events, now, "untallied")].map(([cursor, v]) => [cursor, v.state]));
 }
 
 /** An open decision as `bellman_sync` lists it beside the action requests: its cursor is what a vote names. */
@@ -322,13 +382,15 @@ export interface OutstandingDecision extends OutstandingRequest {
  */
 export function decisionsAwaiting(
   events: readonly SessionEvent[], memberId: string, now: number, perOpener: number,
+  secretVoted: ReadonlySet<number> = new Set(),
 ): OutstandingDecision[] {
   const shown = new Map<string, number>();
   const out: OutstandingDecision[] = [];
-  for (const v of decisionsOf(events, now).values()) {
+  for (const v of decisionsOf(events, now, "untallied").values()) {
     const { electorate, accounts, key, effect, hash, expires_at } = v.payload;
     if (v.state !== "open" || !electorate.includes(memberId) || v.removed.includes(memberId)) continue;
-    const voted = v.ballots.some((b) =>
+    // A secret ballot's votes name no seat, so whether this account voted is the store's answer (`votedOn`).
+    const voted = isSecret(v.payload) ? secretVoted.has(v.cursor) : v.ballots.some((b) =>
       b.vote.capacity === "binding" && accounts[b.memberId] === accounts[memberId] && !v.voided.includes(b.cursor));
     const from = v.opened.fromMemberId;
     if (voted || (shown.get(from) ?? 0) >= perOpener) continue;
@@ -353,7 +415,8 @@ export type VoteDecision =
   | { kind: "closed"; state: DecisionState }    // a closing event exists: no vote lands after it
   | { kind: "not_electorate" }                  // the seat is not in the snapshot taken at open, or was removed from it
   | { kind: "stale"; hash: string }             // the vote names another hash; `hash` is the current one
-  | { kind: "quota"; limit: number }            // the seat has revised its vote `MAX_REVISIONS` times already
+  | { kind: "quota"; limit: number }            // the seat (an account, on a secret ballot) has revised `MAX_REVISIONS` times
+  | { kind: "advisory_secret" }                 // an advisory vote on a secret ballot, which takes none
   | { kind: "record"; close: { state: "passed" | "failed"; reason?: FailReason } | null };
 
 /**
@@ -363,10 +426,20 @@ export type VoteDecision =
  * that is not the decision's; then a seat past its revisions (T9). A vote past the deadline on a decision nobody
  * has closed still lands (decision 4). A recorded vote carries the close `evaluate` calls for with the vote counted in.
  */
-export function applyVote(view: DecisionView, voter: { memberId: string; userId: string }, vote: DecisionVote): VoteDecision {
+export function applyVote(
+  view: DecisionView, voter: { memberId: string; userId: string }, vote: DecisionVote, n?: number,
+): VoteDecision {
   if (view.closed !== null) return { kind: "closed", state: view.state };
   if (!view.payload.electorate.includes(voter.memberId) || view.removed.includes(voter.memberId)) return { kind: "not_electorate" };
   if (vote.hash !== view.payload.hash) return { kind: "stale", hash: view.payload.hash };
+  // A secret ballot: the account's votes so far are `n`, from its ballot row, and the new choice takes the place of
+  // the account's old one in the book, so the close is evaluated with each account counted once.
+  if (isSecret(view.payload)) {
+    if (vote.capacity === "advisory") return { kind: "advisory_secret" };
+    if ((n ?? 0) > MAX_REVISIONS) return { kind: "quota", limit: MAX_REVISIONS };
+    const book = new Map(view.book ?? []).set(view.payload.accounts[voter.memberId], vote.choice);
+    return { kind: "record", close: evaluate({ ...view, book }) };
+  }
   if (view.ballots.filter((b) => b.memberId === voter.memberId).length > MAX_REVISIONS) return { kind: "quota", limit: MAX_REVISIONS };
   const ballots = [...view.ballots, { cursor: Number.MAX_SAFE_INTEGER, ...voter, vote }];
   return { kind: "record", close: evaluate({ ...view, ballots }) };
@@ -395,8 +468,21 @@ export function openedPayload(draft: DecisionDraft, at: number, topic: boolean, 
 }
 
 /** The `decision_closed` event that closes `view`, the server's, carrying the tally of the votes it read. */
+/**
+ * A secret ballot's seats whose account has a vote in its book, in electorate order. Throws for a view folded without
+ * its book: a close computed from it would say nobody voted.
+ */
+function votedSeats(view: DecisionView): string[] {
+  if (view.book === undefined) throw new Error(`decision ${view.cursor} is a secret ballot closed without its ballot book`);
+  const { electorate, accounts } = view.payload;
+  return electorate.filter((m) => view.book!.has(accounts[m]));
+}
+
 export function closingEvent(view: DecisionView, close: { state: ClosedState; reason?: FailReason }): Omit<SessionEvent, "cursor" | "at"> {
-  const payload: DecisionClosed = { decision: view.cursor, state: close.state, ...(close.reason === undefined ? {} : { reason: close.reason }), tally: view.tally };
+  const payload: DecisionClosed = {
+    decision: view.cursor, state: close.state, ...(close.reason === undefined ? {} : { reason: close.reason }), tally: view.tally,
+    ...(isSecret(view.payload) ? { voted: votedSeats(view) } : {}),
+  };
   return { type: "decision_closed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload, refId: null };
 }
 
@@ -463,10 +549,14 @@ export function removalEvents(views: Iterable<DecisionView>, memberId: string, d
   const out: Body[] = [];
   for (const v of views) {
     if (v.closed !== null || !v.payload.electorate.includes(memberId) || v.removed.includes(memberId)) continue;
-    const voided = v.ballots.filter((b) => b.memberId === memberId && !v.voided.includes(b.cursor)).map((b) => b.cursor);
+    // A secret ballot voids nothing: the seat's vote stays counted, so the count does not move (secret ballot spec).
+    const secret = isSecret(v.payload);
+    const voided = secret ? [] : v.ballots.filter((b) => b.memberId === memberId && !v.voided.includes(b.cursor)).map((b) => b.cursor);
     const after = { ...v, voided: [...v.voided, ...voided], removed: [...v.removed, memberId] };
     after.tally = tally(after);
-    const removed: VoterRemoved = { decision: v.cursor, member: memberId, by: departure.fromLabel, reason, voided };
+    const removed: VoterRemoved = {
+      decision: v.cursor, member: memberId, by: departure.fromLabel, reason, voided, ...(secret ? { ballot: "secret" as const } : {}),
+    };
     out.push(fromServer("decision_voter_removed", removed));
     const close = evaluate(after);
     if (close !== null) out.push(closingEvent(after, close));
@@ -482,9 +572,14 @@ const AUDITED_VOTES = 200;
  * built for the call, one per org, whose action and detail each event replaces. Ids, kinds, hashes and counts, never
  * the proposal: no effect and no reason. A closing row lists the binding votes it counted from, each with its seat,
  * account, `via`, `human_approved` and response cursor (T2); `views` holds each decision as of its close.
+ *
+ * A secret ballot's close lists no votes, only the tally and the seats that voted, and is filed from `secretTemplate`:
+ * rows the store built as the system for the room's parties. The caller's template names whoever cast the deciding
+ * vote, and an immutable row would keep that for good.
  */
 export function decisionAudit(
   template: readonly AuditEntry[], events: readonly SessionEvent[], views: ReadonlyMap<number, DecisionView>,
+  secretTemplate: readonly AuditEntry[] = [],
 ): AuditEntry[] {
   const detailOf = (e: SessionEvent): Record<string, unknown> | null => {
     if (e.type === "decision_opened") {
@@ -502,10 +597,19 @@ export function decisionAudit(
     }
     if (e.type !== "decision_closed") return null;
     const c = e.payload as DecisionClosed;
-    const votes = v.ballots.filter((b) => b.vote.capacity === "binding" && !v.voided.includes(b.cursor)).map((b) => ({
-      cursor: b.cursor, member_id: b.memberId, user_id: b.userId, choice: b.vote.choice, via: b.vote.via,
-      human_approved: b.vote.human_approved, ...(b.vote.response_cursor === undefined ? {} : { response_cursor: b.vote.response_cursor }),
-    }));
+    if (isSecret(v.payload)) {
+      return {
+        decision: c.decision, kind: v.payload.effect.kind, hash: v.payload.hash, state: c.state,
+        ...(c.reason === undefined ? {} : { reason: c.reason }), tally: c.tally, voted: c.voted ?? [],
+      };
+    }
+    const votes = v.ballots.filter((b) => b.vote.capacity === "binding" && !v.voided.includes(b.cursor)).map((b) => {
+      const vote = b.vote as DecisionVote;
+      return {
+        cursor: b.cursor, member_id: b.memberId, user_id: b.userId, choice: vote.choice, via: vote.via,
+        human_approved: vote.human_approved, ...(vote.response_cursor === undefined ? {} : { response_cursor: vote.response_cursor }),
+      };
+    });
     return {
       decision: c.decision, kind: v.payload.effect.kind, hash: v.payload.hash, state: c.state,
       ...(c.reason === undefined ? {} : { reason: c.reason }), tally: c.tally, votes: votes.slice(0, AUDITED_VOTES),
@@ -514,7 +618,10 @@ export function decisionAudit(
   };
   return events.flatMap((e) => {
     const detail = detailOf(e);
-    return detail === null ? [] : template.map((row) => ({ ...row, action: e.type, detail }));
+    if (detail === null) return [];
+    const v = views.get(decisionOf(e) ?? (e.type === "decision_opened" ? e.cursor : -1));
+    const rows = e.type === "decision_closed" && v !== undefined && isSecret(v.payload) ? secretTemplate : template;
+    return rows.map((row) => ({ ...row, action: e.type, detail }));
   });
 }
 

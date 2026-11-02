@@ -32,7 +32,8 @@ import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Pla
 import { decideApproval } from "./proposal.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  dueToExpire, noteDecisions, openedPayload, decisionPageOf, removalEvents,
+  dueToExpire, isSecret, noteDecisions, openedPayload, decisionPageOf, removalEvents,
+  type BallotBook, type Choice, type DecisionOpened, type SecretVote,
   type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
   type VoteDecision, type VoteInput,
 } from "./decision.js";
@@ -957,7 +958,11 @@ export type VoteWrite =
   | { outcome: "quota"; limit: number }
   | { outcome: "unknown" }
   | { outcome: "conflict" }
-  | { outcome: "frozen" };
+  | { outcome: "frozen" }
+  // A secret ballot's retry of a key this decision's vote used, whatever its choice: one answer, so a retry cannot
+  // tell the stored choice apart (secret ballot spec). An advisory vote on a secret ballot, which takes none.
+  | { outcome: "recorded" }
+  | { outcome: "advisory_secret" };
 
 /** What `closeDecision` did. `closed` refuses a decision a closing event already ended; `not_due` an expiry before the deadline. */
 export type DecisionClose =
@@ -983,10 +988,17 @@ export function electorateOf(manifest: RoomManifest, members: readonly Member[],
 }
 
 /** `applyVote`'s refusal as `castVote` reports it. */
+/** A view as a store hands it out: never with an open secret ballot's book, which holds every account's choice. */
+export function withoutBook(v: DecisionView): DecisionView {
+  const { book: _book, ...rest } = v;
+  return rest;
+}
+
 export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
   if (d.kind === "stale") return { outcome: "stale", hash: d.hash };
   if (d.kind === "closed") return { outcome: "closed", state: d.state };
   if (d.kind === "quota") return { outcome: "quota", limit: d.limit };
+  if (d.kind === "advisory_secret") return { outcome: "advisory_secret" };
   return { outcome: "not_electorate" };
 }
 
@@ -2107,6 +2119,11 @@ export interface BellmanStore {
    */
   decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage>;
   /**
+   * Which of `decisions` are open secret ballots `userId`'s account has voted in (secret ballot spec): a secret vote
+   * names no seat, so this is the only way to ask. It answers for the one account it is given, and for no open ballot.
+   */
+  votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]>;
+  /**
    * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
    * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
    * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
@@ -2687,6 +2704,11 @@ export class MemoryStore implements BellmanStore {
    * the members in the room now, and the member reads reach the rest.
    */
   private sessions = new Map<string, Session>();
+  /**
+   * Each room's open secret ballots (secret ballot spec): decision → account → its current choice, how many votes it
+   * has cast, and the idempotency keys they used. The only place a secret choice is kept; every close deletes it.
+   */
+  private ballots = new Map<string, Map<number, Map<string, { choice: Choice; n: number; iks: string[] }>>>();
   /** Governed config (#414): room → name → revisions, newest first, at most CONFIG_HISTORY. */
   private configs = new Map<string, Map<ConfigName, ConfigRow[]>>();
   private byJoinCode = new Map<string, string>();
@@ -3118,7 +3140,7 @@ export class MemoryStore implements BellmanStore {
     }
     // The seat's votes on every decision still unclosed, voided after the member and the door (ADR 0040, decision 12).
     const voided = leaving
-      ? removalEvents(decisionsOf(s.events, req.now).values(), memberId, req.event).map((b) => this.appendNow(s, b))
+      ? removalEvents(decisionsOf(s.events, req.now, this.book(s)).values(), memberId, req.event).map((b) => this.appendNow(s, b))
       : [];
     // Last, so a call that throws above leaves no ban behind.
     if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
@@ -3130,8 +3152,9 @@ export class MemoryStore implements BellmanStore {
     // who already left is the eviction's row all the same, and a repeat writes none.
     this.recordAudit([
       ...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : []),
-      ...decisionAudit(req.audit, voided, decisionsOf(s.events, req.now)),
+      ...decisionAudit(req.audit, voided, decisionsOf(s.events, req.now, this.book(s)), this.secretTemplate(s, req.now)),
     ].filter((e) => e.orgId));
+    this.eraseClosed(s, voided);
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
   }
@@ -3995,27 +4018,50 @@ export class MemoryStore implements BellmanStore {
    * event has its cursor. Read in the caller's synchronous stretch, as `approveProposal` reads its key.
    */
   private decisionKey(s: Session, e: EventBody, key: string | null):
-    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" } }
-    | { done: null; remember: (cursor: number) => void } {
-    if (key === null) return { done: null, remember: () => {} };
+    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" }; recorded: SessionEvent | undefined }
+    | { done: null; remember: (cursor: number) => void; storageKey: string | null } {
+    if (key === null) return { done: null, remember: () => {}, storageKey: null };
     const storageKey = idempotencyKey(e.fromMemberId, key);
     const print = fingerprint(e);
     const record = this.keys.get(s.id)?.get(storageKey);
     if (record) {
-      if (record.print !== print) return { done: { outcome: "conflict" } };
       const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (record.print !== print) return { done: { outcome: "conflict" }, recorded: original };
       if (!original) throw new Error(`Idempotency record for ${s.id} names missing cursor ${record.cursor}`);
-      return { done: { outcome: "replayed", event: detach(original) } };
+      return { done: { outcome: "replayed", event: detach(original) }, recorded: original };
     }
     return {
       done: null,
       remember: (cursor) => this.keys.set(s.id, (this.keys.get(s.id) ?? new Map()).set(storageKey, { cursor, print })),
+      storageKey,
     };
+  }
+
+  /** The room's open secret ballots as a fold reads them: decision → account → choice. */
+  private book(s: Session): BallotBook {
+    return new Map([...(this.ballots.get(s.id) ?? [])].map(([d, rows]) => [d, new Map([...rows].map(([a, r]) => [a, r.choice]))]));
+  }
+
+  /** The rows a secret ballot's close is filed under: the system, for the room's parties, never the closing call's actor. */
+  private secretTemplate(s: Session, at: number): AuditEntry[] {
+    return auditRows(rosterParties(s), { at, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR);
+  }
+
+  /** Last in every write that closes: each closed secret ballot's rows and the idempotency records its votes used. */
+  private eraseClosed(s: Session, events: readonly SessionEvent[]): void {
+    const rooms = this.ballots.get(s.id);
+    if (!rooms) return;
+    for (const e of events) {
+      if (e.type !== "decision_closed") continue;
+      const decision = (e.payload as { decision: number }).decision;
+      for (const row of rooms.get(decision)?.values() ?? []) for (const ik of row.iks) this.keys.get(s.id)?.delete(ik);
+      rooms.delete(decision);
+    }
   }
 
   /** The decision opened at `cursor` in `s`, read from its own cursor on. */
   private decisionIn(s: Session, cursor: number, now: number): DecisionView | undefined {
-    return decisionsOf(s.events.filter((ev) => ev.cursor >= cursor), now).get(cursor);
+    return decisionsOf(s.events.filter((ev) => ev.cursor >= cursor), now, this.book(s)).get(cursor);
   }
 
   // Each decision write below is synchronous from its first read to its last write, as approveProposal's is.
@@ -4026,7 +4072,10 @@ export class MemoryStore implements BellmanStore {
    */
   private decisionWrites(s: Session, bodies: readonly EventBody[], at: number, audit: readonly AuditEntry[]): SessionEvent[] {
     const written = bodies.map((b) => this.appendNow(s, b, at));
-    if (written.length > 0) this.recordAudit(decisionAudit(audit, written, decisionsOf(s.events, at)).filter((r) => r.orgId));
+    if (written.length > 0) {
+      this.recordAudit(decisionAudit(audit, written, decisionsOf(s.events, at, this.book(s)), this.secretTemplate(s, at)).filter((r) => r.orgId));
+    }
+    this.eraseClosed(s, written);
     return written;
   }
 
@@ -4059,19 +4108,43 @@ export class MemoryStore implements BellmanStore {
   async castVote(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    const k = this.decisionKey(s, e, key);
-    if (k.done !== null) return k.done;
-    if (s.frozenAt !== null) return { outcome: "frozen" };
     const input = e.payload as VoteInput;
+    const opening = s.events.find((ev) => ev.cursor === input.decision && ev.type === "decision_opened");
+    const secret = opening !== undefined && isSecret(opening.payload as DecisionOpened);
+    const k = this.decisionKey(s, e, key);
+    if (k.done !== null) {
+      // A secret ballot gives one answer to any retry of a key its own vote used, so the retry tells nothing apart.
+      const named = (k.recorded?.payload as { decision?: number } | undefined)?.decision;
+      if (secret && named === input.decision) return { outcome: "recorded" };
+      return k.done;
+    }
+    if (s.frozenAt !== null) return { outcome: "frozen" };
     const at = Date.now();
     const view = this.decisionIn(s, input.decision, at);
     if (view === undefined) return { outcome: "unknown" };
     const vote: DecisionVote = { ...input, capacity: capacityOfVote(input) };
-    const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote);
+    const account = view.payload.accounts[e.fromMemberId];
+    const row = account === undefined ? undefined : this.ballots.get(s.id)?.get(view.cursor)?.get(account);
+    const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote, row?.n ?? 0);
     if (d.kind !== "record") return voteRefusal(d);
-    const event = this.appendNow(s, { ...e, payload: vote }, at);
-    const [closed = null] = d.close === null ? [] : this.decisionWrites(s, [closingEvent(this.decisionIn(s, view.cursor, at)!, d.close)], at, audit);
+    // A secret vote is logged as the system with no choice; the choice goes into the account's ballot row.
+    const event = secret
+      ? this.appendNow(s, {
+        ...e, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+        payload: {
+          decision: input.decision, hash: input.hash, via: input.via, human_approved: input.human_approved, capacity: vote.capacity, ballot: "secret",
+        } satisfies SecretVote,
+      }, at)
+      : this.appendNow(s, { ...e, payload: vote }, at);
+    if (secret) {
+      const room = this.ballots.get(s.id) ?? new Map<number, Map<string, { choice: Choice; n: number; iks: string[] }>>();
+      const rows = room.get(view.cursor) ?? new Map<string, { choice: Choice; n: number; iks: string[] }>();
+      const iks = k.storageKey === null ? row?.iks ?? [] : [...(row?.iks ?? []), k.storageKey];
+      rows.set(account!, { choice: vote.choice, n: (row?.n ?? 0) + 1, iks });
+      this.ballots.set(s.id, room.set(view.cursor, rows));
+    }
     k.remember(event.cursor);
+    const [closed = null] = d.close === null ? [] : this.decisionWrites(s, [closingEvent(this.decisionIn(s, view.cursor, at)!, d.close)], at, audit);
     return { outcome: "appended", event: detach(event), closed: closed === null ? null : detach(closed) };
   }
 
@@ -4097,16 +4170,22 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const view = this.decisionIn(s, cursor, now);
-    return view === undefined ? null : detach(view);
+    return view === undefined ? null : withoutBook(detach(view));
+  }
+
+  async votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]> {
+    const rooms = this.ballots.get(sessionId);
+    return decisions.filter((d) => rooms?.get(d)?.has(userId) === true);
   }
 
   async decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    const views = decisionsOf(s.events.filter((e) => ask.upTo === undefined || e.cursor <= ask.upTo), now);
+    const views = decisionsOf(s.events.filter((e) => ask.upTo === undefined || e.cursor <= ask.upTo), now, this.book(s));
     const { page, next } = decisionPageOf([...views.keys()].reverse(), ask);
     const open = ask.upTo === undefined ? [...views.values()].filter((v) => v.state === "open").reverse() : [];
-    return detach({ open, decisions: page.map((c) => views.get(c)!), next });
+    const read = detach({ open, decisions: page.map((c) => views.get(c)!), next });
+    return { ...read, open: read.open.map(withoutBook), decisions: read.decisions.map(withoutBook) };
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
@@ -5359,6 +5438,7 @@ export class MemoryStore implements BellmanStore {
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
+    this.ballots.delete(s.id);
     this.roomBanned.delete(s.id);
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);

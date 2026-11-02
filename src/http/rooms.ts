@@ -25,7 +25,7 @@ import {
 } from "../blobs.js";
 import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
 import { joinUrl } from "../codes.js";
-import { DECISION_PAGE, MAX_DECISION_PAGE } from "../decision.js";
+import { DECISION_PAGE, MAX_DECISION_PAGE, isSecret } from "../decision.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { decisionMembers, decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
@@ -1058,7 +1058,13 @@ async function readDecisionsRoute(request: Request, url: URL, sessionId: string,
     limit, ...(rawBefore === null ? {} : { before: Number(rawBefore) }), ...(cut === undefined ? {} : { upTo: cut }),
   }, Date.now());
   const members = await decisionMembers(deps.store, sessionId, session.members, [...page.open, ...page.decisions]);
-  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true);
+  // Whether the reader's own account voted on each open secret ballot: the store's answer, the reader's alone. An
+  // admin reading with no seat in the room reads as nobody, and so does a removed member reading to its cut: a
+  // decision open at the cut may have closed since and erased its rows, so asking would answer a false "no".
+  const reader = mine.length === 0 || cut !== undefined ? null : who.identity.userId;
+  const secretOpen = [...page.open, ...page.decisions].filter((v) => v.state === "open" && isSecret(v.payload)).map((v) => v.cursor);
+  const voted = new Set(reader === null || secretOpen.length === 0 ? [] : await deps.store.votedOn(sessionId, reader, secretOpen));
+  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true, reader, reader === null ? null : voted.has(v.cursor));
   const body = JSON.stringify({ open: page.open.map(shown), decisions: page.decisions.map(shown), next: page.next });
   const tag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
   const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag", "cache-control": "no-store", etag: tag };

@@ -35,9 +35,11 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
   [src/tools/sync.ts:SYNC_PAGE]. In a room whose manifest has a `decide` block, `outstanding` also lists the open
   decisions waiting on the caller's human, each with `decision: {kind, key, hash}` [src/decision.ts:decisionsAwaiting]
 - `bellman_decide` takes `action` (`open | vote | read`). `open` returns `{decision, hash, rule, expires_at,
-  electorate, superseded?, replayed?}`; `vote` returns `{cursor, capacity, state?, reason?, replayed?, note?}`
-  (`note` on an advisory vote); `read` returns one decision in `decisionShown`'s full shape, or with no `decision`
-  `{decisions}` (at most `DECISIONS_LISTED` = 20, newest first) [src/tools/decide.ts:registerDecide]
+  electorate, superseded?, replayed?, warning?}`; `vote` returns `{cursor, capacity, state?, reason?, replayed?,
+  note?}` (`note` on an advisory vote), or on a secret ballot `{ballot, capacity, state, reason?}` or
+  `{ballot, recorded, note}` and never a cursor; `read` returns one decision in `decisionShown`'s full shape, or with no `decision`
+  `{decisions}` (every open one and the newest closed, at most `DECISIONS_LISTED` = 20, from `BellmanStore.decisions`)
+  [src/tools/decide.ts:registerDecide]
 - `voteOn` is the one vote path, shared by `bellman_decide vote` and an `action_response` that answers a
   decision [src/tools/decide.ts:voteOn]
 - `bellman_start` returns `session_id`, `member_id`, `join_code`, `join_url`, `public_url` (public rooms only),

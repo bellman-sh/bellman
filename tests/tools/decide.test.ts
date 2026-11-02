@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/store.js";
 import { Harness, envelopes, type Outcome } from "../helpers/harness.js";
-import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { pairUp, secretBallot, type PairedSession } from "../helpers/flows.js";
 import { decisionHash } from "../../src/decision.js";
 
 let h: Harness;
@@ -253,5 +253,85 @@ describe("a removal voids the seat's votes (#407)", () => {
     ok(await p.joiner.call("bellman_leave", { ...room(), member_id: p.joinerMemberId }));
     expect(ok(await read("creator", decision))).toMatchObject({ state: "open", tally: { approve: 0, unreachable: 1 } });
     expect(ok(await vote("creator", decision, { choice: "reject" }))).toMatchObject({ state: "failed", reason: "rejected" });
+  });
+});
+
+describe("secret ballots, release 1", () => {
+  const openedRule = async () =>
+    ((await h.store.eventsAfter(p.sessionId, 0)).find((e) => e.type === "decision_opened")!.payload as { rule: unknown; hash: string });
+
+  it("opens a decision on a secret kind with ballot in its rule, and an open kind as before", async () => {
+    expect((await open()).isError).toBeFalsy();
+    const plain = await openedRule();
+    expect(plain.rule).toBe("majority");
+    expect(plain.hash).toBe(hashOf());
+
+    await h.close();
+    h = new Harness(new MemoryStore());
+    p = await pairUp(h, { manifest: manifest() });
+    secretBallot(h.store as MemoryStore, p.sessionId);
+    expect((await open()).isError).toBeFalsy();
+    expect((await openedRule()).rule).toEqual({ rule: "majority", ballot: "secret" });
+  });
+});
+
+describe("secret ballots in the tools (release 1)", () => {
+  const secretHash = (key = "plan") =>
+    decisionHash({ key, effect: { title: "Plan", kind: "surface_proposal", base: 0 }, rule: { rule: "majority", ballot: "secret" } });
+  const secretVote = (who: "creator" | "joiner", decision: unknown, over: Record<string, unknown> = {}) =>
+    vote(who, decision, { hash: secretHash(), ...over });
+  beforeEach(() => { secretBallot(h.store as MemoryStore, p.sessionId); });
+
+  it("refuses an advisory vote and a reason, before the send limit is charged", async () => {
+    const d = ok(await open()).decision;
+    const store = h.store as MemoryStore;
+    const real = store.admitSend.bind(store);
+    let admitted = 0;
+    store.admitSend = async (...a: Parameters<MemoryStore["admitSend"]>) => { admitted++; return real(...a); };
+    const advisory = await secretVote("joiner", d, { human_approved: false });
+    expect(advisory.isError).toBe(true);
+    expect(advisory.text).toContain("Advisory votes are not taken in a secret ballot");
+    const reasoned = await secretVote("joiner", d, { reason: "because" });
+    expect(reasoned.isError).toBe(true);
+    expect(reasoned.text).toContain("A secret ballot stores no reason. Vote again without one.");
+    const result = await answer(d, { approved: true, hash: secretHash(), human_approved: true, result: "because" });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("result");
+    expect(admitted).toBe(0);
+  });
+
+  it("answers a vote with no cursor and no choice, and a retry with recorded", async () => {
+    const d = ok(await open()).decision;
+    const cast = ok(await secretVote("joiner", d, { idempotency_key: "secret-k1" }));
+    expect(cast).toEqual({ ballot: "secret", capacity: "binding", state: "open" });
+    const retry = ok(await secretVote("joiner", d, { idempotency_key: "secret-k1", choice: "reject" }));
+    expect(retry).toEqual({ ballot: "secret", recorded: true, note: "Recorded under this key. To change your vote, vote again with a new key." });
+  });
+
+  it("reads a live tally, and shows voted on the caller's rows alone", async () => {
+    const d = ok(await open()).decision;
+    ok(await secretVote("joiner", d));
+    const mine = ok(await read("joiner", d)) as { tally: { approve: number }; votes: unknown[]; electorate: { member_id: string; voted?: boolean }[] };
+    expect(mine.tally.approve).toBe(1);
+    expect(mine.votes).toEqual([]);
+    expect(mine.electorate.find((r) => r.member_id === p.joinerMemberId)).toMatchObject({ voted: true });
+    expect(mine.electorate.find((r) => r.member_id === p.creatorMemberId)).not.toHaveProperty("voted");
+    const list = ok(await read("creator")) as { decisions: { decision: number; tally: { approve: number } }[] };
+    expect(list.decisions.find((v) => v.decision === d)?.tally.approve).toBe(1);
+  });
+
+  it("warns that a two-account secret ballot can reveal how individuals voted", async () => {
+    expect(ok(await open())).toMatchObject({
+      warning: "This secret ballot has 2 accounts; with this few, or under unanimous, the result can reveal how individuals voted.",
+    });
+  });
+
+  it("drops a secret decision from the joiner's outstanding list once the joiner votes", async () => {
+    const d = ok(await open()).decision;
+    const before = ok(await sync()) as { outstanding: { cursor: number }[] };
+    expect(before.outstanding.map((o) => o.cursor)).toContain(d);
+    ok(await secretVote("joiner", d));
+    const after = ok(await sync()) as { outstanding?: { cursor: number }[] };
+    expect((after.outstanding ?? []).map((o) => o.cursor)).not.toContain(d);
   });
 });

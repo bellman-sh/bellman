@@ -81,6 +81,8 @@ export interface StoredSession extends Omit<Session, "events"> {
    * store, which does not hydrate.
    */
   blobBytes?: number;
+  /** The bytes of every kept file revision (ADR 0046), moved by `appendFs` in the write's own transaction. Absent reads as 0. */
+  fsBytes?: number;
   /**
    * Outside questions (A2A) the hosted seat was made the voice of on one UTC day, the count
    * `decideAsk` holds under `SEAT_OUTSIDE_DAILY_CAP`. Read and moved in the ask's own
@@ -172,6 +174,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   written before the field was stamped from no plan, so the conservative
  *   number is the honest one, and it ends with the room rather than being
  *   migrated.
+ * - **fsBytes and fsBytesCeiling** (ADR 0046) default to `0` and the free plan's ceiling, for the blob fields' reasons.
  * - **hostUnitsPerMonth / hostUnits** (hosted seat) default to `0` and an empty
  *   month: a room written before the seat has no host, so it may spend nothing
  *   and has spent nothing. A stamped meter is left alone, so a read never hands
@@ -202,7 +205,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   anything reads it (`legacyRows` in member-rows.ts), and that move reads its members
  *   through this gate.
  *
- * All eighteen live here, in one gate or beside it, rather than in separate places that could drift.
+ * All nineteen live here, in one gate or beside it, rather than in separate places that could drift.
  */
 /** What a member reads as when its record names no agent at all, which no member written by Bellman lacks. */
 const UNKNOWN_AGENT: AgentInfo = { provider: "unknown", model: "unknown", client: "unknown" };
@@ -238,6 +241,8 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     // Required on the type, absent on a row written before #183: the cast says
     // so where `??` alone would read as redundant.
     blobBytesCeiling: (row as { blobBytesCeiling?: number }).blobBytesCeiling ?? ENTITLEMENTS.free.blobBytesPerRoom,
+    fsBytes: row.fsBytes ?? 0,
+    fsBytesCeiling: (row as { fsBytesCeiling?: number }).fsBytesCeiling ?? ENTITLEMENTS.free.fsBytesPerRoom,
     hostUnitsPerMonth: (row as { hostUnitsPerMonth?: number }).hostUnitsPerMonth ?? 0,
     hostUnits: (row as { hostUnits?: HostUnits }).hostUnits ?? { month: monthKey(Date.now()), used: 0, wakes: [] },
     // Required on the type, absent on a row written before #65: the cast says so where `??`

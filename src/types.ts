@@ -279,6 +279,8 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /** The bytes this room's files and their history may hold (ADR 0046), stamped at creation as `blobBytesCeiling` is. */
+  fsBytesCeiling: number;
   /**
    * Each governed config name's current revision (#414), moved in the same write as its `cfg:` row, so a poll reports
    * `room_instructions_rev` off the record it already read. Absent until the first write; readers use `?? {}`.
@@ -625,6 +627,8 @@ export interface Entitlements {
    * a plan already rations.
    */
   blobBytesPerRoom: number;
+  /** The bytes a room's files and their history may hold (ADR 0046), stamped on the room as `fsBytesCeiling`. */
+  fsBytesPerRoom: number;
   /**
    * Rooms with a hosted seat a person may hold open at once (spec D2 as ruled on I7): a
    * slot is taken when one is created and given back when it closes. 0 means the plan
@@ -974,4 +978,20 @@ export interface FsEventPayload {
   rev: number;
   size: number;
   op: "write" | "delete" | "restore";
+}
+
+/**
+ * One revision of a room file (ADR 0046): the `fs:<path>` row holds the current one and `fsh:<path>:<rev>` each kept
+ * one. A delete is a tombstone revision: `deleted`, empty content, and the revision count kept so `base_rev` still
+ * means one thing. `size` is the content's UTF-8 bytes.
+ */
+export interface FsRow {
+  path: string;
+  rev: number;
+  content: string;
+  size: number;
+  writerMemberId: string;
+  writerLabel: string;
+  at: number;
+  deleted: boolean;
 }

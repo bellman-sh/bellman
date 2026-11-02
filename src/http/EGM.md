@@ -46,13 +46,17 @@ Account, org and operator routes:
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB
   [src/http/presets.ts:presetRoutes]
 - `statsRoutes`: `GET /operator/stats` (`PlatformStats {accounts, free, paid, paidCapped}`),
-  `GET /operator/accounts`, and `/operator/rooms` and `/operator/rooms/:id` handed to `operatorRooms`
-  [src/http/stats.ts:statsRoutes]
-- `operatorRooms`: `GET /operator/rooms` lists every room newest first from `listRoomsPage`, each row joined to
-  its `roomSummary` (`{rooms, next}`; `?limit=` 1 to `MAX_ROOMS_PAGE` 50, `?after=` a page's `next`, filters
-  `?public=`, `?hosted=`, `?org=`, `?status=` open | closed | frozen | purge_scheduled); `GET /operator/rooms/:id`
-  one room with its `purpose` and role names; `MAX_ROOMS_SCANNED` 500 index rows read per page
-  [src/http/operator-rooms.ts:operatorRooms] [src/http/operator-rooms.ts:scanIndex]
+  `GET /operator/accounts`, `/operator/rooms` and `/operator/rooms/:id` handed to `operatorRooms`, and
+  `/operator/room-counts` handed to `operatorRoomCounts` [src/http/stats.ts:statsRoutes]
+- `operatorRooms`: `GET /operator/rooms` lists every room newest first, one read of `limit + 1` rows from
+  `listRoomsPage`, or `listRoomsFiltered` when `created_by`, `org`, `hosted` or `public=true` is given, each row
+  joined to its `roomSummary` and its creator's handle (`{rooms, next}`, each row with `created_by_handle`;
+  `?limit=` 1 to `MAX_ROOMS_PAGE` 50, `?after=` a page's `next`, filters `?created_by=`, `?public=`, `?hosted=`,
+  `?org=` an org id or `~none`, `?status=` open | closed | frozen | purge_scheduled); `GET /operator/rooms/:id`
+  one room with its `purpose` and role names [src/http/operator-rooms.ts:operatorRooms] [src/http/operator-rooms.ts:pageOf]
+- `operatorRoomCounts`: `GET /operator/room-counts?by=owner|org` (`{by, total_rooms, groups: [{key, label, rooms}],
+  next}`; largest first, ties by key; `?limit=` 1 to 100, default 50; `?after=` a page's `next`, `<rooms>:<key>`;
+  the no-org group's key `~none`; an owner labelled by handle, an org by name) [src/http/operator-rooms.ts:operatorRoomCounts]
 - `orgRoutes`: `GET|PATCH /org`; `GET|POST /org/members`; `PATCH|DELETE /org/members/:key`;
   `POST /org/members/:key/resend`; `GET|PUT|DELETE /org/idp`; `POST /org/domains`;
   `DELETE /org/domains/:domain`; `POST /org/domains/:domain/verify`; `GET /org/scim`;
@@ -105,7 +109,10 @@ Moderation and public routes:
   included, and nothing past `/operator/rooms/:id` is served [src/http/stats.ts:statsRoutes]
 - Operator room reads return metadata, counts and states, never a brief, an event body or a surface item's
   content; an unknown query parameter is 400. A row whose `roomSummary` rejects stays with its summary fields
-  null, and a row whose room is gone is skipped [src/http/operator-rooms.ts:summarised]
+  null and is never dropped; a row whose room is gone is skipped and deleted from the index
+  [src/http/operator-rooms.ts:summarised]
+- A `RegistryDO` still on the code before a deploy answers the counts and a filtered list 503 `not_ready`, with
+  nothing audited [src/http/operator-rooms.ts:notReady]
 - Every operator room read is audited before it answers, and fails closed: a failed audit write is a 500 with no
   room [src/http/operator-rooms.ts:operatorRooms]
 - `GET /rooms/:id/decisions` admits callers as the events read does: a member, a removed member up to its cut

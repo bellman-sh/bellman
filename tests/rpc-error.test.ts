@@ -17,7 +17,7 @@
  * assertion below would have caught any of them. Only workerd did.
  */
 import { describe, it, expect } from "vitest";
-import { reviveRpcError, reviving } from "../src/rpc-error.js";
+import { isNotImplemented, reviveRpcError, reviving } from "../src/rpc-error.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 
 /**
@@ -84,6 +84,18 @@ describe("reviveRpcError", () => {
 
     for (const value of ["a string", 42, null, undefined, { noName: true }]) {
       expect(reviveRpcError(value)).toBe(value);
+    }
+  });
+});
+
+describe("isNotImplemented", () => {
+  it("matches what an object on older code answers for a method it does not have", () => {
+    expect(isNotImplemented(new Error("The RPC receiver does not implement the method 'operatorRead'"))).toBe(true);
+  });
+
+  it("matches nothing else", () => {
+    for (const err of [new Error("registry unreachable"), new PayloadTooDeepError(65), "does not implement the method", null]) {
+      expect(isNotImplemented(err)).toBe(false);
     }
   });
 });

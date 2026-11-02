@@ -95,7 +95,7 @@ describe("a suspended account on the Node server (spec \u{A7}1, R8)", () => {
 
   // /operator/stats reads the store as its caller, so R8 gates it too. This server lists no operators, so the route
   // refuses every caller itself: the control is that refusal, which a suspended account must not reach.
-  it.each(["/operator/stats", "/operator/accounts", "/operator/rooms", "/operator/rooms/qs_any"])("is refused at %s with the one message, ahead of the route's own refusal", async (at) => {
+  it.each(["/operator/stats", "/operator/accounts", "/operator/rooms", "/operator/room-counts", "/operator/rooms/qs_any"])("is refused at %s with the one message, ahead of the route's own refusal", async (at) => {
     const store = new MemoryStore();
     await store.suspend("u_peer", { note: "test", by: "u_operator", at: 0 });
     await withServer(store, async (base) => {

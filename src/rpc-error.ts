@@ -57,6 +57,22 @@ const REVIVERS: Record<string, (carcass: Record<string, unknown>) => Error | nul
     typeof c.depth === "number" ? new PayloadTooDeepError(c.depth) : null,
 };
 
+/**
+ * An object still on the code from before a deploy, asked for a method that deploy added (#361's lag). The route
+ * answers 503 `not_ready` and writes no audit entry.
+ */
+export class NotReadyError extends Error {
+  constructor(message = "the server is still taking a deploy; try again in a few minutes") {
+    super(message);
+    this.name = "NotReadyError";
+  }
+}
+
+/** True for the rejection an object answers while it runs code that has no such method (see `reviving`). */
+export function isNotImplemented(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("does not implement the method");
+}
+
 /** Error-shaped enough to read a name off. workerd's reconstruction is an Error; this does not insist. */
 function named(err: unknown): (Record<string, unknown> & { name: string }) | null {
   if (typeof err !== "object" || err === null) return null;

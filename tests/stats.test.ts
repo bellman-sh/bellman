@@ -145,6 +145,23 @@ describe("GET /operator/stats", () => {
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 
+  it.each([
+    { status: 200, key: DEV_KEY.jesse },
+    { status: 401, key: null },
+    { status: 403, key: DEV_KEY.peer },
+    { status: 405, key: DEV_KEY.jesse, method: "POST" },
+    { status: 500, key: DEV_KEY.jesse, storeFails: true },
+  ])("carries the panel's origin on a $status at /operator/room-counts", async ({ status, key, method, storeFails }) => {
+    if (storeFails) {
+      const failing = new MemoryStore();
+      failing.roomCounts = () => Promise.reject(new Error("registry unreachable"));
+      deps = { ...deps, store: failing };
+    }
+    const res = await call(key, "/operator/room-counts?by=owner", { method, origin: PANEL });
+    expect(res!.status).toBe(status);
+    expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
   it("counts nobody on an empty store", async () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toEqual({
       accounts: 0, free: 0, paid: 0, paidCapped: false,

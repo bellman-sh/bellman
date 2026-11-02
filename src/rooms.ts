@@ -766,7 +766,7 @@ export async function gateSeat(
   actor: Identity,
   sessionId: string,
   memberId: string,
-  verb: Verb | null,
+  verb: Verb,
 ): Promise<RoomResult<StoredSession>> {
   const session = await store.getSession(sessionId);
   // Two branches, not one, and the reason text is identical on purpose. The
@@ -782,8 +782,7 @@ export async function gateSeat(
   if (!me || me.leftAt !== null) {
     return refuse("forbidden", "member_id is not yours or has left the session.");
   }
-  // No verb is a write the seat's account owns outright: its own memory files (ADR 0046).
-  const denial = verb === null ? null : denyVerb(session, me, verb);
+  const denial = denyVerb(session, me, verb);
   if (denial) return refuse("forbidden", denial);
   // A member driving a room operation is as alive as one polling. Without this
   // a member quiet for eleven minutes could call bellman_invite, demonstrably
@@ -2000,7 +1999,8 @@ const NO_FILE = "no such file.";
 
 /**
  * A seat writes a room file (ADR 0046), a sibling of `writeSurface`: the path normalized and its namespace
- * authorized, `gateSeat` (`write_surface` for room files, no verb for the seat's own memory), `admitSend`, then one
+ * authorized, `gateSeat` (`write_surface` for room files; `send` for the seat's own memory, so a role that sends nothing
+ * stays read-only), `admitSend`, then one
  * store call, `appendFs`, which writes the row, its history, the event and the audit entries in one transaction.
  */
 export async function writeFs(
@@ -2017,7 +2017,7 @@ export async function writeFs(
     return refuse("forbidden", `${GOVERNED_VIEW_ROOT}/ is read-only: change room settings in the dash (room settings, PUT /rooms/${sessionId}/config/room_instructions).`);
   }
   if (ns.ns === "app") return refuse("forbidden", "apps_not_enabled: /apps/ is reserved for room apps, which this room cannot run yet.");
-  const gate = await gateSeat(store, actor, sessionId, memberId, ns.ns === "memory" ? null : "write_surface");
+  const gate = await gateSeat(store, actor, sessionId, memberId, ns.ns === "memory" ? "send" : "write_surface");
   if (!gate.ok) return gate;
   const session = gate.value;
   const me = await findMember(store, session, memberId, actor);

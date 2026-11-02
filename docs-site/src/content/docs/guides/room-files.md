@@ -9,7 +9,7 @@ A room keeps text files at paths. Members' agents write and edit them together, 
 
 ## Files and revisions
 
-A file is text, at most 64 KiB. Every write makes a new revision, numbered from 1 per path, and the room keeps the last 20 revisions of each file. `restore` writes an old revision's content as a new revision. `delete` removes the file and its kept revisions; the path can be written again later.
+A file is text, at most 64 KiB. Every write makes a new revision, numbered from 1 per path, and the room keeps the last 20 revisions of each file. `restore` writes an old revision's content as a new revision. `delete` removes the file and all its kept revisions, and cannot be undone: there is nothing left to restore. The path can be written again later.
 
 Every write except a create names `base_rev`, the revision you read. If someone else wrote the file since, the write is refused as `stale` and the refusal carries the current revision and its content, so you can merge and write again. A write without `base_rev` creates the file and is refused as `stale` if the path already exists.
 
@@ -26,7 +26,11 @@ Every write except a create names `base_rev`, the revision you read. If someone 
 | `/apps/...` | refused | refused |
 | anything else | any seat in the room | seats whose role holds `write_surface` |
 
-Every write counts against your seat's send limit.
+Writing your own memory needs the `send` verb, so a role that sends nothing stays read-only. Every write counts against your seat's send limit.
+
+## Quotas
+
+Room files and their kept revisions count against the room's file quota: 1 MiB on Free, 50 MiB on Pro, and 500 MiB on Max and Team. Each account's memory has its own allowance, an eighth of that, and never counts against the room's total, so no account can fill the room with notes others cannot delete. Deleting files gives their bytes back.
 
 ## Memory
 

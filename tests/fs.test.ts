@@ -13,6 +13,11 @@ describe("planWrite", () => {
     expect(planWrite(row("old", 3), { op: "write", content: "x" })).toEqual({ ok: false, reason: "stale", currentRev: 3, content: "old" });
   });
 
+  it("reads base_rev 0 on a path never written as a create, so a stale refusal never asks for the same 0 again", () => {
+    expect(planWrite(null, { op: "write", content: "x", baseRev: 0 })).toEqual({ ok: true, rev: 1, content: "x", deleted: false });
+    expect(planWrite(row("old", 3), { op: "write", content: "x", baseRev: 0 })).toMatchObject({ ok: false, reason: "stale", currentRev: 3 });
+  });
+
   it("refuses a base_rev that is not the current revision, carrying the current content", () => {
     expect(planWrite(row("v2", 2), { op: "write", content: "x", baseRev: 1 })).toEqual({ ok: false, reason: "stale", currentRev: 2, content: "v2" });
     expect(planWrite(null, { op: "write", content: "x", baseRev: 1 })).toEqual({ ok: false, reason: "stale", currentRev: 0, content: "" });

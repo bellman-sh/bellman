@@ -281,6 +281,8 @@ export interface Session {
   blobBytesCeiling: number;
   /** The bytes this room's files and their history may hold (ADR 0046), stamped at creation as `blobBytesCeiling` is. */
   fsBytesCeiling: number;
+  /** Bytes of each account's kept memory revisions, by memory id (ADR 0046), charged apart from the room's files. */
+  fsMemoryBytes?: Record<string, number>;
   /**
    * Each governed config name's current revision (#414), moved in the same write as its `cfg:` row, so a poll reports
    * `room_instructions_rev` off the record it already read. Absent until the first write; readers use `?? {}`.

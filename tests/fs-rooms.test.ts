@@ -136,6 +136,15 @@ describe("namespaces and gates", () => {
     expect(await writeFs(store, JESSE, "qs_verbs", "m_creator", { path: "/a/../b", write: { op: "write", content: "x" } })).toMatchObject({ ok: false, code: "invalid" });
   });
 
+  it("needs send to write memory, so a role that sends nothing stays read-only", async () => {
+    const store = await roomWith("qs_obs", [seat("m_creator", "u_jesse"), seat("m_obs", "u_obs", GRANT, "watcher")]);
+    const s = (await store.getSession("qs_obs"))!;
+    await store.createSession({ ...session({ id: "qs_obs2", members: [member(seat("m_creator", "u_jesse")), member(seat("m_obs", "u_obs", GRANT, "watcher"))] }),
+      manifest: { ...s.manifest, roles: { ...s.manifest.roles, watcher: { ...s.manifest.roles.peer_b, can: [] } } } });
+    const r = await writeFs(store, who("u_obs"), "qs_obs2", "m_obs", { path: "/members/me/a.md", write: { op: "write", content: "x" } });
+    expect(r).toMatchObject({ ok: false, code: "forbidden" });
+  });
+
   it("refuses a frozen room and an evicted seat", async () => {
     const store = await roomWith("qs_gates", [seat("m_creator", "u_jesse"), seat("m_b", "u_b")]);
     expect((await evictMember(store, JESSE, "qs_gates", "m_b")).ok).toBe(true);

@@ -15,11 +15,11 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow,
 } from "./types.js";
 import { CONFIG_HISTORY } from "./config.js";
-import { configEvent, decideConfigWrite, decideFsWrite, fsPrint, hiddenMemory, pageFs, pathMatches, resolveFsPath, underPrefix } from "./store.js";
+import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, pageFs, pathMatches, resolveFsPath, underPrefix } from "./store.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "./fs.js";
 import { namespaceOf } from "./fs-path.js";
 import type {
-  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
+  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsEntry, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
   DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow, RoomSummary,
 } from "./store.js";
@@ -181,10 +181,13 @@ const configHistoryKey = (name: ConfigName, rev: number): string => `${configHis
 /**
  * Room files (ADR 0046): `fs:<path>` the current revision (a tombstone included), `fsh:<path>:<rev>` each kept one,
  * the revision zero-padded. A path may hold colons, so a history list keeps only keys whose rest after the prefix is
- * exactly a padded revision: `fsh:/a:` also lists `/a:b`'s rows. `mi:<userId>` is an account's memory id and
+ * exactly a padded revision: `fsh:/a:` also lists `/a:b`'s rows. `fsm:<path>` is `fs:`'s row without content, for
+ * listings. `mi:<userId>` is an account's memory id and
  * `mio:<memoryId>` its owner. All purged with the room's storage.
  */
 const fsKey = (path: string): string => `fs:${path}`;
+/** `fsm:<path>`: the current row without its content, which listings and finds read so they never load file bodies. */
+const fsIndexKey = (path: string): string => `fsm:${path}`;
 const fsHistoryPrefix = (path: string): string => `fsh:${path}:`;
 const fsHistoryKey = (path: string, rev: number): string => `${fsHistoryPrefix(path)}${String(rev).padStart(10, "0")}`;
 const REV_PAD = /^\d{10}$/;
@@ -3008,10 +3011,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return row && !row.deleted ? row : null;
   }
 
-  // ponytail: a list or find reads every `fs:` row under the prefix, content included, because the hidden memory ids
-  // are filtered before the page is cut. A content-free `fsm:` index row per path if rooms grow past a few thousand files.
-  async #fsRows(prefix: string): Promise<FsRow[]> {
-    return [...(await this.ctx.storage.list<FsRow>({ prefix: fsKey(prefix === "/" ? "/" : prefix) })).values()];
+  // ponytail: a list or find reads every `fsm:` index row under the prefix, because the hidden memory ids are
+  // filtered before the page is cut. Rows carry no content, so this is metadata only; bounded batches if rooms reach
+  // hundreds of thousands of files.
+  async #fsRows(prefix: string): Promise<FsEntry[]> {
+    return [...(await this.ctx.storage.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
   }
 
   /** `BellmanStore.listFs`, for this room. */
@@ -3097,10 +3101,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       after.queued = intents.length > 0;
       const rows = await this.driver.enqueue(txn, intents);
       const e: SessionEvent = { ...decided.event, cursor: await this.nextCursor(txn), at };
-      const session: StoredSession = { ...s, fsBytes: decided.fsBytes };
+      const session: StoredSession = { ...s, fsBytes: decided.fsBytes, fsMemoryBytes: decided.fsMemoryBytes };
       after.forward = await this.#writeEvent(txn, s, e, {
         session,
         [fsKey(resolved.path)]: row,
+        [fsIndexKey(resolved.path)]: fsEntryOf(row),
         ...(row.deleted ? {} : { [fsHistoryKey(resolved.path, row.rev)]: row }),
         ...(resolved.assign === null ? {} : { [memoryIdKey(w.userId)]: resolved.assign, [memoryOwnerKey(resolved.assign)]: w.userId }),
         ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: e.cursor, print: keyed.print } satisfies IdempotencyRecord }),

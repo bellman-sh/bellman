@@ -6,7 +6,7 @@ import type {
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
-import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
+import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
@@ -1212,8 +1212,12 @@ export type FsAppend =
   | { outcome: "stale"; currentRev: number; content: string; writer: { memberId: string; label: string } | null }
   | { outcome: "over_quota"; used: number; ceiling: number };
 
+/** A file without its content: what a listing or a find hands back. */
+export type FsEntry = Omit<FsRow, "content">;
 /** A page of `listFs` or `findFs`. `next` is the cursor of the following page, or null. */
-export interface FsPage { entries: FsRow[]; next: string | null }
+export interface FsPage { entries: FsEntry[]; next: string | null }
+/** A row as an entry, content dropped. */
+export const fsEntryOf = ({ content: _content, ...entry }: FsRow | FsEntry & { content?: string }): FsEntry => entry;
 
 /**
  * The path a file write lands at (ADR 0046): a room path as given, and a memory path with its id resolved. `me`
@@ -1240,7 +1244,11 @@ export function resolveFsPath(
 /** What `decideFsWrite` hands a store to write: the row, the history revisions to delete, the new total, the event. */
 export type FsDecision =
   | { ok: false; result: FsAppend }
-  | { ok: true; row: FsRow; dropRevs: number[]; fsBytes: number; event: EventBody; stamp: Record<string, unknown> };
+  | {
+    ok: true; row: FsRow; dropRevs: number[]; event: EventBody; stamp: Record<string, unknown>;
+    /** The record's totals after the write: the room's files, and each account's memory by id. */
+    fsBytes: number; fsMemoryBytes: Record<string, number> | undefined;
+  };
 
 /**
  * The shared rules of a file write, after the key and the room checks and on the rows read in the transaction:
@@ -1248,7 +1256,7 @@ export type FsDecision =
  * the path's kept revisions, newest first; the live row is its first.
  */
 export function decideFsWrite(
-  s: Pick<Session, "frozenAt" | "fsBytesCeiling"> & { fsBytes?: number },
+  s: Pick<Session, "frozenAt" | "fsBytesCeiling" | "fsMemoryBytes"> & { fsBytes?: number },
   w: FsWrite,
   path: string,
   current: FsRow | null,
@@ -1279,7 +1287,11 @@ export function decideFsWrite(
   };
   const dropped = plan.deleted ? history : history.slice(FS_HISTORY - 1);
   const delta = (plan.deleted ? 0 : size) - dropped.reduce((n, r) => n + r.size, 0);
-  const charge = decideFsCharge(s, false, delta);
+  const ns = namespaceOf(path);
+  const memoryId = ns.ns === "memory" ? ns.memoryId : null;
+  const charge = memoryId === null
+    ? decideFsCharge(s, false, delta)
+    : decideFsCharge({ frozenAt: s.frozenAt, fsBytes: s.fsMemoryBytes?.[memoryId] ?? 0, fsBytesCeiling: memoryCeilingOf(s.fsBytesCeiling) }, false, delta);
   if (!charge.ok) {
     if (charge.reason === "over_quota") return { ok: false, result: { outcome: "over_quota", used: charge.used, ceiling: charge.ceiling } };
     return { ok: false, result: { outcome: charge.reason } };
@@ -1289,7 +1301,9 @@ export function decideFsWrite(
     payload: { path, rev: row.rev, size, op: w.write.op === "restore" ? "restore" : plan.deleted ? "delete" : "write" },
   };
   return {
-    ok: true, row, dropRevs: dropped.map((r) => r.rev), fsBytes: charge.next, event,
+    ok: true, row, dropRevs: dropped.map((r) => r.rev), event,
+    fsBytes: memoryId === null ? charge.next : s.fsBytes ?? 0,
+    fsMemoryBytes: memoryId === null ? s.fsMemoryBytes : { ...s.fsMemoryBytes, [memoryId]: charge.next },
     stamp: { path, rev: row.rev, size, sha256: contentHash(plan.content) },
   };
 }
@@ -1299,13 +1313,13 @@ export const fsPrint = (w: FsWrite): string =>
   fingerprint({ type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null, payload: { path: w.path, write: w.write } });
 
 /** Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule. */
-export function pageFs(rows: readonly FsRow[], keep: (r: FsRow) => boolean, cap: number, cursor?: string): FsPage {
-  const entries: FsRow[] = [];
+export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string): FsPage {
+  const entries: FsEntry[] = [];
   for (const r of rows) {
     if (cursor !== undefined && r.path <= cursor) continue;
     if (r.deleted || !keep(r)) continue;
     if (entries.length === cap) return { entries, next: entries[cap - 1].path };
-    entries.push(r);
+    entries.push(fsEntryOf(r));
   }
   return { entries, next: null };
 }
@@ -1315,7 +1329,7 @@ export const underPrefix = (path: string, prefix: string): boolean =>
   prefix === "/" || path === prefix || path.startsWith(prefix + "/");
 
 /** Whether a row is a memory file of one of the `hide` ids. */
-export const hiddenMemory = (r: FsRow, hide: readonly string[] | undefined): boolean => {
+export const hiddenMemory = (r: FsEntry, hide: readonly string[] | undefined): boolean => {
   if (!hide || hide.length === 0) return false;
   const ns = namespaceOf(r.path);
   return ns.ns === "memory" && ns.memoryId !== null && hide.includes(ns.memoryId);
@@ -3829,6 +3843,7 @@ export class MemoryStore implements BellmanStore {
       this.memoryIdRows.set(sessionId, ids);
     }
     (s as { fsBytes?: number }).fsBytes = decided.fsBytes;
+    s.fsMemoryBytes = decided.fsMemoryBytes;
     const event = this.appendNow(s, decided.event, at);
     if (storageKey !== null) {
       const map = this.keys.get(sessionId) ?? new Map<string, IdempotencyRecord>();

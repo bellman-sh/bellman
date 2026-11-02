@@ -43,7 +43,7 @@ export const fsFileView = (r: FsRow) => ({ ...fsEntryView(r), content: r.content
 /** The writing seat of a row, as the origin of an untrusted envelope. */
 const fsOrigin = (r: Pick<FsRow, "writerMemberId" | "writerLabel">) => ({ memberId: r.writerMemberId, label: r.writerLabel });
 /** A file entry for an agent: in an untrusted envelope whose origin is the server-stamped writing seat. */
-export const fsEntry = (r: FsRow) => untrusted(fsOrigin(r), fsEntryView(r));
+export const fsEntry = (r: Omit<FsRow, "content">) => untrusted(fsOrigin(r), fsEntryView(r));
 /** A file for an agent: content, path and writer in an untrusted envelope from the writing seat. */
 export const fsFile = (r: FsRow) => untrusted(fsOrigin(r), fsFileView(r));
 

@@ -61,7 +61,9 @@ function matches(hay: string, needle: string): number {
 export function planWrite(current: FsRow | null, input: FsPlanInput): FsPlan {
   const live = current !== null && !current.deleted;
   const stale = { ok: false as const, reason: "stale" as const, currentRev: current?.rev ?? 0, content: live ? current.content : "" };
-  if (input.baseRev === undefined ? live : (current?.rev ?? 0) !== input.baseRev || current === null) return stale;
+  // A base_rev of 0 on a path never written is a create: a refusal saying "at revision 0" must not loop.
+  const baseRev = input.baseRev === 0 && current === null ? undefined : input.baseRev;
+  if (baseRev === undefined ? live : (current?.rev ?? 0) !== baseRev || current === null) return stale;
   const rev = (current?.rev ?? 0) + 1;
   const base = live ? current.content : "";
   let content: string;
@@ -89,6 +91,14 @@ export function planWrite(current: FsRow | null, input: FsPlanInput): FsPlan {
   if (utf8Bytes(content) > FS_FILE_MAX_BYTES) return { ok: false, reason: "too_large" };
   return { ok: true, rev, content, deleted: false };
 }
+
+/**
+ * Each account's memory allowance: an eighth of the room's file ceiling (128 KiB free, 6.25 MiB pro, 62.5 MiB max
+ * and team). Memory is charged here and never to the room's total, so no account can fill the room with files nobody
+ * else may delete, and a peer's quota refusal says nothing of memory it may not see.
+ */
+// ponytail: an eighth, not tuned; a per-plan figure in the plan table if rooms ask for more.
+export const memoryCeilingOf = (fsBytesCeiling: number): number => Math.floor(fsBytesCeiling / 8);
 
 export type FsCharge =
   | { ok: true; next: number }

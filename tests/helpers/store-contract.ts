@@ -4699,6 +4699,30 @@ export function describeStoreContract(
         expect((await store.fsHistory(id, "/a:b")).map((r) => r.content)).toEqual(["colon2", "colon"]);
       });
 
+      it("charges memory to the account's own allowance, an eighth of the room's ceiling, never to the room's total", async () => {
+        const id = await room("qs_fs_memquota", { fsBytesCeiling: 80, members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer" })] });
+        expect(await store.appendFs(id, put("/members/me/a.md", { op: "write", content: "x".repeat(10) }), [])).toMatchObject({ outcome: "ok" });
+        expect(await fsBytes(id)).toBe(0);
+        expect(await store.appendFs(id, put("/members/me/b.md", { op: "write", content: "x" }), [])).toEqual({ outcome: "over_quota", used: 10, ceiling: 10 });
+        // A peer's refusal on room files reads the same whatever memory holds.
+        const peer = { memberId: "m_peer", userId: "u_peer", label: "peer" };
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "x".repeat(81) }, peer), [])).toEqual({ outcome: "over_quota", used: 0, ceiling: 80 });
+        // Deleting memory gives the account its allowance back.
+        const mid = (await store.memoryIdOf(id, "u_jesse"))!;
+        expect(await store.appendFs(id, put(`/members/${mid}/a.md`, { op: "delete", baseRev: 1 }), [])).toMatchObject({ outcome: "ok" });
+        expect(await store.appendFs(id, put("/members/me/b.md", { op: "write", content: "x".repeat(10) }), [])).toMatchObject({ outcome: "ok" });
+      });
+
+      it("hands back listings and finds without content", async () => {
+        const id = await room("qs_fs_nocontent");
+        await store.appendFs(id, put("/plans/a.md", { op: "write", content: "secret body" }), []);
+        await store.appendFs(id, put("/plans/a.md", { op: "write", content: "secret body 2", baseRev: 1 }), []);
+        const listed = (await store.listFs(id, "/")).entries;
+        const found = (await store.findFs(id, "plans")).entries;
+        expect(listed).toEqual([{ path: "/plans/a.md", rev: 2, size: 13, writerMemberId: "m_creator", writerLabel: "jesse@codenerd", at: expect.any(Number), deleted: false }]);
+        expect(found).toEqual(listed);
+      });
+
       it("lists at a prefix as a directory, pages, and hides the memory ids it is told to", async () => {
         const id = await room("qs_fs_list");
         for (const p of ["/plans/a.md", "/plans/b.md", "/plansx/c.md", "/z.md"]) await store.appendFs(id, put(p, { op: "write", content: "x" }), []);

@@ -76,6 +76,10 @@ describe("bellman_fs", () => {
     expect((await fsA({ op: "write", path, content: "x", base_rev: 1 })).isError).toBe(true);
   });
 
+  it("creates with base_rev 0 on a path never written", async () => {
+    expect((await fsA({ op: "write", path: "/new.md", content: "x", base_rev: 0 })).data).toMatchObject({ rev: 1 });
+  });
+
   it("refuses /.bellman/ writes and names the dash, and says what an op is missing", async () => {
     const bell = await fsA({ op: "write", path: "/.bellman/room.md", content: "x" });
     expect(bell.isError).toBe(true);

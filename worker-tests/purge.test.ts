@@ -102,8 +102,8 @@ it("purges room files, their history and memory ids with the room (ADR 0046)", a
   expect((await store.appendFs("qs_fs_purge", { path: "/plans/a.md", write: { op: "write", content: "x" }, ...by }, [])).outcome).toBe("ok");
   expect((await store.appendFs("qs_fs_purge", { path: "/members/me/n.md", write: { op: "write", content: "y" }, ...by }, [])).outcome).toBe("ok");
   const keys = () => runInDurableObject(stubOf("qs_fs_purge"), async (_i: SessionDO, ctx) =>
-    [...(await ctx.storage.list()).keys()].filter((k) => /^(fs|fsh|mi|mio):/.test(k)));
-  expect(await keys(), "file, history and memory id rows before").toHaveLength(6);
+    [...(await ctx.storage.list()).keys()].filter((k) => /^(fs|fsh|fsm|mi|mio):/.test(k)));
+  expect(await keys(), "file, history, index and memory id rows before").toHaveLength(8);
   await store.closeSession("qs_fs_purge");
   setClock((await store.getSession("qs_fs_purge"))!.closedAt! + WINDOW);
   expect(await runDurableObjectAlarm(stubOf("qs_fs_purge"))).toBe(true);

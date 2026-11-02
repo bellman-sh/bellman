@@ -1307,6 +1307,14 @@ export function decideFsWrite(
   const charge = memoryId === null
     ? decideFsCharge(s, false, delta)
     : decideFsCharge({ frozenAt: s.frozenAt, fsBytes: s.fsMemoryBytes?.[memoryId] ?? 0, fsBytesCeiling: memoryCeilingOf(s.fsBytesCeiling) }, false, delta);
+  // Every account's memory together is bounded by the room's ceiling too, as accounts come and go over a room's life.
+  // Refused with the writer's own figures, so the refusal says nothing of other accounts' memory.
+  if (charge.ok && memoryId !== null && delta > 0) {
+    const total = Object.values(s.fsMemoryBytes ?? {}).reduce((n, b) => n + b, 0);
+    if (total + delta > s.fsBytesCeiling) {
+      return { ok: false, result: { outcome: "over_quota", used: s.fsMemoryBytes?.[memoryId] ?? 0, ceiling: memoryCeilingOf(s.fsBytesCeiling) } };
+    }
+  }
   if (!charge.ok) {
     if (charge.reason === "over_quota") return { ok: false, result: { outcome: "over_quota", used: charge.used, ceiling: charge.ceiling } };
     return { ok: false, result: { outcome: charge.reason } };

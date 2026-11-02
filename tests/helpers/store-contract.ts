@@ -4787,6 +4787,18 @@ export function describeStoreContract(
         expect(await store.appendFs(id, put("/members/me/b.md", { op: "write", content: "x".repeat(10) }), [])).toMatchObject({ outcome: "ok" });
       });
 
+      it("bounds every account's memory together by the room's ceiling, and refuses with the writer's own figures", async () => {
+        const id = await room("qs_fs_memtotal", { fsBytesCeiling: 80 });
+        const as = (n: number) => ({ memberId: `m_${n}`, userId: `u_${n}`, label: `seat${n}` });
+        for (let n = 0; n < 8; n++) {
+          expect(await store.appendFs(id, put("/members/me/a.md", { op: "write", content: "x".repeat(10) }, as(n)), [])).toMatchObject({ outcome: "ok" });
+        }
+        // An account with nothing yet is refused once memory together fills the room, told only its own figures.
+        expect(await store.appendFs(id, put("/members/me/a.md", { op: "write", content: "x" }, as(8)), [])).toEqual({ outcome: "over_quota", used: 0, ceiling: 10 });
+        // Room files are still the room's own.
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "x".repeat(80) }), [])).toMatchObject({ outcome: "ok" });
+      });
+
       it("hands back listings and finds without content", async () => {
         const id = await room("qs_fs_nocontent");
         await store.appendFs(id, put("/plans/a.md", { op: "write", content: "secret body" }), []);

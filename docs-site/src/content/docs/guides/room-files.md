@@ -30,7 +30,7 @@ Writing your own memory needs the `send` verb, so a role that sends nothing stay
 
 ## Quotas
 
-Room files and their kept revisions count against the room's file quota: 1 MiB on Free, 50 MiB on Pro, and 500 MiB on Max and Team. Each account's memory has its own allowance, an eighth of that, and never counts against the room's total, so no account can fill the room with notes others cannot delete. Deleting files gives their bytes back.
+Room files and their kept revisions count against the room's file quota: 1 MiB on Free, 50 MiB on Pro, and 500 MiB on Max and Team. Each account's memory has its own allowance, an eighth of that, and never counts against the room's files, so no account can fill the room with notes others cannot delete. All accounts' memory together is also capped at the room's quota. Deleting files gives their bytes back.
 
 ## Memory
 

@@ -48,7 +48,7 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
   `SERVER_CARD_CORS`.
 - `[worker.ts:fetch]` the Workers entry. Dispatch order: `/stripe/webhook`; `/rooms[/*]` (moderation routes, then
   room routes); `/public[/*]`; `/presets`, `/scim/v2`, `/audit`, `/org`, `/me/rooms`, `/account/handle`,
-  `/account/bans`, `/operator/(stats|accounts|rooms)` and `/operator/rooms/:id`; `GET /.well-known/agent-card.json`; the server card; OAuth
+  `/account/bans`, `/operator/(stats|accounts|rooms|room-counts)` and `/operator/rooms/:id`; `GET /.well-known/agent-card.json`; the server card; OAuth
   routes; `GET /healthz`; `GET /ws`; A2A paths; `POST /mcp`. Anything else is 404.
 - `[worker.ts]` re-exports the Durable Object classes `SessionDO`, `RegistryDO`, `AuditDO` (from `store-do.ts`),
   `AuthDO` (from `oauth/store.ts`) and `HostDO` (from `host-do.ts`). `[worker.ts:WorkerEnv]` extends
@@ -81,7 +81,8 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
   - moderation: `banAccount`, `roomBans`, `liftRoomBan`, `creatorBans`, `liftCreatorBan`, `suspend`,
     `unsuspend`, `isSuspended`, `fileReport`, `roomReports`, `listReports`, `resolveReport`.
   - registry indexes and accounts: `sessionsCreatedBy`, `sessionsJoinedBy`, `sessionsForOrg`, the operator's
-    index of every room (`listRoomsPage`, `backfillRoomIndex`) and `roomSummary`, `claimPublicName`, `releasePublicName`, `recordSignIn`, `listUsers`, presets, handles and `signRoom`.
+    index of every room (`listRoomsPage`, `listRoomsFiltered`, `roomCounts`, `handlesOf`, `dropRoomIndex`,
+    `backfillRoomIndex`) and `roomSummary`, `claimPublicName`, `releasePublicName`, `recordSignIn`, `listUsers`, presets, handles and `signRoom`.
   - grants, orgs, SSO, SCIM and invites: `putGrantIfOwned`, `moveGrant`, `createOrg`, `updateOrg`,
     `verifyDomain`, `provisionSsoMember`, `createScimUser`, `issueScimToken`, `putOrgInvite`,
     `acceptOrgInvite` and their reads.
@@ -110,8 +111,9 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
   `OutboxDriver`. `REPLAY_LIMIT = 1_000`.
 - `[store-do.ts:RegistryDO]` the singleton: join codes `jc:`, public names `pn:`, connect tokens `pc:`, grants
   `gr:`/`go:`, orgs, IdPs, domains, invites, SCIM users and tokens, created/joined/org room indexes
-  (`us:`/`um:`/`uo:`), the operator's index of every room (`rm:<createdAt>:<sessionId>` holding a `RoomIndexRow`,
-  `ri:<sessionId>` naming that row's key; `listRoomsPage`, `indexRoom`, `dropRoomIndex`, `unindexedRooms`),
+  (`us:`/`um:`/`uo:`), the operator's index of every room (the SQL table `rooms`, one `RoomIndexRow` a room, indexed
+  newest first, by creator and by org; `listRoomsPage`, `listRoomsFiltered`, `roomCounts`, `handlesOf`, `indexRoom`,
+  `dropRoomIndex`, `unindexedRooms`; moved from `rm:`/`ri:` by the constructor on wake),
   presets `pr:`, hosted slots `ho:`, handles `uh:`/`hn:`/`hs:`, creator bans `cb:`,
   suspensions, and the report queue (`rp:`, `ro:`, `rf:`, `rl:`, `rc:`, `rr:`) with its `report_purge` alarm.
 - `[store-do.ts:AuditDO]` one per org, plus the platform operator's stream named `OPERATOR_AUDIT_STREAM`
@@ -281,8 +283,9 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - `[store-do.ts:DurableObjectStore.createSession]` writes the room first and the registry indexes (`us`, `um`,
   `uo`) after, with no transaction across them; `[store-do.ts:DurableObjectStore.writeIndex]` logs a failed
   index write rather than throwing, and nothing rebuilds a lost `us`, `um` or `uo` row. The operator's room index
-  row is written in the same put as the creator's `us:` row (`[store-do.ts:RegistryDO.indexSession]`); a room
-  missing from it is restored by `backfillRoomIndex`, and the purge removes it (`dropRoomIndex`). Join codes reach
+  row is written in the same `transactionSync` as the creator's `us:` row (`[store-do.ts:RegistryDO.indexSession]`);
+  a room missing from it is restored by `backfillRoomIndex`, and the purge removes it (`dropRoomIndex`), as does an
+  operator list page that finds the room gone. Join codes reach
   the registry through the room's outbox, not the facade.
 - `[store-do.ts:DurableObjectStore.getSessionByJoinCode]` treats the registry row as a hint: the room must be open,
   still hold the code, and `codeIsLive` must pass. The public-name index works the same way: claims are
@@ -363,7 +366,7 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - Durable Object storage. `SessionDO`: `session`, `cursor`, `e:<cursor>`, `sf:<key>`, member rows (`mb:`, `mu:`,
   `lb:`, `bf:`), `ik:` idempotency records, `bn:`/`bu:` bans, `sn:` stranger send counts, `ot:`/`oc:`/`ov`
   outside tasks, the decision index `dx:`/`dv:`/`dx-at`, outbox `ob:`/`ob_seq`/`due:`. `RegistryDO`: the
-  prefixes listed under Interface (the room index `rm:`/`ri:` among them) plus its own outbox. `AuditDO`: SQL `entries` and `delivered`, KV `sink`, `settings`, `chain_anchor`, `due:sink`,
+  prefixes listed under Interface plus its own outbox, and SQL `rooms` (the room index). `AuditDO`: SQL `entries` and `delivered`, KV `sink`, `settings`, `chain_anchor`, `due:sink`,
   `due:sweep`. `HostDO`: `state` and `pending`. Each of the four object types runs on a single alarm.
 - Cross-object RPC: `SessionDO` to `RegistryDO` (`putJoinCode`, `dropJoinCode`, `releaseHostedRoom`,
   `putCreatorBan`, index drops on purge, `dropRoomIndex` among them), to `AuditDO.append`, and to `HostDO.wake`/`forget`; `HostDO` back to

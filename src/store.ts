@@ -26,7 +26,7 @@ import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, 
 import { SINK_BATCH, SINK_DELAY_MS, SWEEP_EVERY_MS, SYSTEM_INTENT, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
 import { entryView } from "./audit.js";
 import { randomId } from "./oauth/tokens.js";
-import { scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
+import { NO_ORG, scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
@@ -242,6 +242,21 @@ export const roomIndexRow = (
   sessionId: s.id, createdAt: s.creator.joinedAt, createdBy: s.createdBy, orgId: s.orgId,
   preset: s.manifest.preset, mode: s.manifest.mode, public: s.manifest.public === true, hosted: s.manifest.host !== null,
 });
+
+/** `listRoomsFiltered`'s filters; each one given narrows the page. `org: null` is the rooms with no org. */
+export interface RoomFilter {
+  createdBy?: string;
+  org?: string | null;
+  hosted?: boolean;
+  publicTrue?: true;
+}
+
+export interface RoomCounts {
+  total: number;
+  groups: { key: string; label: string | null; rooms: number }[];
+  next: string | null;
+  orgs: (string | null)[];
+}
 
 /** A row's place in both stores' order: the time zero-padded, then the id, so newest first is this, descending. */
 export const roomIndexKey = (r: Pick<RoomIndexRow, "createdAt" | "sessionId">): string =>
@@ -2080,6 +2095,25 @@ export interface BellmanStore {
    */
   listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]>;
   /**
+   * `listRoomsPage` narrowed to the rows that match every filter given (dash#94): `createdBy` the creator, `org` the
+   * creator's org at the create (null: rooms with no org), `hosted`, and `publicTrue` the rooms created public. A page
+   * is full however few rooms match. A method of its own rather than an argument, so an object still on older code
+   * after a deploy answers "does not implement" instead of ignoring the filter.
+   */
+  listRoomsFiltered(limit: number, startAfter: Pick<RoomIndexRow, "createdAt" | "sessionId"> | undefined, filter: RoomFilter): Promise<RoomIndexRow[]>;
+  /**
+   * How many indexed rooms each owner (`created_by`) or org has, largest first, ties by key ascending (dash#94). The
+   * no-org group's key is `NO_ORG`. At most `limit` groups, past `after` (the last group of the page before);
+   * `next` is `<rooms>:<key>` of the last group returned, null at the end. `total` counts every indexed room; `orgs`
+   * is the distinct orgs of the rooms in the returned groups (null: no org), for the read's audit parties. Labels
+   * are an owner's handle and an org's name, null without one.
+   */
+  roomCounts(by: "owner" | "org", limit: number, after?: { rooms: number; key: string }): Promise<RoomCounts>;
+  /** The handle of each id that has one; ids without one are absent. */
+  handlesOf(userIds: readonly string[]): Promise<Map<string, string>>;
+  /** Take a room out of the operator's index, and nothing else. A room not indexed is a no-op. */
+  dropRoomIndex(sessionId: string): Promise<void>;
+  /**
    * One window of the walk that writes `listRoomsPage`'s missing rows (#471): `next` goes back in as `after`, and
    * null is the end. Idempotent. MemoryStore indexes every room at its create, so it has nothing to write.
    */
@@ -2955,13 +2989,52 @@ export class MemoryStore implements BellmanStore {
   }
 
   async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
+    return this.listRoomsFiltered(limit, startAfter, {});
+  }
+
+  async listRoomsFiltered(limit: number, startAfter: Pick<RoomIndexRow, "createdAt" | "sessionId"> | undefined, f: RoomFilter): Promise<RoomIndexRow[]> {
     const before = startAfter && roomIndexKey(startAfter);
     return [...this.roomIndex.values()]
+      .filter((r) => (f.createdBy === undefined || r.createdBy === f.createdBy) && (f.org === undefined || r.orgId === f.org) &&
+        (f.hosted === undefined || r.hosted === f.hosted) && (f.publicTrue === undefined || r.public))
       .map((r) => ({ key: roomIndexKey(r), r }))
       .filter(({ key }) => before === undefined || key < before)
       .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0))
       .slice(0, limit)
       .map(({ r }) => ({ ...r }));
+  }
+
+  async roomCounts(by: "owner" | "org", limit: number, after?: { rooms: number; key: string }): Promise<RoomCounts> {
+    const keyOf = (r: RoomIndexRow) => (by === "owner" ? r.createdBy : r.orgId ?? NO_ORG);
+    const counts = new Map<string, number>();
+    for (const r of this.roomIndex.values()) counts.set(keyOf(r), (counts.get(keyOf(r)) ?? 0) + 1);
+    const sorted = [...counts]
+      .map(([key, rooms]) => ({ key, rooms }))
+      .filter((g) => after === undefined || g.rooms < after.rooms || (g.rooms === after.rooms && g.key > after.key))
+      .sort((a, b) => b.rooms - a.rooms || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const page = sorted.slice(0, limit);
+    const keys = new Set(page.map((g) => g.key));
+    const orgs = by === "org"
+      ? page.map((g) => (g.key === NO_ORG ? null : g.key))
+      : [...new Set([...this.roomIndex.values()].filter((r) => keys.has(r.createdBy)).map((r) => r.orgId))];
+    const groups = page.map((g) => ({
+      key: g.key,
+      label: (by === "owner" ? this.handleByUser.get(g.key) : g.key === NO_ORG ? undefined : this.orgs.get(g.key)?.name) ?? null,
+      rooms: g.rooms,
+    }));
+    const last = page.at(-1);
+    return { total: this.roomIndex.size, groups, next: sorted.length > limit && last ? `${last.rooms}:${last.key}` : null, orgs };
+  }
+
+  async handlesOf(userIds: readonly string[]): Promise<Map<string, string>> {
+    return new Map(userIds.flatMap((id) => {
+      const handle = this.handleByUser.get(id);
+      return handle === undefined ? [] : [[id, handle] as const];
+    }));
+  }
+
+  async dropRoomIndex(sessionId: string): Promise<void> {
+    this.roomIndex.delete(sessionId);
   }
 
   async backfillRoomIndex(): Promise<{ indexed: number; next: string | null }> {
@@ -5554,7 +5627,7 @@ export class MemoryStore implements BellmanStore {
     this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
-    this.roomIndex.delete(s.id);
+    await this.dropRoomIndex(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);

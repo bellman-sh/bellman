@@ -53,6 +53,10 @@ const runAlarm = (id: string) => runInDurableObject(stubOf(id), (instance: Sessi
 const registryRows = (id: string) =>
   runInDurableObject(registry(), async (_i: RegistryDO, ctx) =>
     [...(await ctx.storage.list()).keys()].filter((key) => key.endsWith(`:${id}`)));
+/** The room's row in the registry's `rooms` table, as a list of its id: one before the purge, none after. */
+const indexedRoom = (id: string) =>
+  runInDurableObject(registry(), (_i: RegistryDO, ctx) =>
+    ctx.storage.sql.exec<{ session_id: string }>("SELECT session_id FROM rooms WHERE session_id = ?", id).toArray().map((r) => r.session_id));
 /** What an org's stream holds for this room. */
 const filed = async (org: string, id: string) =>
   (await auditOf(org).recent(100)).filter((entry) => entry.sessionId === id);
@@ -74,10 +78,10 @@ it("purges a closed room when its window has run out, and a second alarm finds n
   const { store, closedAt } = await closedRoom("qs_window");
   await putObject("qs_window", "b_one");
   expect(await armedAlarm("qs_window"), "the purge is armed from the close").toBe(closedAt + WINDOW);
-  expect(await registryRows("qs_window"), "the registry lists it before: every room's (#471), joined, org's, created").toEqual([
-    "ri:qs_window", expect.stringMatching(/^rm:\d{16}:qs_window$/),
+  expect(await registryRows("qs_window"), "the registry lists it before: joined, org's, created").toEqual([
     "um:u_jesse:qs_window", "uo:org_codenerd:qs_window", "us:u_jesse:qs_window",
   ]);
+  expect(await indexedRoom("qs_window"), "and every room's (#471)").toEqual(["qs_window"]);
 
   setClock(closedAt + WINDOW); // the window's last millisecond is the first that purges
   expect(await runDurableObjectAlarm(stubOf("qs_window"))).toBe(true);
@@ -85,6 +89,7 @@ it("purges a closed room when its window has run out, and a second alarm finds n
   expect(await rowCount("qs_window"), "the object holds nothing").toBe(0);
   expect(await armedAlarm("qs_window"), "and nothing is armed").toBeNull();
   expect(await registryRows("qs_window")).toEqual([]);
+  expect(await indexedRoom("qs_window")).toEqual([]);
   expect(await blobs().list("qs_window")).toEqual([]);
   expect(await filed("org_codenerd", "qs_window")).toMatchObject([{ action: "room_purged", actorUserId: "system" }]);
   expect(await store.getSession("qs_window")).toBeUndefined();

@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, orgIndexKey, orgIndexPrefix,
+  allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, NO_ORG, orgIndexKey, orgIndexPrefix,
   orgInvitesPrefix, orgKey, OPERATOR_AUDIT_STREAM, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
 } from "./grant-index.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
@@ -21,7 +21,7 @@ import { namespaceOf } from "./fs-path.js";
 import type {
   AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsEntry, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
-  DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow, RoomSummary,
+  DecisionClose, DecisionOpen, VoteWrite, RoomCounts, RoomFilter, RoomIndexRow, RoomSummary,
 } from "./store.js";
 import { electorateOf, voteRefusal } from "./store.js";
 import {
@@ -34,7 +34,7 @@ import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, 
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomIndexKey, roomIndexRow, roomSummaryOf,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomIndexRow, roomSummaryOf,
   seatInOrder, seatVictims, stampSeen,
 } from "./store.js";
 import {
@@ -67,7 +67,7 @@ import {
 import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
-import { reviving } from "./rpc-error.js";
+import { NotReadyError, isNotImplemented, reviving } from "./rpc-error.js";
 import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "./surface.js";
 import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "./frames.js";
 import { decideApproval } from "./proposal.js";
@@ -193,13 +193,65 @@ const fsHistoryKey = (path: string, rev: number): string => `${fsHistoryPrefix(p
 const REV_PAD = /^\d{10}$/;
 const memoryIdKey = (userId: string): string => `mi:${userId}`;
 const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
-/** The operator's index of every room (#471); `RegistryDO.listRoomsPage` says what the rows hold. */
-const ROOM_INDEX_PREFIX = "rm:";
-const roomIdKey = (sessionId: string): string => `ri:${sessionId}`;
-const roomRows = (room: RoomIndexRow): Record<string, unknown> => {
-  const key = `${ROOM_INDEX_PREFIX}${roomIndexKey(room)}`;
-  return { [key]: room, [roomIdKey(room.sessionId)]: key };
-};
+/**
+ * The operator's index of every room (#471, dash#94): one row a room, the fields of its `RoomIndexRow`, fixed at
+ * the create. A close keeps it, the purge deletes it. No org is NULL; `NO_ORG` exists only past the HTTP layer.
+ */
+const ROOMS_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS rooms (
+    session_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    org_id TEXT,
+    preset TEXT,
+    mode TEXT NOT NULL,
+    public INTEGER NOT NULL,
+    hosted INTEGER NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS rooms_newest ON rooms (created_at DESC, session_id DESC)",
+  "CREATE INDEX IF NOT EXISTS rooms_by_owner ON rooms (created_by, created_at DESC, session_id DESC)",
+  "CREATE INDEX IF NOT EXISTS rooms_by_org ON rooms (org_id, created_at DESC, session_id DESC)",
+];
+
+interface RoomSqlRow extends Record<string, SqlStorageValue> {
+  session_id: string; created_at: number; created_by: string; org_id: string | null;
+  preset: string | null; mode: string; public: number; hosted: number;
+}
+
+/** SQLite has no boolean: `public` and `hosted` go in as 1/0 and come back as booleans. */
+function insertRoom(sql: SqlStorage, r: RoomIndexRow): void {
+  sql.exec(
+    "INSERT OR IGNORE INTO rooms (session_id, created_at, created_by, org_id, preset, mode, public, hosted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    r.sessionId, r.createdAt, r.createdBy, r.orgId, r.preset, r.mode, r.public ? 1 : 0, r.hosted ? 1 : 0,
+  );
+}
+
+const roomOfSql = (r: RoomSqlRow): RoomIndexRow => ({
+  sessionId: r.session_id, createdAt: r.created_at, createdBy: r.created_by, orgId: r.org_id,
+  preset: r.preset as RoomIndexRow["preset"], mode: r.mode as RoomIndexRow["mode"], public: r.public === 1, hosted: r.hosted === 1,
+});
+
+/**
+ * One page of `rooms`, newest first: a `WHERE` built from only the filters given, so SQLite plans each shape on its
+ * own index (`rooms_by_owner`, `rooms_by_org`), which a fixed `(? IS NULL OR col = ?)` form never could. Exported
+ * so the query-plan test runs exactly what the store runs.
+ */
+export function roomsPageQuery(
+  limit: number, startAfter: Pick<RoomIndexRow, "createdAt" | "sessionId"> | undefined, f: RoomFilter,
+): { sql: string; bindings: SqlStorageValue[] } {
+  const where: string[] = [];
+  const bindings: SqlStorageValue[] = [];
+  if (f.createdBy !== undefined) { where.push("created_by = ?"); bindings.push(f.createdBy); }
+  if (f.org === null) where.push("org_id IS NULL");
+  else if (f.org !== undefined) { where.push("org_id = ?"); bindings.push(f.org); }
+  if (f.hosted !== undefined) { where.push("hosted = ?"); bindings.push(f.hosted ? 1 : 0); }
+  if (f.publicTrue) where.push("public = 1");
+  if (startAfter) { where.push("(created_at, session_id) < (?, ?)"); bindings.push(startAfter.createdAt, startAfter.sessionId); }
+  return {
+    sql: `SELECT * FROM rooms${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, session_id DESC LIMIT ?`,
+    bindings: [...bindings, limit],
+  };
+}
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -4406,6 +4458,14 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    */
   private driver = new OutboxDriver(this.ctx.storage, (row) => this.#deliver(row));
 
+  constructor(ctx: DurableObjectState, env: BellmanEnv) {
+    super(ctx, env);
+    // Before any call is let in: the `rooms` table, and an index still in the KV shape moved into it.
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => migrateRoomIndex(this.ctx.storage));
+    });
+  }
+
   async putJoinCode(code: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`jc:${code}`, sessionId);
   }
@@ -5619,37 +5679,85 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async indexSession(userId: string, sessionId: string, room?: RoomIndexRow): Promise<void> {
     // `room` is optional so a caller a deploy ahead of this object still writes the `us:` row (#361's lag);
     // the backfill writes the room's row the call left out.
-    await this.ctx.storage.put<unknown>({ [`us:${userId}:${sessionId}`]: Date.now(), ...(room ? roomRows(room) : {}) });
+    // One transaction: in a SQLite-backed object KV and SQL are one database, so both land or neither does.
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put(`us:${userId}:${sessionId}`, Date.now());
+      if (room) insertRoom(this.ctx.storage.sql, room);
+    });
   }
 
   /**
-   * `rm:<roomIndexKey>` — every room, for the operator (#471), its `RoomIndexRow`: newest first is reverse key order.
-   * `ri:<sessionId>` holds that row's key, so the purge finds it by id and the backfill can tell an indexed room.
-   * Written with the creator's `us:` row (`indexSession`), or by the backfill (`indexRoom`). A close keeps both.
+   * The `rooms` table — every room, for the operator (#471) — newest first. Written with the creator's `us:` row
+   * (`indexSession`), or by the backfill (`indexRoom`); a close keeps the row, the purge deletes it.
    */
   async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
-    const rows = await this.ctx.storage.list<RoomIndexRow>({
-      prefix: ROOM_INDEX_PREFIX, reverse: true, limit,
-      ...(startAfter === undefined ? {} : { end: `${ROOM_INDEX_PREFIX}${roomIndexKey(startAfter)}` }),
-    });
-    return [...rows.values()];
+    return this.listRoomsFiltered(limit, startAfter, {});
+  }
+
+  async listRoomsFiltered(limit: number, startAfter: Pick<RoomIndexRow, "createdAt" | "sessionId"> | undefined, filter: RoomFilter): Promise<RoomIndexRow[]> {
+    const { sql, bindings } = roomsPageQuery(limit, startAfter, filter);
+    return this.ctx.storage.sql.exec<RoomSqlRow>(sql, ...bindings).toArray().map(roomOfSql);
+  }
+
+  /**
+   * `BellmanStore.roomCounts`: one `GROUP BY` inside SQLite, nothing copied out but the page of groups.
+   * ponytail: O(rooms) a read. If that is ever measured too slow, a `room_counts(kind, key, rooms)` table written in
+   * the insert's and the delete's transactions is the upgrade.
+   */
+  async roomCounts(by: "owner" | "org", limit: number, after?: { rooms: number; key: string }): Promise<RoomCounts> {
+    const sql = this.ctx.storage.sql;
+    // NO_ORG is a constant with no quote in it, and no org id can be spelled that way (`isOrgId`).
+    const keyOf = by === "owner" ? "created_by" : `COALESCE(org_id, '${NO_ORG}')`;
+    const page = sql.exec<{ k: string; n: number }>(
+      `SELECT ${keyOf} AS k, COUNT(*) AS n FROM rooms GROUP BY k` +
+        (after ? " HAVING n < ? OR (n = ? AND k > ?)" : "") +
+        " ORDER BY n DESC, k ASC LIMIT ?",
+      ...(after ? [after.rooms, after.rooms, after.key] : []), limit + 1,
+    ).toArray();
+    const more = page.length > limit;
+    const groups = page.slice(0, limit);
+    const keys = groups.map((g) => g.k);
+    const total = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM rooms").one().n;
+    const orgs = by === "org"
+      ? keys.map((k) => (k === NO_ORG ? null : k))
+      : sql.exec<{ org_id: string | null }>(
+        "SELECT DISTINCT org_id FROM rooms WHERE created_by IN (SELECT value FROM json_each(?))", JSON.stringify(keys),
+      ).toArray().map((r) => r.org_id);
+    const labels = by === "owner"
+      ? await this.handlesOf(keys)
+      : new Map((await Promise.all(keys.filter((k) => k !== NO_ORG).map(async (k) => [k, (await this.getOrg(k))?.name] as const)))
+        .flatMap(([k, name]) => (name === undefined ? [] : [[k, name] as const])));
+    const last = groups.at(-1);
+    return {
+      total,
+      groups: groups.map((g) => ({ key: g.k, label: labels.get(g.k) ?? null, rooms: g.n })),
+      next: more && last ? `${last.n}:${last.k}` : null,
+      orgs,
+    };
+  }
+
+  /** `uh:<id>` for each id, in gets of at most 128 keys. */
+  async handlesOf(userIds: readonly string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    for (let i = 0; i < userIds.length; i += 128) {
+      const got = await this.ctx.storage.get<string>(userIds.slice(i, i + 128).map((id) => `uh:${id}`));
+      for (const [key, handle] of got) out.set(key.slice("uh:".length), handle);
+    }
+    return out;
   }
 
   async indexRoom(room: RoomIndexRow): Promise<void> {
-    await this.ctx.storage.put<unknown>(roomRows(room));
+    insertRoom(this.ctx.storage.sql, room);
   }
 
-  /** The purge's (#65), and only the purge's. Idempotent. */
+  /** The purge's (#65), and a list page's for a row whose room is gone. Idempotent. */
   async dropRoomIndex(sessionId: string): Promise<void> {
-    await this.ctx.storage.transaction(async (txn) => {
-      const key = await txn.get<string>(roomIdKey(sessionId));
-      if (key !== undefined) await txn.delete([key, roomIdKey(sessionId)]);
-    });
+    this.ctx.storage.sql.exec("DELETE FROM rooms WHERE session_id = ?", sessionId);
   }
 
   /**
    * One window of the backfill's walk (#471): of at most `limit` rows of the account indexes (`um:`, `uo:`, `us:`,
-   * which sort together and in that order), the rooms they name that have no `ri:` row, and the key to go on from,
+   * which sort together and in that order), the rooms they name that have no `rooms` row, and the key to go on from,
    * null at the end. Every index row's key ends in its room's id, which holds no colon; a sign-in record and
    * `us:count` are not numbers, and are passed over.
    */
@@ -5664,14 +5772,11 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       }
     }
     const ids = [...named];
-    const sessionIds: string[] = [];
-    // A get takes at most 128 keys.
-    for (let i = 0; i < ids.length; i += 128) {
-      const batch = ids.slice(i, i + 128);
-      const held = await this.ctx.storage.get(batch.map(roomIdKey));
-      sessionIds.push(...batch.filter((id) => !held.has(roomIdKey(id))));
-    }
-    return { sessionIds, next: page.size < limit ? null : [...page.keys()].at(-1)! };
+    // One bound parameter whatever the window's size, clear of SQLite's limit on them.
+    const held = new Set(this.ctx.storage.sql.exec<{ session_id: string }>(
+      "SELECT session_id FROM rooms WHERE session_id IN (SELECT value FROM json_each(?))", JSON.stringify(ids),
+    ).toArray().map((r) => r.session_id));
+    return { sessionIds: ids.filter((id) => !held.has(id)), next: page.size < limit ? null : [...page.keys()].at(-1)! };
   }
 
   /**
@@ -6264,6 +6369,19 @@ function migrateAudit(storage: DurableObjectStorage): void {
   storage.kv.delete("seq");
 }
 
+/**
+ * The `rooms` table, and the room index's old KV rows moved into it (dash#94): each `rm:` row is inserted and
+ * deleted, then each `ri:` row (its by-id pointer) is deleted. `INSERT OR IGNORE`, so a room already in the table
+ * keeps its row, and a second wake moves nothing. After a rollback, the rooms an older Worker indexed as `rm:` move
+ * on the next wake. Run inside one `transactionSync`, so it lands whole or not at all.
+ * ponytail: the same ceiling as `migrateAudit`, about two million rows inside blockConcurrencyWhile's 30 s.
+ */
+function migrateRoomIndex(storage: DurableObjectStorage): void {
+  for (const ddl of ROOMS_SCHEMA) storage.sql.exec(ddl);
+  moveKv<RoomIndexRow>(storage, "rm:", (_key, row) => insertRoom(storage.sql, row));
+  moveKv<string>(storage, "ri:", () => {});
+}
+
 export class AuditDO extends DurableObject {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -6549,6 +6667,15 @@ export interface BellmanEnv {
   ANTHROPIC_API_KEY?: string;
   /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */
   MODEL_URL?: string;
+}
+
+/** A call to a method an object on older code does not have yet (#361's lag), rethrown as `NotReadyError`. */
+async function notReady<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call;
+  } catch (err) {
+    throw isNotImplemented(err) ? new NotReadyError() : err;
+  }
 }
 
 export class DurableObjectStore implements BellmanStore {
@@ -6963,6 +7090,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async listRoomsPage(limit: number, startAfter?: Pick<RoomIndexRow, "createdAt" | "sessionId">): Promise<RoomIndexRow[]> {
     return this.registry.listRoomsPage(limit, startAfter);
+  }
+
+  async listRoomsFiltered(limit: number, startAfter: Pick<RoomIndexRow, "createdAt" | "sessionId"> | undefined, filter: RoomFilter): Promise<RoomIndexRow[]> {
+    return notReady(this.registry.listRoomsFiltered(limit, startAfter, filter));
+  }
+
+  async roomCounts(by: "owner" | "org", limit: number, after?: { rooms: number; key: string }): Promise<RoomCounts> {
+    return notReady(this.registry.roomCounts(by, limit, after));
+  }
+
+  async handlesOf(userIds: readonly string[]): Promise<Map<string, string>> {
+    return notReady(this.registry.handlesOf(userIds));
+  }
+
+  async dropRoomIndex(sessionId: string): Promise<void> {
+    return this.registry.dropRoomIndex(sessionId);
   }
 
   async roomSummary(sessionId: string): Promise<RoomSummary | undefined> {

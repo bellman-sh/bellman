@@ -2672,7 +2672,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (v === undefined || !isSecret(v.payload)) continue;
       const rows = await txn.list<BallotRow>({ prefix: ballotPrefix(decision) });
       const keys = [...rows.values()].flatMap((row) => row.iks);
-      await txn.delete([...rows.keys(), ...keys]);
+      // At most KEYS_PER_CALL keys a delete, as putRows writes: a 5,000-seat ballot holds far more than one call takes.
+      const doomed = [...rows.keys(), ...keys];
+      for (let i = 0; i < doomed.length; i += KEYS_PER_CALL) await txn.delete(doomed.slice(i, i + KEYS_PER_CALL));
       erased.push({ decision, rows: rows.size, keys: keys.length });
     }
     return erased;

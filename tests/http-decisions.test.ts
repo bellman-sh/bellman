@@ -231,6 +231,21 @@ describe("decisionShown on a secret ballot (release 1)", () => {
     expect(body.open[0]!.electorate.find((r) => r.member_id === "m_peer")).not.toHaveProperty("voted");
   });
 
+  it("tells a removed voter nothing false about their own vote: a read to the cut carries no voted", async () => {
+    const d = await openSecret();
+    await castSecret(d, PEER);
+    const h = new Harness(store, blobs);
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const out = await jesse.call("bellman_evict", { session_id: ROOM, member_id: "m_peer" });
+    await h.close();
+    expect(out.isError, out.text).toBe(false);
+    const opened = (await store.decision(ROOM, d, Date.now()))!;
+    await store.closeDecision(ROOM, d, { state: "expired" }, opened.payload.expires_at + 1);
+    const body = await read(DEV_KEY.peer);
+    const row = body.decisions.find((v) => v.decision === d)!.electorate.find((r) => r.member_id === "m_peer");
+    expect(row).not.toHaveProperty("voted");
+  });
+
   it("shows every seat's voted from the closing payload once closed", async () => {
     const d = await openSecret();
     await castSecret(d, JESSE);

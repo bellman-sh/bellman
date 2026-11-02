@@ -93,4 +93,31 @@ describe("secret ballots in SessionDO (release 1)", () => {
     expect(after.filter((k) => k.endsWith(":k-1")), "no idempotency record").toEqual([]);
     expect((await store.decision(id, cursor, Date.now()))!.state).toBe("expired");
   });
+
+  it("erases a secret ballot with more ballot rows and keys than one storage call takes", async () => {
+    const store = new DurableObjectStore(env as never);
+    const pair = roomManifest();
+    const manifest = roomManifest({ roles: { ...pair.roles, peer_a: { ...pair.roles.peer_a, can: [...pair.roles.peer_a.can, "vote"] } } });
+    const base = session({ id: `qs_secret_${++rooms}`, manifest, joinCodes: {} });
+    const role = base.members[0]!.roomRole;
+    const voters = Array.from({ length: 70 }, (_, i) => member({ memberId: `m_v${i}`, userId: `u_v${i}`, label: `v${i}@codenerd`, roomRole: role }));
+    await store.createSession({ ...base, members: [...base.members, ...voters] });
+    const stub = env.SESSION.get(env.SESSION.idFromName(base.id));
+    const opened = await store.openDecision(base.id, { ...opening, payload: { ...draft, rule: { rule: "unanimous", ballot: "secret" } } }, null);
+    if (opened.outcome !== "appended") throw new Error(opened.outcome);
+    const cursor = opened.event.cursor;
+    const hash = (opened.event.payload as { hash: string }).hash;
+    for (const v of voters) {
+      const out = await store.castVote(base.id, {
+        type: "decision_vote", fromMemberId: v.memberId, fromUserId: v.userId, fromLabel: v.label, refId: null,
+        payload: { decision: cursor, hash, choice: "approve", via: "action_response", human_approved: true },
+      }, `big-${v.memberId}`);
+      expect(out, v.memberId).toMatchObject({ outcome: "appended", closed: null });
+    }
+    const keys = () => runInDurableObject(stub, async (_i: SessionDO, ctx) => [...(await ctx.storage.list()).keys()]);
+    expect((await keys()).filter((k) => k.startsWith(`bv:${cursor}:`) || k.includes(":big-")).length).toBe(140);
+    const deadline = (opened.event.payload as { expires_at: number }).expires_at;
+    expect(await store.closeDecision(base.id, cursor, { state: "expired" }, deadline + 1)).toMatchObject({ outcome: "appended" });
+    expect((await keys()).filter((k) => k.startsWith("bv:") || k.includes(":big-"))).toEqual([]);
+  });
 });

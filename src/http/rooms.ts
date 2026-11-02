@@ -1059,8 +1059,9 @@ async function readDecisionsRoute(request: Request, url: URL, sessionId: string,
   }, Date.now());
   const members = await decisionMembers(deps.store, sessionId, session.members, [...page.open, ...page.decisions]);
   // Whether the reader's own account voted on each open secret ballot: the store's answer, the reader's alone. An
-  // admin reading with no seat in the room reads as nobody.
-  const reader = mine.length === 0 ? null : who.identity.userId;
+  // admin reading with no seat in the room reads as nobody, and so does a removed member reading to its cut: a
+  // decision open at the cut may have closed since and erased its rows, so asking would answer a false "no".
+  const reader = mine.length === 0 || cut !== undefined ? null : who.identity.userId;
   const secretOpen = [...page.open, ...page.decisions].filter((v) => v.state === "open" && isSecret(v.payload)).map((v) => v.cursor);
   const voted = new Set(reader === null || secretOpen.length === 0 ? [] : await deps.store.votedOn(sessionId, reader, secretOpen));
   const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true, reader, reader === null ? null : voted.has(v.cursor));

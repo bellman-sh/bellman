@@ -1209,7 +1209,7 @@ export type FsAppend =
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "conflict" | "too_large" | "frozen" | "closed" | "not_found" | "forbidden" }
   | { outcome: "invalid"; detail: string }
-  | { outcome: "stale"; currentRev: number; content: string }
+  | { outcome: "stale"; currentRev: number; content: string; writer: { memberId: string; label: string } | null }
   | { outcome: "over_quota"; used: number; ceiling: number };
 
 /** A page of `listFs` or `findFs`. `next` is the cursor of the following page, or null. */
@@ -1266,7 +1266,10 @@ export function decideFsWrite(
   }
   const plan = planWrite(current, input);
   if (!plan.ok) {
-    if (plan.reason === "stale") return { ok: false, result: { outcome: "stale", currentRev: plan.currentRev, content: plan.content } };
+    if (plan.reason === "stale") {
+      const writer = current === null ? null : { memberId: current.writerMemberId, label: current.writerLabel };
+      return { ok: false, result: { outcome: "stale", currentRev: plan.currentRev, content: plan.content, writer } };
+    }
     if (plan.reason === "too_large") return { ok: false, result: { outcome: "too_large" } };
     return { ok: false, result: { outcome: "invalid", detail: plan.detail } };
   }

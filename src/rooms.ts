@@ -2038,7 +2038,7 @@ export async function writeFs(
       return refuse("conflict", `idempotency_key "${input.idempotencyKey}" was already used for a different write. Pick a new key for new content.`);
     case "stale":
       return refuse("stale", `stale: the file is at revision ${out.currentRev}. Re-read it and write again with base_rev ${out.currentRev}.`, {
-        state: { current_rev: out.currentRev, content: out.content },
+        state: { current_rev: out.currentRev, content: out.content, writer: out.writer },
       });
     case "too_large": return refuse("too_large", "too_large: a file holds at most 64 KiB.");
     case "over_quota":

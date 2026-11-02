@@ -4590,7 +4590,7 @@ export function describeStoreContract(
         expect(await store.appendFs(id, put("/a.md", { op: "write", content: "v2", baseRev: 1 }), [])).toMatchObject({ outcome: "ok", rev: 2 });
         const before = await store.eventsAfter(id, 0);
         expect(await store.appendFs(id, put("/a.md", { op: "append", content: "!", baseRev: 1 }), [fsAudit(id)]))
-          .toEqual({ outcome: "stale", currentRev: 2, content: "v2" });
+          .toEqual({ outcome: "stale", currentRev: 2, content: "v2", writer: { memberId: "m_creator", label: "jesse@codenerd" } });
         expect(await store.appendFs(id, put("/a.md", { op: "write", content: "x" }), [])).toMatchObject({ outcome: "stale", currentRev: 2 });
         expect(await store.eventsAfter(id, 0)).toEqual(before);
         expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === id)).toEqual([]);

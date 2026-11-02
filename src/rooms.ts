@@ -14,7 +14,7 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceKind, type SurfaceRow, type Verb } from "./types.js";
+import { SEND_KINDS, type AuditEntry, type FsRow, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceKind, type SurfaceRow, type Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
@@ -26,11 +26,15 @@ import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
   JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
   type BellmanStore, type EventBody, type RemovalRequest,
+  type FsPage, type FsWrite,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
-import { briefAuthors, memoryAuthors, publicReadEvent, readableEvent, readableEvents } from "./public-event.js";
+import { briefAuthors, memoryAuthors, publicReadEvent, readableEvent, readableEvents, seesMemory } from "./public-event.js";
+import { OWN_MEMORY, namespaceOf, normalizePath } from "./fs-path.js";
+import { diffText } from "./fs.js";
+import { GOVERNED_VIEW_ROOT, governedFile, governedView } from "./governed-view.js";
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
@@ -58,9 +62,12 @@ import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
  *
  * `"rate_limited"` is a send past its member's minute (ADR 0022), or a report past its account's day. It is
  * the one refusal that carries a number, `retryAfter`, and a route answers it 429.
+ *
+ * `"stale"`, `"too_large"` and `"over_quota"` are a room file write's (ADR 0046): a `base_rev` that is not the current
+ * revision, a file past 64 KiB, and a room past its file ceiling. The first and last carry `state`.
  */
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited";
-
+export type RoomFailure =
+  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited" | "stale" | "too_large" | "over_quota";
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not
  * exceptional. Not a ToolResult, because that shape is MCP's and a route has
@@ -70,12 +77,12 @@ export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "con
  */
 export type RoomResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: RoomFailure; reason: string; retryAfter?: number };
+  | { ok: false; code: RoomFailure; reason: string; retryAfter?: number; state?: Record<string, unknown> };
 
 export const succeed = <T>(value: T): RoomResult<T> => ({ ok: true, value });
 
 /** `RoomResult<never>` so a refusal is assignable to any operation's result. */
-export const refuse = (code: RoomFailure, reason: string, extra?: { retryAfter: number }): RoomResult<never> =>
+export const refuse = (code: RoomFailure, reason: string, extra?: { retryAfter?: number; state?: Record<string, unknown> }): RoomResult<never> =>
   ({ ok: false, code, reason, ...extra });
 
 // ---------------------------------------------------------------------------
@@ -759,7 +766,7 @@ export async function gateSeat(
   actor: Identity,
   sessionId: string,
   memberId: string,
-  verb: Verb,
+  verb: Verb | null,
 ): Promise<RoomResult<StoredSession>> {
   const session = await store.getSession(sessionId);
   // Two branches, not one, and the reason text is identical on purpose. The
@@ -775,7 +782,8 @@ export async function gateSeat(
   if (!me || me.leftAt !== null) {
     return refuse("forbidden", "member_id is not yours or has left the session.");
   }
-  const denial = denyVerb(session, me, verb);
+  // No verb is a write the seat's account owns outright: its own memory files (ADR 0046).
+  const denial = verb === null ? null : denyVerb(session, me, verb);
   if (denial) return refuse("forbidden", denial);
   // A member driving a room operation is as alive as one polling. Without this
   // a member quiet for eleven minutes could call bellman_invite, demonstrably
@@ -1981,4 +1989,161 @@ export async function fileRoomReport(
   }
   if (filed.outcome === "filed") await mail(filed.report);
   return succeed({ reportId: filed.report.id, folded: filed.outcome === "folded" });
+}
+
+// ------------------------------------------------ room files (ADR 0046)
+
+/** What a file write asks for: the path as the caller wrote it, the op, and an optional idempotency key. */
+export interface FsWriteInput { path: string; write: FsWrite["write"]; idempotencyKey?: string }
+
+const NO_FILE = "no such file.";
+
+/**
+ * A seat writes a room file (ADR 0046), a sibling of `writeSurface`: the path normalized and its namespace
+ * authorized, `gateSeat` (`write_surface` for room files, no verb for the seat's own memory), `admitSend`, then one
+ * store call, `appendFs`, which writes the row, its history, the event and the audit entries in one transaction.
+ */
+export async function writeFs(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  input: FsWriteInput,
+): Promise<RoomResult<{ path: string; rev: number; cursor: number; replayed: boolean }>> {
+  const norm = normalizePath(input.path);
+  if (!norm.ok) return refuse("invalid", `invalid path: ${norm.reason}.`);
+  const ns = namespaceOf(norm.path);
+  if (ns.ns === "bellman") {
+    return refuse("forbidden", `${GOVERNED_VIEW_ROOT}/ is read-only: change room settings in the dash (room settings, PUT /rooms/${sessionId}/config/room_instructions).`);
+  }
+  if (ns.ns === "app") return refuse("forbidden", "apps_not_enabled: /apps/ is reserved for room apps, which this room cannot run yet.");
+  const gate = await gateSeat(store, actor, sessionId, memberId, ns.ns === "memory" ? null : "write_surface");
+  if (!gate.ok) return gate;
+  const session = gate.value;
+  const me = await findMember(store, session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
+  const admitted = await admitSend(store, sessionId, me);
+  if (!admitted.ok) return admitted;
+
+  const out = await store.appendFs(sessionId, {
+    path: norm.path, write: input.write, memberId, userId: actor.userId, label: me.label, key: input.idempotencyKey ?? null,
+  }, auditEntries(session, actor, "fs_write", { op: input.write.op }));
+  switch (out.outcome) {
+    case "ok": return succeed({ path: out.path, rev: out.rev, cursor: out.event.cursor, replayed: false });
+    case "replayed": {
+      const p = out.event.payload as { path: string; rev: number };
+      return succeed({ path: p.path, rev: p.rev, cursor: out.event.cursor, replayed: true });
+    }
+    case "conflict":
+      return refuse("conflict", `idempotency_key "${input.idempotencyKey}" was already used for a different write. Pick a new key for new content.`);
+    case "stale":
+      return refuse("stale", `stale: the file is at revision ${out.currentRev}. Re-read it and write again with base_rev ${out.currentRev}.`, {
+        state: { current_rev: out.currentRev, content: out.content },
+      });
+    case "too_large": return refuse("too_large", "too_large: a file holds at most 64 KiB.");
+    case "over_quota":
+      return refuse("over_quota", `over_quota: the room's files use ${out.used} of ${out.ceiling} bytes. Delete files to free space.`, {
+        state: { used: out.used, ceiling: out.ceiling },
+      });
+    case "frozen": return refuse("frozen", FROZEN);
+    case "closed": return refuse("closed", "session not found or closed.");
+    case "not_found": return refuse("not_found", "session not found or closed.");
+    case "forbidden": return refuse("forbidden", `only an account's own seats write its memory: write under /members/${OWN_MEMORY}/.`);
+    case "invalid": return refuse("invalid", `invalid: ${out.detail}.`);
+  }
+}
+
+/** The read gate: the room exists and the handle is the caller's and still in it. Frozen and closed rooms read. */
+async function gateFsRead(store: BellmanStore, actor: Identity, sessionId: string, memberId: string): Promise<RoomResult<StoredSession>> {
+  const session = await store.getSession(sessionId);
+  if (!session) return refuse("not_found", "session not found.");
+  const me = await findMember(store, session, memberId, actor);
+  if (!me || me.leftAt !== null) return refuse("forbidden", "member_id is not yours or has left the session.");
+  return succeed(session);
+}
+
+/** Whether `reader` may see the memory of `owner`: its own, or a peer when the memory rule allows (ADR 0046, 7). */
+async function seesMemoryOf(store: BellmanStore, sessionId: string, owner: string, reader: string): Promise<boolean> {
+  return owner === reader || seesMemory(await store.membersOfUser(sessionId, owner), owner, reader);
+}
+
+/** The memory ids `reader` may not see, for the store to drop before it pages or caps. */
+async function hiddenMemoryIds(store: BellmanStore, sessionId: string, reader: string): Promise<string[]> {
+  const ids = await store.memoryIds(sessionId);
+  const seen = await Promise.all(ids.map((m) => seesMemoryOf(store, sessionId, m.userId, reader)));
+  return ids.filter((_, i) => !seen[i]).map((m) => m.memoryId);
+}
+
+/**
+ * A path normalized and, under `/members/`, resolved to a memory id the reader may see: `me` to the reader's own,
+ * a named id checked against the rule. A withheld or unknown id is refused as a missing file, so a reader learns
+ * nothing of memory it may not see.
+ */
+async function readablePath(store: BellmanStore, sessionId: string, actor: Identity, raw: string): Promise<RoomResult<string>> {
+  const norm = normalizePath(raw);
+  if (!norm.ok) return refuse("invalid", `invalid path: ${norm.reason}.`);
+  const ns = namespaceOf(norm.path);
+  if (ns.ns !== "memory" || ns.memoryId === null) return succeed(norm.path);
+  if (ns.memoryId === OWN_MEMORY) {
+    const own = await store.memoryIdOf(sessionId, actor.userId);
+    if (own === null) return refuse("not_found", NO_FILE);
+    return succeed(["", "members", own, ...norm.path.split("/").slice(3)].join("/"));
+  }
+  const owner = await store.memoryIdOwner(sessionId, ns.memoryId);
+  if (owner === null || !(await seesMemoryOf(store, sessionId, owner, actor.userId))) return refuse("not_found", NO_FILE);
+  return succeed(norm.path);
+}
+
+/** A seat reads one file, at `rev` or the current revision, under the memory rule. `/.bellman/` is rendered. */
+export async function readFsFor(
+  store: BellmanStore, actor: Identity, sessionId: string, memberId: string, path: string, rev?: number,
+): Promise<RoomResult<FsRow>> {
+  const gate = await gateFsRead(store, actor, sessionId, memberId);
+  if (!gate.ok) return gate;
+  const p = await readablePath(store, sessionId, actor, path);
+  if (!p.ok) return p;
+  const row = namespaceOf(p.value).ns === "bellman"
+    ? await governedFile(store, sessionId, p.value)
+    : await store.readFs(sessionId, p.value, rev);
+  return row === null || row.deleted ? refuse("not_found", NO_FILE) : succeed(row);
+}
+
+/** A seat lists the live files at `prefix` or under it, withheld memory dropped before the page is cut. */
+export async function listFsFor(
+  store: BellmanStore, actor: Identity, sessionId: string, memberId: string, prefix: string, cursor?: string,
+): Promise<RoomResult<FsPage>> {
+  const gate = await gateFsRead(store, actor, sessionId, memberId);
+  if (!gate.ok) return gate;
+  const p = await readablePath(store, sessionId, actor, prefix);
+  if (!p.ok) return p.code === "not_found" ? succeed({ entries: [], next: null }) : p;
+  if (namespaceOf(p.value).ns === "bellman") {
+    return succeed({ entries: (await governedView(store, sessionId)).filter((r) => cursor === undefined || r.path > cursor), next: null });
+  }
+  return succeed(await store.listFs(sessionId, p.value, { cursor, hide: await hiddenMemoryIds(store, sessionId, actor.userId) }));
+}
+
+/** A seat reads a file's kept revisions, newest first, and when asked a diff between two of them. */
+export async function fsHistoryFor(
+  store: BellmanStore, actor: Identity, sessionId: string, memberId: string, path: string, diff?: { from: number; to: number },
+): Promise<RoomResult<{ revisions: FsRow[]; diff?: { diff: string; truncated: boolean } | null }>> {
+  const gate = await gateFsRead(store, actor, sessionId, memberId);
+  if (!gate.ok) return gate;
+  const p = await readablePath(store, sessionId, actor, path);
+  if (!p.ok) return p;
+  const revisions = await store.fsHistory(sessionId, p.value);
+  if (revisions.length === 0) return refuse("not_found", NO_FILE);
+  if (diff === undefined) return succeed({ revisions });
+  const a = revisions.find((r) => r.rev === diff.from), b = revisions.find((r) => r.rev === diff.to);
+  if (!a || !b) return refuse("invalid", `invalid: from and to must name kept revisions (${revisions.map((r) => r.rev).join(", ")}).`);
+  return succeed({ revisions, diff: diffText(a.content, b.content) });
+}
+
+/** A seat finds files by path name, withheld memory dropped before the 20 are counted. */
+export async function findFsFor(
+  store: BellmanStore, actor: Identity, sessionId: string, memberId: string, query: string, cursor?: string,
+): Promise<RoomResult<FsPage>> {
+  const gate = await gateFsRead(store, actor, sessionId, memberId);
+  if (!gate.ok) return gate;
+  if (query.trim() === "" || query.length > 200) return refuse("invalid", "invalid: query is 1 to 200 characters.");
+  return succeed(await store.findFs(sessionId, query, { cursor, hide: await hiddenMemoryIds(store, sessionId, actor.userId) }));
 }

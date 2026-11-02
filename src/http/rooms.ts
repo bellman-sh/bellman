@@ -99,6 +99,8 @@ export const MAX_VIEW_BYTES = 256;
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
   not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400, rate_limited: 429,
+  // Room file writes (ADR 0046): the wire codes the blob routes already answer for a size and a quota.
+  stale: 409, too_large: 413, over_quota: 413,
 };
 
 // ponytail: five minutes of private caching, not tuned. It is also how long a

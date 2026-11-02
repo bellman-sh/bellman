@@ -3,7 +3,9 @@
  * called by both stores inside the write's own transaction, so the stale check and the charge read the row they
  * write (as `decideConfigWrite` is shared).
  */
+import { createHash } from "node:crypto";
 import { createPatch } from "diff";
+import { newBlobId } from "./blobs.js";
 import type { FsRow, Session } from "./types.js";
 
 /** One file's cap, and the cap on any content a refusal or diff carries back. */
@@ -15,6 +17,12 @@ export const FS_LIST_PAGE = 100;
 export const FS_FIND_MAX = 20;
 
 export const utf8Bytes = (s: string): number => new TextEncoder().encode(s).byteLength;
+
+/** A memory id (ADR 0046): 16 random hex characters, from the generator `newBlobId` uses. */
+export const newMemoryId = (): string => newBlobId().slice(0, 16);
+
+/** The SHA-256 of a revision's content, as hex, for its audit entry. */
+export const contentHash = (s: string): string => createHash("sha256").update(s).digest("hex");
 
 /** `s` cut to at most `max` UTF-8 bytes on a character boundary. */
 export function cutBytes(s: string, max: number): string {

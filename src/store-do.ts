@@ -12,12 +12,14 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy,
-  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow,
 } from "./types.js";
 import { CONFIG_HISTORY } from "./config.js";
-import { configEvent, decideConfigWrite } from "./store.js";
+import { configEvent, decideConfigWrite, decideFsWrite, fsPrint, hiddenMemory, pageFs, pathMatches, resolveFsPath, underPrefix } from "./store.js";
+import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "./fs.js";
+import { namespaceOf } from "./fs-path.js";
 import type {
-  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
+  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
   DecisionClose, DecisionOpen, VoteWrite, RoomIndexRow, RoomSummary,
 } from "./store.js";
@@ -176,6 +178,18 @@ const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)
 const configKey = (name: ConfigName): string => `cfg:${name}`;
 const configHistoryPrefix = (name: ConfigName): string => `cfgh:${name}:`;
 const configHistoryKey = (name: ConfigName, rev: number): string => `${configHistoryPrefix(name)}${String(rev).padStart(10, "0")}`;
+/**
+ * Room files (ADR 0046): `fs:<path>` the current revision (a tombstone included), `fsh:<path>:<rev>` each kept one,
+ * the revision zero-padded. A path may hold colons, so a history list keeps only keys whose rest after the prefix is
+ * exactly a padded revision: `fsh:/a:` also lists `/a:b`'s rows. `mi:<userId>` is an account's memory id and
+ * `mio:<memoryId>` its owner. All purged with the room's storage.
+ */
+const fsKey = (path: string): string => `fs:${path}`;
+const fsHistoryPrefix = (path: string): string => `fsh:${path}:`;
+const fsHistoryKey = (path: string, rev: number): string => `${fsHistoryPrefix(path)}${String(rev).padStart(10, "0")}`;
+const REV_PAD = /^\d{10}$/;
+const memoryIdKey = (userId: string): string => `mi:${userId}`;
+const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
 /** The operator's index of every room (#471); `RegistryDO.listRoomsPage` says what the rows hold. */
 const ROOM_INDEX_PREFIX = "rm:";
 const roomIdKey = (sessionId: string): string => `ri:${sessionId}`;
@@ -2982,6 +2996,118 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       );
       written = e;
       return { ok: true, rev: row.rev };
+    });
+    if (written !== null) await this.#afterDecision([written], members, after);
+    return result;
+  }
+
+  /** `BellmanStore.readFs`, for this room. */
+  async readFs(path: string, rev?: number): Promise<FsRow | null> {
+    if (rev !== undefined) return (await this.ctx.storage.get<FsRow>(fsHistoryKey(path, rev))) ?? null;
+    const row = await this.ctx.storage.get<FsRow>(fsKey(path));
+    return row && !row.deleted ? row : null;
+  }
+
+  // ponytail: a list or find reads every `fs:` row under the prefix, content included, because the hidden memory ids
+  // are filtered before the page is cut. A content-free `fsm:` index row per path if rooms grow past a few thousand files.
+  async #fsRows(prefix: string): Promise<FsRow[]> {
+    return [...(await this.ctx.storage.list<FsRow>({ prefix: fsKey(prefix === "/" ? "/" : prefix) })).values()];
+  }
+
+  /** `BellmanStore.listFs`, for this room. */
+  async listFs(prefix: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
+    return pageFs(await this.#fsRows(prefix), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor);
+  }
+
+  /** `BellmanStore.findFs`, for this room. */
+  async findFs(query: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
+    return pageFs(await this.#fsRows("/"), (r) => pathMatches(r.path, query) && !hiddenMemory(r, opts.hide), FS_FIND_MAX, opts.cursor);
+  }
+
+  /** `BellmanStore.fsHistory`, for this room: newest first. */
+  async fsHistory(path: string): Promise<FsRow[]> {
+    return this.#fsHistory(this.ctx.storage, path);
+  }
+
+  async #fsHistory(from: { list: DurableObjectStorage["list"] }, path: string): Promise<FsRow[]> {
+    const prefix = fsHistoryPrefix(path);
+    const rows = await from.list<FsRow>({ prefix, reverse: true });
+    return [...rows].filter(([k]) => REV_PAD.test(k.slice(prefix.length))).map(([, r]) => r);
+  }
+
+  /** `BellmanStore.memoryIdOf`, for this room. Never writes. */
+  async memoryIdOf(userId: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(memoryIdKey(userId))) ?? null;
+  }
+
+  /** `BellmanStore.memoryIdOwner`, for this room. */
+  async memoryIdOwner(memoryId: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(memoryOwnerKey(memoryId))) ?? null;
+  }
+
+  /** `BellmanStore.memoryIds`, for this room. */
+  async memoryIds(): Promise<Array<{ userId: string; memoryId: string }>> {
+    const rows = await this.ctx.storage.list<string>({ prefix: "mi:" });
+    return [...rows].map(([k, memoryId]) => ({ userId: k.slice("mi:".length), memoryId }));
+  }
+
+  /**
+   * `BellmanStore.appendFs`, for this room, in one transaction: the key before the room checks (as appendSurface),
+   * the path resolved against the `mi:`/`mio:` rows, `decideFsWrite` on the rows read here, then the file row, its
+   * history row, the record's `fsBytes`, the memory id rows on a first memory write, the event, the key's record and
+   * the audit intents in one put, and the pruned or dropped history deleted.
+   */
+  async appendFs(w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
+    let after = { forward: false, queued: false };
+    let members: readonly Member[] = [];
+    let written: SessionEvent | null = null;
+    const result = await this.ctx.storage.transaction<FsAppend>(async (txn) => {
+      after = { forward: false, queued: false };
+      written = null;
+      const s = await this.stored(txn);
+      if (!s) return { outcome: "not_found" };
+      members = s.members;
+      const keyed = w.key === null ? null : { storageKey: idempotencyKey(w.memberId, w.key), print: fsPrint(w) };
+      if (keyed !== null) {
+        const record = await txn.get<IdempotencyRecord>(keyed.storageKey);
+        if (record) {
+          if (record.print !== keyed.print) return { outcome: "conflict" };
+          const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+          if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+          return { outcome: "replayed", event: original };
+        }
+      }
+      if (s.closed) return { outcome: "closed" };
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+      const named = namespaceOf(w.path);
+      const namedOwner = named.ns === "memory" && named.memoryId !== null
+        ? (await txn.get<string>(memoryOwnerKey(named.memoryId))) ?? null
+        : null;
+      const writerId = (await txn.get<string>(memoryIdKey(w.userId))) ?? null;
+      const resolved = resolveFsPath(w, writerId, namedOwner, newMemoryId);
+      if (!resolved.ok) return { outcome: "forbidden" };
+      const at = Date.now();
+      const current = (await txn.get<FsRow>(fsKey(resolved.path))) ?? null;
+      const history = await this.#fsHistory(txn, resolved.path);
+      const decided = decideFsWrite(s, w, resolved.path, current, history, at);
+      if (!decided.ok) return decided.result;
+      const { row } = decided;
+      const stamped = audit.map((e) => ({ ...e, detail: { ...e.detail, ...decided.stamp } }));
+      const intents = stamped.filter((e) => e.orgId).map(auditIntent);
+      after.queued = intents.length > 0;
+      const rows = await this.driver.enqueue(txn, intents);
+      const e: SessionEvent = { ...decided.event, cursor: await this.nextCursor(txn), at };
+      const session: StoredSession = { ...s, fsBytes: decided.fsBytes };
+      after.forward = await this.#writeEvent(txn, s, e, {
+        session,
+        [fsKey(resolved.path)]: row,
+        ...(row.deleted ? {} : { [fsHistoryKey(resolved.path, row.rev)]: row }),
+        ...(resolved.assign === null ? {} : { [memoryIdKey(w.userId)]: resolved.assign, [memoryOwnerKey(resolved.assign)]: w.userId }),
+        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: e.cursor, print: keyed.print } satisfies IdempotencyRecord }),
+        ...rows,
+      }, decided.dropRevs.map((rev) => fsHistoryKey(resolved.path, rev)));
+      written = e;
+      return { outcome: "ok", path: resolved.path, rev: row.rev, event: e };
     });
     if (written !== null) await this.#afterDecision([written], members, after);
     return result;
@@ -7023,6 +7149,38 @@ export class DurableObjectStore implements BellmanStore {
 
   async writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
     return this.session(sessionId).writeConfig(w, audit);
+  }
+
+  async readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null> {
+    return this.session(sessionId).readFs(path, rev);
+  }
+
+  async listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage> {
+    return this.session(sessionId).listFs(prefix, opts);
+  }
+
+  async fsHistory(sessionId: string, path: string): Promise<FsRow[]> {
+    return this.session(sessionId).fsHistory(path);
+  }
+
+  async findFs(sessionId: string, query: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage> {
+    return this.session(sessionId).findFs(query, opts);
+  }
+
+  async appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
+    return this.session(sessionId).appendFs(w, audit);
+  }
+
+  async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {
+    return this.session(sessionId).memoryIdOf(userId);
+  }
+
+  async memoryIdOwner(sessionId: string, memoryId: string): Promise<string | null> {
+    return this.session(sessionId).memoryIdOwner(memoryId);
+  }
+
+  async memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>> {
+    return this.session(sessionId).memoryIds();
   }
 
   async waitForEvents(

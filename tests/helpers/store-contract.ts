@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, ConfigWrite, EventBody, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
+import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
@@ -4549,6 +4549,185 @@ export function describeStoreContract(
         const after = (await store.getSession(s.id))!;
         expect(after.manifest).toEqual(before.manifest);
         expect(after.members).toEqual(before.members);
+      });
+    });
+
+    // ------------------------------------------------ room files (ADR 0046)
+    describe("room files", () => {
+      const by = { memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd", key: null };
+      const put = (path: string, write: FsWrite["write"], over: Partial<FsWrite> = {}): FsWrite => ({ path, write, ...by, ...over });
+      const fsAudit = (sessionId: string): AuditEntry => ({
+        at: Date.now(), orgId: "org_codenerd", sessionId, actorUserId: "u_jesse", action: "fs_write", detail: { op: "write" },
+      });
+      const fsBytes = async (id: string) => ((await store.getSession(id)) as { fsBytes?: number }).fsBytes ?? 0;
+      const room = async (id: string, over: Partial<Session> = {}) => {
+        const s = session({ id, ...over });
+        await store.createSession(s);
+        return s.id;
+      };
+
+      it("writes, reads back, and appends one event that carries no content, with the audit entry stamped", async () => {
+        const id = await room("qs_fs_write");
+        const out = await store.appendFs(id, put("/plans/launch.md", { op: "write", content: "hello" }), [fsAudit(id)]);
+        expect(out).toMatchObject({ outcome: "ok", path: "/plans/launch.md", rev: 1 });
+        expect(await store.readFs(id, "/plans/launch.md")).toMatchObject({
+          path: "/plans/launch.md", rev: 1, content: "hello", size: 5, writerMemberId: "m_creator", writerLabel: "jesse@codenerd", deleted: false,
+        });
+        const events = (await store.eventsAfter(id, 0)).filter((e) => e.type === "fs");
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ fromMemberId: "m_creator", fromUserId: "u_jesse", payload: { path: "/plans/launch.md", rev: 1, size: 5, op: "write" } });
+        expect(JSON.stringify(events[0])).not.toContain("hello");
+        const audit = (await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === id);
+        expect(audit).toHaveLength(1);
+        expect(audit[0].detail).toMatchObject({ op: "write", path: "/plans/launch.md", rev: 1, size: 5 });
+        expect(audit[0].detail.sha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(await fsBytes(id)).toBe(5);
+      });
+
+      it("refuses a second write on the same base as stale, carrying the current revision and content, and writes nothing", async () => {
+        const id = await room("qs_fs_stale");
+        await store.appendFs(id, put("/a.md", { op: "write", content: "v1" }), []);
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "v2", baseRev: 1 }), [])).toMatchObject({ outcome: "ok", rev: 2 });
+        const before = await store.eventsAfter(id, 0);
+        expect(await store.appendFs(id, put("/a.md", { op: "append", content: "!", baseRev: 1 }), [fsAudit(id)]))
+          .toEqual({ outcome: "stale", currentRev: 2, content: "v2" });
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "x" }), [])).toMatchObject({ outcome: "stale", currentRev: 2 });
+        expect(await store.eventsAfter(id, 0)).toEqual(before);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === id)).toEqual([]);
+      });
+
+      it("keeps 20 revisions, newest first, and pruning gives their bytes back", async () => {
+        const id = await room("qs_fs_history");
+        for (let rev = 0; rev < 21; rev++) {
+          expect(await store.appendFs(id, put("/a.md", { op: "write", content: "x".repeat(rev + 1), baseRev: rev === 0 ? undefined : rev }), []))
+            .toMatchObject({ outcome: "ok", rev: rev + 1 });
+        }
+        const history = await store.fsHistory(id, "/a.md");
+        expect(history.map((r) => r.rev)).toEqual(Array.from({ length: 20 }, (_, i) => 21 - i));
+        // Sizes 2..21 are kept; size 1 was pruned.
+        expect(await fsBytes(id)).toBe(Array.from({ length: 20 }, (_, i) => i + 2).reduce((a, b) => a + b, 0));
+        expect((await store.readFs(id, "/a.md", 2))?.content).toBe("xx");
+        expect(await store.readFs(id, "/a.md", 1)).toBeNull();
+      });
+
+      it("restores a kept revision as a new one, and refuses one not kept", async () => {
+        const id = await room("qs_fs_restore");
+        await store.appendFs(id, put("/a.md", { op: "write", content: "one" }), []);
+        await store.appendFs(id, put("/a.md", { op: "write", content: "two", baseRev: 1 }), []);
+        expect(await store.appendFs(id, put("/a.md", { op: "restore", rev: 1, baseRev: 2 }), [])).toMatchObject({ outcome: "ok", rev: 3 });
+        expect((await store.readFs(id, "/a.md"))?.content).toBe("one");
+        expect((await store.eventsAfter(id, 0)).filter((e) => e.type === "fs").at(-1)?.payload).toMatchObject({ op: "restore", rev: 3 });
+        expect(await store.appendFs(id, put("/a.md", { op: "restore", rev: 9, baseRev: 3 }), [])).toMatchObject({ outcome: "invalid" });
+      });
+
+      it("gives a deleted file's bytes back, hides it, and lets the path be written again", async () => {
+        const id = await room("qs_fs_delete");
+        await store.appendFs(id, put("/keep.md", { op: "write", content: "keep" }), []);
+        await store.appendFs(id, put("/a.md", { op: "write", content: "abc" }), []);
+        await store.appendFs(id, put("/a.md", { op: "write", content: "abcdef", baseRev: 1 }), []);
+        expect(await fsBytes(id)).toBe(13);
+        expect(await store.appendFs(id, put("/a.md", { op: "delete", baseRev: 2 }), [])).toMatchObject({ outcome: "ok", rev: 3 });
+        expect(await fsBytes(id)).toBe(4);
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect((await store.listFs(id, "/")).entries.map((r) => r.path)).toEqual(["/keep.md"]);
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "new" }), [])).toMatchObject({ outcome: "ok", rev: 4 });
+      });
+
+      it("refuses a write past the room's file ceiling, and a file past 64 KiB", async () => {
+        const id = await room("qs_fs_quota", { fsBytesCeiling: 10 });
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "12345678" }), [])).toMatchObject({ outcome: "ok" });
+        expect(await store.appendFs(id, put("/b.md", { op: "write", content: "123" }), [])).toEqual({ outcome: "over_quota", used: 8, ceiling: 10 });
+        const big = await room("qs_fs_big");
+        expect(await store.appendFs(big, put("/a.md", { op: "write", content: "x".repeat(64 * 1024 + 1) }), [])).toEqual({ outcome: "too_large" });
+      });
+
+      it("replays a retried key and refuses the key reused with other content", async () => {
+        const id = await room("qs_fs_key");
+        const first = await store.appendFs(id, put("/a.md", { op: "write", content: "x" }, { key: "k1" }), []);
+        expect(first.outcome).toBe("ok");
+        const again = await store.appendFs(id, put("/a.md", { op: "write", content: "x" }, { key: "k1" }), []);
+        expect(again).toEqual({ outcome: "replayed", event: (first as { event: SessionEvent }).event });
+        expect(await store.appendFs(id, put("/a.md", { op: "write", content: "y" }, { key: "k1" }), [])).toEqual({ outcome: "conflict" });
+        expect((await store.eventsAfter(id, 0)).filter((e) => e.type === "fs")).toHaveLength(1);
+      });
+
+      it("assigns a memory id on an account's first /members/ write, shares it across its seats, and never on a read", async () => {
+        const id = await room("qs_fs_memory", { members: [member(), member({ memberId: "m_second", label: "jesse@laptop" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer" })] });
+        expect(await store.memoryIdOf(id, "u_jesse")).toBeNull();
+        expect(await store.readFs(id, "/members/me/notes.md")).toBeNull();
+        expect(await store.memoryIdOf(id, "u_jesse")).toBeNull();
+        const out = await store.appendFs(id, put("/members/me/notes.md", { op: "write", content: "n" }), []);
+        expect(out.outcome).toBe("ok");
+        const mid = await store.memoryIdOf(id, "u_jesse");
+        expect(mid).toMatch(/^[0-9a-f]{16}$/);
+        expect((out as { path: string }).path).toBe(`/members/${mid}/notes.md`);
+        expect(await store.memoryIdOwner(id, mid!)).toBe("u_jesse");
+        // The second seat of the account writes to the same id, through the alias and by name.
+        expect(await store.appendFs(id, put("/members/me/b.md", { op: "write", content: "b" }, { memberId: "m_second" }), []))
+          .toMatchObject({ outcome: "ok", path: `/members/${mid}/b.md` });
+        expect(await store.appendFs(id, put(`/members/${mid}/c.md`, { op: "write", content: "c" }, { memberId: "m_second" }), []))
+          .toMatchObject({ outcome: "ok" });
+        // Another account may not write under it, nor under an id nobody holds.
+        const peer = { memberId: "m_peer", userId: "u_peer", label: "peer" };
+        expect(await store.appendFs(id, put(`/members/${mid}/x.md`, { op: "write", content: "x" }, peer), [])).toEqual({ outcome: "forbidden" });
+        expect(await store.appendFs(id, put("/members/0123456789abcdef/x.md", { op: "write", content: "x" }, peer), [])).toEqual({ outcome: "forbidden" });
+        expect(await store.appendFs(id, put("/members/me", { op: "write", content: "x" }, peer), [])).toEqual({ outcome: "forbidden" });
+        expect(await store.memoryIdOf(id, "u_peer")).toBeNull();
+        expect(await store.memoryIds(id)).toEqual([{ userId: "u_jesse", memoryId: mid }]);
+        // No user id in the events.
+        expect(JSON.stringify((await store.eventsAfter(id, 0)).filter((e) => e.type === "fs").map((e) => e.payload))).not.toContain("u_jesse");
+      });
+
+      it("refuses a frozen room and a closed one, and a missing one", async () => {
+        const frozen = await room("qs_fs_frozen");
+        await store.freezeSession(frozen, Date.now());
+        expect(await store.appendFs(frozen, put("/a.md", { op: "write", content: "x" }), [])).toEqual({ outcome: "frozen" });
+        const closed = await room("qs_fs_closed");
+        await store.closeSession(closed);
+        expect(await store.appendFs(closed, put("/a.md", { op: "write", content: "x" }), [])).toEqual({ outcome: "closed" });
+        expect(await store.appendFs("qs_fs_nobody", put("/a.md", { op: "write", content: "x" }), [])).toEqual({ outcome: "not_found" });
+      });
+
+      it("round-trips a colon in a path, and keeps the history of /a apart from /a:b", async () => {
+        const id = await room("qs_fs_colon");
+        await store.appendFs(id, put("/a", { op: "write", content: "plain" }), []);
+        await store.appendFs(id, put("/a:b", { op: "write", content: "colon" }), []);
+        await store.appendFs(id, put("/a:b", { op: "write", content: "colon2", baseRev: 1 }), []);
+        expect((await store.readFs(id, "/a:b"))?.content).toBe("colon2");
+        expect((await store.fsHistory(id, "/a")).map((r) => r.content)).toEqual(["plain"]);
+        expect((await store.fsHistory(id, "/a:b")).map((r) => r.content)).toEqual(["colon2", "colon"]);
+      });
+
+      it("lists at a prefix as a directory, pages, and hides the memory ids it is told to", async () => {
+        const id = await room("qs_fs_list");
+        for (const p of ["/plans/a.md", "/plans/b.md", "/plansx/c.md", "/z.md"]) await store.appendFs(id, put(p, { op: "write", content: "x" }), []);
+        await store.appendFs(id, put("/members/me/n.md", { op: "write", content: "x" }), []);
+        const mid = (await store.memoryIdOf(id, "u_jesse"))!;
+        expect((await store.listFs(id, "/plans")).entries.map((r) => r.path)).toEqual(["/plans/a.md", "/plans/b.md"]);
+        expect((await store.listFs(id, "/")).entries.map((r) => r.path)).toEqual(["/members/" + mid + "/n.md", "/plans/a.md", "/plans/b.md", "/plansx/c.md", "/z.md"]);
+        expect((await store.listFs(id, "/", { hide: [mid] })).entries.map((r) => r.path)).not.toContain(`/members/${mid}/n.md`);
+        expect((await store.listFs(id, "/members", { hide: [mid] })).entries).toEqual([]);
+        for (let i = 0; i < 101; i++) await store.appendFs(id, put(`/many/${String(i).padStart(3, "0")}.md`, { op: "write", content: "" }), []);
+        const first = await store.listFs(id, "/many");
+        expect(first.entries).toHaveLength(100);
+        expect(first.next).toBe("/many/099.md");
+        const second = await store.listFs(id, "/many", { cursor: first.next! });
+        expect(second.entries.map((r) => r.path)).toEqual(["/many/100.md"]);
+        expect(second.next).toBeNull();
+      });
+
+      it("finds by path name only, every word, case-insensitive, at most 20, hiding memory before it counts", async () => {
+        const id = await room("qs_fs_find");
+        await store.appendFs(id, put("/plans/Launch-Notes.md", { op: "write", content: "secret word" }), []);
+        await store.appendFs(id, put("/plans/other.md", { op: "write", content: "launch" }), []);
+        expect((await store.findFs(id, "launch notes")).entries.map((r) => r.path)).toEqual(["/plans/Launch-Notes.md"]);
+        expect((await store.findFs(id, "secret")).entries).toEqual([]);
+        for (let i = 0; i < 25; i++) await store.appendFs(id, put(`/members/me/hit${String(i).padStart(2, "0")}.md`, { op: "write", content: "" }), []);
+        for (let i = 0; i < 3; i++) await store.appendFs(id, put(`/docs/hit${i}.md`, { op: "write", content: "" }), []);
+        const mid = (await store.memoryIdOf(id, "u_jesse"))!;
+        expect((await store.findFs(id, "hit")).entries).toHaveLength(20);
+        expect((await store.findFs(id, "hit", { hide: [mid] })).entries.map((r) => r.path)).toEqual(["/docs/hit0.md", "/docs/hit1.md", "/docs/hit2.md"]);
       });
     });
 

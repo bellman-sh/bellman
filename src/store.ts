@@ -2,10 +2,12 @@ import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, PresetName, SessionMode,
-  ConfigGovernance, ConfigName, ConfigRow,
+  ConfigGovernance, ConfigName, ConfigRow, FsRow,
 } from "./types.js";
 import { DEFAULT_POLICY } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
+import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
+import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -1180,6 +1182,149 @@ export type HostInstructionsSet =
   | { ok: true; instructions: string | null }
   | { ok: false; reason: "not_found" | "no_host" | "closed" };
 
+/**
+ * One room file write (ADR 0046). `path` is normalized; under `/members/` its id segment is the account's memory id
+ * or `me` (`OWN_MEMORY`), which the store resolves to the account's id and assigns on the first write. `restore`
+ * names the kept revision whose content becomes the new one.
+ */
+export interface FsWrite {
+  path: string;
+  write:
+    | { op: "write" | "append"; content: string; baseRev?: number }
+    | { op: "edit"; old: string; new: string; baseRev?: number }
+    | { op: "delete"; baseRev?: number }
+    | { op: "restore"; rev: number; baseRev?: number };
+  memberId: string;
+  userId: string;
+  label: string;
+  key: string | null;
+}
+
+/**
+ * What `appendFs` answered. `forbidden` is a memory path whose id is not the writing account's; `invalid` is a plan
+ * refusal (`planWrite`) or a restore of a revision not kept. On a refusal nothing is written.
+ */
+export type FsAppend =
+  | { outcome: "ok"; path: string; rev: number; event: SessionEvent }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "conflict" | "too_large" | "frozen" | "closed" | "not_found" | "forbidden" }
+  | { outcome: "invalid"; detail: string }
+  | { outcome: "stale"; currentRev: number; content: string }
+  | { outcome: "over_quota"; used: number; ceiling: number };
+
+/** A page of `listFs` or `findFs`. `next` is the cursor of the following page, or null. */
+export interface FsPage { entries: FsRow[]; next: string | null }
+
+/**
+ * The path a file write lands at (ADR 0046): a room path as given, and a memory path with its id resolved. `me`
+ * names the writing account's id, minted by `fresh` on its first write (`assign`); a named id must be the writing
+ * account's, and a memory path needs a file under its id. Shared by both stores, read before the rows it names.
+ */
+export function resolveFsPath(
+  w: Pick<FsWrite, "path" | "userId">,
+  writerMemoryId: string | null,
+  namedOwner: string | null,
+  fresh: () => string,
+): { ok: true; path: string; assign: string | null } | { ok: false } {
+  const ns = namespaceOf(w.path);
+  if (ns.ns !== "memory") return { ok: true, path: w.path, assign: null };
+  const rest = w.path.split("/").slice(3);
+  if (ns.memoryId === null || rest.length === 0) return { ok: false };
+  if (ns.memoryId === OWN_MEMORY) {
+    const id = writerMemoryId ?? fresh();
+    return { ok: true, path: `/members/${id}/${rest.join("/")}`, assign: writerMemoryId === null ? id : null };
+  }
+  return namedOwner === w.userId ? { ok: true, path: w.path, assign: null } : { ok: false };
+}
+
+/** What `decideFsWrite` hands a store to write: the row, the history revisions to delete, the new total, the event. */
+export type FsDecision =
+  | { ok: false; result: FsAppend }
+  | { ok: true; row: FsRow; dropRevs: number[]; fsBytes: number; event: EventBody; stamp: Record<string, unknown> };
+
+/**
+ * The shared rules of a file write, after the key and the room checks and on the rows read in the transaction:
+ * the restore's source, `planWrite`, the history kept (a delete drops all of it), and the net charge. `history` is
+ * the path's kept revisions, newest first; the live row is its first.
+ */
+export function decideFsWrite(
+  s: Pick<Session, "frozenAt" | "fsBytesCeiling"> & { fsBytes?: number },
+  w: FsWrite,
+  path: string,
+  current: FsRow | null,
+  history: readonly FsRow[],
+  at: number,
+): FsDecision {
+  let input: FsPlanInput;
+  if (w.write.op === "restore") {
+    const want = w.write.rev;
+    const from = history.find((r) => r.rev === want);
+    if (!from) return { ok: false, result: { outcome: "invalid", detail: `revision ${want} is not kept` } };
+    input = { op: "restore", content: from.content, baseRev: w.write.baseRev };
+  } else {
+    input = w.write;
+  }
+  const plan = planWrite(current, input);
+  if (!plan.ok) {
+    if (plan.reason === "stale") return { ok: false, result: { outcome: "stale", currentRev: plan.currentRev, content: plan.content } };
+    if (plan.reason === "too_large") return { ok: false, result: { outcome: "too_large" } };
+    return { ok: false, result: { outcome: "invalid", detail: plan.detail } };
+  }
+  const size = utf8Bytes(plan.content);
+  const row: FsRow = {
+    path, rev: plan.rev, content: plan.content, size, writerMemberId: w.memberId, writerLabel: w.label, at, deleted: plan.deleted,
+  };
+  const dropped = plan.deleted ? history : history.slice(FS_HISTORY - 1);
+  const delta = (plan.deleted ? 0 : size) - dropped.reduce((n, r) => n + r.size, 0);
+  const charge = decideFsCharge(s, false, delta);
+  if (!charge.ok) {
+    if (charge.reason === "over_quota") return { ok: false, result: { outcome: "over_quota", used: charge.used, ceiling: charge.ceiling } };
+    return { ok: false, result: { outcome: charge.reason } };
+  }
+  const event: EventBody = {
+    type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null,
+    payload: { path, rev: row.rev, size, op: w.write.op === "restore" ? "restore" : plan.deleted ? "delete" : "write" },
+  };
+  return {
+    ok: true, row, dropRevs: dropped.map((r) => r.rev), fsBytes: charge.next, event,
+    stamp: { path, rev: row.rev, size, sha256: contentHash(plan.content) },
+  };
+}
+
+/** The print a keyed file write is remembered by: the path as sent and the op, never the resolved path. */
+export const fsPrint = (w: FsWrite): string =>
+  fingerprint({ type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null, payload: { path: w.path, write: w.write } });
+
+/** Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule. */
+export function pageFs(rows: readonly FsRow[], keep: (r: FsRow) => boolean, cap: number, cursor?: string): FsPage {
+  const entries: FsRow[] = [];
+  for (const r of rows) {
+    if (cursor !== undefined && r.path <= cursor) continue;
+    if (r.deleted || !keep(r)) continue;
+    if (entries.length === cap) return { entries, next: entries[cap - 1].path };
+    entries.push(r);
+  }
+  return { entries, next: null };
+}
+
+/** Whether `path` is `prefix` or under it, as a directory; `/` holds everything. */
+export const underPrefix = (path: string, prefix: string): boolean =>
+  prefix === "/" || path === prefix || path.startsWith(prefix + "/");
+
+/** Whether a row is a memory file of one of the `hide` ids. */
+export const hiddenMemory = (r: FsRow, hide: readonly string[] | undefined): boolean => {
+  if (!hide || hide.length === 0) return false;
+  const ns = namespaceOf(r.path);
+  return ns.ns === "memory" && ns.memoryId !== null && hide.includes(ns.memoryId);
+};
+
+/** Whether a path holds every word of `query`, case-insensitive. An empty query matches nothing. */
+export function pathMatches(path: string, query: string): boolean {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const p = path.toLowerCase();
+  return words.length > 0 && words.every((w) => p.includes(w));
+}
+
 /** A governed config write (#414), validated and hashed by the caller; the store adds the revision. */
 export interface ConfigWrite {
   name: ConfigName;
@@ -2260,6 +2405,32 @@ export interface BellmanStore {
    */
   writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult>;
 
+  /**
+   * Room files (ADR 0046). Reads apply no memory rule: `src/rooms.ts` does, and passes the memory ids a reader may
+   * not see as `hide`, so listing and finding filter before they page or cap. `readFs` without `rev` returns null
+   * for a deleted file.
+   */
+  readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null>;
+  /** Live files at `prefix` or under it, in path order, `FS_LIST_PAGE` a page after `cursor` (a path). */
+  listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage>;
+  /** A path's kept revisions, newest first, at most `FS_HISTORY`. */
+  fsHistory(sessionId: string, path: string): Promise<FsRow[]>;
+  /** Live files whose path holds every word of `query`, case-insensitive, at most `FS_FIND_MAX`, in path order. */
+  findFs(sessionId: string, query: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage>;
+  /**
+   * One file write in one transaction: the idempotency key, `planWrite` against the row read there, the net byte
+   * charge (`decideFsCharge`), the memory id on an account's first `/members/` write, the `fs:` and `fsh:` rows
+   * (history past `FS_HISTORY` pruned, a delete's history dropped), one `fs` event and `audit`, each entry's detail
+   * stamped with the resolved path, revision, size and content hash.
+   */
+  appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend>;
+  /** The account's memory id in this room, or null. Never assigns one. */
+  memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
+  /** The account a memory id belongs to, or null. */
+  memoryIdOwner(sessionId: string, memoryId: string): Promise<string | null>;
+  /** Every account in the room with a memory id, for the readers that hide withheld memory. */
+  memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>>;
+
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
 
@@ -2655,6 +2826,10 @@ export class MemoryStore implements BellmanStore {
   private sessions = new Map<string, Session>();
   /** Governed config (#414): room → name → revisions, newest first, at most CONFIG_HISTORY. */
   private configs = new Map<string, Map<ConfigName, ConfigRow[]>>();
+  /** Room files (ADR 0046): per room, per path, the current row (a tombstone included) and the kept revisions, newest first. */
+  private files = new Map<string, Map<string, { current: FsRow; history: FsRow[] }>>();
+  /** Memory ids per room, by account. */
+  private memoryIdRows = new Map<string, Map<string, string>>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3590,6 +3765,87 @@ export class MemoryStore implements BellmanStore {
     this.appendNow(s, configEvent(decided.row));
     this.recordAudit([...audit]);
     return { ok: true, rev: decided.row.rev };
+  }
+
+  async readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null> {
+    const f = this.files.get(sessionId)?.get(path);
+    if (!f) return null;
+    const row = rev === undefined ? (f.current.deleted ? undefined : f.current) : f.history.find((r) => r.rev === rev);
+    return row === undefined ? null : detach(row);
+  }
+
+  async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
+    return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor));
+  }
+
+  async fsHistory(sessionId: string, path: string): Promise<FsRow[]> {
+    return detach(this.files.get(sessionId)?.get(path)?.history ?? []);
+  }
+
+  async findFs(sessionId: string, query: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
+    return detach(pageFs(this.sortedFiles(sessionId), (r) => pathMatches(r.path, query) && !hiddenMemory(r, opts.hide), FS_FIND_MAX, opts.cursor));
+  }
+
+  private sortedFiles(sessionId: string): FsRow[] {
+    return [...(this.files.get(sessionId)?.values() ?? [])].map((f) => f.current).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+
+  async appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { outcome: "not_found" };
+    // Synchronous from the key check to the last row, as appendSurface.
+    const storageKey = w.key === null ? null : idempotencyKey(w.memberId, w.key);
+    const print = fsPrint(w);
+    const record = storageKey === null ? undefined : this.keys.get(sessionId)?.get(storageKey);
+    if (record) {
+      if (record.print !== print) return { outcome: "conflict" };
+      const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (!original) throw new Error(`Idempotency record for ${sessionId} names missing cursor ${record.cursor}`);
+      return { outcome: "replayed", event: detach(original) };
+    }
+    if (s.closed) return { outcome: "closed" };
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+    const ids = this.memoryIdRows.get(sessionId) ?? new Map<string, string>();
+    const named = namespaceOf(w.path);
+    const namedOwner = named.ns === "memory" && named.memoryId !== null
+      ? [...ids].find(([, id]) => id === named.memoryId)?.[0] ?? null
+      : null;
+    const resolved = resolveFsPath(w, ids.get(w.userId) ?? null, namedOwner, newMemoryId);
+    if (!resolved.ok) return { outcome: "forbidden" };
+    const files = this.files.get(sessionId) ?? new Map<string, { current: FsRow; history: FsRow[] }>();
+    const f = files.get(resolved.path);
+    const at = Date.now();
+    const decided = decideFsWrite(s as Session & { fsBytes?: number }, detach(w), resolved.path, f?.current ?? null, f?.history ?? [], at);
+    if (!decided.ok) return decided.result;
+    const kept = f?.history ?? [];
+    const history = decided.row.deleted ? [] : [decided.row, ...kept.filter((r) => !decided.dropRevs.includes(r.rev))];
+    files.set(resolved.path, { current: decided.row, history });
+    this.files.set(sessionId, files);
+    if (resolved.assign !== null) {
+      ids.set(w.userId, resolved.assign);
+      this.memoryIdRows.set(sessionId, ids);
+    }
+    (s as { fsBytes?: number }).fsBytes = decided.fsBytes;
+    const event = this.appendNow(s, decided.event, at);
+    if (storageKey !== null) {
+      const map = this.keys.get(sessionId) ?? new Map<string, IdempotencyRecord>();
+      map.set(storageKey, { cursor: event.cursor, print });
+      this.keys.set(sessionId, map);
+    }
+    this.recordAudit(audit.map((e) => ({ ...e, detail: { ...e.detail, ...decided.stamp } })));
+    return { outcome: "ok", path: resolved.path, rev: decided.row.rev, event: detach(event) };
+  }
+
+  async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {
+    return this.memoryIdRows.get(sessionId)?.get(userId) ?? null;
+  }
+
+  async memoryIdOwner(sessionId: string, memoryId: string): Promise<string | null> {
+    return [...(this.memoryIdRows.get(sessionId) ?? [])].find(([, id]) => id === memoryId)?.[0] ?? null;
+  }
+
+  async memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>> {
+    return [...(this.memoryIdRows.get(sessionId) ?? [])].map(([userId, memoryId]) => ({ userId, memoryId }));
   }
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
@@ -5290,6 +5546,8 @@ export class MemoryStore implements BellmanStore {
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);
     this.configs.delete(s.id);
+    this.files.delete(s.id);
+    this.memoryIdRows.delete(s.id);
     this.outsideTasks.delete(s.id);
     this.outsideCallerRows.delete(s.id);
     this.outsideVisitors.delete(s.id);

@@ -621,6 +621,12 @@ transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
 `mi:<userId>` for each account's memory id. One store call, `appendFs`, writes the row, its history, an `fs` event (path,
 revision, size and op, never content) and the audit rows together.
 
+**Home memory (ADR 0047, #524)** is an account's notes in its **home room**, a `SessionDO` with `kind: "home"` and one
+member, holding the same `fs:` and `fsh:` rows plus `lk:` lookup rows. Its id, `qh_` and a hash of the user id, is
+computed by the Worker, so no registry row maps an account to it and none can go missing. It writes no `fs` events, no
+listing or index row names it, and every room route refuses its id. A room's `ns:<userId>` row is an account's notes
+sharing switch. Facts are files under `/facts/`, written only by an approval in the transaction that stores it.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/store.ts<br/>every method async"]
@@ -1752,6 +1758,14 @@ peer only when every seat the account holds grants `read_context` (or, holding n
 it left). The rule is applied in `readableEvent` for `fs` events, from the account's rows (`membersOfUser`), and on
 every file read. The room socket reads as no account and never receives them, and `publicReadEvent` drops every `fs`
 event. Memory ids are opaque, so no path, event or listing carries a user id.
+
+**Room notes are private until their account shares them, and home memory never reaches a peer (ADR 0047).** Since
+ADR 0047 the memory rule also needs the account's notes sharing switch for the room, which is off by default and
+turned on only from a dash session, because an agent reads peer content that could ask it to. `seesMemory` is still the
+one predicate. A home room is read only by its own account's seats, never by a hosted seat (which answers peers with no
+human watching) or an outside caller, and every agent read of it leaves a lookup row the account sees. Home notes go out
+in the untrusted envelope, since an agent may have copied peer text into one. A room fact is written only when a seat
+holding `write_surface` approves a proposal that names its source, and a direct write under `/facts/` is refused.
 
 **Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
 instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token

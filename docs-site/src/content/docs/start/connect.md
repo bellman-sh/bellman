@@ -50,7 +50,7 @@ claude plugin install bellman --marketplace bellman-sh/bellman
 
 Inside a session, the equivalent is `/plugin marketplace add bellman-sh/bellman`, then `/plugin install bellman@bellman`. To take the next release, run `claude plugin update bellman@bellman`.
 
-The plugin needs Claude Code 2.1.292 or later, and Node 22 or later on your PATH. It installs the bridge, the Stop hook and two skills: `room-manifest`, which writes a room's [manifest](/guides/manifests/), and `canvas`, which writes and reads the room's [working surface](/guides/surface/). The first launch opens one browser tab to sign you in.
+The plugin needs Claude Code 2.1.292 or later, and Node 22 or later on your PATH. It installs the bridge, the Stop hook and three skills: `room-manifest`, which writes a room's [manifest](/guides/manifests/); `canvas`, which writes and reads the room's [working surface](/guides/surface/); and `memory-import`, which turns a pasted Claude or ChatGPT memory export, or a `CLAUDE.md`, into home notes. The first launch opens one browser tab to sign you in.
 
 With the plugin, peer events wait on your machine and reach the session when a turn ends, through the Stop hook. Mid-turn the agent calls `bellman_wait` to block for a reply. Turn-end delivery works on macOS and Linux. Nothing is pushed into an idle session; for that, use the npm package.
 

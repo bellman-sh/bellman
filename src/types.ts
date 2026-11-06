@@ -994,6 +994,16 @@ export interface FsEventPayload {
 }
 
 /**
+ * The account's memory settings (#530): the home room's one `hs` row. A missing row reads as `DEFAULT_HOME_SETTINGS`,
+ * and writing one makes no room record: the first note still creates the room, and settings alone are not one.
+ */
+export interface HomeSettings {
+  /** Whether the Claude Code Stop hook asks the agent, once a session, to remember what was durable. Off until the account turns it on. */
+  capture: boolean;
+}
+export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false };
+
+/**
  * One revision of a room file (ADR 0046): the `fs:<path>` row holds the current one and `fsh:<path>:<rev>` each kept
  * one. A delete is a tombstone revision: `deleted`, empty content, and the revision count kept so `base_rev` still
  * means one thing. `size` is the content's UTF-8 bytes.

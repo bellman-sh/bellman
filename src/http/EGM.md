@@ -42,7 +42,9 @@ Account, org and operator routes:
   `PUT|DELETE /audit/sink`, `POST /audit/sink/resume`; `parseAuditQuery`, `AUDIT_PAGE` 100,
   `AUDIT_EXPORT_PAGE` 500, CSV helpers `csvRow`/`csvCell`, `exportFilename` [src/http/audit.ts:auditRoutes]
 - `handleRoutes`: `GET|PUT|DELETE /account/handle` [src/http/handles.ts:handleRoutes]
-- `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}` [src/http/me.ts:meRoutes]
+- `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
+  (`{capture}`) to a bearer or a cookie, `PUT /me/memory` `{capture: boolean}` replaces it from a dash session alone
+  (bearer 403, cookie without Origin 403) [src/http/me.ts:meRoutes]
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB
   [src/http/presets.ts:presetRoutes]
 - `statsRoutes`: `GET /operator/stats` (`PlatformStats {accounts, free, paid, paidCapped}`),

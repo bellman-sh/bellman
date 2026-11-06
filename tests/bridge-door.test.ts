@@ -235,6 +235,27 @@ describe("recent", () => {
   });
 });
 
+describe("readMemory (#530)", () => {
+  it("reads the account's memory settings with the bridge's bearer, and passes capture alone on", async () => {
+    const { seen, fetchImpl } = serving(() => Response.json({ capture: true, lookup_log: 3 }));
+    const { bridge } = await armedBridge({ sync: [], upload: uploadTo(fetchImpl) });
+    expect(await bridge.readMemory()).toEqual({ status: 200, body: { capture: true } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].method).toBe("GET");
+    expect(seen[0].url).toBe("https://bellman.test/me/memory");
+    expect(seen[0].headers.get("authorization")).toBe("Bearer tok");
+  });
+
+  it("answers 503 with no credential, upstream with the server's status, and 502 for a body it cannot read", async () => {
+    const none = await armedBridge({ sync: [] });
+    expect(await none.bridge.readMemory()).toEqual({ status: 503, body: { error: "no_credential" } });
+    const refused = await armedBridge({ sync: [], upload: uploadTo(serving(() => new Response("no", { status: 403 })).fetchImpl) });
+    expect(await refused.bridge.readMemory()).toEqual({ status: 403, body: { error: "upstream" } });
+    const odd = await armedBridge({ sync: [], upload: uploadTo(serving(() => Response.json({ capture: "yes" })).fetchImpl) });
+    expect(await odd.bridge.readMemory()).toEqual({ status: 502, body: { error: "upstream" } });
+  });
+});
+
 describe("readEvents", () => {
   it("reads the room's log with the bridge's bearer", async () => {
     const { seen, fetchImpl } = serving(() => log());

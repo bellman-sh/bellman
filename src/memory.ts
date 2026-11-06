@@ -9,7 +9,7 @@ import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
 import type { BellmanStore, FsPage, FsWrite } from "./store.js";
-import type { FsRow, Identity } from "./types.js";
+import type { FsRow, HomeSettings, Identity } from "./types.js";
 
 const NO_NOTE = "no such note.";
 
@@ -73,6 +73,18 @@ export async function listHome(store: BellmanStore, actor: Identity, prefix: str
   const path = homePath(prefix);
   if (!path.ok) return path.code === "forbidden" ? succeed({ entries: [], next: null }) : path;
   return succeed(await store.listFs(homeRoomId(actor.userId), path.value, { cursor, newest: true }));
+}
+
+/** The account's memory settings (#530): what `GET /me/memory` returns, and what the bridge reads for the Stop hook. */
+export const readMemorySettings = (store: BellmanStore, actor: Identity): Promise<HomeSettings> =>
+  store.readHomeSettings(homeRoomId(actor.userId));
+
+/** The capture switch set, from a dash session only (the route checks); the settings as they now are. */
+export async function setMemoryCapture(store: BellmanStore, actor: Identity, capture: boolean): Promise<HomeSettings> {
+  const id = homeRoomId(actor.userId);
+  const next = { ...(await store.readHomeSettings(id)), capture };
+  await store.writeHomeSettings(id, next);
+  return next;
 }
 
 /**

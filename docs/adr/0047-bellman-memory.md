@@ -97,6 +97,11 @@ facts, keyword search now, memory on every plan.
       also deletes one note with its lookup rows, and the account's own room notes in a room.
     - *Export:* one Markdown document of home notes and the account's room notes in rooms where it holds a seat, one read
       per object.
+    - *Capture switch* (#530): `PUT /me/memory` `{ capture }`, the one `hs` row in the home room, written without a
+      record (settings alone are not a home room; the first note still creates it). Off until turned on. `GET /me/memory`
+      answers a bearer too: the Claude Code bridge reads it, once a session, when the Stop hook asks through its door
+      whether to run the memory check. The hook reads no transcript and sends nothing; the agent writes with
+      `bellman_memory`.
 14. **Purge** (amends ADR 0046 decision 11). A room's purge deletes its `ns:` rows with `fs:`, `fsh:` and `mi:`. A
     home room is purged by `DELETE /me/memory` or by the operator's `DELETE /admin/accounts/:userId/memory`, which the
     account-deletion runbook runs and any later account deletion calls.

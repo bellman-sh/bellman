@@ -47,7 +47,7 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - `[server-card.ts:serverCard]` the static MCP Server Card at `SERVER_CARD_PATH` (`/mcp/server-card`), with
   `SERVER_CARD_CORS`.
 - `[worker.ts:fetch]` the Workers entry. Dispatch order: `/stripe/webhook`; `/rooms[/*]` (moderation routes, then
-  room routes); `/public[/*]`; `/presets`, `/scim/v2`, `/audit`, `/org`, `/me/rooms`, `/account/handle`,
+  room routes); `/public[/*]`; `/presets`, `/scim/v2`, `/audit`, `/org`, `/me/rooms`, `/me/memory`, `/account/handle`,
   `/account/bans`, `/operator/(stats|accounts|rooms|room-counts)` and `/operator/rooms/:id`; `GET /.well-known/agent-card.json`; the server card; OAuth
   routes; `GET /healthz`; `GET /ws`; A2A paths; `POST /mcp`. Anything else is 404.
 - `[worker.ts]` re-exports the Durable Object classes `SessionDO`, `RegistryDO`, `AuditDO` (from `store-do.ts`),

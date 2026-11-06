@@ -2,7 +2,7 @@
 
 *   **Author:** mcfearsome
 *   **Status:** Draft
-*   **Date:** 2026-11-04
+*   **Date:** 2026-11-04 (revised 2026-11-06 after the planner's review of #532)
 *   **Issue:** #525 (epic #524) · **ADR:** `docs/adr/0047-bellman-memory.md`
 
 --------------------------------------------------------------------------------
@@ -75,11 +75,12 @@ Design decisions this spec makes, numbered D1 onward:
 *   **D1.** A home room's id is derived from the user id, so resolving it reads no other object and no registry row can
     go missing (§1).
 *   **D2.** A home room writes no `fs` events; it has no one to deliver them to (§1).
-*   **D3.** `bellman_memory` is one tool with five ops, at most 420 tokens (§2).
+*   **D3.** `bellman_memory` is one tool with four ops, at most 270 tokens (§2).
 *   **D4.** Hosted seats and outside A2A callers never reach home memory (§2).
 *   **D5.** Notes sharing is turned on only from a dash session; any of the account's seats can turn it off (§3).
 *   **D6.** Content search runs inside the room's object and returns pointers, never whole bodies (§4).
-*   **D7.** Recall on arrival is at most 2,000 tokens: fact titles and the account's home-note titles (§5).
+*   **D7.** Recall on arrival fits inside one budget for the whole `bellman_confirm` reply, 24,000 characters; the
+    surface window is cut first (§5).
 *   **D8.** `/facts/**` is written only by an approval or a passed decision; a direct write is refused (§6).
 *   **D9.** A fact proposal names its source: an event cursor in the room or an `http(s)` link (§6).
 *   **D10.** The home room's quota follows the account's plan at write time and is not stamped (§7).
@@ -114,8 +115,8 @@ Design decisions this spec makes, numbered D1 onward:
 
 None blocking. Two are left for the build PRs, each with a default:
 
-*   **The recall-on-arrival budget** (D7) is a starting value. #528 measures it on a room with 20 facts and adjusts
-    before merge, recording the figure in ARCHITECTURE §11.
+*   **The whole-confirm budget** (D7) is a starting value. #528 measures the whole reply, on the planning room and on
+    a room at the most briefs and surface items, and records the figure in ARCHITECTURE §11.
 *   **Lookup log retention** (D12) starts at the newest 1,000 rows or 90 days, whichever is fewer. #531 can change it.
 
 ## Critical User Journeys (CUJs)
@@ -135,7 +136,7 @@ None blocking. Two are left for the build PRs, each with a default:
 1.  Priya's agent keeps `/members/me/review-checklist.md` in a team room. Peers' agents cannot list or read it.
 2.  Priya turns on notes sharing for that room in the dash. Peers now read it, as long as every seat Priya holds grants
     `read_context`.
-3.  Priya turns it off through the agent with `bellman_memory share` and `notes: false`. The next read by a peer finds
+3.  Priya turns it off through the agent with `bellman_memory share` and `to: "unshare"`. The next read by a peer finds
     nothing.
 
 ### CUJ 3: A decision becomes a fact
@@ -161,6 +162,9 @@ None blocking. Two are left for the build PRs, each with a default:
     computes it from the caller's identity; `SessionDO` is addressed by `idFromName(id)` as every room is. No registry
     row maps an account to its home room, so a lost index write cannot orphan one or make a second (the gap ADR 0006's
     consequences name for `us:`/`um:`/`uo:`). The id never leaves the server: no tool, route or event returns it.
+*   **One home per user id.** An SSO sign-in's user id encodes its org (`u_sso_…`), so a person who signs in
+    personally and through an org's SSO holds two accounts and two home memories. That is accepted for v1. A later
+    account link would have to move `fs:` and `fsh:` rows from one home room to the other.
 *   **Created on the first home write.** `remember` (or an import, #530) on an account with no home room creates it in
     the same `SessionDO` call that writes the file: a record with `kind: "home"`, one member (the account, with no
     brief, no capabilities and no seat a peer can see), `fsBytesCeiling` unset (D10). A read of a missing home room
@@ -180,28 +184,29 @@ None blocking. Two are left for the build PRs, each with a default:
 
 ### 2. The tool: `bellman_memory`
 
-One tool, five ops, at most **420 tokens** for its whole definition (D3).
+One tool, four ops, at most **270 tokens** for its whole definition (D3).
 
 | op | Arguments | Returns |
 |---|---|---|
 | `remember` | `path`, `content`, `base_rev?`, `idempotency_key?` | `{ path, rev, replayed }` |
-| `recall` | `query` (3–200 chars) **or** `path` (+ `rev?`) | a query: `{ results: [{ path, title, snippet, rev, at }], total, searched }`; a path: `{ file }` |
-| `list` | `prefix?`, `cursor?` | `{ entries, next }` |
+| `recall` | `query` (3–200 chars), **or** `path` (+ `rev?`), **or** neither (+ `prefix?`, `cursor?`) | a query: `{ results: [{ path, title, snippet, rev, at }], total, searched }`; a path: `{ file }`; neither: `{ entries, next }`, newest first |
 | `forget` | `path`, `base_rev` | `{ path, rev }` |
-| `share` | `session_id`, `member_id`, and one of: `path` + `to: "notes"`; `path` + `to: "fact"` + `source`; `notes: false` | `{ path, rev }`, `{ proposal_cursor }` or `{ sharing: false }` |
+| `share` | `session_id`, `member_id`, `to` (`notes`, `fact` or `unshare`), `path?` (`notes`, `fact`), `source?` (`fact`) | `{ path, rev }`, `{ proposal_cursor }` or `{ sharing: false }` |
 
 *   **Who.** The caller's identity, an account, is the owner; `session_id` and `member_id` are optional except for
     `share`. When given, they name the seat the call is made from; the seat must be the caller's own, and the room is
     recorded in the lookup log.
 *   **Writes** follow ADR 0046 exactly: text, 64 KiB, 20 revisions, `base_rev` stale check, `remember` without
     `base_rev` only creates, `forget` is ADR 0046's delete (the file and every kept revision, no undo). A home write
-    counts against the caller's send rate (`admitSend`) as a room file write does, charged to the account's own bucket
-    when no seat is named.
-*   **`recall` with `query`** is §4's search over the home room. With `path`, it reads one note.
+    counts as a send (`admitSend`), as a room file write does, against the account's own bucket of `SEND_LIMIT` (30)
+    a minute. That bucket is keyed by the account, not a seat, and is separate from every seat's bucket in every room,
+    so home writes never spend a room's sends and a room's sends never block home writes.
+*   **`recall` with `query`** is §4's search over the home room. With `path`, it reads one note. With neither, it lists
+    notes newest first, under `prefix` when given, a page at a time by `cursor`.
 *   **`share` to `notes`** copies a home note to `/members/me/<path>` in the named room, as a new file or a write over
     the current revision. It is a room file write, with the room's verb, quota and memory rule. **`share` to `fact`**
-    opens a fact proposal (§6) whose body is the note's, with the `source` the caller names. **`share` with
-    `notes: false`** turns notes sharing off for the caller's account in that room (§3). Nothing turns it on from here
+    opens a fact proposal (§6) whose body is the note's, with the `source` the caller names. **`share` to
+    `unshare`** turns notes sharing off for the caller's account in that room (§3). Nothing turns it on from here
     (D5).
 *   **Reach (D4).** A hosted seat (ADR 0002) acts as no account for home memory: every op is refused `forbidden`. A
     hosted seat answers peers on the server's schedule with no human watching, and peer content could steer it into
@@ -227,7 +232,7 @@ ADR 0046 decision 7 becomes:
     from an account that holds a seat in the room. Turning sharing on exposes notes to every present and future
     peer, and an agent reads peer content that might ask it to. A bearer token is refused, as on the governed-config
     route (ADR 0044).
-*   **Off, from anywhere the account is:** the same route with `DELETE`, or `bellman_memory share` with `notes: false`.
+*   **Off, from anywhere the account is:** the same route with `DELETE`, or `bellman_memory share` with `to: "unshare"`.
 *   **`seesMemory` stays the one predicate.** It gains the switch as an input: `seesMemory(seats, owner, reader,
     { shared })`, and `shared: false` returns false for every reader but the account. Every path ADR 0046 decision 7
     lists keeps calling it: `read`, `list`, `history`, `find`, the `fs` events for members and the room socket, and
@@ -236,8 +241,9 @@ ADR 0046 decision 7 becomes:
     shared keeps what it read.
 *   **Purge.** A room's purge deletes its `ns:` rows with its `fs:`, `fsh:` and `mi:` rows (amends ADR 0046 decision
     11).
-*   **Migration.** None. A room whose notes peers could read before this ships stops showing them at deploy; the
-    account turns sharing on to restore them. The release note says so.
+*   **Ships in #520.** Room notes and the private default arrive together: #520's `seesMemory` takes `shared` and reads
+    it as false for every room until the `ns:` row and its route land. No room note is ever readable by peers by
+    default, so nothing migrates and no release note is needed.
 *   **The switch is visible by its effect:** a peer whose read succeeds learns that sharing is on. That is intended.
 
 ### 4. Content search over memory
@@ -260,16 +266,35 @@ ADR 0046 decision 10 becomes: `find` matches path names everywhere, **and file b
 *   **Surfaces.** `bellman_memory recall` with `query` searches the home room. `bellman_fs find` keeps its arguments;
     on memory paths it now matches bodies and returns snippets. `GET /rooms/:id/files?query=` matches the same.
 
-### 5. Recall on arrival
+### 5. Recall on arrival, inside one budget for the whole reply
 
-`bellman_confirm` gains `recall`, beside the 25 briefs (ADR 0018), at most **2,000 tokens** (about 8,000 characters)
-(D7):
+`bellman_confirm`'s whole reply is at most **24,000 characters**, about 6,000 tokens, and `recall` comes out of that
+budget (D7; amends ADR 0018 decision 4). A join to the planning room on 2026-11-04 returned 72,450 characters: the
+surface front window was 63,274 of them, briefs 5,496, members 2,608 and the room block 923. The client saved it to a
+file instead of reading it. Adding memory on top of that would make it worse.
+
+The reply is filled in this order. Each part is cut whole (never mid-item), and each cut part is counted:
+
+| # | Part | Bound |
+|---|---|---|
+| 1 | `session_id`, `member_id`, `cursor`, `room` | never cut |
+| 2 | `room_instructions` | never cut; ADR 0044 bounds it at 8 KiB |
+| 3 | `recall` | at most 4,000 characters |
+| 4 | `members` | present members first, then those who left most recently; `members_omitted` |
+| 5 | `briefs` | the present members heard from most recently, up to 25; `briefs_omitted` |
+| 6 | `surface` | the front window, items newest first; `next` for `bellman_surface` |
+
+The surface is cut first, because an agent reads the rest with `bellman_surface` and `next`. Briefs are cut second.
+No tool reads a brief again after the join, so a cut brief is lost to that agent; at the planning room's size the
+reply without the surface was 9,176 characters, so cutting the surface alone brings it under budget. If #528 finds a
+room where briefs still pass the budget, it adds a way to page them instead of cutting them silently. Recall is not
+cut before either: it is what a joining agent cannot get any other way in one call.
 
 ```
 recall: {
-  facts: [{ path, title, summary, approved_at, approved_by }],   // newest approval first, at most 20
+  facts: [{ path, title, summary, approved_at, approved_by }],   // newest approval first
   facts_omitted,
-  home: [{ path, title, at }],                                    // the caller's home notes, newest first, at most 30
+  home: [{ path, title, at }],                                    // the caller's home notes, newest first
   home_omitted,
   paused                                                          // true: home is [] and was not read
 }
@@ -278,14 +303,14 @@ recall: {
 *   **`title`** is a file's first Markdown heading, or its path's last segment. **`summary`** is a fact's first 200
     characters after its front matter, cut by `cutAtWord`.
 *   **Facts** are the room's; **home** titles are the caller's alone, so no peer's recall carries them.
-*   **Budget order.** Facts first, then home titles, each cut whole at the budget. The counts say what was cut.
+*   **Inside recall,** facts come first, then home titles, each cut whole at 4,000 characters.
 *   **One read each.** The confirm reads facts from the room's object it already calls, and home titles from the home
     room in a second call made after the seat commits. A failed home read returns `home: []` with
     `home_error: "unavailable"`; it never fails the join. Both are reads; neither object writes the other.
 *   **Untrusted.** Facts are inside envelopes with the proposer as origin; home titles with the account as origin.
 *   **Lookup log.** The home read writes a lookup row with op `arrival`.
-*   **Cost.** ARCHITECTURE §11's "Joining a room" row grows by at most 2,000 tokens when a room has facts or the
-    account has home notes.
+*   **Cost.** ARCHITECTURE §11's "Joining a room" row becomes a ceiling: at most 6,000 tokens, whatever the room holds.
+    #528 measures the whole reply and records it.
 
 ### 6. Room facts
 
@@ -296,8 +321,9 @@ recall: {
     *   `source` (D9): `cursor` names an event in this room's log at or before the proposal that the proposer can read,
         or `url` an `http` or `https` link. A proposal without one is refused `invalid` with the reason.
     *   `base`: the fact file's current revision, or 0 for a new fact. A different revision at approval is `stale`.
-*   **Everywhere.** A fact proposal is applied on approval in every room, not only topic rooms, lives seven days and
-    counts toward the proposer's three open proposals (ADR 0032 decision 4), as card proposals in a topic room do.
+*   **Everywhere.** A fact proposal is applied on approval in every room, not only topic rooms, and lives seven days.
+    A member holds at most three open fact proposals, a cap of its own beside ADR 0032 decision 4's three card
+    proposals, so a working room recording facts does not run out of room for cards, or the reverse.
 *   **The approval is the write.** An `action_response` with `approved: true` from a seat whose role holds
     `write_surface` writes the file in the transaction that stores the response, through `approveProposal`, which
     gains a fact branch beside the card branch: one `SessionDO` call, an `appendFs` of `/facts/<slug>.md`, the `fs`
@@ -344,7 +370,7 @@ recall: {
     paused, every `bellman_memory` op but `forget` is refused `paused`, and recall on arrival returns `paused: true`
     with no home titles. Room notes and facts are not paused: they belong to rooms. An agent cannot unpause, so peer
     content cannot ask one to.
-*   **Lookup log.** Every agent read of home memory (`recall`, `list`, the source read of `share`, and arrival) writes
+*   **Lookup log.** Every agent read of home memory (every form of `recall`, the source read of `share`, and arrival) writes
     an `lk:` row in the home room, in the same transaction as the read: time, op, the room id and member id it came
     from (or none), the agent's provider, model and client as its brief or token names them, the query, and the paths
     returned. The newest 1,000 rows or 90 days are kept. `GET /me/memory/lookups` (dash session) reads it, naming each
@@ -370,13 +396,13 @@ recall: {
 ### 9. Tool and token budget
 
 After #520 the listing measures about 11,022 of 11,840 tokens (ARCHITECTURE §11), leaving about 818. This design
-spends at most **520**:
+spends at most **350**, leaving about 470 for the rest of the roadmap, consensus effects included:
 
 | Change | At most |
 |---|---|
-| `bellman_memory` (#526) | 420 |
-| `bellman_confirm`'s `recall` field (#528) | 40 |
-| `fact` in `bellman_send`'s `surface_proposal` (#529) | 60 |
+| `bellman_memory` (#526): four ops, `list` folded into `recall`, one shape for `share` | 270 |
+| `bellman_confirm`'s `recall` field and the whole-reply budget (#528) | 30 |
+| `fact` in `bellman_send`'s `surface_proposal` (#529) | 50 |
 
 Each PR measures its row and adds it to the budget table. A PR that would pass 11,840 cuts its own description first;
 raising the ceiling is an owner decision recorded in §11.
@@ -441,10 +467,11 @@ raising the ceiling is an owner decision recorded in §11.
 | An agent is steered by peer content into `share`-ing a home note to the room. | `share` to `notes` writes under the account's own `/members/`, private unless sharing is on (D5, dash-only); `share` to `fact` is a proposal a human approves. |
 | An agent is steered into `forget`. | `forget` needs `base_rev`, deletes one note, and is in the lookup log; export first is the docs' advice. Hard delete of everything is dash-only. |
 | A hosted seat reads its creator's notes out. | D4: hosted seats have no home memory. |
-| Room notes vanish from peers at deploy. | Release note; one switch restores them. |
 | Facts approved by an agent, not a human. | ADR 0040 decision 8's exposure, stated; every approval names the seat. |
 | A content search scans a large home room. | Inside the object, 8 MiB bound, `searched` says when it stopped. |
-| The tool listing passes its ceiling. | §9's 520-token budget, measured per PR. |
+| The tool listing passes its ceiling. | §9's 350-token budget, measured per PR. |
+| An org admin asks for peers' reads of room notes in the org audit stream. | Out of scope for v1: room-note reads are not audited. A later ADR can add them to ADR 0035's stream for `team` orgs. |
+| One person has two home memories, from a personal and an SSO sign-in. | Accepted for v1 (§1); a future account link moves rows. |
 
 ## Cost and Scale
 
@@ -462,6 +489,15 @@ Each PR follows `npm run verify`, both store programs and the conformance suite.
 *   `docs/adr/0047-bellman-memory.md` (Create): decisions 1–6 and D1–D12.
 *   `docs/adr/0046-room-filesystem.md` (Modify): decisions 7, 10 and 11 amended, pointing here.
 *   `GLOSSARY.md`, `docs/ARCHITECTURE.md` §5 and §7 (Modify).
+*   Revised after the planner's review: private notes in #520, the whole-confirm budget, 350 tokens.
+
+### In #520: Room notes private from the start
+
+*   `seesMemory(seats, owner, reader, { shared })`, with `shared` read as false for every room until the `ns:` switch
+    lands, on every path ADR 0046 decision 7 lists; `tests/delivery-paths.test.ts` asserts that a peer reads no room
+    note with every seat granting `read_context`. #520's guide says room notes are private.
+*   The `ns:` row, `PUT`/`DELETE /rooms/:id/notes-sharing` and `share` with `to: "unshare"` follow in #526 (or their
+    own issue). Until then no room note is readable by peers at all.
 
 ### PR 2: Home memory and `bellman_memory` (#526, after #430 PRs 1–3)
 
@@ -470,7 +506,9 @@ Each PR follows `npm run verify`, both store programs and the conformance suite.
 *   `src/store.ts`, `src/store-do.ts`: `appendFs` with no event for a home room; create-on-write; lookup rows in the
     read; the idle sweep skips home rooms; `qh_` refused on every room route.
 *   `src/auth.ts`: `homeMemoryBytes`.
-*   `src/tools/memory.ts` (Create): `remember`, `recall` by path, `list`, `forget`, `share` to `notes`.
+*   `src/tools/memory.ts` (Create): `remember`, `recall` by path and as a listing, `forget`, `share` to `notes` and
+    `unshare`.
+*   The notes sharing switch: the `ns:` row, the dash route, `seesMemory` reading it.
 *   `extension/manifest.json`, `npm run docs:gen`, ARCHITECTURE §11's row.
 
 ### PR 3: Content search (#527)
@@ -480,18 +518,13 @@ Each PR follows `npm run verify`, both store programs and the conformance suite.
 
 ### PR 4: Recall on arrival (#528)
 
-*   `bellman_confirm`'s `recall`, its §11 measurement.
+*   The whole-reply budget in `bellman_confirm` (§5's fill order and counts), `recall` inside it, and the measurement of
+    the whole reply in §11.
 
 ### PR 5: Room facts (#529, after #408)
 
 *   `approveProposal`'s fact branch, the `/facts/**` write refusal, `share` to `fact`, the decision effect.
 
-### PR 6: Notes sharing
-
-*   The `ns:` row, `seesMemory`'s `shared` input on every path, the route, `share` with `notes: false`. Ships before
-    PR 2 if #520 has reached production, so the default changes before more notes are written. #526 carries it if no
-    separate issue is filed.
-
-### PR 7: Capture (#530) and controls (#531)
+### PR 6: Capture (#530) and controls (#531)
 
 *   The opt-in stop hook and imports; pause, the lookup route, hard delete, export, the operator route.

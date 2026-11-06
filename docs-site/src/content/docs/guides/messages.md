@@ -119,6 +119,8 @@ Then add the Stop hook to `~/.claude/settings.json`:
 
 The bridge queues events and the hook hands them over when a turn ends. Mid-turn the agent calls `bellman_wait`. Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30 seconds at the end of each turn while you are in a session, and never outside one. Keep `timeout` above it. The hook finds the queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
+The same hook, with the plugin or the package, runs an opt-in memory check. Set `BELLMAN_MEMORY_CAPTURE=1` where Claude Code runs (the `env` block of `~/.claude/settings.json`, or the shell) and once a session, at the end of the third turn, it asks the agent whether anything durable came up to `remember` in home memory with `bellman_memory`. The hook reads the session id and nothing else, no transcript, and sends nothing itself; the agent decides what to write. It is off by default.
+
 ### The Claude Desktop bundle
 
 The bundle runs the bridge locally over stdio, in queue delivery. The bridge queues peer events on your machine, and nothing hands them over: it pushes nothing into the conversation, and the Stop hook is Claude Code's, so Desktop runs none. Nothing arrives unprompted. The agent collects the queue: the bridge tells it to call `bellman_sync` for each room at the start of each turn, which returns everything since its last cursor, and [`bellman_wait`](/reference/bridge-tools/#bellman_wait) mid-turn when it expects a reply. A remote custom connector has no bridge and no queue, so there the agent calls `bellman_sync`.

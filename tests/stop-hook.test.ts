@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,11 +13,13 @@ import { statusDoor } from "./helpers/status-door.js";
  * Claude Code, so the inbox is keyed by this process's pid.
  */
 
-const hookInput = JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false });
+/** What Claude Code writes to the hook's stdin; `session_id` is the only field the hook reads. */
+const hookInput = (sessionId = "sess-1") =>
+  JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false, session_id: sessionId });
 
 const SOURCE = `"${process.execPath}" --import tsx src/stop-hook.ts`;
 
-function runHook(root: string, env: Record<string, string> = {}, command = SOURCE) {
+function runHook(root: string, env: Record<string, string> = {}, command = SOURCE, input = hookInput()) {
   return new Promise<{ code: number | null; stderr: string; ms: number }>((resolve, reject) => {
     const started = Date.now();
     const child = spawn("sh", ["-c", command], {
@@ -28,7 +30,7 @@ function runHook(root: string, env: Record<string, string> = {}, command = SOURC
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stderr, ms: Date.now() - started }));
-    child.stdin.end(hookInput);
+    child.stdin.end(input);
   });
 }
 
@@ -130,6 +132,81 @@ describe("the Stop hook and the seat status", () => {
     try {
       enqueue(inbox, event());
       const run = await runHook(root, { BELLMAN_DOOR_ROOT: door.root });
+      expect(run.code).toBe(2);
+      expect(door.setStatus).not.toHaveBeenCalled();
+    } finally {
+      await door.close();
+    }
+  });
+});
+
+// #530: with BELLMAN_MEMORY_CAPTURE on, the third stop of a session with nothing queued asks the agent, once, whether
+// anything durable came up to remember in home memory. Off by default, and the hook reads only the session id.
+describe("the Stop hook's memory check", () => {
+  const ON = { BELLMAN_MEMORY_CAPTURE: "1" };
+  const stops = async (n: number, env: Record<string, string>, input?: string) => {
+    const runs = [];
+    for (let i = 0; i < n; i++) runs.push(await runHook(root, env, SOURCE, input));
+    return runs;
+  };
+
+  it("asks nothing unless the setting is on", async () => {
+    const runs = await stops(4, {});
+    expect(runs.map((r) => [r.code, r.stderr])).toEqual([[0, ""], [0, ""], [0, ""], [0, ""]]);
+  });
+
+  it("asks at the third stop of a session, once, with nothing queued", async () => {
+    const runs = await stops(4, ON);
+    expect(runs.map((r) => r.code)).toEqual([0, 0, 2, 0]);
+    expect(runs[2].stderr).toContain("bellman_memory");
+    expect(runs[2].stderr).toContain('"remember"');
+    expect(runs[2].stderr).toContain("BELLMAN_MEMORY_CAPTURE");
+    expect(runs[3].stderr).toBe("");
+  });
+
+  it("counts each session on its own", async () => {
+    await stops(3, ON, hookInput("sess-1"));
+    const other = await runHook(root, ON, SOURCE, hookInput("sess-2"));
+    expect(other.code).toBe(0);
+  });
+
+  it("asks in hook delivery too, from an inbox that holds nothing", async () => {
+    mkdirSync(inbox, { recursive: true });
+    const runs = await stops(3, ON);
+    expect(runs.map((r) => r.code)).toEqual([0, 0, 2]);
+    expect(runs[2].stderr).toContain("Memory check");
+  });
+
+  it("hands queued events over first, and asks at the next stop that has none", async () => {
+    await stops(2, ON);
+    enqueue(inbox, event({ payload: { text: "queued ahead of the memory check" } }));
+
+    const withEvents = await runHook(root, ON);
+    expect(withEvents.code).toBe(2);
+    expect(withEvents.stderr).toContain("queued ahead of the memory check");
+    expect(withEvents.stderr).not.toContain("Memory check");
+
+    const next = await runHook(root, ON);
+    expect(next.code).toBe(2);
+    expect(next.stderr).toContain("Memory check");
+  });
+
+  it("never asks without a session id to count by", async () => {
+    const runs = await stops(4, ON, JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false }));
+    expect(runs.map((r) => r.code)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("refuses a session id that is not a plain name", async () => {
+    const runs = await stops(3, ON, hookInput("../escape"));
+    expect(runs.map((r) => r.code)).toEqual([0, 0, 0]);
+    expect(existsSync(join(root, "escape"))).toBe(false);
+  });
+
+  it("sets no seat idle when it blocks the stop to ask", async () => {
+    await stops(2, ON);
+    const door = await statusDoor();
+    try {
+      const run = await runHook(root, { ...ON, BELLMAN_DOOR_ROOT: door.root });
       expect(run.code).toBe(2);
       expect(door.setStatus).not.toHaveBeenCalled();
     } finally {

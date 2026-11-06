@@ -251,6 +251,11 @@ export type PublicView = "canvas" | "page";
 
 export interface Session {
   id: string;
+  /**
+   * `"home"` on an account's home room (ADR 0047): hidden, one member, no codes, no events, never listed, never
+   * abandoned. Absent on every room.
+   */
+  kind?: "home";
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
   manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it
@@ -631,6 +636,11 @@ export interface Entitlements {
   blobBytesPerRoom: number;
   /** The bytes a room's files and their history may hold (ADR 0046), stamped on the room as `fsBytesCeiling`. */
   fsBytesPerRoom: number;
+  /**
+   * The bytes an account's home memory may hold (ADR 0047, decision 12): read from the caller's plan on each home
+   * write, never stamped, so an upgrade applies at once and a downgrade keeps the notes but refuses growth.
+   */
+  homeMemoryBytes: number;
   /**
    * Rooms with a hosted seat a person may hold open at once (spec D2 as ruled on I7): a
    * slot is taken when one is created and given back when it closes. 0 means the plan

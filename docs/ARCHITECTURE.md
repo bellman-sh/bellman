@@ -106,7 +106,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the fifteen tools work over plain remote MCP. The bridge exists
+use Bellman** — the sixteen tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
@@ -626,6 +626,9 @@ member, holding the same `fs:` and `fsh:` rows plus `lk:` lookup rows. Its id, `
 computed by the Worker, so no registry row maps an account to it and none can go missing. It writes no `fs` events, no
 listing or index row names it, and every room route refuses its id. A room's `ns:<userId>` row is an account's notes
 sharing switch. Facts are files under `/facts/`, written only by an approval in the transaction that stores it.
+The room cost capture (#473) does not count home rooms: they have no `rooms` row to be found from, and their bytes are
+the account's, reported to it alone (#531), never a room's or an org's. #526 ruled it; a per-account count is its own
+issue if billing ever needs one.
 
 ```mermaid
 flowchart LR
@@ -2433,7 +2436,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,121** | every request, whether or not you are in a room |
+| Tool definitions | **~11,512** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
@@ -2460,6 +2463,7 @@ decision recorded here, not a side effect of a merge.
 | Secret ballot release 1: the decide rule's `ballot` field (`bellman_start`, `bellman_connect`) | +20 | 10,444 | (#469) |
 | Secret ballot release 1: `bellman_decide`'s secret-ballot sentence and read list, `bellman_send`'s secret vote answer | +79 | 10,523 | (#469) |
 | `bellman_fs`: room files, memory and the `/.bellman/` view (ADR 0046) | +598 | 11,121 | #430 PR B |
+| `bellman_memory`: home memory, four ops (ADR 0047; the ADR allotted 270) | +391 | 11,512 | #526 |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

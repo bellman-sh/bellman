@@ -15,7 +15,8 @@ import type {
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow,
 } from "./types.js";
 import { CONFIG_HISTORY } from "./config.js";
-import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, pageFs, pathMatches, resolveFsPath, underPrefix } from "./store.js";
+import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "./store.js";
+import { isHomeRoomId } from "./home.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "./fs.js";
 import { namespaceOf } from "./fs-path.js";
 import type {
@@ -3178,8 +3179,49 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /** `BellmanStore.listFs`, for this room. */
-  async listFs(prefix: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
-    return pageFs(await this.#fsRows(prefix), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor);
+  async listFs(prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
+    return pageFs(await this.#fsRows(prefix), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined);
+  }
+
+  /**
+   * `BellmanStore.writeHome`, for this home room (ADR 0047), in one transaction: the record created from `home` when
+   * none is stored, the key (`hk:`) checked, `decideFsWrite` with `ceiling` as the room's and no memory rule, then the
+   * file row, its index and history rows, the record's `fsBytes` and the key's record in one put, and the pruned
+   * history deleted. No event, no outbox intent, no alarm: nothing is owed, so nothing is armed.
+   */
+  async writeHome(home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    return this.ctx.storage.transaction<HomeAppend>(async (txn) => {
+      const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
+      if (keyed !== null) {
+        const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
+        if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+      }
+      if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+      const read = await this.stored(txn);
+      let s = read, seeded: Record<string, unknown> = {};
+      if (!s) {
+        const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+        const { events: _events, members: _arriving, ...others } = home;
+        s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
+        seeded = { ...seatRows(seat), cursor: 0 };
+      }
+      const at = Date.now();
+      const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
+      const history = await this.#fsHistory(txn, w.path);
+      const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
+      if (!decided.ok) return decided.result;
+      const { row } = decided;
+      await putRows(txn, {
+        ...seeded,
+        ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
+        [fsKey(w.path)]: row,
+        [fsIndexKey(w.path)]: fsEntryOf(row),
+        ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
+        ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
+      });
+      for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
+      return { outcome: "ok", path: w.path, rev: row.rev };
+    });
   }
 
   /** `BellmanStore.findFs`, for this room. */
@@ -6883,6 +6925,8 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
+    // A home room (ADR 0047) is not a room: no route, tool or socket reads it as one.
+    if (isHomeRoomId(id)) return undefined;
     return this.session(id).getSession();
   }
 
@@ -7414,7 +7458,7 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).readFs(path, rev);
   }
 
-  async listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage> {
+  async listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[]; newest?: boolean }): Promise<FsPage> {
     return this.session(sessionId).listFs(prefix, opts);
   }
 
@@ -7428,6 +7472,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
     return this.session(sessionId).appendFs(w, audit);
+  }
+
+  async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    return this.session(id).writeHome(home, w, ceiling);
   }
 
   async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {

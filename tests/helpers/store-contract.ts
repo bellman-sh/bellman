@@ -17,7 +17,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/store.js";
+import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
 import {
   applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput,
@@ -31,7 +32,7 @@ import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/frames.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
-import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditEntry, Identity, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
@@ -4965,6 +4966,59 @@ export function describeStoreContract(
         const mid = (await store.memoryIdOf(id, "u_jesse"))!;
         expect((await store.findFs(id, "hit")).entries).toHaveLength(20);
         expect((await store.findFs(id, "hit", { hide: [mid] })).entries.map((r) => r.path)).toEqual(["/docs/hit0.md", "/docs/hit1.md", "/docs/hit2.md"]);
+      });
+    });
+
+    // ------------------------------------------------ home memory (ADR 0047)
+
+    describe("home memory", () => {
+      const jesse: Identity = { userId: "u_jesse", label: "jesse@codenerd", orgId: "org_codenerd", plan: "team", role: "member" };
+      const id = homeRoomId("u_jesse");
+      const home = () => homeSession(jesse, Date.now());
+      const note = (path: string, write: FsWrite["write"], key: string | null = null): FsWrite =>
+        ({ path, write, memberId: HOME_MEMBER_ID, userId: "u_jesse", label: "jesse@codenerd", key });
+
+      it("creates the home room on the first write, with no event and no listing, and getSession refuses its id", async () => {
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.getSession(id)).toBeUndefined();
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "hello" }), 1024)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        expect(await store.readFs(id, "/a.md")).toMatchObject({ path: "/a.md", rev: 1, content: "hello", writerMemberId: HOME_MEMBER_ID, deleted: false });
+        expect(await store.getSession(id)).toBeUndefined();
+        expect(await store.eventsAfter(id, 0)).toEqual([]);
+        expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual([]);
+        expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+        expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+      });
+
+      it("keeps history, refuses stale and over the ceiling it is handed, treats /members/ as plain and /apps/ as forbidden", async () => {
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v1" }), 1024)).toMatchObject({ outcome: "ok", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v2" }), 1024)).toMatchObject({ outcome: "stale", currentRev: 1, content: "v1" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v2", baseRev: 1 }), 1024)).toMatchObject({ outcome: "ok", rev: 2 });
+        expect((await store.fsHistory(id, "/a.md")).map((r) => r.rev)).toEqual([2, 1]);
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "x".repeat(1023) }), 1024)).toEqual({ outcome: "over_quota", used: 4, ceiling: 1024 });
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "x".repeat(1023) }), 2048)).toMatchObject({ outcome: "ok" });
+        expect(await store.writeHome(id, home(), note("/members/me/n.md", { op: "write", content: "n" }), 4096)).toMatchObject({ outcome: "ok", path: "/members/me/n.md" });
+        expect(await store.memoryIdOf(id, "u_jesse")).toBeNull();
+        expect(await store.writeHome(id, home(), note("/apps/x/index.html", { op: "write", content: "<p>" }), 4096)).toEqual({ outcome: "forbidden" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "delete", baseRev: 2 }), 4096)).toMatchObject({ outcome: "ok", rev: 3 });
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+      });
+
+      it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "replayed", path: "/a.md", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "y" }, "k1"), 4096)).toEqual({ outcome: "conflict" });
+        vi.advanceTimersByTime(2);
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "y" }), 4096)).toMatchObject({ outcome: "ok" });
+        vi.advanceTimersByTime(2);
+        expect(await store.writeHome(id, home(), note("/c/d.md", { op: "write", content: "z" }), 4096)).toMatchObject({ outcome: "ok" });
+        expect((await store.listFs(id, "/")).entries.map((r) => r.path)).toEqual(["/a.md", "/b.md", "/c/d.md"]);
+        const newest = await store.listFs(id, "/", { newest: true });
+        expect(newest.entries.map((r) => r.path)).toEqual(["/c/d.md", "/b.md", "/a.md"]);
+        expect(newest.next).toBeNull();
+        expect((await store.listFs(id, "/", { newest: true, cursor: newestKey(newest.entries[0]) })).entries.map((r) => r.path)).toEqual(["/b.md", "/a.md"]);
+        expect((await store.listFs(id, "/c", { newest: true })).entries.map((r) => r.path)).toEqual(["/c/d.md"]);
       });
     });
 

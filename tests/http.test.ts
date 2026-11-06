@@ -182,10 +182,10 @@ describe("HTTP surface", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists the 15 tools over HTTP", async () => {
+  it("lists the 16 tools over HTTP", async () => {
     const client = await mcpClient("qk_dev_jesse");
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(16);
     await client.close();
   });
 });

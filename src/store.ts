@@ -8,6 +8,7 @@ import { DEFAULT_POLICY } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
+import { isHomeRoomId } from "./home.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -427,7 +428,7 @@ export interface DepartedMembers {
 }
 
 /** What the abandonment rule reads: a session, or a stored one. */
-export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
+export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members" | "kind">;
 
 /**
  * When this room becomes abandoned, or null if the question does not apply: a
@@ -439,7 +440,8 @@ export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
  * 90 days after one of them was last there, however recently its host spoke.
  */
 export function abandonedAt(s: RoomRoster): number | null {
-  if (s.closed || s.frozenAt !== null) return null;
+  // A home room (ADR 0047) has one member who never sits in it: it ends only by hard delete, never by abandonment.
+  if (s.closed || s.frozenAt !== null || s.kind === "home") return null;
   const active = s.members.filter(isActivePerson);
   if (active.length === 0) return null;
   return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
@@ -1269,8 +1271,11 @@ export function resolveFsPath(
 }
 
 /** What `decideFsWrite` hands a store to write: the row, the history revisions to delete, the new total, the event. */
+/** A refused write: every `FsAppend` but the two that wrote something. */
+export type FsRefusal = Exclude<FsAppend, { outcome: "ok" | "replayed" }>;
+
 export type FsDecision =
-  | { ok: false; result: FsAppend }
+  | { ok: false; result: FsRefusal }
   | {
     ok: true; row: FsRow; dropRevs: number[]; event: EventBody; stamp: Record<string, unknown>;
     /** The record's totals after the write: the room's files, and each account's memory by id. */
@@ -1289,6 +1294,7 @@ export function decideFsWrite(
   current: FsRow | null,
   history: readonly FsRow[],
   at: number,
+  plain = false,
 ): FsDecision {
   let input: FsPlanInput;
   if (w.write.op === "restore") {
@@ -1314,8 +1320,9 @@ export function decideFsWrite(
   };
   const dropped = plan.deleted ? history : history.slice(FS_HISTORY - 1);
   const delta = (plan.deleted ? 0 : size) - dropped.reduce((n, r) => n + r.size, 0);
+  // In a home room (ADR 0047) every path is the account's, so `/members/` is a plain directory there: `plain` says so.
   const ns = namespaceOf(path);
-  const memoryId = ns.ns === "memory" ? ns.memoryId : null;
+  const memoryId = !plain && ns.ns === "memory" ? ns.memoryId : null;
   const charge = memoryId === null
     ? decideFsCharge(s, false, delta)
     : decideFsCharge({ frozenAt: s.frozenAt, fsBytes: s.fsMemoryBytes?.[memoryId] ?? 0, fsBytesCeiling: memoryCeilingOf(s.fsBytesCeiling) }, false, delta);
@@ -1347,17 +1354,34 @@ export function decideFsWrite(
 export const fsPrint = (w: FsWrite): string =>
   fingerprint({ type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null, payload: { path: w.path, write: w.write } });
 
-/** Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule. */
-export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string): FsPage {
+/**
+ * Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule.
+ * `keyOf` is the order and the cursor: the path by default; `newestKey` for a listing newest first (ADR 0047).
+ */
+export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string, keyOf: (r: FsEntry) => string = (r) => r.path): FsPage {
   const entries: FsEntry[] = [];
-  for (const r of rows) {
-    if (cursor !== undefined && r.path <= cursor) continue;
+  for (const r of [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))) {
+    if (cursor !== undefined && keyOf(r) <= cursor) continue;
     if (r.deleted || !keep(r)) continue;
-    if (entries.length === cap) return { entries, next: entries[cap - 1].path };
+    if (entries.length === cap) return { entries, next: keyOf(entries[cap - 1]) };
     entries.push(fsEntryOf(r));
   }
   return { entries, next: null };
 }
+
+/** The sort key that puts the newest row first: the time inverted and padded, then the path, so the order is total. */
+export const newestKey = (r: Pick<FsEntry, "at" | "path">): string =>
+  `${String(Number.MAX_SAFE_INTEGER - r.at).padStart(16, "0")}:${r.path}`;
+
+/** What a keyed home write (ADR 0047) is remembered by: no event, so the path and revision are stored with the print. */
+export interface HomeKeyRecord { print: string; path: string; rev: number }
+export const homeKey = (memberId: string, key: string): string => `hk:${encodeURIComponent(memberId)}:${key}`;
+
+/**
+ * What `writeHome` answered: `appendFs`'s outcomes without an event. `forbidden` is a `/apps/` path, which a home
+ * room cannot run.
+ */
+export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal;
 
 /** Whether `path` is `prefix` or under it, as a directory; `/` holds everything. */
 export const underPrefix = (path: string, prefix: string): boolean =>
@@ -2487,8 +2511,11 @@ export interface BellmanStore {
    * for a deleted file.
    */
   readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null>;
-  /** Live files at `prefix` or under it, in path order, `FS_LIST_PAGE` a page after `cursor` (a path). */
-  listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage>;
+  /**
+   * Live files at `prefix` or under it, in path order, `FS_LIST_PAGE` a page after `cursor` (a path); with `newest`,
+   * newest first and the cursor is `newestKey`'s.
+   */
+  listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[]; newest?: boolean }): Promise<FsPage>;
   /** A path's kept revisions, newest first, at most `FS_HISTORY`. */
   fsHistory(sessionId: string, path: string): Promise<FsRow[]>;
   /** Live files whose path holds every word of `query`, case-insensitive, at most `FS_FIND_MAX`, in path order. */
@@ -2500,6 +2527,14 @@ export interface BellmanStore {
    * stamped with the resolved path, revision, size and content hash.
    */
   appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend>;
+  /**
+   * One home memory write (ADR 0047), in one transaction: the room `home` describes is created when `id` holds
+   * none, the key is checked (`homeKey`), `planWrite` runs against the row read there with no memory rule and
+   * `ceiling` as the room's, and the `fs:` and `fsh:` rows land. No event, no audit entry, no index row: a home room
+   * has one member and is never listed. `getSession(id)` answers undefined for a home id, so every room path refuses
+   * it; the reads (`readFs`, `listFs`, `fsHistory`) answer it as any room.
+   */
+  writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */
@@ -2911,6 +2946,8 @@ export class MemoryStore implements BellmanStore {
   private files = new Map<string, Map<string, { current: FsRow; history: FsRow[] }>>();
   /** Memory ids per room, by account. */
   private memoryIdRows = new Map<string, Map<string, string>>();
+  /** Keyed home writes (ADR 0047), per home room: no event to point at, so the path and revision are kept. */
+  private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3104,7 +3141,8 @@ export class MemoryStore implements BellmanStore {
 
   async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
-    if (!s) return undefined;
+    // A home room (ADR 0047) is not a room: no route, tool or socket reads it as one.
+    if (!s || isHomeRoomId(id)) return undefined;
     this.closeIfAbandoned(s, Date.now());
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
@@ -3895,8 +3933,39 @@ export class MemoryStore implements BellmanStore {
     return row === undefined ? null : detach(row);
   }
 
-  async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
-    return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor));
+  async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
+    return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined));
+  }
+
+  async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    // Synchronous from the key check to the last row, as appendFs.
+    const storageKey = w.key === null ? null : homeKey(w.memberId, w.key);
+    const print = fsPrint(w);
+    const record = storageKey === null ? undefined : this.homeKeys.get(id)?.get(storageKey);
+    if (record) return record.print === print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+    let s = this.sessions.get(id);
+    if (!s) {
+      // Created by the first write, and indexed nowhere: not by creator, member, org or the operator's room table.
+      const { members, briefs } = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+      s = detach({ ...home, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });
+      this.keepBriefs(id, briefs);
+      this.sessions.set(id, s);
+    }
+    const files = this.files.get(id) ?? new Map<string, { current: FsRow; history: FsRow[] }>();
+    const f = files.get(w.path);
+    const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, detach(w), w.path, f?.current ?? null, f?.history ?? [], Date.now(), true);
+    if (!decided.ok) return decided.result;
+    const kept = f?.history ?? [];
+    files.set(w.path, { current: decided.row, history: decided.row.deleted ? [] : [decided.row, ...kept.filter((r) => !decided.dropRevs.includes(r.rev))] });
+    this.files.set(id, files);
+    (s as { fsBytes?: number }).fsBytes = decided.fsBytes;
+    if (storageKey !== null) {
+      const map = this.homeKeys.get(id) ?? new Map<string, HomeKeyRecord>();
+      map.set(storageKey, { print, path: w.path, rev: decided.row.rev });
+      this.homeKeys.set(id, map);
+    }
+    return { outcome: "ok", path: w.path, rev: decided.row.rev };
   }
 
   async fsHistory(sessionId: string, path: string): Promise<FsRow[]> {

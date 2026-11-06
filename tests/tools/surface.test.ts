@@ -30,6 +30,7 @@ const EXPECTED_TOOLS = [
   "bellman_surface",
   "bellman_decide",
   "bellman_fs",
+  "bellman_memory",
 ].sort();
 
 describe("tool surface", () => {
@@ -51,7 +52,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(15);
+    expect(EXPECTED_TOOLS).toHaveLength(16);
   });
 
   it("gives every tool a description and an input schema", async () => {

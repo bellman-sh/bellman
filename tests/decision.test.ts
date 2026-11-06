@@ -4,13 +4,14 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyVote, capacityOfVote, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
+  applyVote, capacityOfVote, closingEvent, decideClose, decisionsAwaiting, isSecret, decideOpenQuota, decideSupersede, decisionAudit, decisionExpiry, decisionHash,
   decisionOwning, decisionPageOf, decisionStates, decisionsOf, dueToExpire, earliestDeadline, evaluate, noteDecisions, removalEvents, ruleOf, tally, DECISION_EVENTS,
   MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
   type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
-  type OpenDecisions, type VoterRemoved,
+  type BallotBook, type Choice, type OpenDecisions, type VoterRemoved,
 } from "../src/decision.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "../src/action-state.js";
+import { SYSTEM_ACTOR, auditRows } from "../src/audit.js";
 import type { EventType, SessionEvent } from "../src/types.js";
 
 const draft = () => ({
@@ -681,5 +682,92 @@ describe("a page of decisions (#411)", () => {
     expect(decisionPageOf([9, 7, 5, 3], { limit: 2 })).toEqual({ page: [9, 7], next: 7 });
     expect(decisionPageOf([9, 7, 5, 3], { limit: 2, before: 7 })).toEqual({ page: [5, 3], next: null });
     expect(decisionPageOf([9, 7, 5, 3], { limit: 5, upTo: 6 })).toEqual({ page: [5, 3], next: null });
+  });
+});
+
+describe("secret ballots (release 1)", () => {
+  const AT = 1_000_000;
+  const SECRET = { rule: "majority", ballot: "secret" } as const;
+  const opened = (cursor: number, over: Partial<DecisionOpened> = {}): SessionEvent => ({
+    cursor, type: "decision_opened", fromMemberId: "m_a", fromUserId: "u_a", fromLabel: "m_a", refId: null, at: AT,
+    payload: {
+      ...draft(), rule: SECRET, expires_at: AT + ACTION_REQUEST_TTL_MS, electorate: ["m_a", "m_b", "m_c"],
+      accounts: { m_a: "u_a", m_b: "u_b", m_c: "u_c" }, hash: HASH, ...over,
+    } satisfies DecisionOpened,
+  });
+  const removed = (cursor: number, member: string): SessionEvent => ({
+    cursor, type: "decision_voter_removed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null, at: AT,
+    payload: { decision: 1, member, by: "creator@x", reason: "evicted", voided: [], ballot: "secret" },
+  });
+  const book = (entries: Record<string, Choice>, decision = 1): BallotBook => new Map([[decision, new Map(Object.entries(entries))]]);
+  const view = (events: SessionEvent[], b: Record<string, Choice> = {}) => decisionsOf(events, AT, book(b)).get(1)!;
+
+  it("isSecret is true only for a rule that names ballot: secret", () => {
+    expect(isSecret(opened(1).payload as DecisionOpened)).toBe(true);
+    expect(isSecret(opened(1, { rule: "majority" }).payload as DecisionOpened)).toBe(false);
+    expect(isSecret(opened(1, { rule: { rule: "majority", ballot: "open" } }).payload as DecisionOpened)).toBe(false);
+  });
+
+  it("folds an open secret decision from its ballot book: throws without one, zero untallied, counted with one", () => {
+    expect(() => decisionsOf([opened(1)], AT)).toThrow(/decision 1/);
+    expect(decisionsOf([opened(1)], AT, "untallied").get(1)!.tally).toMatchObject({ approve: 0, reject: 0, turnout: 0 });
+    const v = view([opened(1)], { u_a: "approve", u_b: "reject" });
+    expect(v.tally).toMatchObject({ approve: 1, reject: 1, turnout: 2 });
+    expect(v.book).toEqual(new Map([["u_a", "approve"], ["u_b", "reject"]]));
+  });
+
+  it("keeps a removed seat's vote counted, and does not count it again as an assumed rejection", () => {
+    const v = view([opened(1), removed(2, "m_b")], { u_a: "approve", u_b: "reject", u_c: "approve" });
+    expect(v.tally).toMatchObject({ approve: 2, reject: 1, unreachable: 1, turnout: 3 });
+    expect(evaluate(v)).toEqual({ state: "passed" });
+  });
+
+  it("refuses an advisory vote, applies the cap per account, and evaluates with the account's new choice in place", () => {
+    const open = view([opened(1)], { u_a: "approve", u_b: "approve" });
+    const voter = { memberId: "m_a", userId: "u_a" };
+    expect(applyVote(open, voter, vote("reject", false), 0)).toEqual({ kind: "advisory_secret" });
+    expect(applyVote(open, voter, vote("reject"), MAX_REVISIONS + 1)).toEqual({ kind: "quota", limit: MAX_REVISIONS });
+    expect(applyVote(open, voter, vote("reject"), MAX_REVISIONS)).toEqual({ kind: "record", close: null });
+  });
+
+  it("writes a secret removal with nothing voided", () => {
+    const events = [opened(1)];
+    const out = removalEvents(decisionsOf(events, AT, book({ u_b: "approve" })).values(), "m_b", {
+      type: "member_evicted", fromMemberId: "system", fromUserId: "u_creator", fromLabel: "creator@x", payload: {}, refId: null,
+    });
+    expect(out[0]).toMatchObject({ type: "decision_voter_removed", payload: { member: "m_b", voided: [], ballot: "secret" } });
+  });
+
+  it("closes with every seat of each account that voted, in electorate order", () => {
+    const v = view([opened(1, { accounts: { m_a: "u_a", m_b: "u_b", m_c: "u_a" } })], { u_a: "approve" });
+    expect(closingEvent(v, { state: "expired" }).payload).toMatchObject({ decision: 1, state: "expired", voted: ["m_a", "m_c"] });
+  });
+
+  it("files a secret close as the system, one row per party, with the tally and the voted set and no votes", () => {
+    const v = view([opened(1)], { u_a: "approve" });
+    const closing = { ...closingEvent(v, { state: "expired" }), cursor: 2, at: AT } as SessionEvent;
+    const template = [{ at: AT, orgId: "org_a", sessionId: "qs_test", actorUserId: "u_ann", actorLabel: "ann", actorOrgId: "org_a", action: "x", detail: {}, roomName: "r", parties: ["org_a"], crossing: "internal", direction: null }] as never;
+    const secretTemplate = auditRows(["org_a", "org_b"], { at: AT, sessionId: "qs_test", action: "decision_closed", roomName: "r", detail: {} }, SYSTEM_ACTOR);
+    const rows = decisionAudit(template, [opened(1), closing], decisionsOf([opened(1), closing], AT, book({})), secretTemplate);
+    const closes = rows.filter((r) => r.action === "decision_closed");
+    expect(closes.map((r) => r.orgId)).toEqual(["org_a", "org_b"]);
+    for (const r of closes) {
+      expect(r).toMatchObject({ actorUserId: "system", actorLabel: null, actorOrgId: null, direction: null });
+      expect(r.detail).toMatchObject({ decision: 1, tally: expect.any(Object), voted: ["m_a"] });
+      expect(r.detail).not.toHaveProperty("votes");
+    }
+    expect(rows.find((r) => r.action === "decision_opened")).toMatchObject({ actorUserId: "u_ann" });
+  });
+
+  it("lists a secret decision as outstanding until its cursor is in secretVoted; decisionStates folds untallied", () => {
+    expect(decisionsAwaiting([opened(1)], "m_b", AT, 3).map((o) => o.cursor)).toEqual([1]);
+    expect(decisionsAwaiting([opened(1)], "m_b", AT, 3, new Set([1]))).toEqual([]);
+    expect(decisionStates([opened(1)], AT).get(1)).toBe("open");
+  });
+
+  it("leaves an open ballot counted from its events, as before", () => {
+    const plain = opened(1, { rule: "majority" });
+    const vote1: SessionEvent = { cursor: 2, type: "decision_vote", fromMemberId: "m_a", fromUserId: "u_a", fromLabel: "m_a", refId: null, at: AT, payload: vote("approve") };
+    expect(decisionsOf([plain, vote1], AT).get(1)!.tally).toMatchObject({ approve: 1, turnout: 1 });
   });
 });

@@ -1011,7 +1011,7 @@ export async function admitSend(
  * in milliseconds and a refusal in whole seconds, rounded up, because a client that waited the rounded-down second
  * would be refused again. One function, so the two limits cannot come to round differently.
  */
-function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
+export function waitRefusal(spent: string, retryAfterMs: number): RoomResult<never> {
   const retryAfter = Math.ceil(retryAfterMs / 1000);
   return refuse(
     "rate_limited",

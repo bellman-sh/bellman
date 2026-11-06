@@ -177,11 +177,11 @@ describe("plan entitlements", () => {
   it("gives max creates, the blob and file ceilings, the retention window and the hosted seat over pro, and nothing else", () => {
     const {
       monthlyCreates: mc, blobBytesPerRoom: mb, retainAfterCloseMs: mk,
-      hostedRooms: mh, hostUnitsPerRoom: mu, fsBytesPerRoom: mf, ...maxRest
+      hostedRooms: mh, hostUnitsPerRoom: mu, fsBytesPerRoom: mf, homeMemoryBytes: mm, ...maxRest
     } = ENTITLEMENTS.max;
     const {
       monthlyCreates: pc, blobBytesPerRoom: pb, retainAfterCloseMs: pk,
-      hostedRooms: ph, hostUnitsPerRoom: pu, fsBytesPerRoom: pf, ...proRest
+      hostedRooms: ph, hostUnitsPerRoom: pu, fsBytesPerRoom: pf, homeMemoryBytes: pm, ...proRest
     } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
     expect([mc, pc]).toEqual([2000, 500]);
@@ -191,6 +191,7 @@ describe("plan entitlements", () => {
     expect([mh, ph]).toEqual([3, 0]);
     expect([mu, pu]).toEqual([3000, 0]);
     expect([mf, pf]).toEqual([500 * 1024 * 1024, 50 * 1024 * 1024]);
+    expect([mm, pm]).toEqual([200 * 1024 * 1024, 50 * 1024 * 1024]);
   });
 
   it("gives the hosted seat to max and team only", () => {
@@ -230,7 +231,7 @@ describe("plan entitlements", () => {
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "fsBytesPerRoom", "retainAfterCloseMs",
+      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "fsBytesPerRoom", "homeMemoryBytes", "retainAfterCloseMs",
       "auditRetentionMs", "hostedRooms", "hostUnitsPerRoom", "publicRooms",
     ].sort();
 

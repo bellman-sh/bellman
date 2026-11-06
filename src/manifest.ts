@@ -323,10 +323,13 @@ export const HostInstructionsShape = z.string().max(300);
  * A kind's rule (ADR 0040, decisions 6 and 20): a rule's name, or `{ rule, quorum }`. Strings, not enums, so
  * resolveDecide can refuse a wrong one naming the valid set, and so the schema every tool listing carries grows by
  * as little as it can. `require` is known so it can be refused in words (decision 8): nothing enforces it yet.
+ * `ballot` is `open` or `secret` (secret ballot spec), a string for the same reason.
  */
 const RuleShape = z.union([
   z.string().max(16),
-  z.strictObject({ rule: z.string().max(16), quorum: z.string().max(4).nullish(), require: z.unknown().optional() }),
+  z.strictObject({
+    rule: z.string().max(16), quorum: z.string().max(4).nullish(), ballot: z.string().max(8).nullish(), require: z.unknown().optional(),
+  }),
 ]);
 
 const DecideShape = z.strictObject({
@@ -810,7 +813,9 @@ function resolveDecide(d: DecideInput | null | undefined): DecideConfig | null {
     const given = d[kind];
     if (given == null) continue;
     const field = `decide.${kind}`;
-    const { rule, quorum, require } = typeof given === "string" ? { rule: given, quorum: null, require: undefined } : given;
+    const { rule, quorum, ballot, require } = typeof given === "string"
+      ? { rule: given, quorum: null, ballot: null, require: undefined }
+      : given;
     if (!(DECISION_RULES as readonly string[]).includes(rule)) {
       throw new ManifestError(`${field}: unknown rule "${rule}" (valid: ${DECISION_RULES.join(", ")})`);
     }
@@ -818,9 +823,14 @@ function resolveDecide(d: DecideInput | null | undefined): DecideConfig | null {
       throw new ManifestError(`${field}.require: dash_session is reserved for phase 2, and nothing enforces it yet; omit it`);
     }
     if (rule === "single" && quorum != null) throw new ManifestError(`${field}: single takes no quorum: one approval decides it`);
+    if (ballot != null && ballot !== "open" && ballot !== "secret") {
+      throw new ManifestError(`${field}.ballot: unknown ballot "${ballot}" (valid: open, secret)`);
+    }
+    if (ballot === "secret") throw new ManifestError(`${field}.ballot: secret ballots are not enabled yet; omit it`);
     rules[kind] = {
       rule: rule as DecisionRuleName,
       quorum: quorum != null ? parseQuorum(`${field}.quorum`, quorum) : rule === "single" ? null : fallback,
+      ...(ballot != null ? { ballot } : {}),
     };
   }
   return Object.keys(rules).length > 0 ? { rules, expiresMs } : null;

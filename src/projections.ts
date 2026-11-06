@@ -13,7 +13,7 @@ import { purgeDueAt } from "./retention.js";
 import { createdAtOf } from "./surface.js";
 import type { StoredSession } from "./stored-session.js";
 import { accountAliases } from "./public-event.js";
-import type { DecisionView } from "./decision.js";
+import { isSecret, type DecisionClosed, type DecisionView, type DecisionVote } from "./decision.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
 // itself: these turn a Session into what a client sees, and server.ts imports
@@ -252,7 +252,10 @@ export function roomPreview(session: StoredSession, viewerRole: string | null, v
     // preview is what it always was. Every value is one the server parsed from the closed sets.
     ...(m.decide ? {
       decide: {
-        rules: Object.fromEntries(Object.entries(m.decide.rules).map(([kind, r]) => [kind, { rule: r.rule, quorum_percent: r.quorum }])),
+        rules: Object.fromEntries(Object.entries(m.decide.rules).map(([kind, r]) => [kind, {
+          rule: r.rule, quorum_percent: r.quorum, ballot: r.ballot ?? "open",
+          ...(r.ballot === "secret" ? { ballot_promise: SECRET_BALLOT_PROMISE } : {}),
+        }])),
         expires_seconds: seconds(m.decide.expiresMs),
       },
       veto: Object.fromEntries(Object.entries(m.roles).flatMap(([key, def]) => (def.veto ? [[key, def.veto]] : []))),
@@ -588,12 +591,35 @@ export async function decisionMembers(
 }
 
 /**
+ * What a secret ballot promises and the limits beside it (secret ballot spec, "What the promise covers"), word for
+ * word. The server writes it, never the creator, and the consent preview and the docs carry it as one text.
+ */
+export const SECRET_BALLOT_PROMISE = [
+  "P1. No member, and no one holding a public room's link, ever sees another seat's choice, or which seat cast which vote.",
+  "P2. No voter can read back their own choice. A voter can show a coercer that they voted, never how.",
+  "P3. After close, no Bellman storage holds a choice, except what point-in-time recovery can restore for about 30 days.",
+  "L1. The operator can read choices while a decision is open, because the server needs them to tally and to apply revisions.",
+  "L2. Point-in-time recovery can restore a choice for about 30 days after close.",
+  "L3. A vote relayed by an agent is seen by that agent's model provider and stays in the agent's transcript and the client's history. Bellman cannot erase those copies.",
+  "L4. Who voted is revealed at close.",
+  "L5. Unanimous results and small electorates reveal choices. No tally can avoid that.",
+  "L6. A member who knows when someone was active, or who sees a seat's presence change, can match it to a change in the live count.",
+  "L7. A removal that closes a decision at once shows that the removed voter had not voted.",
+].join("\n");
+
+/**
  * A decision as a member is shown it, by `bellman_decide read` and `GET /rooms/:id/decisions` alike (#411): its
  * peer-authored parts wrapped as untrusted, each account as its alias, never the upstream id. `full` adds the
  * electorate, each seat with `voted` (its account has a binding vote that counts), and the votes, binding in `votes`
  * and advisory in `advisory_votes`, since an advisory vote is shown and never counted.
+ *
+ * A secret ballot lists no votes. While it is open, `voted` is on the reader's own rows alone, with `voted` the
+ * store's answer for the reader's account (`votedOn`); once closed, every row's comes from the closing event. `reader`
+ * is the caller's user id, null for a read with no account (the admin route).
  */
-export function decisionShown(v: DecisionView, members: readonly Member[], full: boolean) {
+export function decisionShown(
+  v: DecisionView, members: readonly Member[], full: boolean, reader: string | null = null, voted: boolean | null = null,
+) {
   const { payload: d } = v;
   const label = (m: string) => members.find((x) => x.memberId === m)?.label ?? null;
   const alias = accountAliases(d.accounts);
@@ -603,12 +629,23 @@ export function decisionShown(v: DecisionView, members: readonly Member[], full:
   const latest = new Map(v.ballots.filter((b) => b.vote.capacity === "binding" && d.electorate.includes(b.memberId))
     .map((b) => [d.accounts[b.memberId], b] as const));
   const bound = new Set([...latest].filter(([, b]) => counts(b)).map(([account]) => account));
-  const vote = (b: DecisionView["ballots"][number]) => ({
-    cursor: b.cursor, member_id: b.memberId, label: label(b.memberId), account: alias[b.memberId] ?? null,
-    choice: b.vote.choice, capacity: b.vote.capacity, via: b.vote.via, human_approved: b.vote.human_approved,
-    ...(v.voided.includes(b.cursor) ? { voided: true } : {}),
-    ...(b.vote.reason !== undefined ? { reason: untrusted(by(b.memberId), b.vote.reason) } : {}),
-  });
+  const secret = isSecret(d);
+  const closedVoted = (v.closed?.payload as DecisionClosed | undefined)?.voted ?? [];
+  const votedOf = (m: string): { voted?: boolean } => {
+    if (!secret) return { voted: bound.has(d.accounts[m]) };
+    if (v.closed !== null) return { voted: closedVoted.includes(m) };
+    return reader !== null && voted !== null && d.accounts[m] === reader ? { voted } : {};
+  };
+  // An open ballot's vote: a secret ballot's carry no choice and are never listed (secret ballot spec).
+  const vote = (b: DecisionView["ballots"][number]) => {
+    const cast = b.vote as DecisionVote;
+    return {
+      cursor: b.cursor, member_id: b.memberId, label: label(b.memberId), account: alias[b.memberId] ?? null,
+      choice: cast.choice, capacity: cast.capacity, via: cast.via, human_approved: cast.human_approved,
+      ...(v.voided.includes(b.cursor) ? { voided: true } : {}),
+      ...(cast.reason !== undefined ? { reason: untrusted(by(b.memberId), cast.reason) } : {}),
+    };
+  };
   return {
     decision: v.cursor,
     state: v.state,
@@ -623,12 +660,12 @@ export function decisionShown(v: DecisionView, members: readonly Member[], full:
     tally: v.tally,
     ...(full ? {
       electorate: d.electorate.map((m) => ({
-        member_id: m, label: label(m), account: alias[m], voted: bound.has(d.accounts[m]),
+        member_id: m, label: label(m), account: alias[m], ...votedOf(m),
         ...(d.veto?.includes(m) ? { veto: true } : {}),
         ...(v.removed.includes(m) ? { unreachable: true } : {}),
       })),
-      votes: v.ballots.filter((b) => b.vote.capacity === "binding").map(vote),
-      advisory_votes: v.ballots.filter((b) => b.vote.capacity === "advisory").map(vote),
+      votes: secret ? [] : v.ballots.filter((b) => b.vote.capacity === "binding").map(vote),
+      advisory_votes: secret ? [] : v.ballots.filter((b) => b.vote.capacity === "advisory").map(vote),
     } : {}),
   };
 }

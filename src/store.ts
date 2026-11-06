@@ -8,6 +8,7 @@ import { DEFAULT_POLICY } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
+import { isHomeRoomId } from "./home.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -34,7 +35,8 @@ import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, readWindow, type Pla
 import { decideApproval } from "./proposal.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  dueToExpire, noteDecisions, openedPayload, decisionPageOf, removalEvents,
+  dueToExpire, isSecret, noteDecisions, openedPayload, decisionPageOf, removalEvents,
+  type BallotBook, type Choice, type DecisionOpened, type SecretVote,
   type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type Electorate, type DecisionState, type DecisionView, type DecisionVote, type FailReason,
   type VoteDecision, type VoteInput,
 } from "./decision.js";
@@ -426,7 +428,7 @@ export interface DepartedMembers {
 }
 
 /** What the abandonment rule reads: a session, or a stored one. */
-export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
+export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members" | "kind">;
 
 /**
  * When this room becomes abandoned, or null if the question does not apply: a
@@ -438,7 +440,8 @@ export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
  * 90 days after one of them was last there, however recently its host spoke.
  */
 export function abandonedAt(s: RoomRoster): number | null {
-  if (s.closed || s.frozenAt !== null) return null;
+  // A home room (ADR 0047) has one member who never sits in it: it ends only by hard delete, never by abandonment.
+  if (s.closed || s.frozenAt !== null || s.kind === "home") return null;
   const active = s.members.filter(isActivePerson);
   if (active.length === 0) return null;
   return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
@@ -959,7 +962,11 @@ export type VoteWrite =
   | { outcome: "quota"; limit: number }
   | { outcome: "unknown" }
   | { outcome: "conflict" }
-  | { outcome: "frozen" };
+  | { outcome: "frozen" }
+  // A secret ballot's retry of a key this decision's vote used, whatever its choice: one answer, so a retry cannot
+  // tell the stored choice apart (secret ballot spec). An advisory vote on a secret ballot, which takes none.
+  | { outcome: "recorded" }
+  | { outcome: "advisory_secret" };
 
 /** What `closeDecision` did. `closed` refuses a decision a closing event already ended; `not_due` an expiry before the deadline. */
 export type DecisionClose =
@@ -985,10 +992,17 @@ export function electorateOf(manifest: RoomManifest, members: readonly Member[],
 }
 
 /** `applyVote`'s refusal as `castVote` reports it. */
+/** A view as a store hands it out: never with an open secret ballot's book, which holds every account's choice. */
+export function withoutBook(v: DecisionView): DecisionView {
+  const { book: _book, ...rest } = v;
+  return rest;
+}
+
 export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
   if (d.kind === "stale") return { outcome: "stale", hash: d.hash };
   if (d.kind === "closed") return { outcome: "closed", state: d.state };
   if (d.kind === "quota") return { outcome: "quota", limit: d.limit };
+  if (d.kind === "advisory_secret") return { outcome: "advisory_secret" };
   return { outcome: "not_electorate" };
 }
 
@@ -1257,8 +1271,11 @@ export function resolveFsPath(
 }
 
 /** What `decideFsWrite` hands a store to write: the row, the history revisions to delete, the new total, the event. */
+/** A refused write: every `FsAppend` but the two that wrote something. */
+export type FsRefusal = Exclude<FsAppend, { outcome: "ok" | "replayed" }>;
+
 export type FsDecision =
-  | { ok: false; result: FsAppend }
+  | { ok: false; result: FsRefusal }
   | {
     ok: true; row: FsRow; dropRevs: number[]; event: EventBody; stamp: Record<string, unknown>;
     /** The record's totals after the write: the room's files, and each account's memory by id. */
@@ -1277,6 +1294,7 @@ export function decideFsWrite(
   current: FsRow | null,
   history: readonly FsRow[],
   at: number,
+  plain = false,
 ): FsDecision {
   let input: FsPlanInput;
   if (w.write.op === "restore") {
@@ -1302,8 +1320,9 @@ export function decideFsWrite(
   };
   const dropped = plan.deleted ? history : history.slice(FS_HISTORY - 1);
   const delta = (plan.deleted ? 0 : size) - dropped.reduce((n, r) => n + r.size, 0);
+  // In a home room (ADR 0047) every path is the account's, so `/members/` is a plain directory there: `plain` says so.
   const ns = namespaceOf(path);
-  const memoryId = ns.ns === "memory" ? ns.memoryId : null;
+  const memoryId = !plain && ns.ns === "memory" ? ns.memoryId : null;
   const charge = memoryId === null
     ? decideFsCharge(s, false, delta)
     : decideFsCharge({ frozenAt: s.frozenAt, fsBytes: s.fsMemoryBytes?.[memoryId] ?? 0, fsBytesCeiling: memoryCeilingOf(s.fsBytesCeiling) }, false, delta);
@@ -1335,17 +1354,34 @@ export function decideFsWrite(
 export const fsPrint = (w: FsWrite): string =>
   fingerprint({ type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null, payload: { path: w.path, write: w.write } });
 
-/** Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule. */
-export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string): FsPage {
+/**
+ * Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule.
+ * `keyOf` is the order and the cursor: the path by default; `newestKey` for a listing newest first (ADR 0047).
+ */
+export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string, keyOf: (r: FsEntry) => string = (r) => r.path): FsPage {
   const entries: FsEntry[] = [];
-  for (const r of rows) {
-    if (cursor !== undefined && r.path <= cursor) continue;
+  for (const r of [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))) {
+    if (cursor !== undefined && keyOf(r) <= cursor) continue;
     if (r.deleted || !keep(r)) continue;
-    if (entries.length === cap) return { entries, next: entries[cap - 1].path };
+    if (entries.length === cap) return { entries, next: keyOf(entries[cap - 1]) };
     entries.push(fsEntryOf(r));
   }
   return { entries, next: null };
 }
+
+/** The sort key that puts the newest row first: the time inverted and padded, then the path, so the order is total. */
+export const newestKey = (r: Pick<FsEntry, "at" | "path">): string =>
+  `${String(Number.MAX_SAFE_INTEGER - r.at).padStart(16, "0")}:${r.path}`;
+
+/** What a keyed home write (ADR 0047) is remembered by: no event, so the path and revision are stored with the print. */
+export interface HomeKeyRecord { print: string; path: string; rev: number }
+export const homeKey = (memberId: string, key: string): string => `hk:${encodeURIComponent(memberId)}:${key}`;
+
+/**
+ * What `writeHome` answered: `appendFs`'s outcomes without an event. `forbidden` is a `/apps/` path, which a home
+ * room cannot run.
+ */
+export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal;
 
 /** Whether `path` is `prefix` or under it, as a directory; `/` holds everything. */
 export const underPrefix = (path: string, prefix: string): boolean =>
@@ -2277,6 +2313,11 @@ export interface BellmanStore {
    */
   decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage>;
   /**
+   * Which of `decisions` are open secret ballots `userId`'s account has voted in (secret ballot spec): a secret vote
+   * names no seat, so this is the only way to ask. It answers for the one account it is given, and for no open ballot.
+   */
+  votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]>;
+  /**
    * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
    * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
    * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
@@ -2470,8 +2511,11 @@ export interface BellmanStore {
    * for a deleted file.
    */
   readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null>;
-  /** Live files at `prefix` or under it, in path order, `FS_LIST_PAGE` a page after `cursor` (a path). */
-  listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage>;
+  /**
+   * Live files at `prefix` or under it, in path order, `FS_LIST_PAGE` a page after `cursor` (a path); with `newest`,
+   * newest first and the cursor is `newestKey`'s.
+   */
+  listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[]; newest?: boolean }): Promise<FsPage>;
   /** A path's kept revisions, newest first, at most `FS_HISTORY`. */
   fsHistory(sessionId: string, path: string): Promise<FsRow[]>;
   /** Live files whose path holds every word of `query`, case-insensitive, at most `FS_FIND_MAX`, in path order. */
@@ -2483,6 +2527,14 @@ export interface BellmanStore {
    * stamped with the resolved path, revision, size and content hash.
    */
   appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend>;
+  /**
+   * One home memory write (ADR 0047), in one transaction: the room `home` describes is created when `id` holds
+   * none, the key is checked (`homeKey`), `planWrite` runs against the row read there with no memory rule and
+   * `ceiling` as the room's, and the `fs:` and `fsh:` rows land. No event, no audit entry, no index row: a home room
+   * has one member and is never listed. `getSession(id)` answers undefined for a home id, so every room path refuses
+   * it; the reads (`readFs`, `listFs`, `fsHistory`) answer it as any room.
+   */
+  writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */
@@ -2883,12 +2935,19 @@ export class MemoryStore implements BellmanStore {
    * the members in the room now, and the member reads reach the rest.
    */
   private sessions = new Map<string, Session>();
+  /**
+   * Each room's open secret ballots (secret ballot spec): decision → account → its current choice, how many votes it
+   * has cast, and the idempotency keys they used. The only place a secret choice is kept; every close deletes it.
+   */
+  private ballots = new Map<string, Map<number, Map<string, { choice: Choice; n: number; iks: string[] }>>>();
   /** Governed config (#414): room → name → revisions, newest first, at most CONFIG_HISTORY. */
   private configs = new Map<string, Map<ConfigName, ConfigRow[]>>();
   /** Room files (ADR 0046): per room, per path, the current row (a tombstone included) and the kept revisions, newest first. */
   private files = new Map<string, Map<string, { current: FsRow; history: FsRow[] }>>();
   /** Memory ids per room, by account. */
   private memoryIdRows = new Map<string, Map<string, string>>();
+  /** Keyed home writes (ADR 0047), per home room: no event to point at, so the path and revision are kept. */
+  private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3082,7 +3141,8 @@ export class MemoryStore implements BellmanStore {
 
   async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
-    if (!s) return undefined;
+    // A home room (ADR 0047) is not a room: no route, tool or socket reads it as one.
+    if (!s || isHomeRoomId(id)) return undefined;
     this.closeIfAbandoned(s, Date.now());
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
@@ -3318,7 +3378,7 @@ export class MemoryStore implements BellmanStore {
     }
     // The seat's votes on every decision still unclosed, voided after the member and the door (ADR 0040, decision 12).
     const voided = leaving
-      ? removalEvents(decisionsOf(s.events, req.now).values(), memberId, req.event).map((b) => this.appendNow(s, b))
+      ? removalEvents(decisionsOf(s.events, req.now, this.book(s)).values(), memberId, req.event).map((b) => this.appendNow(s, b))
       : [];
     // Last, so a call that throws above leaves no ban behind.
     if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
@@ -3330,8 +3390,9 @@ export class MemoryStore implements BellmanStore {
     // who already left is the eviction's row all the same, and a repeat writes none.
     this.recordAudit([
       ...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : []),
-      ...decisionAudit(req.audit, voided, decisionsOf(s.events, req.now)),
+      ...decisionAudit(req.audit, voided, decisionsOf(s.events, req.now, this.book(s)), this.secretTemplate(s, req.now)),
     ].filter((e) => e.orgId));
+    this.eraseClosed(s, voided);
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
   }
@@ -3872,8 +3933,39 @@ export class MemoryStore implements BellmanStore {
     return row === undefined ? null : detach(row);
   }
 
-  async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
-    return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor));
+  async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
+    return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined));
+  }
+
+  async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    // Synchronous from the key check to the last row, as appendFs.
+    const storageKey = w.key === null ? null : homeKey(w.memberId, w.key);
+    const print = fsPrint(w);
+    const record = storageKey === null ? undefined : this.homeKeys.get(id)?.get(storageKey);
+    if (record) return record.print === print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+    let s = this.sessions.get(id);
+    if (!s) {
+      // Created by the first write, and indexed nowhere: not by creator, member, org or the operator's room table.
+      const { members, briefs } = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+      s = detach({ ...home, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });
+      this.keepBriefs(id, briefs);
+      this.sessions.set(id, s);
+    }
+    const files = this.files.get(id) ?? new Map<string, { current: FsRow; history: FsRow[] }>();
+    const f = files.get(w.path);
+    const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, detach(w), w.path, f?.current ?? null, f?.history ?? [], Date.now(), true);
+    if (!decided.ok) return decided.result;
+    const kept = f?.history ?? [];
+    files.set(w.path, { current: decided.row, history: decided.row.deleted ? [] : [decided.row, ...kept.filter((r) => !decided.dropRevs.includes(r.rev))] });
+    this.files.set(id, files);
+    (s as { fsBytes?: number }).fsBytes = decided.fsBytes;
+    if (storageKey !== null) {
+      const map = this.homeKeys.get(id) ?? new Map<string, HomeKeyRecord>();
+      map.set(storageKey, { print, path: w.path, rev: decided.row.rev });
+      this.homeKeys.set(id, map);
+    }
+    return { outcome: "ok", path: w.path, rev: decided.row.rev };
   }
 
   async fsHistory(sessionId: string, path: string): Promise<FsRow[]> {
@@ -4277,27 +4369,50 @@ export class MemoryStore implements BellmanStore {
    * event has its cursor. Read in the caller's synchronous stretch, as `approveProposal` reads its key.
    */
   private decisionKey(s: Session, e: EventBody, key: string | null):
-    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" } }
-    | { done: null; remember: (cursor: number) => void } {
-    if (key === null) return { done: null, remember: () => {} };
+    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" }; recorded: SessionEvent | undefined }
+    | { done: null; remember: (cursor: number) => void; storageKey: string | null } {
+    if (key === null) return { done: null, remember: () => {}, storageKey: null };
     const storageKey = idempotencyKey(e.fromMemberId, key);
     const print = fingerprint(e);
     const record = this.keys.get(s.id)?.get(storageKey);
     if (record) {
-      if (record.print !== print) return { done: { outcome: "conflict" } };
       const original = s.events.find((ev) => ev.cursor === record.cursor);
+      if (record.print !== print) return { done: { outcome: "conflict" }, recorded: original };
       if (!original) throw new Error(`Idempotency record for ${s.id} names missing cursor ${record.cursor}`);
-      return { done: { outcome: "replayed", event: detach(original) } };
+      return { done: { outcome: "replayed", event: detach(original) }, recorded: original };
     }
     return {
       done: null,
       remember: (cursor) => this.keys.set(s.id, (this.keys.get(s.id) ?? new Map()).set(storageKey, { cursor, print })),
+      storageKey,
     };
+  }
+
+  /** The room's open secret ballots as a fold reads them: decision → account → choice. */
+  private book(s: Session): BallotBook {
+    return new Map([...(this.ballots.get(s.id) ?? [])].map(([d, rows]) => [d, new Map([...rows].map(([a, r]) => [a, r.choice]))]));
+  }
+
+  /** The rows a secret ballot's close is filed under: the system, for the room's parties, never the closing call's actor. */
+  private secretTemplate(s: Session, at: number): AuditEntry[] {
+    return auditRows(rosterParties(s), { at, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR);
+  }
+
+  /** Last in every write that closes: each closed secret ballot's rows and the idempotency records its votes used. */
+  private eraseClosed(s: Session, events: readonly SessionEvent[]): void {
+    const rooms = this.ballots.get(s.id);
+    if (!rooms) return;
+    for (const e of events) {
+      if (e.type !== "decision_closed") continue;
+      const decision = (e.payload as { decision: number }).decision;
+      for (const row of rooms.get(decision)?.values() ?? []) for (const ik of row.iks) this.keys.get(s.id)?.delete(ik);
+      rooms.delete(decision);
+    }
   }
 
   /** The decision opened at `cursor` in `s`, read from its own cursor on. */
   private decisionIn(s: Session, cursor: number, now: number): DecisionView | undefined {
-    return decisionsOf(s.events.filter((ev) => ev.cursor >= cursor), now).get(cursor);
+    return decisionsOf(s.events.filter((ev) => ev.cursor >= cursor), now, this.book(s)).get(cursor);
   }
 
   // Each decision write below is synchronous from its first read to its last write, as approveProposal's is.
@@ -4308,7 +4423,10 @@ export class MemoryStore implements BellmanStore {
    */
   private decisionWrites(s: Session, bodies: readonly EventBody[], at: number, audit: readonly AuditEntry[]): SessionEvent[] {
     const written = bodies.map((b) => this.appendNow(s, b, at));
-    if (written.length > 0) this.recordAudit(decisionAudit(audit, written, decisionsOf(s.events, at)).filter((r) => r.orgId));
+    if (written.length > 0) {
+      this.recordAudit(decisionAudit(audit, written, decisionsOf(s.events, at, this.book(s)), this.secretTemplate(s, at)).filter((r) => r.orgId));
+    }
+    this.eraseClosed(s, written);
     return written;
   }
 
@@ -4341,19 +4459,43 @@ export class MemoryStore implements BellmanStore {
   async castVote(sessionId: string, e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    const k = this.decisionKey(s, e, key);
-    if (k.done !== null) return k.done;
-    if (s.frozenAt !== null) return { outcome: "frozen" };
     const input = e.payload as VoteInput;
+    const opening = s.events.find((ev) => ev.cursor === input.decision && ev.type === "decision_opened");
+    const secret = opening !== undefined && isSecret(opening.payload as DecisionOpened);
+    const k = this.decisionKey(s, e, key);
+    if (k.done !== null) {
+      // A secret ballot gives one answer to any retry of a key its own vote used, so the retry tells nothing apart.
+      const named = (k.recorded?.payload as { decision?: number } | undefined)?.decision;
+      if (secret && named === input.decision) return { outcome: "recorded" };
+      return k.done;
+    }
+    if (s.frozenAt !== null) return { outcome: "frozen" };
     const at = Date.now();
     const view = this.decisionIn(s, input.decision, at);
     if (view === undefined) return { outcome: "unknown" };
     const vote: DecisionVote = { ...input, capacity: capacityOfVote(input) };
-    const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote);
+    const account = view.payload.accounts[e.fromMemberId];
+    const row = account === undefined ? undefined : this.ballots.get(s.id)?.get(view.cursor)?.get(account);
+    const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote, row?.n ?? 0);
     if (d.kind !== "record") return voteRefusal(d);
-    const event = this.appendNow(s, { ...e, payload: vote }, at);
-    const [closed = null] = d.close === null ? [] : this.decisionWrites(s, [closingEvent(this.decisionIn(s, view.cursor, at)!, d.close)], at, audit);
+    // A secret vote is logged as the system with no choice; the choice goes into the account's ballot row.
+    const event = secret
+      ? this.appendNow(s, {
+        ...e, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+        payload: {
+          decision: input.decision, hash: input.hash, via: input.via, human_approved: input.human_approved, capacity: vote.capacity, ballot: "secret",
+        } satisfies SecretVote,
+      }, at)
+      : this.appendNow(s, { ...e, payload: vote }, at);
+    if (secret) {
+      const room = this.ballots.get(s.id) ?? new Map<number, Map<string, { choice: Choice; n: number; iks: string[] }>>();
+      const rows = room.get(view.cursor) ?? new Map<string, { choice: Choice; n: number; iks: string[] }>();
+      const iks = k.storageKey === null ? row?.iks ?? [] : [...(row?.iks ?? []), k.storageKey];
+      rows.set(account!, { choice: vote.choice, n: (row?.n ?? 0) + 1, iks });
+      this.ballots.set(s.id, room.set(view.cursor, rows));
+    }
     k.remember(event.cursor);
+    const [closed = null] = d.close === null ? [] : this.decisionWrites(s, [closingEvent(this.decisionIn(s, view.cursor, at)!, d.close)], at, audit);
     return { outcome: "appended", event: detach(event), closed: closed === null ? null : detach(closed) };
   }
 
@@ -4379,16 +4521,22 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const view = this.decisionIn(s, cursor, now);
-    return view === undefined ? null : detach(view);
+    return view === undefined ? null : withoutBook(detach(view));
+  }
+
+  async votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]> {
+    const rooms = this.ballots.get(sessionId);
+    return decisions.filter((d) => rooms?.get(d)?.has(userId) === true);
   }
 
   async decisions(sessionId: string, ask: DecisionPageAsk, now: number): Promise<DecisionPage> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
-    const views = decisionsOf(s.events.filter((e) => ask.upTo === undefined || e.cursor <= ask.upTo), now);
+    const views = decisionsOf(s.events.filter((e) => ask.upTo === undefined || e.cursor <= ask.upTo), now, this.book(s));
     const { page, next } = decisionPageOf([...views.keys()].reverse(), ask);
     const open = ask.upTo === undefined ? [...views.values()].filter((v) => v.state === "open").reverse() : [];
-    return detach({ open, decisions: page.map((c) => views.get(c)!), next });
+    const read = detach({ open, decisions: page.map((c) => views.get(c)!), next });
+    return { ...read, open: read.open.map(withoutBook), decisions: read.decisions.map(withoutBook) };
   }
 
   async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
@@ -5641,6 +5789,7 @@ export class MemoryStore implements BellmanStore {
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
+    this.ballots.delete(s.id);
     this.roomBanned.delete(s.id);
     this.sends.delete(s.id);
     this.surfaces.delete(s.id);

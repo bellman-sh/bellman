@@ -17,10 +17,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/store.js";
+import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
 import {
-  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type VoteInput,
+  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput,
 } from "../../src/decision.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
@@ -31,7 +32,7 @@ import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/frames.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
-import type { AuditEntry, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditEntry, Identity, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
 import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
@@ -113,6 +114,12 @@ export interface StoreContractHarness {
    * of one goes on to the user it names, so a row left on a key no user names any longer shows only here.
    */
   scimIndexRows: () => Promise<string[]>;
+  /**
+   * Every row a room's store holds, key and value, as the Durable Objects store names them: `e:<cursor>` events,
+   * `bv:<decision>:<account>` ballot rows, `ik:<member>:<key>` idempotency records (secret ballot spec). It is how a case
+   * proves a closed secret ballot left no choice anywhere, which `BellmanStore` cannot show.
+   */
+  roomRows: (sessionId: string) => Promise<[string, unknown][]>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -3672,7 +3679,7 @@ export function describeStoreContract(
         await store.castVote(id, ballot(event.cursor, { choice: "reject" }), null);
         await store.castVote(id, ballot(event.cursor, { choice: "approve" }), null);
         const view = (await store.decision(id, event.cursor, event.at))!;
-        expect(view.ballots.map((b) => b.vote.choice)).toEqual(["reject", "approve"]);
+        expect(view.ballots.map((b) => (b.vote as DecisionVote).choice)).toEqual(["reject", "approve"]);
         expect(view.tally).toMatchObject({ approve: 1, reject: 0 });
       });
 
@@ -3972,6 +3979,127 @@ export function describeStoreContract(
         });
         expect(JSON.stringify(rows), "never the proposal").not.toContain("example.com");
         expect(await store.verifyAudit("org_codenerd")).toMatchObject({ ok: true, checked: 5 });
+      });
+
+      describe("secret ballots (release 1)", () => {
+        const SECRET = { rule: "majority", ballot: "secret" };
+        const secretDraft = (over: Partial<DecisionDraft> = {}) => draft({ rule: SECRET, ...over });
+        const secretBallot = (decision: number, choice: "approve" | "reject" | "abstain", by = ANN, d = secretDraft()) =>
+          ballot(decision, { hash: decisionHash(d), choice }, by);
+        const ANN2 = member({ memberId: "m_ann2", userId: "u_ann", label: "ann2@codenerd", roomRole: "peer_a" });
+        const voteOf = (e: unknown) => e as { type: string; fromMemberId: string; payload: Record<string, unknown> };
+
+        /** What a closed secret decision must leave: no ballot row, no key of its votes, and no event naming a voter or a choice. */
+        const erased = async (id: string, decision: number, keys: string[]) => {
+          const rows = await harness.roomRows(id);
+          expect(rows.map(([k]) => k).filter((k) => k.startsWith(`bv:${decision}:`)), "no ballot row").toEqual([]);
+          expect(rows.map(([k]) => k).filter((k) => keys.some((key) => k.endsWith(`:${key}`))), "no idempotency record").toEqual([]);
+          for (const [, v] of rows) {
+            const e = voteOf(v);
+            if (e?.type !== "decision_vote") continue;
+            expect(e.payload, "no choice in a stored vote").not.toHaveProperty("choice");
+            expect(e.fromMemberId, "no voter on a stored vote").toBe("system");
+          }
+          const closes = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "decision_closed" && a.detail.decision === decision);
+          expect(closes).toHaveLength(1);
+          expect(closes[0]).toMatchObject({ actorUserId: "system", actorLabel: null, actorOrgId: null });
+          expect(closes[0]!.detail).not.toHaveProperty("votes");
+        };
+
+        it("close path 1: a vote that settles the rule erases every choice, and the close lists the seats that voted", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann")).toMatchObject({ outcome: "appended", closed: null });
+          const settled = await store.castVote(id, secretBallot(event.cursor, "approve", BEN), "k-ben");
+          expect(settled).toMatchObject({ outcome: "appended", closed: { payload: { state: "passed", voted: ["m_ann", "m_ben"], tally: { approve: 2, turnout: 2 } } } });
+          await erased(id, event.cursor, ["k-ann", "k-ben"]);
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject"), "k-ann"), "a retry after the close").toEqual({ outcome: "closed", state: "passed" });
+        });
+
+        it("close path 2: a supersession erases the old decision's choices", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann");
+          await open(id, secretDraft({ key: "other", supersedes: event.cursor }));
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("close path 3: an open that finds a secret decision overdue erases it", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "approve"), "k-ann");
+          vi.setSystemTime((event.payload as { expires_at: number }).expires_at + 1);
+          await open(id, secretDraft({ key: "later" }));
+          expect((await store.decision(id, event.cursor, Date.now()))!.state).toBe("expired");
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("close path 5: a removal that settles a secret decision erases it, and keeps the removed seat's vote", async () => {
+          const id = await room({ members: [ANN, BEN, DAN], manifest: { ...voting, mode: "swarm" } });
+          const d = secretDraft({ rule: { ...SECRET, quorum: 100 } });
+          const { event } = await open(id, d);
+          await store.castVote(id, secretBallot(event.cursor, "approve", BEN, d), "k-ben");
+          const before = await count(id);
+          expect(await store.removeMember(id, "m_ben", evict())).toMatchObject({ removed: true });
+          expect((await since(id, before)).map((e) => [e.type, (e.payload as Record<string, unknown>).voided ?? null])).toEqual([
+            ["member_evicted", null], ["decision_voter_removed", []],
+          ]);
+          expect((await store.decision(id, event.cursor, Date.now()))!.tally).toMatchObject({ approve: 1, unreachable: 1 });
+          expect(await store.removeMember(id, "m_dan", evict())).toMatchObject({ removed: true });
+          expect((await store.decision(id, event.cursor, Date.now()))).toMatchObject({ state: "failed", reason: "no_quorum" });
+          await erased(id, event.cursor, ["k-ben"]);
+        });
+
+        it("close path 6: a direct closeDecision erases it", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          await store.castVote(id, secretBallot(event.cursor, "abstain"), "k-ann");
+          const deadline = (event.payload as { expires_at: number }).expires_at;
+          expect(await store.closeDecision(id, event.cursor, { state: "expired" }, deadline + 1, [rowFor("decision")]))
+            .toMatchObject({ outcome: "appended", event: { payload: { voted: ["m_ann"] } } });
+          await erased(id, event.cursor, ["k-ann"]);
+        });
+
+        it("answers a retry while open with recorded, whatever its choice, and a key from another decision with conflict", async () => {
+          const id = await room();
+          const other = (await open(id)).event;
+          await store.castVote(id, ballot(other.cursor), "k-used");
+          const { event } = await open(id, secretDraft({ key: "secret" }));
+          const d = secretDraft({ key: "secret" });
+          await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-ann");
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-ann")).toEqual({ outcome: "recorded" });
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject", ANN, d), "k-ann")).toEqual({ outcome: "recorded" });
+          expect(await store.castVote(id, secretBallot(event.cursor, "approve", ANN, d), "k-used")).toEqual({ outcome: "conflict" });
+        });
+
+        it("counts one account's two seats once, under one cap of six votes", async () => {
+          const id = await room({ members: [ANN, ANN2, BEN] });
+          const { event } = await open(id, secretDraft());
+          for (let i = 0; i < 6; i++) {
+            const by = i % 2 === 0 ? ANN : ANN2;
+            expect(await store.castVote(id, secretBallot(event.cursor, i % 2 === 0 ? "approve" : "abstain", by), null), `vote ${i + 1}`).toMatchObject({ outcome: "appended" });
+          }
+          expect(await store.castVote(id, secretBallot(event.cursor, "reject", ANN2), null)).toEqual({ outcome: "quota", limit: 5 });
+          expect((await store.decision(id, event.cursor, Date.now()))!.tally).toMatchObject({ abstain: 1, turnout: 1 });
+        });
+
+        it("shows a live tally with no ballot book, answers votedOn for one account only, and leaves an open ballot as it was", async () => {
+          const id = await room();
+          const { event } = await open(id, secretDraft());
+          const plain = (await open(id, draft({ key: "plain" }))).event;
+          await store.castVote(id, secretBallot(event.cursor, "abstain"), null);
+          await store.castVote(id, ballot(plain.cursor, { hash: decisionHash(draft({ key: "plain" })) }), null);
+          const live = (await store.decision(id, event.cursor, Date.now()))!;
+          expect(live.tally).toMatchObject({ abstain: 1, turnout: 1 });
+          expect(live).not.toHaveProperty("book");
+          expect((await store.decisions(id, { limit: 10 }, Date.now())).open.every((v) => !("book" in v))).toBe(true);
+          expect(await store.votedOn(id, "u_ann", [event.cursor, plain.cursor])).toEqual([event.cursor]);
+          expect(await store.votedOn(id, "u_ben", [event.cursor])).toEqual([]);
+          const plainVote = (await store.eventsAfter(id, 0)).find((e) => e.type === "decision_vote" && (e.payload as { decision: number }).decision === plain.cursor)!;
+          expect(plainVote).toMatchObject({ fromMemberId: "m_ann", payload: { choice: "approve" } });
+          const closed = await store.closeDecision(id, event.cursor, { state: "expired" }, (event.payload as { expires_at: number }).expires_at + 1);
+          expect(closed).toMatchObject({ event: { payload: { tally: live.tally } } });
+        });
       });
     });
 
@@ -4838,6 +4966,59 @@ export function describeStoreContract(
         const mid = (await store.memoryIdOf(id, "u_jesse"))!;
         expect((await store.findFs(id, "hit")).entries).toHaveLength(20);
         expect((await store.findFs(id, "hit", { hide: [mid] })).entries.map((r) => r.path)).toEqual(["/docs/hit0.md", "/docs/hit1.md", "/docs/hit2.md"]);
+      });
+    });
+
+    // ------------------------------------------------ home memory (ADR 0047)
+
+    describe("home memory", () => {
+      const jesse: Identity = { userId: "u_jesse", label: "jesse@codenerd", orgId: "org_codenerd", plan: "team", role: "member" };
+      const id = homeRoomId("u_jesse");
+      const home = () => homeSession(jesse, Date.now());
+      const note = (path: string, write: FsWrite["write"], key: string | null = null): FsWrite =>
+        ({ path, write, memberId: HOME_MEMBER_ID, userId: "u_jesse", label: "jesse@codenerd", key });
+
+      it("creates the home room on the first write, with no event and no listing, and getSession refuses its id", async () => {
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.getSession(id)).toBeUndefined();
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "hello" }), 1024)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        expect(await store.readFs(id, "/a.md")).toMatchObject({ path: "/a.md", rev: 1, content: "hello", writerMemberId: HOME_MEMBER_ID, deleted: false });
+        expect(await store.getSession(id)).toBeUndefined();
+        expect(await store.eventsAfter(id, 0)).toEqual([]);
+        expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual([]);
+        expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+        expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+      });
+
+      it("keeps history, refuses stale and over the ceiling it is handed, treats /members/ as plain and /apps/ as forbidden", async () => {
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v1" }), 1024)).toMatchObject({ outcome: "ok", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v2" }), 1024)).toMatchObject({ outcome: "stale", currentRev: 1, content: "v1" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "v2", baseRev: 1 }), 1024)).toMatchObject({ outcome: "ok", rev: 2 });
+        expect((await store.fsHistory(id, "/a.md")).map((r) => r.rev)).toEqual([2, 1]);
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "x".repeat(1023) }), 1024)).toEqual({ outcome: "over_quota", used: 4, ceiling: 1024 });
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "x".repeat(1023) }), 2048)).toMatchObject({ outcome: "ok" });
+        expect(await store.writeHome(id, home(), note("/members/me/n.md", { op: "write", content: "n" }), 4096)).toMatchObject({ outcome: "ok", path: "/members/me/n.md" });
+        expect(await store.memoryIdOf(id, "u_jesse")).toBeNull();
+        expect(await store.writeHome(id, home(), note("/apps/x/index.html", { op: "write", content: "<p>" }), 4096)).toEqual({ outcome: "forbidden" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "delete", baseRev: 2 }), 4096)).toMatchObject({ outcome: "ok", rev: 3 });
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+      });
+
+      it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "replayed", path: "/a.md", rev: 1 });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "y" }, "k1"), 4096)).toEqual({ outcome: "conflict" });
+        vi.advanceTimersByTime(2);
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "y" }), 4096)).toMatchObject({ outcome: "ok" });
+        vi.advanceTimersByTime(2);
+        expect(await store.writeHome(id, home(), note("/c/d.md", { op: "write", content: "z" }), 4096)).toMatchObject({ outcome: "ok" });
+        expect((await store.listFs(id, "/")).entries.map((r) => r.path)).toEqual(["/a.md", "/b.md", "/c/d.md"]);
+        const newest = await store.listFs(id, "/", { newest: true });
+        expect(newest.entries.map((r) => r.path)).toEqual(["/c/d.md", "/b.md", "/a.md"]);
+        expect(newest.next).toBeNull();
+        expect((await store.listFs(id, "/", { newest: true, cursor: newestKey(newest.entries[0]) })).entries.map((r) => r.path)).toEqual(["/b.md", "/a.md"]);
+        expect((await store.listFs(id, "/c", { newest: true })).entries.map((r) => r.path)).toEqual(["/c/d.md"]);
       });
     });
 

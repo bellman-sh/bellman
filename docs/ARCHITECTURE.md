@@ -621,6 +621,12 @@ transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
 `mi:<userId>` for each account's memory id. One store call, `appendFs`, writes the row, its history, an `fs` event (path,
 revision, size and op, never content) and the audit rows together.
 
+**Home memory (ADR 0047, #524)** is an account's notes in its **home room**, a `SessionDO` with `kind: "home"` and one
+member, holding the same `fs:` and `fsh:` rows plus `lk:` lookup rows. Its id, `qh_` and a hash of the user id, is
+computed by the Worker, so no registry row maps an account to it and none can go missing. It writes no `fs` events, no
+listing or index row names it, and every room route refuses its id. A room's `ns:<userId>` row is an account's notes
+sharing switch. Facts are files under `/facts/`, written only by an approval in the transaction that stores it.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/store.ts<br/>every method async"]
@@ -1094,6 +1100,17 @@ know whose room a wake is for until it reads the room, so with a list set it rea
 it and goes on only for a listed creator; with no list it still returns before the
 read. Plans still apply: a listed user needs a hosted seat in their plan. The Node
 server reads only the switch.
+
+### Secret ballots
+
+A decision kind may be a secret ballot (ADR 0040, decisions 23 to 28). Its votes are written to the log as the
+system with no choice, so nothing that reads events, and nothing that reads storage, ties a vote to a seat. Each
+voting account's choice sits in one `bv:<decision>:<account>` row (a map in `MemoryStore`), which every fold of an
+open secret decision reads as its ballot book and every store read strips before returning. A decision closes in
+one of six ways: a vote settles it, a supersession, an open finding it overdue, the deadline alarm, a removal that
+settles it, or a direct `closeDecision`. Each runs the same erase last in its transaction: the decision's ballot rows
+and the idempotency records their votes used. `votedOn` is how a reader asks whether its own account has voted. The
+operator can read a choice while the decision is open; after close only point-in-time recovery can.
 
 ### The working surface
 
@@ -1741,6 +1758,14 @@ peer only when every seat the account holds grants `read_context` (or, holding n
 it left). The rule is applied in `readableEvent` for `fs` events, from the account's rows (`membersOfUser`), and on
 every file read. The room socket reads as no account and never receives them, and `publicReadEvent` drops every `fs`
 event. Memory ids are opaque, so no path, event or listing carries a user id.
+
+**Room notes are private until their account shares them, and home memory never reaches a peer (ADR 0047).** Since
+ADR 0047 the memory rule also needs the account's notes sharing switch for the room, which is off by default and
+turned on only from a dash session, because an agent reads peer content that could ask it to. `seesMemory` is still the
+one predicate. A home room is read only by its own account's seats, never by a hosted seat (which answers peers with no
+human watching) or an outside caller, and every agent read of it leaves a lookup row the account sees. Home notes go out
+in the untrusted envelope, since an agent may have copied peer text into one. A room fact is written only when a seat
+holding `write_surface` approves a proposal that names its source, and a direct write under `/facts/` is refused.
 
 **Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
 instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token
@@ -2408,7 +2433,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,022** | every request, whether or not you are in a room |
+| Tool definitions | **~11,121** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
@@ -2432,7 +2457,9 @@ decision recorded here, not a side effect of a merge.
 | `bellman_decide` (485), a decision vote in `bellman_send` and `bellman_sync` | +578 | 11,803 | #482 (#405) |
 | Concise output style for every description | −1,463 | 10,340 | #479 (#416) |
 | `govern` verb (`bellman_start`); `room_instructions` in `bellman_connect`/`bellman_confirm`, `room_instructions_rev` and a changed text in `bellman_sync` | +84 | 10,424 | #512 (#414) |
-| `bellman_fs`: room files, memory and the `/.bellman/` view (ADR 0046) | +598 | 11,022 | #430 PR B |
+| Secret ballot release 1: the decide rule's `ballot` field (`bellman_start`, `bellman_connect`) | +20 | 10,444 | (#469) |
+| Secret ballot release 1: `bellman_decide`'s secret-ballot sentence and read list, `bellman_send`'s secret vote answer | +79 | 10,523 | (#469) |
+| `bellman_fs`: room files, memory and the `/.bellman/` view (ADR 0046) | +598 | 11,121 | #430 PR B |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

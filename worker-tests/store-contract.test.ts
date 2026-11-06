@@ -58,6 +58,9 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   scimIndexRows: () =>
     runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), async (_i: RegistryDO, ctx) =>
       [...(await ctx.storage.list({ prefix: "sk:" })).keys()]),
+  // Every row of the room's object, key and value: how a case proves a closed secret ballot left no choice behind.
+  roomRows: (id) =>
+    runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), async (_i: SessionDO, ctx) => [...(await ctx.storage.list()).entries()]),
   // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
   // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
   forgetMemory: () => abortAllDurableObjects(),

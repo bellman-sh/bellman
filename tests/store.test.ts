@@ -25,6 +25,19 @@ describeStoreContract(
     reporterRows: async () => [...(memory as unknown as { filings: Map<string, number[]> }).filings.keys()],
     // The SCIM key index is a private map too, and every read of a row goes on to the user it names.
     scimIndexRows: async () => [...(memory as unknown as { scimByKey: Map<string, unknown> }).scimByKey.keys()].sort(),
+    // A room's rows as the Durable Objects store names them: its events, its ballot rows, its idempotency records.
+    roomRows: async (id) => {
+      const m = memory as unknown as {
+        sessions: Map<string, Session>;
+        ballots: Map<string, Map<number, Map<string, unknown>>>;
+        keys: Map<string, Map<string, unknown>>;
+      };
+      return [
+        ...(m.sessions.get(id)?.events ?? []).map((e): [string, unknown] => [`e:${e.cursor}`, e]),
+        ...[...(m.ballots.get(id) ?? [])].flatMap(([d, rows]) => [...rows].map(([a, r]): [string, unknown] => [`bv:${d}:${a}`, r])),
+        ...[...(m.keys.get(id) ?? [])],
+      ];
+    },
   },
 );
 

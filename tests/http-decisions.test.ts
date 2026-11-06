@@ -7,6 +7,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { DECISION_PAGE, decisionHash, type DecisionDraft } from "../src/decision.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
+import { decisionShown } from "../src/projections.js";
 import { MemoryStore } from "../src/store.js";
 import type { Member } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
@@ -187,5 +188,72 @@ describe("GET /rooms/:id/decisions", () => {
       expect((await call(DEV_KEY.jesse, `/rooms/${ROOM}/decisions${q}`))!.status, q).toBe(400);
     }
     expect((await read(DEV_KEY.jesse, `?limit=${DECISION_PAGE}`)).decisions).toEqual([]);
+  });
+});
+
+describe("decisionShown on a secret ballot (release 1)", () => {
+  const secret = (key = "secret"): DecisionDraft => ({ ...draft(key), rule: { rule: "unanimous", ballot: "secret" } });
+  const openSecret = async () => {
+    const out = await store.openDecision(ROOM, {
+      type: "decision_opened", fromMemberId: JESSE.memberId, fromUserId: JESSE.userId, fromLabel: JESSE.label, payload: secret(), refId: null,
+    }, null);
+    if (out.outcome !== "appended") throw new Error(out.outcome);
+    return out.event.cursor;
+  };
+  const castSecret = (decision: number, by: Member) => store.castVote(ROOM, {
+    type: "decision_vote", fromMemberId: by.memberId, fromUserId: by.userId, fromLabel: by.label, refId: null,
+    payload: { decision, hash: decisionHash(secret()), choice: "approve", via: "action_response", human_approved: true },
+  }, null);
+
+  it("lists no votes, and shows voted only on the reader's own rows while open", async () => {
+    const d = await openSecret();
+    await castSecret(d, JESSE);
+    const view = (await store.decision(ROOM, d, Date.now()))!;
+    const shown = decisionShown(view, [JESSE, PEER], true, JESSE.userId, true);
+    expect(shown).toMatchObject({ votes: [], advisory_votes: [] });
+    expect(shown.electorate).toEqual([
+      expect.objectContaining({ member_id: "m_creator", voted: true }),
+      expect.not.objectContaining({ voted: expect.anything() }),
+    ]);
+    const peers = decisionShown(view, [JESSE, PEER], true, PEER.userId, false);
+    expect(peers.electorate![0]).not.toHaveProperty("voted");
+    expect(peers.electorate![1]).toMatchObject({ member_id: "m_peer", voted: false });
+    expect(decisionShown(view, [JESSE, PEER], true).electorate!.every((row) => !("voted" in row)), "no reader, no voted").toBe(true);
+  });
+
+  it("gives a member who has voted and one who has not different ETags", async () => {
+    const d = await openSecret();
+    await castSecret(d, JESSE);
+    const tag = async (key: string) => (await call(key, `/rooms/${ROOM}/decisions`))!.headers.get("etag");
+    expect(await tag(DEV_KEY.jesse)).not.toBe(await tag(DEV_KEY.peer));
+    const body = await read(DEV_KEY.jesse);
+    expect(body.open[0]!.electorate.find((r) => r.member_id === "m_creator")).toMatchObject({ voted: true });
+    expect(body.open[0]!.electorate.find((r) => r.member_id === "m_peer")).not.toHaveProperty("voted");
+  });
+
+  it("tells a removed voter nothing false about their own vote: a read to the cut carries no voted", async () => {
+    const d = await openSecret();
+    await castSecret(d, PEER);
+    const h = new Harness(store, blobs);
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const out = await jesse.call("bellman_evict", { session_id: ROOM, member_id: "m_peer" });
+    await h.close();
+    expect(out.isError, out.text).toBe(false);
+    const opened = (await store.decision(ROOM, d, Date.now()))!;
+    await store.closeDecision(ROOM, d, { state: "expired" }, opened.payload.expires_at + 1);
+    const body = await read(DEV_KEY.peer);
+    const row = body.decisions.find((v) => v.decision === d)!.electorate.find((r) => r.member_id === "m_peer");
+    expect(row).not.toHaveProperty("voted");
+  });
+
+  it("shows every seat's voted from the closing payload once closed", async () => {
+    const d = await openSecret();
+    await castSecret(d, JESSE);
+    await castSecret(d, PEER);
+    const view = (await store.decision(ROOM, d, Date.now()))!;
+    expect(view.state).toBe("passed");
+    const shown = decisionShown(view, [JESSE, PEER], true, null, null);
+    expect(shown.electorate!.map((row) => [row.member_id, row.voted])).toEqual([["m_creator", true], ["m_peer", true]]);
+    expect(shown.votes).toEqual([]);
   });
 });

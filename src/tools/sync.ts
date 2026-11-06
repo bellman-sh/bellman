@@ -13,7 +13,7 @@ import { publicEvent } from "../public-event.js";
 import { VOICE_NOTE, questionsToAnswer } from "../outside.js";
 import { isTopicRoom } from "../manifest.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../action-state.js";
-import { decisionTtlMs, decisionsAwaiting } from "../decision.js";
+import { decisionTtlMs, decisionsAwaiting, decisionsOf, isSecret } from "../decision.js";
 import { MAX_REQUESTS_PER_SENDER } from "../housekeeping.js";
 
 /**
@@ -288,9 +288,14 @@ removed: true: a creator removed you. You still get the history up to and includ
       //
       // An open decision this seat votes on waits on its human the same way, so it is listed beside the requests,
       // in cursor order, and only to a member still in the room.
+      // A secret ballot's votes name no seat, so whether this account voted on one is the store's answer.
+      const secretOpen = decide && isActiveMember(me)
+        ? [...decisionsOf(visible, Date.now(), "untallied").values()].filter((v) => v.state === "open" && isSecret(v.payload)).map((v) => v.cursor)
+        : [];
+      const secretVoted = new Set(secretOpen.length === 0 ? [] : await s.votedOn(session_id, identity.userId, secretOpen));
       const outstanding = [
         ...outstandingFor(visible, member_id, Date.now(), topic).filter((o) => o.mine || isActiveMember(me)),
-        ...(decide && isActiveMember(me) ? decisionsAwaiting(visible, member_id, Date.now(), MAX_REQUESTS_PER_SENDER) : []),
+        ...(decide && isActiveMember(me) ? decisionsAwaiting(visible, member_id, Date.now(), MAX_REQUESTS_PER_SENDER, secretVoted) : []),
       ].sort((a, b) => a.cursor - b.cursor);
 
       // The surface's cursor, and the surface when it was asked for, capped by

@@ -686,7 +686,8 @@ export type DecisionRuleName = "single" | "majority" | "supermajority" | "unanim
  * `quorum` is a whole percentage of the electorate, null for none; `expiresMs` null takes the room's default.
  */
 export interface DecideConfig {
-  rules: Partial<Record<DecisionKind, { rule: DecisionRuleName; quorum: number | null }>>;
+  /** `ballot` is absent for a manifest that names none, and read as `open` (secret ballot spec). */
+  rules: Partial<Record<DecisionKind, { rule: DecisionRuleName; quorum: number | null; ballot?: "open" | "secret" }>>;
   expiresMs: number | null;
 }
 

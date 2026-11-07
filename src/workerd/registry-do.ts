@@ -1,13 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, NO_ORG, orgIndexKey, orgIndexPrefix, orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys } from "../storage/grant-index.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs.js";
 import { isBanId, oldestFirst, type CreatorBan } from "../bans.js";
 import type { Suspension } from "../suspension.js";
-import { firstSignInFirst, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "../storage/store.js";
-import type { GrantDelete, GrantWrite, HostedSlot, PublicNameEntry } from "../storage/store.js";
+import { firstSignInFirst, type ScimCreate, type ScimUpdate, type GrantDelete, type GrantWrite, type HostedSlot, type PublicNameEntry, type RoomCounts, type RoomFilter, type RoomIndexRow } from "../storage/store.js";
+import { sameEntry } from "../public-names.js";
 import type { AuditEntry, PendingConnect, PlanGrant, SavedPreset, UserRecord, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry } from "../types.js";
-import type { RoomCounts, RoomFilter, RoomIndexRow } from "../storage/store.js";
 import { KEYS_PER_CALL, getRows } from "../storage/member-rows.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "../grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "../storage/outbox.js";

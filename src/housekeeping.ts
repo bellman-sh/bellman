@@ -10,7 +10,7 @@
  * Every rule here is pure: a session in, a verdict out, with the clock handed in as `now`
  * where a rule reads it. The store holds no housekeeping policy, the same split
  * heartbeat.ts has. The books the rules read (`Member.lastSentAt`, `openRequests`,
- * `lastMemberEventAt`) are kept at the write by `noteAppend`, in store.ts, and the record
+ * `lastMemberEventAt`) are kept at the write by `noteAppend`, in members.ts, and the record
  * of what has been raised (`raised`) is the firing's.
  *
  * This module must stay importable by both builds: no `cloudflare:workers`, directly or
@@ -18,10 +18,10 @@
  */
 import type { HousekeepingFinding, HousekeepingPayload, Member } from "./types.js";
 import type { StoredSession } from "./storage/stored-session.js";
-// `isActivePerson` and `isRemovedMember` live in store.ts beside the other member rules, and
-// store.ts applies `noteAppend` inside both stores, so this module imports that one and not
+// `isActivePerson` and `isRemovedMember` live in members.ts beside the other member rules, and
+// both stores apply `noteAppend` from there, so this module imports members.ts and not
 // the reverse. heartbeat.ts is built the same way.
-import { isActivePerson, isRemovedMember } from "./storage/store.js";
+import { isActivePerson, isRemovedMember } from "./members.js";
 
 /** The name of this handler on the room's one alarm, beside the others' (retention.ts, outbox.ts). */
 export const HOUSEKEEP_HANDLER = "housekeep";

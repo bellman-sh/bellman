@@ -1,38 +1,39 @@
-import type { ApprovedBy, ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
-import { DEFAULT_HOME_SETTINGS } from "../types.js";
-import { CONFIG_HISTORY } from "../config.js";
-import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, DEFAULT_HOME_SETTINGS } from "../types.js";
+import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../config.js";
+import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId, type HomeKeyRecord, decideFsWrite, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix } from "../fs.js";
 import { namespaceOf } from "../fs-path.js";
 import { isHomeRoomId } from "../home.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "../orgs.js";
-import { MemoryBlobStore, type BlobStore } from "../blobs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs.js";
+import { MemoryBlobStore, type BlobStore, decideBlobCharge } from "../blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects } from "../retention.js";
-import { type StoredSession } from "./stored-session.js";
-// Type-only, as when MemoryStore lived in store.ts: host.ts, heartbeat.ts and housekeeping.ts import
-// store.ts at runtime, so a value import from there would be a cycle, and `MemoryStore.tick` and
-// `MemoryStore.housekeep` are handed their rules for that reason. From this file it would not be one.
-import type { HostWake } from "../host.js";
+import type { StoredSession } from "./stored-session.js";
+// The host charge rules live in host.ts and are imported here. heartbeat.ts and housekeeping.ts are
+// imported for their types only: `MemoryStore.tick` and `MemoryStore.housekeep` are handed their rules.
+import { type HostWake, decideHostCharge, hostSentEntries } from "../host.js";
 import type { TickStep } from "../heartbeat.js";
 import type { Finding } from "../housekeeping.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "../grant-audit.js";
 import { SINK_BATCH, SINK_DELAY_MS, SWEEP_EVERY_MS, SYSTEM_INTENT, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "../audit-sink.js";
-import { entryView } from "../audit.js";
+import { entryView, SYSTEM_ACTOR, auditRows, facetsOf, pageOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry } from "../audit.js";
 import { randomId } from "../oauth/tokens.js";
 import { NO_ORG, scimKeyIndex, scimNameKey, scimUserKey } from "./grant-index.js";
 import { presetInNewWords } from "../presets.js";
-import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface.js";
-import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../frames.js";
+import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite, asRowWriter, batchEvent, carriedEvent, surfaceBatchPrint, surfaceFactsOf, surfacePrint } from "../surface.js";
+import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage, placeSurfaceBatch, placedEvent, placesAmongRows, windowUnderCut } from "../frames.js";
 import { decideApproval } from "../proposal.js";
-import { applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, dueToExpire, isSecret, noteDecisions, openedPayload, decisionPageOf, removalEvents, type BallotBook, type Choice, type DecisionOpened, type SecretVote, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../decision.js";
-import { isTopicRoom } from "../manifest.js";
-import { decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason, type SeatDay } from "../outside.js";
+import { applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, dueToExpire, isSecret, noteDecisions, openedPayload, decisionPageOf, removalEvents, type BallotBook, type Choice, type DecisionOpened, type SecretVote, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput, electorateOf, voteRefusal, withoutBook } from "../decision.js";
+import { isTopicRoom, capacityOf, isPublic } from "../manifest.js";
+import { decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason, type SeatDay, handOff, newestTaskFirst, taskWithEvent } from "../outside.js";
 import { admitAt, type SendAdmission } from "../send-limit.js";
 import type { Suspension } from "../suspension.js";
 import { REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow, type FiledReport, type NewReport, type Report } from "../reports.js";
-import { SYSTEM_ACTOR, auditRows, facetsOf, pageOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry } from "../audit.js";
-import { ABANDONED_AFTER_MS, type AccountBanRequest, type AppendExtras, type ApprovalWrite, type BellmanStore, type BlobCharge, type ConfigWrite, type ConfigWriteResult, type DecisionClose, type DecisionOpen, type DepartedMembers, type EventBody, type EventWrite, type FsAppend, type FsPage, type FsWrite, type GrantDelete, type GrantWrite, HOST_MEMBER_ID, type HomeAppend, type HomeKeyRecord, type HostAppend, type HostInstructionsSet, type HostedSlot, type MemberPatch, NO_SOCKETS, type ProposalApproval, type PublicNameEntry, type PurgeSchedule, type RemovalOutcome, type RemovalRequest, type RoomCounts, type RoomFilter, type RoomIndexRow, type RoomSummary, type ScimCreate, type ScimUpdate, type SeatOutcome, type SetJoinCode, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type VoteWrite, abandonedAt, asRowWriter, batchEvent, capacityOf, carriedEvent, clearSilence, codeIsLive, configEvent, connectedAmong, creatorOf, creditReport, decideBlobCharge, decideConfigWrite, decideFsWrite, decideHostCharge, departures, electorateOf, firstSignInFirst, fsPrint, handOff, hiddenMemory, homeKey, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isPublic, isReplyToHost, markRemoved, newestKey, newestTaskFirst, noteAppend, pageFs, patchedOrg, pathMatches, placeSurfaceBatch, placedEvent, placesAmongRows, purchasedOrg, resolveFsPath, roomIndexKey, roomIndexRow, roomSummaryOf, rosterParties, sameEntry, scimGrant, seatInOrder, seatVictims, stampSeen, surfaceBatchPrint, surfaceFactsOf, surfacePrint, taskWithEvent, underPrefix, voteRefusal, windowUnderCut, withoutBook } from "./store.js";
+import { ABANDONED_AFTER_MS, abandonedAt, connectedAmong, isAbandoned, stampSeen } from "../presence.js";
+import { type AccountBanRequest, type AppendExtras, type ApprovalWrite, type BellmanStore, type BlobCharge, type ConfigWrite, type ConfigWriteResult, type DecisionClose, type DecisionOpen, type DepartedMembers, type EventBody, type EventWrite, type FsAppend, type FsPage, type FsWrite, type GrantDelete, type GrantWrite, type HomeAppend, type HostAppend, type HostInstructionsSet, type HostedSlot, type MemberPatch, type ProposalApproval, type PublicNameEntry, type PurgeSchedule, type RemovalOutcome, type RemovalRequest, type RoomCounts, type RoomFilter, type RoomIndexRow, type RoomSummary, type ScimCreate, type ScimUpdate, type SeatOutcome, type SetJoinCode, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type VoteWrite, firstSignInFirst, roomIndexKey, roomIndexRow, roomSummaryOf } from "./store.js";
+import { HOST_MEMBER_ID, NO_SOCKETS, clearSilence, creatorOf, creditReport, departures, hostSeated, isActiveMember, isActivePerson, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims } from "../members.js";
+import { codeIsLive } from "../codes.js";
+import { sameEntry } from "../public-names.js";
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -1189,7 +1190,7 @@ export class MemoryStore implements BellmanStore {
 
   /**
    * Apply an append's `extras`, if it asked for any. The roster rules,
-   * `creditReport` and `markRemoved`, live in this module and the surface rule,
+   * `creditReport` and `markRemoved`, live in members.ts and the surface rule,
    * `applySurfaceWrite`, in surface.ts; `SessionDO`'s `extraRows` applies the
    * same functions, so the two stores cannot disagree about when an extra rides
    * an append. The action-request stamp is the one extra with no function to

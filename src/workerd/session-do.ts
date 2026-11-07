@@ -1,22 +1,22 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
-import { codeIsLive, isPublic, newestTaskFirst, taskWithEvent } from "../storage/store.js";
-import type { BlobCharge, HostAppend, PurgeSchedule, SetJoinCode } from "../storage/store.js";
-import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PublicView, SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
-import { DEFAULT_HOME_SETTINGS } from "../types.js";
-import { CONFIG_HISTORY } from "../config.js";
-import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "../storage/store.js";
-import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
+import { codeIsLive } from "../codes.js";
+import { isPublic, isTopicRoom, capacityOf } from "../manifest.js";
+import { newestTaskFirst, taskWithEvent, handOff, decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason } from "../outside.js";
+import { type BlobCharge, type HostAppend, type PurgeSchedule, type SetJoinCode, type HomeAppend, type AppendExtras, type ApprovalWrite, type ConfigWrite, type ConfigWriteResult, type FsAppend, type FsEntry, type FsPage, type FsWrite, type DepartedMembers, type EventBody, type EventWrite, type HostInstructionsSet, type MemberPatch, type AccountBanRequest, type ProposalApproval, type RemovalOutcome, type RemovalRequest, type SeatOutcome, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type DecisionClose, type DecisionOpen, type VoteWrite, type RoomSummary, roomSummaryOf } from "../storage/store.js";
+import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, DEFAULT_HOME_SETTINGS } from "../types.js";
+import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../config.js";
+import { decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeKeyRecord, FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
 import { namespaceOf } from "../fs-path.js";
-import type { AppendExtras, ApprovalWrite, ConfigWrite, ConfigWriteResult, FsAppend, FsEntry, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch, AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts, DecisionClose, DecisionOpen, VoteWrite, RoomSummary } from "../storage/store.js";
-import { electorateOf, voteRefusal, withoutBook } from "../storage/store.js";
-import { applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../decision.js";
-import { isTopicRoom } from "../manifest.js";
-import { asRowWriter, batchEvent, carriedEvent, placeSurfaceBatch, placedEvent, placesAmongRows, surfaceBatchPrint, surfaceFactsOf, surfacePrint, windowUnderCut } from "../storage/store.js";
-import { ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport, decideBlobCharge, decideHostCharge, departures, handOff, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, roomSummaryOf, seatInOrder, seatVictims, stampSeen } from "../storage/store.js";
+import { electorateOf, voteRefusal, withoutBook, applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../decision.js";
+import { asRowWriter, batchEvent, carriedEvent, surfaceBatchPrint, surfaceFactsOf, surfacePrint, applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface.js";
+import { placeSurfaceBatch, placedEvent, placesAmongRows, windowUnderCut, FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../frames.js";
+import { ABANDONED_AFTER_MS, abandonedAt, connectedAmong, isAbandoned, stampSeen } from "../presence.js";
+import { HOST_MEMBER_ID, creatorOf, creditReport, departures, hostSeated, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims, clearSilence } from "../members.js";
+import { decideBlobCharge } from "../blobs.js";
+import { decideHostCharge, hostSentEntries, hostWakeIntent, type HostWake } from "../host.js";
 import { BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows, putRows, seatRows, seated, userOfKey, userPrefix, USER_PREFIX, type RowReader } from "../storage/member-rows.js";
-import { hostWakeIntent, type HostWake } from "../host.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "../storage/idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "../storage/stored-session.js";
 import { publicEvent, readableEvent, readableEvents } from "../public-event.js";
@@ -25,13 +25,10 @@ import { SYSTEM_ACTOR, auditRows, type AuditActor } from "../audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "../storage/outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects } from "../retention.js";
-import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "../heartbeat.js";
+import { nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "../heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "../upgrade.js";
-import { applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface.js";
-import { FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../frames.js";
 import { decideApproval } from "../proposal.js";
-import { decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason } from "../outside.js";
 import { admitAt, isStrangerKey, type SendAdmission } from "../send-limit.js";
 import type { BellmanEnv } from "./store-do.js";
 
@@ -169,7 +166,7 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?
  * delivery does not depend on whose socket it is. Presence reads `memberIds`
  * (#146): they find the identity that opened the socket, and every undeparted
  * member of that identity counts as connected while the socket is open, which
- * `connectedAmong` in store.ts explains (the ids are a snapshot, so they are a
+ * `connectedAmong` in presence.ts explains (the ids are a snapshot, so they are a
  * starting point and not the whole answer). `#closeCutSockets` is what reads it
  * to find a socket by member: on an eviction it finds the sockets naming only
  * members a creator removed and closes them (#113). A member who merely left

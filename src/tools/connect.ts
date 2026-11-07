@@ -1,16 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { fail, ok, roomInstructionsField } from "./kit.js";
-import type { ToolResult } from "./kit.js";
+import { fail, ok, roomInstructionsField, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
 import { joinRefusal } from "../orgs.js";
 import { seesBrief } from "../public-event.js";
 import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
-import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
+import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode, CONNECT_TOKEN_TTL } from "../codes.js";
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf, rosterHasOrgless } from "../storage/store.js";
+import { ROOM_MEMBER_CEILING, capacityOf } from "../manifest.js";
+import { rosterHasOrgless } from "../members.js";
 import type { BellmanStore } from "../storage/store.js";
 import { APP_UI_META } from "../ui/resource.js";
 

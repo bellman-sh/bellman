@@ -1,13 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { fail, ok } from "./kit.js";
-import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
-import type { ToolResult } from "./kit.js";
+import { fail, ok, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, soleSeat, yourSeats } from "../projections.js";
 import { cutFor, handlesOf, memberLog, readSurfaceWindow, searchLog, searchSurface } from "../rooms.js";
 import { QUERY_WITH_WINDOW, parseWindow, type Window } from "../frames.js";
 import { SEARCH_IN, checkQuery } from "../search.js";
-import { isActiveMember } from "../storage/store.js";
+import { isActiveMember } from "../members.js";
 import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 import { APP_UI_META } from "../ui/resource.js";

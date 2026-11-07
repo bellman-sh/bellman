@@ -1,8 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, renderedLength, roomInstructionsField } from "./kit.js";
-import type { ToolResult } from "./kit.js";
+import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, renderedLength, roomInstructionsField, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
 import { homeTitles } from "../memory.js";
@@ -11,7 +10,7 @@ import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, mostThatFits, readSurfaceWithin } from "../rooms.js";
 import { STALE_AFTER_MS, type Presence } from "../presence.js";
-import { isActiveMember, lastSeen, rosterHasOrgless } from "../storage/store.js";
+import { isActiveMember, lastSeen, rosterHasOrgless } from "../members.js";
 import type { BellmanStore } from "../storage/store.js";
 import { APP_UI_META } from "../ui/resource.js";
 

@@ -1,13 +1,14 @@
 import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb, FsRow } from "./types.js";
 import { actionStates } from "./action-state.js";
-import { isTopicRoom } from "./manifest.js";
+import { isTopicRoom, capacityOf, isPublic } from "./manifest.js";
 import type { CardHit, MessageHit } from "./search.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
-import { asked, capacityOf, codeIsLive, isActiveMember, type BellmanStore } from "./storage/store.js";
-import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
-import { joinUrl } from "./codes.js";
+import { asked, isActiveMember } from "./members.js";
+import { codeIsLive, joinUrl } from "./codes.js";
+import type { BellmanStore } from "./storage/store.js";
+import { activeMembers, sessionStatus } from "./rooms.js";
 import { heldName } from "./public-names.js";
 import { purgeDueAt } from "./retention.js";
 import { createdAtOf } from "./surface.js";

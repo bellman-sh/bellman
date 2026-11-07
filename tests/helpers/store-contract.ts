@@ -16,27 +16,25 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/storage/store.js";
-import type { SurfaceWrite } from "../../src/surface.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/storage/store.js";
+import { type SurfaceWrite, MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/codes.js";
+import { ROOM_MEMBER_CEILING, resolveManifest } from "../../src/manifest.js";
+import { newestKey } from "../../src/fs.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
-import {
-  applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput,
-} from "../../src/decision.js";
-import { resolveManifest } from "../../src/manifest.js";
+import { applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput } from "../../src/decision.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
-import { MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
 import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/frames.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
-import type { AuditEntry, Identity, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import { type AuditEntry, type Identity, type Org, type OrgIdp, type OrgInvite, type PlanGrant, type SavedPreset, type ScimUser, type Session, type SessionEvent, type SurfaceItem, DEFAULT_POLICY } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
-import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
-import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
+import { HOST_MEMBER_ID, HOST_USER_ID } from "../../src/members.js";
+import { WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/storage/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
 import type { NewReport, Report } from "../../src/reports.js";

@@ -8,7 +8,7 @@ import { isRecord } from "../billing/subscription.js";
 import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, inviteLive, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs/orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../storage/store.js";
-import { DEFAULT_POLICY, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
+import { DEFAULT_POLICY, type AuditEntry, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
 import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
@@ -127,7 +127,7 @@ export type PlanStore = Pick<
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
   | "backfillRoomIndex"
-  | "purgeHome"
+  | "purgeHome" | "appendOperatorAudit"
 >;
 
 // ponytail: two hundred reports a read, not tuned, and no paging. The queue lists the open reports first and then the
@@ -2381,9 +2381,9 @@ export async function handleOAuth(
     }
     if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
     const handle = handleFromSegment(named[1]);
-    if (handle === undefined || (await config.plans.releaseHandleNamed(handle)) === undefined) {
-      return oauthError("not_found", "no such handle", 404);
-    }
+    const holder = handle === undefined ? undefined : await config.plans.releaseHandleNamed(handle);
+    if (handle === undefined || holder === undefined) return oauthError("not_found", "no such handle", 404);
+    await config.plans.appendOperatorAudit(operatorEntry(gate.identity, "operator:handles", "operator_handle_released", { handle, user_id: holder }));
     return new Response(null, { status: 204 });
   }
 
@@ -2443,6 +2443,7 @@ export async function handleOAuth(
       return oauthError("invalid_request", "the path must name a user id: u_ and up to 198 letters, digits, - or _");
     }
     await config.plans.purgeHome(homeRoomId(userId));
+    await config.plans.appendOperatorAudit(operatorEntry(gate.identity, "operator:accounts", "operator_account_memory_purged", { user_id: userId }));
     return new Response(null, { status: 204 });
   }
 
@@ -2556,6 +2557,17 @@ async function jsonObject(request: Request): Promise<Record<string, unknown> | u
 /** How an operator's write is recorded: by their id and label, with no org, since the operator acts for the platform. */
 const operatorIntent = (identity: Identity): AuditIntent =>
   ({ actorUserId: identity.userId, actorLabel: identity.label, actorOrgId: null });
+
+/**
+ * An operator's irreversible act on a person's data (#556), in the platform operator stream (#472), written after
+ * the act lands: who did it, to whom, when. Not an org's row: the target may have no org, and the stream is the
+ * platform's. The home room's id never leaves the server (ADR 0047 decision 1), so the row names the user id.
+ */
+const operatorEntry = (identity: Identity, sessionId: string, action: string, detail: Record<string, unknown>): AuditEntry => ({
+  at: Date.now(), orgId: null, sessionId, actorUserId: identity.userId, action, detail,
+  actorLabel: identity.label, actorOrgId: identity.orgId, roomName: null,
+  parties: [identity.orgId], crossing: "internal", direction: null,
+});
 
 /**
  * The note an operator's write carries, for a suspension and for a resolution: trimmed, 1 to 500 characters, or

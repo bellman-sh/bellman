@@ -132,8 +132,14 @@ describe("/admin/accounts/:userId/memory", () => {
     const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
     expect((await send("DELETE", "/admin/accounts/u_target/memory", { cookie: `${COOKIE}=${sid}`, origin: PANEL })).status).toBe(401);
     expect(await store.readFs(id, "/a.md")).not.toBeNull();
+    expect(await store.operatorAudit(10), "a refusal deletes nothing, so audits nothing").toEqual([]);
     expect((await send("DELETE", "/admin/accounts/u_target/memory", await bearer(OPERATOR))).status).toBe(204);
     expect(await store.readFs(id, "/a.md")).toBeNull();
+    // The operator's stream (#556): an irreversible delete of a person's data names who did it and to whom.
+    expect(await store.operatorAudit(10)).toMatchObject([{
+      action: "operator_account_memory_purged", actorUserId: OPERATOR.userId, actorLabel: OPERATOR.label, orgId: null,
+      sessionId: "operator:accounts", detail: { user_id: "u_target" }, crossing: "internal",
+    }]);
     expect((await send("GET", "/admin/accounts/u_target/memory", await bearer(OPERATOR))).status).toBe(405);
     expect((await send("DELETE", "/admin/accounts/u_%E0%A4%A/memory", await bearer(OPERATOR))).status).toBe(400);
     expect((await send("DELETE", "/admin/accounts/github%3A4242/memory", await bearer(OPERATOR))).status).toBe(400);

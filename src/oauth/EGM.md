@@ -127,7 +127,9 @@ Primitives:
   `openidconnect.googleapis.com`), OIDC discovery, token and userinfo, `cloudflare-dns.com`
   [src/oauth/providers.ts:github] [src/oauth/oidc.ts:discover] [src/oauth/dns.ts:txtRecords]
 - Plan store writes with audit intent: grants, SSO member provisioning, orgs, suspensions, reports, handle
-  release; `purgeHome` on `DELETE /admin/accounts/:userId/memory`; `recordSignIn` on each resolution, with the
+  release; `purgeHome` on `DELETE /admin/accounts/:userId/memory`; an `appendOperatorAudit` row after each of
+  those two deletes (`operator_handle_released` with the handle and its holder, `operator_account_memory_purged`
+  with the user id), in the platform operator stream and no org's [src/oauth/routes.ts:operatorEntry]; `recordSignIn` on each resolution, with the
   request's `bm_ref` campaign tag, which only the sign-in that creates the record keeps
   [src/oauth/cookies.ts:readCampaignRef]; `moveGrant` of an address grant; `backfillRoomIndex` on
   `/admin/rooms/backfill` [src/oauth/routes.ts:handleOAuth]

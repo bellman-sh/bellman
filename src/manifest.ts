@@ -825,7 +825,9 @@ function resolveDecide(d: DecideInput | null | undefined): DecideConfig | null {
     if (ballot != null && ballot !== "open" && ballot !== "secret") {
       throw new ManifestError(`${field}.ballot: unknown ballot "${ballot}" (valid: open, secret)`);
     }
-    if (ballot === "secret") throw new ManifestError(`${field}.ballot: secret ballots are not enabled yet; omit it`);
+    if (ballot === "secret" && rule === "single") {
+      throw new ManifestError(`${field}: single is one approver's action request; a secret ballot needs a vote.`);
+    }
     rules[kind] = {
       rule: rule as DecisionRuleName,
       quorum: quorum != null ? parseQuorum(`${field}.quorum`, quorum) : rule === "single" ? null : fallback,
@@ -856,6 +858,12 @@ function checkDecide(m: RoomManifest): void {
     }
     for (const kind of def.veto) {
       if (!m.decide?.rules[kind]) throw new ManifestError(`role "${key}" vetoes ${kind}, which decide does not declare`);
+      if (m.decide.rules[kind]!.ballot === "secret") {
+        throw new ManifestError(
+          `role "${key}" vetoes ${kind}, which uses ballot: secret; drop veto on ${kind} or use ballot: open; ` +
+          "a veto reveals its holder's choice.",
+        );
+      }
     }
   }
   // A permanent code seats only the default role, and only in a public room (rooms.ts, ADR 0020). Governing room

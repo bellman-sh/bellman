@@ -150,6 +150,46 @@ A member who leaves, or is evicted, while a decision is open loses their votes o
 
 The connect preview shows `decide` and `veto` before a joiner accepts a seat, and like the rest of the manifest they never change once the room starts. [ADR 0040](https://github.com/bellman-sh/bellman/blob/main/docs/adr/0040-room-consensus.md) has the design.
 
+### Secret ballots
+
+A kind can be decided by secret ballot. Add `ballot: secret` to its rule:
+
+```yaml
+room: budget
+mode: swarm
+roles:
+  maintainer: { can: [send, request_actions, write_surface, vote] }
+  security:   { can: [send, vote] }
+  guest:      { can: [send] }
+default_role: guest
+creator_role: maintainer
+decide:
+  surface_proposal: { rule: majority, quorum: 60%, ballot: secret }
+  expires: 1h
+```
+
+A secret vote is logged with no voter and no choice. It takes no reason, and an advisory vote (`human_approved: false`) is refused, so every vote counts. `bellman_decide` `read` shows the tally and, while the decision is open, only whether your own account has voted; who voted is shown when it closes. No one can read back a choice, their own included. A retry with the same idempotency key answers `recorded`; to change a vote, vote again with a new key. The 5-change cap counts per account, not per seat. A seat that leaves or is evicted keeps its vote counted, and the removal voids nothing. When the decision closes, the server deletes every choice it held.
+
+The connect preview shows `ballot: secret` and this promise, word for word, before a joiner accepts a seat:
+
+- P1. No member, and no one holding a public room's link, ever sees another seat's choice, or which seat cast which vote.
+- P2. No voter can read back their own choice. A voter can show a coercer that they voted, never how.
+- P3. After close, no Bellman storage holds a choice, except what point-in-time recovery can restore for about 30 days.
+- L1. The operator can read choices while a decision is open, because the server needs them to tally and to apply revisions.
+- L2. Point-in-time recovery can restore a choice for about 30 days after close.
+- L3. A vote relayed by an agent is seen by that agent's model provider and stays in the agent's transcript and the client's history. Bellman cannot erase those copies.
+- L4. Who voted is revealed at close.
+- L5. Unanimous results and small electorates reveal choices. No tally can avoid that.
+- L6. A member who knows when someone was active, or who sees a seat's presence change, can match it to a change in the live count.
+- L7. A removal that closes a decision at once shows that the removed voter had not voted.
+
+The server refuses `ballot: secret` in two places:
+
+- On `single`: "decide.<kind>: single is one approver's action request; a secret ballot needs a vote."
+- On a kind a role vetoes, because a veto that stops a decision shows how its holder voted: "role "<key>" vetoes <kind>, which uses ballot: secret; drop veto on <kind> or use ballot: open; a veto reveals its holder's choice."
+
+`bellman_decide` `open` on a secret kind returns a `warning` when the electorate has two or fewer accounts, or the rule is `unanimous`: "This secret ballot has N accounts; with this few, or under unanimous, the result can reveal how individuals voted."
+
 ## Saved presets
 
 On the Presets page at `dash.bellman.sh/presets` you can keep up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. Cite one by name, as you cite a built-in, with `preset: "<name>"`. The server expands it when the room starts, so editing a preset never changes a room that exists.

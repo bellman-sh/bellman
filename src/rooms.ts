@@ -609,16 +609,21 @@ export const ROOMS_LIMIT = 50;
  */
 export const WINDOW_LIMIT = 1024;
 
+/** The rooms `identity` created or joined, before closed ones and left seats are dropped: the set `liveRooms` and the memory export both walk. */
+export async function roomIdsOf(s: BellmanStore, identity: Identity): Promise<Set<string>> {
+  return new Set([
+    ...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)),
+    ...(await s.sessionsJoinedBy(identity.userId, JOINED_SCAN)),
+  ]);
+}
+
 /**
  * The open rooms `identity` holds a seat in, each as `roomSummary` shows it: what `bellman_rooms` returns and
  * `GET /me/rooms` (#434) answers, from this one function so the two cannot drift. Closed rooms, and rooms the
  * caller left or was removed from, are not listed.
  */
 export async function liveRooms(s: BellmanStore, identity: Identity): Promise<ReturnType<typeof roomSummary>[]> {
-  const ids = new Set([
-    ...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)),
-    ...(await s.sessionsJoinedBy(identity.userId, JOINED_SCAN)),
-  ]);
+  const ids = await roomIdsOf(s, identity);
   const now = Date.now();
   const rooms: ReturnType<typeof roomSummary>[] = [];
   for (const id of ids) {

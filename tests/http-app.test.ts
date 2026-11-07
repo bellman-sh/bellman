@@ -149,6 +149,25 @@ describe("GET /me/memory/lookups", () => {
   });
 });
 
+describe("GET /me/memory/export", () => {
+  it("returns one Markdown document of home notes and the account's room notes, to the dash alone", async () => {
+    const pair = await pairUp(h);
+    await pair.creator.call("bellman_memory", { op: "remember", path: "/a.md", content: "home note" });
+    await pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/members/me/r.md", content: "room note" });
+    await pair.joiner.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.joinerMemberId, path: "/members/me/p.md", content: "peer note" });
+    const res = await call(null, "/me/memory/export", { cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect([res.status, res.headers.get("content-type"), res.headers.get("content-disposition")]).toEqual([200, "text/markdown; charset=utf-8", expect.stringMatching(/^attachment; filename="bellman-memory-\d{4}-\d{2}-\d{2}\.md"$/)]);
+    const md = await res.text();
+    expect(md).toContain("### /a.md");
+    expect(md).toContain("home note");
+    expect(md).toContain(`### test-room (${pair.sessionId})`);
+    expect(md).toContain("room note");
+    expect(md).not.toContain("peer note");
+    expect((await call(DEV_KEY.jesse, "/me/memory/export")).status).toBe(403);
+    expect((await call(null, "/me/memory/export", { method: "PUT", cookie: DEV_KEY.jesse, body: {} })).headers.get("allow")).toBe("GET");
+  });
+});
+
 // #531, ADR 0047 decision 14: hard delete, from a dash session alone, and never refused as paused.
 describe("DELETE /me/memory and /me/memory/notes", () => {
   const dash = (body: unknown) => call(null, "/me/memory", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });

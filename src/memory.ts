@@ -6,9 +6,10 @@
 import { ENTITLEMENTS } from "./auth.js";
 import { namespaceOf, normalizePath } from "./fs-path.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
-import { findMember, gateFsRead, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
+import { renderExport, type ExportRoom } from "./memory-export.js";
+import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
-import type { BellmanStore, FsPage, FsWrite } from "./store.js";
+import { isActiveMember, type BellmanStore, type FsPage, type FsWrite } from "./store.js";
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "./types.js";
 
 const NO_NOTE = "no such note.";
@@ -116,6 +117,40 @@ export async function forgetNote(store: BellmanStore, actor: Identity, raw: stri
   const path = homePath(raw);
   if (!path.ok) return path;
   return (await store.forgetHomeNote(homeRoomId(actor.userId), path.value)) ? succeed(null) : refuse("not_found", NO_NOTE);
+}
+
+/** Every live file under `prefix` in `roomId`, paged to the end, each read whole. */
+async function readAll(store: BellmanStore, roomId: string, prefix: string): Promise<FsRow[]> {
+  const rows: FsRow[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await store.listFs(roomId, prefix, { cursor });
+    for (const e of page.entries) {
+      const file = await store.readFs(roomId, e.path);
+      if (file) rows.push(file);
+    }
+    cursor = page.next ?? undefined;
+  } while (cursor !== undefined);
+  return rows;
+}
+
+/**
+ * The account's memory as one Markdown document (ADR 0047 decision 14): its home notes, and its own notes
+ * (`/members/<memory id>/`) in each open room it holds an active seat in. Reads the store directly, so the lookup
+ * log is untouched and a paused account can still take its notes out.
+ */
+export async function exportMemory(store: BellmanStore, actor: Identity): Promise<string> {
+  const home = await readAll(store, homeRoomId(actor.userId), "/");
+  const rooms: ExportRoom[] = [];
+  for (const id of await roomIdsOf(store, actor)) {
+    const session = await store.getSession(id);
+    if (!session || session.closed || !session.members.some((m) => m.userId === actor.userId && isActiveMember(m))) continue;
+    const memoryId = await store.memoryIdOf(id, actor.userId);
+    if (memoryId === null) continue;
+    const notes = await readAll(store, id, `/members/${memoryId}`);
+    if (notes.length > 0) rooms.push({ sessionId: id, room: session.manifest.room, notes });
+  }
+  return renderExport({ label: actor.label, at: Date.now(), home, rooms });
 }
 
 /** One lookup as the dash shows it (ADR 0047 decision 13): the row, with its room named. */

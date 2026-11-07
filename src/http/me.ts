@@ -23,9 +23,13 @@
  * the home room, settings and lookup log included; the second deletes one note as `forget` does and scrubs it from the
  * log (404 `not_found`, 400 `invalid_request` for a missing or invalid path). Dash session only, Origin checked, and
  * never refused while paused.
+ *
+ * `GET /me/memory/export` (#531, decision 14): one Markdown document, `text/markdown` as an attachment: the home notes,
+ * then the account's own notes in each open room it sits in. Dash session only (403 `dash_session_required` to a
+ * bearer), and never refused while paused: it reads the store, not the logged read, so the lookup log is untouched.
  */
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { deleteMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../memory.js";
+import { deleteMemory, exportMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../memory.js";
 import { liveRooms } from "../rooms.js";
 import type { HomeSettings } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -36,6 +40,7 @@ const ROOMS = "/me/rooms";
 const MEMORY = "/me/memory";
 const LOOKUPS = "/me/memory/lookups";
 const NOTES = "/me/memory/notes";
+const EXPORT = "/me/memory/export";
 
 /** The body as a settings patch: a non-empty object whose every key is `capture` or `paused`, each a boolean; else `null`. */
 function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
@@ -48,7 +53,7 @@ function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
 /** `undefined` for any other path, so the server carries on. */
 export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Response | undefined> {
   const path = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS && path !== NOTES) return undefined;
+  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS && path !== NOTES && path !== EXPORT) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   if (request.method === "OPTIONS") return preflightResponse(origin);
   const allowed = path === MEMORY ? "GET, PUT, DELETE" : path === NOTES ? "DELETE" : "GET";
@@ -60,6 +65,20 @@ export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Res
     if (path === LOOKUPS) {
       if (who.via !== "cookie") return problem(403, "dash_session_required", "the lookup log is read by the person signed in to the dash", origin);
       return json(200, { lookups: await memoryLookups(deps.store, who.identity) }, origin);
+    }
+    if (path === EXPORT) {
+      if (who.via !== "cookie") return problem(403, "dash_session_required", "memory is exported by the person signed in to the dash", origin);
+      // The account's own notes, verbatim, as a download: never rendered here, so nothing is escaped.
+      const day = new Date().toISOString().slice(0, 10);
+      return new Response(await exportMemory(deps.store, who.identity), {
+        status: 200,
+        headers: {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-disposition": `attachment; filename="bellman-memory-${day}.md"`,
+          "cache-control": "no-store",
+          ...corsHeaders(origin),
+        },
+      });
     }
     if (request.method === "DELETE") {
       if (who.via !== "cookie") return problem(403, "dash_session_required", "memory is deleted by the person signed in to the dash, never with a bearer token", origin);

@@ -68,9 +68,13 @@ facts, keyword search now, memory on every plan.
    4. `members`, present members first;
    5. briefs, of the present members heard from most recently, up to 25, with `briefs_omitted`;
    6. the surface front window, items newest first, with `next` for `bellman_surface` to read the rest.
-   The surface is cut first, since `bellman_surface` reads the rest, and briefs second; no tool reads a brief again,
-   so #528 adds a way to page them if a room's briefs alone pass the budget. Home titles are read from the home room
-   after the seat commits, in a call of its own; a failure returns `home: []` and never fails the join.
+   The surface is cut first, since `bellman_surface` reads the rest, and briefs second. #528 shipped the budget
+   without a briefs pager: a brief left out is in the room's `member_joined` or `brief_update` event, which
+   `bellman_sync` reads from any cursor, so a joiner that wants them pages the log. Home titles are the note paths,
+   read from the home room after the seat commits, in a call of its own; a failure returns `home: []` and never fails
+   the join. The ceiling is measured on the reply as the tool renders it, indented JSON after the untrusted-content
+   preamble, since that is what the agent reads; a roster rides whole, so a room of 40 members spends about two thirds
+   of the budget on `members` before a brief is counted.
 10. **Room facts** (epic decision 4). A `surface_proposal` action request (ADR 0032) carries
     `fact: { slug, title, body }`, `source: { cursor } | { url }` and `base`, the fact file's revision (0 for new). The
     source is an event in the room the proposer can read, or an `http(s)` link; without one the proposal is refused.
@@ -114,7 +118,8 @@ facts, keyword search now, memory on every plan.
 - After #520 the tool listing is about 11,022 of 11,840 tokens. This ADR spends at most 350: 270 for
   `bellman_memory`, 30 for `recall` in `bellman_confirm`, 50 for `fact` in `bellman_send`. That leaves about 470 for
   the rest of the roadmap, consensus effects included. Each PR adds its row to ARCHITECTURE §11; passing the ceiling
-  is an owner decision.
+  is an owner decision. Amended 2026-11-07: `bellman_memory` landed at 391 (#526), accepted; `recall` and the
+  reply's ceiling in `bellman_confirm` at 55 (#528); `fact` keeps its 50, so the ADR spends 496 and about 320 remain.
 - A join no longer grows with the surface. An agent that needs more of it than the reply carries reads it with
   `bellman_surface` and `next`. #528 measures the whole reply, not only `recall`.
 - Because the private default ships with room notes in #520, no room note is readable by peers by default at any

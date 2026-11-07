@@ -15,11 +15,11 @@ describe("the briefs a joiner is handed", () => {
   it("are the most recently heard-from members', at most BRIEFS_ON_JOIN, with a count of the rest", async () => {
     const now = Date.now();
     // m_00 was heard from last, and each member after it a second earlier. Two have left.
-    const members = Array.from({ length: 40 }, (_, i) => member({
+    const members = Array.from({ length: 30 }, (_, i) => member({
       memberId: `m_${String(i).padStart(2, "0")}`,
       userId: `u_member_${i}`,
       roomRole: "peer_b",
-      brief: brief({ goal: `member ${i}` }),
+      brief: brief({ goal: `member ${i}`, state: "s", constraints: [], open_questions: [] }),
       joinedAt: now - 100_000,
       lastSeenAt: now - i * 1000,
       leftAt: i === 1 || i === 2 ? now - 500 : null,

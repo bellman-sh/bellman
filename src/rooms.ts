@@ -38,7 +38,7 @@ import { GOVERNED_VIEW_ROOT, governedFile, governedView } from "./governed-view.
 import {
   MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
 } from "./surface.js";
-import { MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
+import { cutPage, type WindowPage, MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
@@ -425,21 +425,51 @@ export async function readSurfaceWindow(
 ): Promise<{ ok: true; block: SurfaceBlock } | { ok: false; reason: string }> {
   const read = await store.surfaceWindow(session.id, asked, { cut });
   if (!read.ok) return read;
-  const { page, cursor } = read;
-  return {
-    ok: true,
-    block: {
-      cursor, items: page.items.map(surfaceItem), frames: page.frames, window: page.window, next: page.next,
-      ...(page.slots === undefined ? {} : { slots: page.slots }),
-    },
-  };
+  return { ok: true, block: blockOf(read.page, read.cursor) };
 }
+
+/** A page as the wire carries it: each row in its writer's envelope, the cursor beside them. */
+const blockOf = (page: WindowPage, cursor: number): SurfaceBlock => ({
+  cursor, items: page.items.map(surfaceItem), frames: page.frames, window: page.window, next: page.next,
+  ...(page.slots === undefined ? {} : { slots: page.slots }),
+});
 
 /** The front of the surface: frame 1 when the member sees a frame, else the newest. Asked for nothing, it is never refused. */
 export async function readSurface(store: BellmanStore, session: StoredSession, cut?: number): Promise<SurfaceBlock> {
   const read = await readSurfaceWindow(store, session, {}, cut);
   if (!read.ok) throw new Error(`the front of the surface was refused: ${read.reason}`);
   return read.block;
+}
+
+/**
+ * The largest `k` from 0 to `n` whose `build(k)` passes `fits`, with that value. `fits` must be monotone in `k`, so a
+ * binary search finds it in about log2(n) builds. `k` is 0, built anyway, when nothing but the empty cut passes.
+ */
+export function mostThatFits<T>(n: number, build: (k: number) => T, fits: (value: T) => boolean): { k: number; value: T } {
+  let best = { k: 0, value: build(0) };
+  for (let lo = 1, hi = n; lo <= hi;) {
+    const mid = (lo + hi) >> 1;
+    const value = build(mid);
+    if (fits(value)) { best = { k: mid, value }; lo = mid + 1; } else hi = mid - 1;
+  }
+  return best;
+}
+
+/**
+ * The front of the surface cut to `fits` (ADR 0047 decision 9): the most ranked items whose block passes it, their
+ * connectors with them, and `next` for the rest. The whole front is tried first; with nothing passing, the empty cut
+ * is returned anyway and the caller trims what ranks below the surface.
+ */
+export async function readSurfaceWithin(
+  store: BellmanStore, session: StoredSession, fits: (block: SurfaceBlock) => boolean, cut?: number,
+): Promise<SurfaceBlock> {
+  const read = await store.surfaceWindow(session.id, {}, { cut });
+  if (!read.ok) throw new Error(`the front of the surface was refused: ${read.reason}`);
+  const { page, cursor } = read;
+  const whole = blockOf(page, cursor);
+  if (fits(whole)) return whole;
+  const ranked = page.items.filter((r) => r.kind !== "frame" && r.kind !== "connector").length;
+  return mostThatFits(ranked - 1, (k) => blockOf(cutPage(page, k), cursor), fits).value;
 }
 
 /** A public room's page link, or null for a private room (room search spec, R11). */

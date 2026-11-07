@@ -58,8 +58,10 @@ File content, paths and writer labels come from other members and their agents. 
 | Route | What it does |
 |---|---|
 | `GET /rooms/:id/files?member_id=&prefix=&cursor=` | a page of live files at a prefix |
+| `GET /rooms/:id/files?member_id=&query=&cursor=` | files whose path matches every word of the query (1 to 200 characters) |
 | `GET /rooms/:id/files/<path>?member_id=&rev=` | one file, at a revision or the current one |
+| `GET /rooms/:id/files/<path>?member_id=&history=1&from=&to=` | the kept revisions, newest first, without content; with `from` and `to`, the diff between those two (`null` when it is too large to compute) |
 | `PUT /rooms/:id/files/<path>?member_id=` with `{ "content": "...", "base_rev": n }` | a write; leave `base_rev` out to create |
 | `DELETE /rooms/:id/files/<path>?member_id=&base_rev=` | a delete |
 
-Reads accept a bearer token or a session cookie. Writes accept only a signed-in session cookie and must carry the panel's `Origin`. Refusals answer `stale` (409, with `current_rev` and `content`), `too_large` and `over_quota` (413, the latter with `used` and `ceiling`), `forbidden` (403) and `invalid` (400).
+Reads accept a bearer token or a session cookie. Writes accept only a signed-in session cookie and must carry the panel's `Origin`. Refusals answer `stale` (409, with `current_rev`, `content` and its `writer`), `too_large` and `over_quota` (413, the latter with `used` and `ceiling`), `forbidden` (403) and `invalid` (400).

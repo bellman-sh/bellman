@@ -86,6 +86,61 @@ describe("file routes", () => {
     expect((await call(`${F}/nope.md?member_id=m_creator`))!.status).toBe(404);
   });
 
+  it("names a stale refusal's writer in snake_case, as the rest of the body", async () => {
+    await put("/a.md", { content: "x" });
+    const [, stale] = await json(await put("/a.md", { content: "y" }));
+    expect(stale.writer).toEqual({ member_id: "m_creator", label: "jesse@codenerd" });
+  });
+
+  it("lists history newest first without content, and diffs two kept revisions", async () => {
+    await put("/a.md", { content: "one\n" });
+    await put("/a.md", { content: "two\n", base_rev: 1 });
+    const [status, history] = await json(await call(`${F}/a.md?member_id=m_peer&history=1`, { cookie: DEV_KEY.peer }));
+    expect(status).toBe(200);
+    expect((history.revisions as { rev: number }[]).map((r) => r.rev)).toEqual([2, 1]);
+    expect(history.revisions).toEqual([
+      expect.objectContaining({ path: "/a.md", rev: 2, size: 4, writer: { member_id: "m_creator", label: "jesse@codenerd" } }),
+      expect.objectContaining({ rev: 1 }),
+    ]);
+    expect(JSON.stringify(history)).not.toMatch(/one|two/);
+    expect(history).not.toHaveProperty("diff");
+    const [, diffed] = await json(await call(`${F}/a.md?member_id=m_creator&history=1&from=1&to=2`, { bearer: DEV_KEY.jesse }));
+    expect(diffed.diff).toMatchObject({ truncated: false, diff: expect.stringMatching(/-one\n\+two/) });
+  });
+
+  it("refuses a diff naming a revision not kept, half a diff, and a bad revision number", async () => {
+    await put("/a.md", { content: "x" });
+    expect((await call(`${F}/a.md?member_id=m_creator&history=1&from=1&to=9`))!.status).toBe(400);
+    expect((await call(`${F}/a.md?member_id=m_creator&history=1&from=1`))!.status).toBe(400);
+    expect((await call(`${F}/a.md?member_id=m_creator&history=1&from=x&to=1`))!.status).toBe(400);
+    expect((await call(`${F}/nope.md?member_id=m_creator&history=1`))!.status).toBe(404);
+  });
+
+  it("finds files by path name with query, and refuses an empty or over-long one", async () => {
+    await put("/plans/launch.md", { content: "x" });
+    await put("/notes.md", { content: "launch" });
+    const [status, found] = await json(await call(`${F}?member_id=m_peer&query=launch`, { cookie: DEV_KEY.peer }));
+    expect(status).toBe(200);
+    expect(found).toEqual({ entries: [expect.objectContaining({ path: "/plans/launch.md" })], next: null });
+    expect((await call(`${F}?member_id=m_creator&query=`))!.status).toBe(400);
+    expect((await call(`${F}?member_id=m_creator&query=${"q".repeat(201)}`))!.status).toBe(400);
+  });
+
+  it("hides withheld memory from history and query", async () => {
+    await store.createSession(session({
+      id: "qs_withheld", fsBytesCeiling: 10_000,
+      members: [member({ capabilities: ["receive_messages"] }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+    const W = "/rooms/qs_withheld/files";
+    const [s, wrote] = await json(await call(`${W}/members/me/secret.md?member_id=m_creator`, { method: "PUT", body: { content: "x" } }));
+    expect(s).toBe(200);
+    const path = wrote.path as string;
+    expect((await call(`${W}${path}?member_id=m_creator&history=1`))!.status, "the owner reads its own").toBe(200);
+    expect((await call(`${W}${path}?member_id=m_peer&history=1`, { cookie: DEV_KEY.peer }))!.status).toBe(404);
+    const [, found] = await json(await call(`${W}?member_id=m_peer&query=secret`, { cookie: DEV_KEY.peer }));
+    expect(found.entries).toEqual([]);
+  });
+
   it("deletes with base_rev, and refuses a delete without one", async () => {
     await put("/a.md", { content: "x" });
     expect((await call(`${F}/a.md?member_id=m_creator`, { method: "DELETE" }))!.status).toBe(400);

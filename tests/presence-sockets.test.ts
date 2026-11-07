@@ -18,7 +18,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   STALE_AFTER_MS, connectedAmong, presenceOf, presentMembers, staleMembers,
 } from "../src/presence.js";
-import { MemoryStore, seatVictims } from "../src/store.js";
+import { seatVictims } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, session, swarmSession } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY } from "./helpers/harness.js";
 import { brief } from "./helpers/fixtures.js";

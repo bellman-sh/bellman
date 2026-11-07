@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ACCOUNTS_LISTED, MAX_BACKFILL_WINDOW, MAX_REPORTS_LISTED, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import type { Report } from "../src/reports.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity } from "../src/types.js";
 import { policyView } from "../src/orgs.js";
 import { COOKIE, ISSUER, PANEL, panelConfig, routeWith, seedSession } from "./helpers/panel.js";

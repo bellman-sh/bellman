@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { MAX_ROLE_KEY_LENGTH } from "./manifest.js";
 import { heldName } from "./public-names.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 
 // No 0/O, 1/I/L — codes get relayed over voice and chat.
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";

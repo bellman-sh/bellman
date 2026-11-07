@@ -15,9 +15,9 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
+import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/storage/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/store.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/storage/store.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
 import {
@@ -37,7 +37,7 @@ import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/org
 import { DEFAULT_POLICY } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
-import { monthKey } from "../../src/stored-session.js";
+import { monthKey } from "../../src/storage/stored-session.js";
 import { sendKeyFor } from "../../src/send-limit.js";
 import type { NewReport, Report } from "../../src/reports.js";
 import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";

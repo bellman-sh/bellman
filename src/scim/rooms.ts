@@ -5,7 +5,7 @@
  * finished by the next deactivation of the same user.
  */
 import { audit, evictionRequest } from "../rooms.js";
-import { JOINED_SCAN, isActiveMember, type BellmanStore } from "../store.js";
+import { JOINED_SCAN, isActiveMember, type BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 
 /**

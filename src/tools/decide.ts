@@ -7,8 +7,8 @@ import type { Identity, Member } from "../types.js";
 import { denyVerb } from "../roles.js";
 import { FROZEN, admitSend, auditEntries, findMember, touchMember } from "../rooms.js";
 import { DECISION_KINDS, isTopicRoom } from "../manifest.js";
-import { electorateOf, type BellmanStore } from "../store.js";
-import type { StoredSession } from "../stored-session.js";
+import { electorateOf, type BellmanStore } from "../storage/store.js";
+import type { StoredSession } from "../storage/stored-session.js";
 import { UNTRUSTED_PREAMBLE, decisionMembers, decisionShown } from "../projections.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 import {

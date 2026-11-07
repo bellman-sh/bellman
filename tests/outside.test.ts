@@ -10,7 +10,7 @@ import {
   answerQuestion, askRoom, cancelOutsideTask, isVoice, outsideTask, outsideTasksOf, OUTSIDE_TASK_TTL_MS, type AskInput, type Caller,
 } from "../src/outside.js";
 import { evictMember } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, RoomManifest, Session } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";

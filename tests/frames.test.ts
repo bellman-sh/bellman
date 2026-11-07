@@ -5,7 +5,7 @@ import {
   frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName,
 } from "../src/frames.js";
 import type { SurfaceItem, SurfaceRow } from "../src/types.js";
-import { placeSurfaceBatch } from "../src/store.js";
+import { placeSurfaceBatch } from "../src/storage/store.js";
 
 const row = (key: string, over: Partial<SurfaceRow> = {}): SurfaceRow => ({
   key, kind: "text", title: null, body: "b", ends: null, placement: null, blob: null, shape: null,

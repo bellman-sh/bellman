@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { HOST_LABEL, hostMember } from "../src/host.js";
 import { publicNames } from "../src/member-names.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 /** A store that numbers the labels it is given a table for, and records each ask. */

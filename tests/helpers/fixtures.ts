@@ -2,8 +2,8 @@ import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../..
 import type { AuditActor } from "../../src/audit.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
-import { monthKey } from "../../src/stored-session.js";
-import { JOIN_CODE_TTL, creatorOf, seatInOrder, type Seating } from "../../src/store.js";
+import { monthKey } from "../../src/storage/stored-session.js";
+import { JOIN_CODE_TTL, creatorOf, seatInOrder, type Seating } from "../../src/storage/store.js";
 import { orgsOnRoster } from "../../src/retention.js";
 
 export const anthropicAgent = {

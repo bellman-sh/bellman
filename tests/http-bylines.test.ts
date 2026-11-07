@@ -10,7 +10,8 @@ import { HANDLE_PAGE_BATCH, HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/p
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { parseOperators, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
-import { HOST_USER_ID, MemoryStore } from "../src/store.js";
+import { HOST_USER_ID } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity } from "../src/types.js";
 import { jesseActor, member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";

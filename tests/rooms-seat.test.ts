@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { cutAtFor, cutFor, handlesOf } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, session } from "./helpers/fixtures.js";
 
 const me = { userId: "u_me" };

@@ -7,7 +7,7 @@ import { joinUrl } from "../codes.js";
 import type { Identity } from "../types.js";
 import { MAX_ROLE_KEY_LENGTH } from "../manifest.js";
 import { issueInvite, revokeInvite } from "../rooms.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 
 export function registerInvite(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(

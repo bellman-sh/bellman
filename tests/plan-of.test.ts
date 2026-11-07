@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planOf, signedInPlan } from "../src/oauth/routes.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type PlanGrant } from "../src/types.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 

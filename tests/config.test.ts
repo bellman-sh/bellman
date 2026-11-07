@@ -3,7 +3,8 @@ import {
   CONFIG_NAMES, CONFIG_RESERVE_BYTES, bodyBytes, bodyHash, getGovernedConfig, isNarrowing, parseConfigBody, restrictive,
   truncateForDelivery,
 } from "../src/config.js";
-import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { type BellmanStore } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { ConfigRow } from "../src/types.js";
 
 describe("getGovernedConfig", () => {

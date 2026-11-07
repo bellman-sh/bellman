@@ -16,7 +16,7 @@ import { problem, roomRoutes } from "./http/rooms.js";
 import { statsRoutes } from "./http/stats.js";
 import { reportMailer } from "./reports.js";
 import { buildServer } from "./server.js";
-import type { BellmanStore } from "./store.js";
+import type { BellmanStore } from "./storage/store.js";
 import { SUSPENDED } from "./suspension.js";
 
 /**

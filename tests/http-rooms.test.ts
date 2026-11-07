@@ -16,7 +16,8 @@ import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_HTTP } from
 import { resolveManifest } from "../src/manifest.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
-import { JOINED_SCAN, MemoryStore } from "../src/store.js";
+import { JOINED_SCAN } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";

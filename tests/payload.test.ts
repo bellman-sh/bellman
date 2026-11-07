@@ -17,7 +17,7 @@ import {
   MAX_PAYLOAD_DEPTH,
   PayloadTooDeepError,
 } from "../src/payload.js";
-import { fingerprint } from "../src/idempotency.js";
+import { fingerprint } from "../src/storage/idempotency.js";
 import type { SessionEvent } from "../src/types.js";
 
 /** `levels` containers deep around a leaf, each made by `wrap`. */

@@ -1,5 +1,5 @@
 import { SYSTEM_ACTOR, auditRow, type AuditActor } from "./audit.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 import type { AuditEntry, SurfaceRow } from "./types.js";
 
 // Runtime-free on purpose, for the reason CLAUDE.md gives: both stores and both test

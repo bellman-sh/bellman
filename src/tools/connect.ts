@@ -10,8 +10,8 @@ import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf, rosterHasOrgless } from "../store.js";
-import type { BellmanStore } from "../store.js";
+import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf, rosterHasOrgless } from "../storage/store.js";
+import type { BellmanStore } from "../storage/store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConnect(server: McpServer, identity: Identity, s: BellmanStore): void {

@@ -1,4 +1,4 @@
-import { isOrgId } from "../grant-index.js";
+import { isOrgId } from "../storage/grant-index.js";
 import type { Identity } from "../types.js";
 import { base64url, base64urlDecode } from "./tokens.js";
 

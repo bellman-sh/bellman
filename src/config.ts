@@ -7,7 +7,7 @@ import { z } from "zod";
 import { canonical } from "./decision.js";
 import { createHash } from "node:crypto";
 import type { ConfigName, ConfigRow } from "./types.js";
-import type { BellmanStore } from "./store.js";
+import type { BellmanStore } from "./storage/store.js";
 
 export const CONFIG_NAMES = ["room_instructions"] as const satisfies readonly ConfigName[];
 

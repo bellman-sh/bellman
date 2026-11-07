@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ManifestError, ManifestShape, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
 import { SECRET_BALLOT_PROMISE, roomPreview } from "../src/projections.js";
-import type { StoredSession } from "../src/stored-session.js";
+import type { StoredSession } from "../src/storage/stored-session.js";
 import { member, session } from "./helpers/fixtures.js";
 
 const authored = (over: Record<string, unknown> = {}) => ({

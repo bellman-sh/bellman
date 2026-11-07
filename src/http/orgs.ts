@@ -29,7 +29,7 @@ import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
 import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, inviteMailBudget, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
-import type { AuditIntent } from "../store.js";
+import type { AuditIntent } from "../storage/store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 

@@ -16,7 +16,7 @@ import { seal } from "../src/oauth/sealed.js";
 import { sha256Base64url, signJwt } from "../src/oauth/tokens.js";
 import { INVITE_AUDIENCE } from "../src/invite-mail.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
 import { INVITE_TTL_MS, RESEND_COOLDOWN_MS } from "../src/orgs.js";

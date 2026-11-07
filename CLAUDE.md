@@ -39,7 +39,9 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
 - `src/projections.ts` — `Session` in, wire object out. Runtime-free on purpose,
   so the HTTP routes can import it without the MCP SDK; `src/public-event.ts` is
   the same layer. `tests/projections.test.ts` asserts that, transitively.
-- `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
+- `src/storage/` — the storage boundary: `store.ts` is `BellmanStore` and the write rules both stores apply,
+  `memory-store.ts` is `MemoryStore`, and the rest are the layout helpers both stores share (the stored session,
+  member rows, idempotency keys, the outbox, the registry's key layout).
 - `src/workerd/` — everything that runs only in workerd: the Workers entry (`worker.ts`) and the six Durable
   Object classes. `store-do.ts` is `DurableObjectStore`, the production `BellmanStore`, which routes each call to
   `SessionDO` (`session-do.ts`), `RegistryDO` (`registry-do.ts`) or `AuditDO` (`audit-do.ts`); `AuthDO`, `HostDO`

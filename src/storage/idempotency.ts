@@ -1,5 +1,5 @@
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./payload.js";
-import type { SessionEvent } from "./types.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../payload.js";
+import type { SessionEvent } from "../types.js";
 
 /**
  * Key layout and content fingerprint for idempotent event appends.

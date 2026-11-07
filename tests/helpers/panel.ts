@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { MemoryAuthStore, SESSION_TTL_MS, type PanelSession } from "../../src/oauth/storage.js";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { handleOAuth, type OAuthConfig } from "../../src/oauth/routes.js";
 import type { Identity } from "../../src/types.js";
 

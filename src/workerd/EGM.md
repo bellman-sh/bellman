@@ -42,7 +42,7 @@ with `MemoryStore` and the Node server; what is here is storage layout, transact
   presets `pr:`, hosted slots `ho:`, handles `uh:`/`hn:`/`hs:`, creator bans `cb:`,
   suspensions, and the report queue (`rp:`, `ro:`, `rf:`, `rl:`, `rc:`, `rr:`) with its `report_purge` alarm.
 - `[src/workerd/audit-do.ts:AuditDO]` one per org, plus the platform operator's stream named `OPERATOR_AUDIT_STREAM`
-  (`"~operator"`, `[src/grant-index.ts:OPERATOR_AUDIT_STREAM]`, outside every org id's grammar): SQL tables `entries` (hash-chained) and `delivered`, a daily retention
+  (`"~operator"`, `[src/storage/grant-index.ts:OPERATOR_AUDIT_STREAM]`, outside every org id's grammar): SQL tables `entries` (hash-chained) and `delivered`, a daily retention
   sweep, and the org's SIEM sink, both on its one alarm.
 - `[src/workerd/store-do.ts:DurableObjectStore]` the production facade: `SessionDO` by `idFromName(sessionId)`, `RegistryDO` by
   `idFromName("registry")`, `AuditDO` by `idFromName(orgId)`, each stub wrapped in `reviving`

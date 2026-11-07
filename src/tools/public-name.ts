@@ -5,7 +5,7 @@ import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { nameFree, publicNameRefusal } from "../public-names.js";
 import { namePublicRoom } from "../rooms.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 
 export function registerPublicName(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(

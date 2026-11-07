@@ -5,7 +5,7 @@ import {
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { RegistryDO } from "../src/workerd/registry-do.js";
 import type { AuditDO } from "../src/workerd/audit-do.js";
-import { OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow } from "../src/outbox.js";
+import { OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow } from "../src/storage/outbox.js";
 import type { AuditEntry, PlanGrant } from "../src/types.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -587,7 +587,7 @@ it("delivers every queued entry, in the order they were queued", async () => {
   // then returns false. Park it far ahead; the test is the one to fire it.
   //
   // PARKED UNTIL IT STICKS, which a single setAlarm does not guarantee. `reArm` sets the
-  // earliest due time unconditionally (src/outbox.ts) and these rows' marker is dated
+  // earliest due time unconditionally (src/storage/outbox.ts) and these rows' marker is dated
   // now, so a re-arm landing after the park puts the alarm back to now. CI caught exactly
   // that: the alarm read 59,997 ms earlier than the park, which is #131, and a park that
   // is silently lost is what made #131 surface three lines down as

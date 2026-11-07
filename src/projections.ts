@@ -5,13 +5,13 @@ import type { CardHit, MessageHit } from "./search.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
-import { asked, capacityOf, codeIsLive, isActiveMember, type BellmanStore } from "./store.js";
+import { asked, capacityOf, codeIsLive, isActiveMember, type BellmanStore } from "./storage/store.js";
 import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import { heldName } from "./public-names.js";
 import { purgeDueAt } from "./retention.js";
 import { createdAtOf } from "./surface.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 import { accountAliases } from "./public-event.js";
 import { isSecret, type DecisionClosed, type DecisionView, type DecisionVote } from "./decision.js";
 

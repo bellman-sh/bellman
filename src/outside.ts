@@ -2,7 +2,7 @@ import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
 import { audit } from "./rooms.js";
 import { verbsOfRole } from "./roles.js";
-import { hostSeated, isActiveMember, isHostMember, isPublic, type BellmanStore } from "./store.js";
+import { hostSeated, isActiveMember, isHostMember, isPublic, type BellmanStore } from "./storage/store.js";
 import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 
 /** Outside callers (A2A) of a public room: the limits, asking and answering. The task row's type is `OutsideTask`, in types.ts. */

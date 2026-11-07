@@ -1,6 +1,6 @@
-import type { AgentInfo, Brief, HostUnits, Member, RoomManifest, Session } from "./types.js";
-import { ENTITLEMENTS } from "./auth.js";
-import type { OpenDecisions } from "./decision.js";
+import type { AgentInfo, Brief, HostUnits, Member, RoomManifest, Session } from "../types.js";
+import { ENTITLEMENTS } from "../auth.js";
+import type { OpenDecisions } from "../decision.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
 // exists only inside workerd, so a test can load it only by stubbing that module, and

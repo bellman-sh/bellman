@@ -8,7 +8,7 @@
  * tool handlers and both test programs import it. `blobs-r2.ts` is the Workers
  * half, and the only file that touches a bucket.
  */
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 
 // ponytail: ceilings, not tuned. 25 MB is a quarter of the zone's 100 MB request
 // bound; a cap raised past it is a different route (multipart), not a bigger

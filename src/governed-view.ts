@@ -3,7 +3,7 @@
  * through `getGovernedConfig` on every read and never stored. `room.md` is the room instructions.
  */
 import { getGovernedConfig } from "./config.js";
-import type { BellmanStore } from "./store.js";
+import type { BellmanStore } from "./storage/store.js";
 import type { FsRow } from "./types.js";
 import { utf8Bytes } from "./fs.js";
 

@@ -11,7 +11,7 @@
  */
 import { z } from "zod";
 import type { ApprovedBy, SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow, WidgetLocality } from "./types.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
 

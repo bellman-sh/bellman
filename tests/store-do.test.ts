@@ -3,7 +3,7 @@
  * A row without a manifest is treated as gone rather than crashing a read.
  */
 import { describe, it, expect } from "vitest";
-import { hydrateStoredSession } from "../src/stored-session.js";
+import { hydrateStoredSession } from "../src/storage/stored-session.js";
 import { session } from "./helpers/fixtures.js";
 
 describe("legacy Durable Object rows", () => {

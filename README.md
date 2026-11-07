@@ -600,7 +600,7 @@ Losing the room would be the wrong punishment for a failed card, and it is not r
 
 ## Production path
 
-State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/workerd/worker.ts` with `DurableObjectStore` (`src/workerd/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.
+State lives behind the `BellmanStore` interface (`src/storage/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/workerd/worker.ts` with `DurableObjectStore` (`src/workerd/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.
 
 ## Architecture
 

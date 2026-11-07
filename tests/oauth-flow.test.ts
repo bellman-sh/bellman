@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleOAuth, identityFromAccessToken, replanOnRefresh, resolvePlan, signedInPlan, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";

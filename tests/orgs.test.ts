@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, forbiddenCapabilityRefusal, joinRefusal, liftOrg, orgView, parseOrgName, parsePolicyPatch, parseSeats, policyView, userIdForKey } from "../src/orgs.js";
-import { patchedOrg } from "../src/store.js";
+import { patchedOrg } from "../src/storage/store.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { DEFAULT_POLICY, type Capability, type Org } from "../src/types.js";
 

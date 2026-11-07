@@ -9,7 +9,7 @@ import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
 import { roomPreview } from "../src/projections.js";
 import { isPublic } from "../src/rooms.js";
-import { hydrateStoredSession } from "../src/stored-session.js";
+import { hydrateStoredSession } from "../src/storage/stored-session.js";
 import type { SavedPreset, Session } from "../src/types.js";
 import { brief, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";

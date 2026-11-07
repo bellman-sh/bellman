@@ -8,7 +8,7 @@ import { ENTITLEMENTS } from "../src/auth.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession, isHomeRoomId } from "../src/home.js";
 import { listHome, readHome, shareHome, writeHome } from "../src/memory.js";
 import { SEND_LIMIT } from "../src/send-limit.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 

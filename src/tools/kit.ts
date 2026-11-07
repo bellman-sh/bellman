@@ -2,7 +2,7 @@ import { z } from "zod";
 import { SEAT_STATUSES, SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
 import { FROZEN } from "../rooms.js";
 import { MAX_PAYLOAD_CHARS } from "../payload.js";
-import type { AppendExtras, BellmanStore } from "../store.js";
+import type { AppendExtras, BellmanStore } from "../storage/store.js";
 import { getGovernedConfig, truncateForDelivery } from "../config.js";
 import { untrusted } from "../projections.js";
 

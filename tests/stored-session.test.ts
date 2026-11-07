@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hydrateStoredSession, monthKey } from "../src/stored-session.js";
+import { hydrateStoredSession, monthKey } from "../src/storage/stored-session.js";
 import { ENTITLEMENTS } from "../src/auth.js";
 import { mustReport } from "../src/roles.js";
 import { roomManifest, session } from "./helpers/fixtures.js";

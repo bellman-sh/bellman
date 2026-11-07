@@ -1,4 +1,4 @@
-import type { PlanGrant } from "./types.js";
+import type { PlanGrant } from "../types.js";
 
 /**
  * Key layout for the org-scoped grant index.

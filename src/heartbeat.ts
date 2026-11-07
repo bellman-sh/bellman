@@ -16,10 +16,10 @@
  * programs.
  */
 import type { Member } from "./types.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 // `asked` and `clearSilence` live in store.ts beside `isActiveMember`, because
 // `freezeSession` applies them inside the store and this module imports that one.
-import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./store.js";
+import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./storage/store.js";
 export { asked, clearSilence };
 
 /**

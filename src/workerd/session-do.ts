@@ -125,6 +125,9 @@ const fsHistoryKey = (path: string, rev: number): string => `${fsHistoryPrefix(p
 const REV_PAD = /^\d{10}$/;
 const memoryIdKey = (userId: string): string => `mi:${userId}`;
 const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
+/** `ns:<userId>`: the account shares its room notes here (ADR 0047 decision 7). Absent is off. Purged with the room. */
+const NOTES_SHARING_PREFIX = "ns:";
+const notesSharingKey = (userId: string): string => `${NOTES_SHARING_PREFIX}${userId}`;
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -3125,6 +3128,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async memoryIds(): Promise<Array<{ userId: string; memoryId: string }>> {
     const rows = await this.ctx.storage.list<string>({ prefix: "mi:" });
     return [...rows].map(([k, memoryId]) => ({ userId: k.slice("mi:".length), memoryId }));
+  }
+
+  /** `BellmanStore.notesSharers`, for this room: the `ns:` rows' accounts. */
+  async notesSharers(): Promise<string[]> {
+    const rows = await this.ctx.storage.list<true>({ prefix: NOTES_SHARING_PREFIX });
+    return [...rows.keys()].map((k) => k.slice(NOTES_SHARING_PREFIX.length));
+  }
+
+  /** `BellmanStore.setNotesSharing`, for this room. Reads the record for nothing, so none is needed. */
+  async setNotesSharing(userId: string, shared: boolean): Promise<void> {
+    if (shared) await this.ctx.storage.put(notesSharingKey(userId), true);
+    else await this.ctx.storage.delete(notesSharingKey(userId));
   }
 
   /**

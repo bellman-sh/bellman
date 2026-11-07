@@ -77,10 +77,12 @@ describe("seesMemory", () => {
 describe("readableEvent and readableEvents on fs events", () => {
   const mixed = [member({ memberId: "m_owner", userId: "u_owner", capabilities: GRANT }), member({ memberId: "m_owner2", userId: "u_owner", capabilities: KEEP })];
 
-  it("hands a memory event to its own account and drops it for every peer, since no path reads the sharing switch yet", () => {
+  it("hands a memory event to its own account, to a peer when the account shares and every seat grants, and drops it otherwise", () => {
     const e = fsEvent(MEMORY);
     expect(readableEvent(e, undefined, "u_owner")).toBe(e);
-    expect(readableEvent(e, undefined, "u_peer", [mixed[0]]), "every seat grants, and still hidden").toBeNull();
+    expect(readableEvent(e, undefined, "u_peer", [mixed[0]]), "every seat grants, not shared: hidden").toBeNull();
+    expect(readableEvent(e, undefined, "u_peer", [mixed[0]], true), "shared and every seat grants").toBe(e);
+    expect(readableEvent(e, undefined, "u_peer", mixed, true), "shared, one seat withholds").toBeNull();
     expect(readableEvent(e, undefined, "u_peer", mixed)).toBeNull();
     expect(readableEvent(e, undefined, "u_peer"), "no seats passed: fail closed").toBeNull();
     expect(readableEvent(e, undefined, null, [mixed[0]]), "the room socket").toBeNull();
@@ -98,6 +100,9 @@ describe("readableEvent and readableEvents on fs events", () => {
     // Both accounts' memory is dropped, u_other's with every seat granting; the room file is not.
     expect(readableEvents(events, [], "u_peer", seats).map((e) => `${e.fromUserId}:${(e.payload as { path: string }).path}`))
       .toEqual(["u_owner:/plans/a.md"]);
+    // With both sharing, u_other's memory comes through; u_owner's still has a withholding seat.
+    expect(readableEvents(events, [], "u_peer", seats, new Set(["u_owner", "u_other"])).map((e) => `${e.fromUserId}:${(e.payload as { path: string }).path}`))
+      .toEqual(["u_owner:/plans/a.md", `u_other:${MEMORY}`]);
     expect(memoryAuthors(events)).toEqual(["u_owner", "u_other"]);
   });
 });
@@ -125,5 +130,10 @@ describe("eventsFor (bellman_sync, the dash's Log, bellman_rooms)", () => {
     expect(shown.map((e) => `${e.fromUserId}:${(e.payload as { path: string }).path}`)).toEqual(["u_a:/plans/x.md"]);
     expect((await eventsFor(store, "qs_mem", events, "u_a")).length, "u_a reads its own memory and the room file").toBe(2);
     expect((await eventsFor(store, "qs_mem", events, "u_b")).length, "u_b reads its own memory and the room file").toBe(2);
+    // Both turn sharing on: u_b's memory reaches the peer (its seat grants); u_a's does not (one seat withholds).
+    await store.setNotesSharing("qs_mem", "u_a", true);
+    await store.setNotesSharing("qs_mem", "u_b", true);
+    const sharedShown = await eventsFor(store, "qs_mem", events, "u_jesse");
+    expect(sharedShown.map((e) => `${e.fromUserId}:${(e.payload as { path: string }).path}`)).toEqual([`u_b:${MEMORY}`, "u_a:/plans/x.md"]);
   });
 });

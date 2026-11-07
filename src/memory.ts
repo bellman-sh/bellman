@@ -6,7 +6,7 @@
 import { ENTITLEMENTS } from "./auth.js";
 import { namespaceOf, normalizePath } from "./fs-path.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
-import { readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
+import { findMember, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
 import type { BellmanStore, FsPage, FsWrite } from "./store.js";
 import type { FsRow, HomeSettings, Identity } from "./types.js";
@@ -99,6 +99,19 @@ export async function setMemoryCapture(store: BellmanStore, actor: Identity, cap
   const next = { ...(await store.readHomeSettings(id)), capture };
   await store.writeHomeSettings(id, next);
   return next;
+}
+
+/**
+ * `unshare`: turn off the caller's notes sharing in a room, from a seat of the caller's (ADR 0047 decision 7: any of
+ * the account's seats can turn it off; only a dash session turns it on, through `PUT /rooms/:id/notes-sharing`).
+ */
+export async function unshareNotes(store: BellmanStore, actor: Identity, sessionId: string, memberId: string): Promise<RoomResult<{ shared: false }>> {
+  const session = await store.getSession(sessionId);
+  if (!session) return refuse("not_found", "session not found.");
+  const me = await findMember(store, session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours.");
+  await store.setNotesSharing(sessionId, actor.userId, false);
+  return succeed({ shared: false });
 }
 
 /**

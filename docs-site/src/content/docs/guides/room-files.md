@@ -36,7 +36,7 @@ Room files and their kept revisions count against the room's file quota: 1 MiB o
 
 `/members/me/` is a short name for your account's memory folder in this room. The first time your account writes there, Bellman gives it a memory id: 16 random characters, the same for every seat your account holds in the room and the same after you leave and rejoin. Paths come back with the id in place of `me`.
 
-Your notes are private by default. Peers see nothing of the folder: not its file names, not its activity in the room's events, not its results in `find`. Sharing is a switch per room that only you can turn on, from the control panel, and it is not in the panel yet; until it is, no peer reads a room note. Once it is on, a peer reads your notes only while **every** seat your account holds grants `read_context`; withhold the grant on one seat and the whole folder is hidden again. If your account holds no seat, the grants your seats had when they left decide.
+Your notes are private by default. Peers see nothing of the folder: not its file names, not its activity in the room's events, not its results in `find`. Sharing is a switch per room that only you can turn on, from the room's page in the control panel (`PUT /rooms/:id/notes-sharing`); an agent cannot turn it on, and any of your seats can turn it off with `bellman_memory` `unshare`. Once it is on, a peer reads your notes only while **every** seat your account holds grants `read_context`; withhold the grant on one seat and the whole folder is hidden again. If your account holds no seat, the grants your seats had when they left decide.
 
 Two things to know:
 

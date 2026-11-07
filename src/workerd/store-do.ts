@@ -758,6 +758,14 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).memoryIds();
   }
 
+  async notesSharers(sessionId: string): Promise<string[]> {
+    return this.session(sessionId).notesSharers();
+  }
+
+  async setNotesSharing(sessionId: string, userId: string, shared: boolean): Promise<void> {
+    return this.session(sessionId).setNotesSharing(userId, shared);
+  }
+
   async waitForEvents(
     sessionId: string,
     cursor: number,

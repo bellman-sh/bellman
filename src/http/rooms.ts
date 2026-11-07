@@ -37,6 +37,7 @@ import {
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { configRoutes } from "./config.js";
+import { notesSharingRoutes } from "./notes-sharing.js";
 import { fileRoutes } from "./files.js";
 import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
@@ -260,6 +261,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     }
     const config = await configRoutes(request, url, path, origin, deps);
     if (config) return config;
+    const sharing = await notesSharingRoutes(request, path, origin, deps);
+    if (sharing) return sharing;
     const files = await fileRoutes(request, url, path, origin, deps);
     if (files) return files;
     return problem(404, "not_found", "no such route", origin);

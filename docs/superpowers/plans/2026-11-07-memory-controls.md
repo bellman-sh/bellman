@@ -57,7 +57,7 @@
 - Produces: `setMemorySettings(store, actor, patch: Partial<HomeSettings>): Promise<HomeSettings>` in `src/memory.ts`, replacing `setMemoryCapture`. Reads the row, spreads the patch, writes, returns the result.
 - Produces: `PUT /me/memory` accepts an object whose keys are a non-empty subset of `capture`, `paused`, each a boolean; 400 otherwise. `GET /me/memory` returns the full `HomeSettings`.
 
-- [ ] **Step 1: Write the failing contract test**
+- [x] **Step 1: Write the failing contract test**
 
 In the "home memory" describe of `tests/helpers/store-contract.ts`, change the settings case's expectations from `{ capture: false }` to `{ capture: false, paused: false }` throughout, and add:
 
@@ -70,7 +70,7 @@ it("reads paused false from a row written before the field existed", async () =>
 });
 ```
 
-- [ ] **Step 2: Write the failing route tests**
+- [x] **Step 2: Write the failing route tests**
 
 In `tests/http-app.test.ts`, "GET and PUT /me/memory": every `toEqual({ capture: … })` becomes `toEqual({ capture: …, paused: false })`. Add:
 
@@ -83,24 +83,24 @@ it("sets paused and capture independently, in either order", async () => {
 });
 ```
 
-- [ ] **Step 3: Run both to verify they fail**
+- [x] **Step 3: Run both to verify they fail**
 
 Run: `npx vitest run tests/store-contract.test.ts tests/http-app.test.ts -t "paused"`
 Expected: FAIL (type error on `paused`, or `undefined` where `false` is expected).
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 - `src/types.ts`: add `paused: boolean` to `HomeSettings` with a doc line ("Pause (ADR 0047 decision 13): every `bellman_memory` op but `forget` and `unshare` is refused `paused`, and arrival reads no home titles. Only the dash sets it."); `DEFAULT_HOME_SETTINGS = { capture: false, paused: false }`.
 - Both `readHomeSettings`: return `{ ...DEFAULT_HOME_SETTINGS, ...row }` when a row exists.
 - `src/memory.ts`: replace `setMemoryCapture` with `setMemorySettings(store, actor, patch: Partial<HomeSettings>)`.
 - `src/http/me.ts`: parse the body as an object whose every key is `capture` or `paused` with a boolean value and at least one key; call `setMemorySettings`. Update the file's header comment (the PUT's body and that `paused` is pause) and the 400 message: `send {"capture": boolean} and/or {"paused": boolean}`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run tests/store-contract.test.ts tests/http-app.test.ts tests/memory.test.ts tests/bridge-door.test.ts`
 Expected: PASS. (`bridge-door` reads `/me/memory` through the bridge; the extra field must not break it.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/types.ts src/store.ts src/workerd/session-do.ts src/memory.ts src/http/me.ts tests/helpers/store-contract.ts tests/http-app.test.ts
@@ -154,7 +154,7 @@ homeLookups(id: string): Promise<LookupRow[]>;
 - DO storage: key `lk:<at zero-padded to 14 digits>:<8 random hex>` so a reverse list reads newest first and two reads in one millisecond do not collide. `const LOOKUP_PREFIX = "lk:"` next to `NOTES_SHARING_PREFIX`; the key comment lists it as purged with the room.
 - `MemoryStore`: `private lookups = new Map<string, LookupRow[]>()`, newest first.
 
-- [ ] **Step 1: Write the failing contract tests**
+- [x] **Step 1: Write the failing contract tests**
 
 ```ts
 it("logs each read in the home room, newest first, with the paths it returned, and nothing when paused", async () => {
@@ -197,23 +197,23 @@ it("keeps the newest 1,000 lookup rows and 90 days", async () => {
 
 The contract already runs under `vi.useFakeTimers()`; check the block's `beforeEach` and reuse it. The 1,005-read loop runs on the Durable Object too; it is a few seconds there and acceptable.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store-contract.test.ts -t "lookup"`
 Expected: FAIL, `readHomeLogged is not a function`.
 
-- [ ] **Step 3: Implement both stores**
+- [x] **Step 3: Implement both stores**
 
 - `MemoryStore`: `readHomeLogged` and `listHomeLogged` check `this.homeSettings.get(id)?.paused`, perform the read as `readFs` / `listFs(..., { newest: true, cursor })` do, unshift the row, then filter rows older than `now - LOOKUP_KEEP_MS`. `homeLookups` slices to `LOOKUP_KEEP` and stores the slice.
 - `SessionDO`: one `this.ctx.storage.transaction` per logged read: `txn.get<HomeSettings>("hs")`, return `{ paused: true }` if paused; read as `readFs` / `listFs` do (the list reads `fsm:` rows through `#fsRows`, which takes a storage; pass `txn`); `txn.put(lookupKey(at), row)`; `txn.list({ prefix: LOOKUP_PREFIX, end: lookupKey(at - LOOKUP_KEEP_MS, "") })` and delete each key. `homeLookups`: `storage.list<LookupRow>({ prefix: LOOKUP_PREFIX, reverse: true })`, delete keys past `LOOKUP_KEEP`, return the first `LOOKUP_KEEP` values. A `// ponytail:` comment on `homeLookups` naming the ceiling: the whole log is read to cap it; a count row if logs grow past a few thousand before the dash reads them.
 - `DurableObjectStore`: delegate the three methods.
 
-- [ ] **Step 4: Run both test programs**
+- [x] **Step 4: Run both test programs**
 
 Run: `npx vitest run tests/store-contract.test.ts && npm run test:worker -- store-contract`
 (Check `package.json` for the Workers pool's script name; `npm run verify` runs both.) Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/types.ts src/store.ts src/workerd/session-do.ts src/workerd/store-do.ts tests/helpers/store-contract.ts
@@ -238,7 +238,7 @@ git commit -m "Memory controls: logged home reads and the lk: lookup log in both
 - Produces, in `src/memory.ts`: `readHome(store, actor, raw, source: LookupSource)`, `listHome(store, actor, prefix, cursor, source)`; both refuse `paused` with reason `paused: your human paused home memory in the dash; forget still works.` `shareHome` passes `{ op: "share", sessionId, memberId, agent, query: path }` where `agent` is `(await store.getBriefs(sessionId, [memberId]))[memberId]?.agent ?? null`. `writeHome` maps `outcome: "paused"` to `refuse("paused", …)`.
 - The tool: `recall` with `path` passes `{ op: "read", sessionId: null, memberId: null, agent: null, query: path }`; `recall` alone passes `op: "list"`, `query: prefix ?? "/"`. The description's refusal list gains `paused`; nothing else in the text changes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Contract (`tests/helpers/store-contract.ts`, home block):
 
@@ -285,12 +285,12 @@ it("logs a bare recall with no seat, and a share with its seat and agent", async
 
 `PairedSession` (`tests/helpers/flows.ts`) carries `sessionId`, `creatorMemberId` and `joinerMemberId`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store-contract.test.ts tests/tools/memory.test.ts -t "paused|logs"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - `HomeAppend` union gains `{ outcome: "paused" }`; both `writeHome`s read `hs` (the DO inside its transaction, `txn.get("hs")`) and return it for `w.write.op === "write"` when paused.
 - `RoomFailure` gains `"paused"`.
@@ -298,12 +298,12 @@ Expected: FAIL.
 - `src/tools/memory.ts`: pass the sources; add `paused` to the description's refusals (`Refusals: stale (current_rev, content), too_large, over_quota, paused, forbidden, …`).
 - `docs/ARCHITECTURE.md` §11: measure as the budget test does (run `npx vitest run tests/tool-budget.test.ts`; it prints the measured figure on failure), add a row `| Memory controls: \`bellman_memory\`'s \`paused\` refusal | +N | total | #531 (ADR 0047, 13) |` and move the "Tool definitions" figure.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run tests/store-contract.test.ts tests/memory.test.ts tests/tools/memory.test.ts tests/tool-budget.test.ts && npm run docs:gen && npx vitest run tests/docs-reference.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ docs/ARCHITECTURE.md docs-site/src/content/docs/reference tests/
@@ -322,7 +322,7 @@ git commit -m "Memory controls: bellman_memory refuses paused and logs every hom
 - Consumes: Task 2's `listHomeLogged`.
 - Produces: `homeTitles(store, actor, source: LookupSource): Promise<{ titles: string[]; paused: boolean }>`; a failed read logs and returns `{ titles: [], paused: false }`. `confirm.ts` passes `{ op: "arrival", sessionId: joined.id, memberId, agent: brief.agent, query: null }` (the joiner's brief is the tool's `brief` argument; use the variable the handler already holds) and renders `recall: { home, home_omitted, paused }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/tools/join-budget.test.ts`, change the `toEqual({ home: [], home_omitted: 0 })` assertion to include `paused: false`, and add:
 
@@ -349,19 +349,19 @@ it("arrival logs a lookup with the room, seat and agent, and a paused account ge
 
 `roomWith` and `join` are this file's helpers (`join` connects with the seeded code `BELL-TEST-01`, so each `roomWith` room must carry it; read `swarmSession` in the file's imports for how the first case seeds the code, and give the second room a code of its own if one code cannot be live in two rooms). `member` and `brief` come from `tests/helpers/fixtures.ts`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run tests/tools/join-budget.test.ts`
 Expected: FAIL on the `paused` key.
 
-- [ ] **Step 3: Implement** as the Interfaces block says. `recallOf` in `confirm.ts` becomes `(k) => ({ home: titles.slice(0, k), home_omitted: titles.length - k, paused })`.
+- [x] **Step 3: Implement** as the Interfaces block says. `recallOf` in `confirm.ts` becomes `(k) => ({ home: titles.slice(0, k), home_omitted: titles.length - k, paused })`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `npx vitest run tests/tools/join-budget.test.ts tests/tools/memory.test.ts tests/tool-budget.test.ts`
 Expected: PASS. If `bellman_confirm`'s description names the `recall` fields, add `paused` there and extend Task 3's budget row rather than adding a second.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/memory.ts src/tools/confirm.ts tests/tools/join-budget.test.ts docs/ARCHITECTURE.md
@@ -393,7 +393,7 @@ export interface LookupShown {
 - Produces: `GET /me/memory/lookups` → 200 `{ lookups: LookupShown[] }`. Dash session only: a bearer is 403 `dash_session_required` ("the lookup log is read by the person signed in to the dash"). 405 for any other method, `allow: GET`.
 - Routing: `src/app.ts` already mounts `/me/memory` with `app.use`, which matches sub-paths; `src/workerd/worker.ts` tests `/^\/me\/(rooms|memory)\/?$/`, which must become `/^\/me\/(rooms|memory)(\/|$)/`. In `meRoutes`, dispatch on the path after `/me/memory`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 describe("GET /me/memory/lookups", () => {
@@ -419,19 +419,19 @@ describe("GET /me/memory/lookups", () => {
 
 `"pair"` is the manifest's `room` for `pairUp`'s room; confirm in `tests/helpers/flows.ts`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run tests/http-app.test.ts -t lookups`
 Expected: FAIL, 404 or `undefined` response.
 
-- [ ] **Step 3: Implement** as the Interfaces block says. Update `src/http/me.ts`'s header comment with the new route.
+- [x] **Step 3: Implement** as the Interfaces block says. Update `src/http/me.ts`'s header comment with the new route.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `npx vitest run tests/http-app.test.ts && npm run typecheck:worker`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/memory.ts src/http/me.ts src/app.ts src/workerd/worker.ts tests/http-app.test.ts
@@ -469,7 +469,7 @@ forgetHomeNote(id: string, path: string): Promise<boolean>;
   - `GET, PUT, DELETE` is `/me/memory`'s allow list now; `/me/memory/notes` allows `DELETE`.
 - Produces, in `src/oauth/routes.ts`: `DELETE /admin/accounts/:userId/memory` behind `operatorGate(request, config, "deleting an account's memory")`, `const ADMIN_ACCOUNT_MEMORY = /^\/admin\/accounts\/([^/]+)\/memory$/`, the segment decoded with `decodeURIComponent`, `config.plans.purgeHome(homeRoomId(userId))`, 204. 501 `unsupported` when `config.plans` is unset, as `/admin/handles` answers. `purgeHome` must be on whatever type `config.plans` is declared as; if that is a narrower interface than `BellmanStore`, add the method to it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Contract:
 
@@ -548,19 +548,19 @@ describe("/admin/accounts/:userId/memory", () => {
 
 `homeRoomId`, `homeSession` and `HOME_MEMBER_ID` come from `src/home.js`; `seedSession` is already imported from `tests/helpers/panel.js`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store-contract.test.ts tests/http-app.test.ts tests/http-admin.test.ts -t "purgeHome|forgetHomeNote|DELETE /me/memory|accounts"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** as the Interfaces block says. In `src/oauth/EGM.md`'s interface list add the route beside `/admin/handles/:handle`.
+- [x] **Step 3: Implement** as the Interfaces block says. In `src/oauth/EGM.md`'s interface list add the route beside `/admin/handles/:handle`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npm run verify`
 Expected: PASS, both test programs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ tests/ docs/
@@ -623,7 +623,7 @@ Revision <rev> · <ISO of row.at>
 - Produces, in `src/memory.ts`: `exportMemory(store, actor): Promise<string>`. Home notes: page `listFs(home, "/")` to the end, `readFs` each. Rooms: the id set `liveRooms` builds (`sessionsCreatedBy(userId, ROOMS_LIMIT)` ∪ `sessionsJoinedBy(userId, JOINED_SCAN)`; export the two constants or a `roomIdsOf(store, identity)` helper from `src/rooms.ts`), `getSession` each, skip closed rooms and rooms with no active seat of the account's, `memoryIdOf(id, userId)`, skip when null, page `listFs(id, \`/members/${memoryId}/\`)`, `readFs` each; rooms in the order the id set yields. `room` is `manifest.room`.
 - Produces: `GET /me/memory/export` → 200, `content-type: text/markdown; charset=utf-8`, `content-disposition: attachment; filename="bellman-memory-<YYYY-MM-DD>.md"`, CORS headers as `json` sets them. Dash session only (bearer 403 `dash_session_required`). 405 otherwise.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/memory-export.test.ts`:
 
@@ -660,19 +660,19 @@ describe("GET /me/memory/export", () => {
 
 Check `bellman_fs`'s write arguments in `src/tools/fs.ts` and adjust the calls.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/memory-export.test.ts tests/http-app.test.ts -t export`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** as the Interfaces block says. `tests/projections.test.ts` asserts the runtime-free layer imports no SDK; `src/memory-export.ts` imports only `./types.js`.
+- [x] **Step 3: Implement** as the Interfaces block says. `tests/projections.test.ts` asserts the runtime-free layer imports no SDK; `src/memory-export.ts` imports only `./types.js`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run tests/memory-export.test.ts tests/http-app.test.ts tests/projections.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/memory-export.ts src/memory.ts src/http/me.ts src/rooms.ts tests/memory-export.test.ts tests/http-app.test.ts
@@ -692,7 +692,7 @@ git commit -m "Memory controls: GET /me/memory/export, one Markdown document (#5
 - Produces, in `src/memory.ts`: `deleteRoomNotes(store, actor, sessionId): Promise<RoomResult<{ deleted: string[]; refused: { path: string; code: RoomFailure } | null }>>`. `not_found` when the room is missing or the account holds no active seat. Picks the first active seat of the account's (`membersOfUser`, filtered by `isActiveMember`), reads `memoryIdOf`; none → `{ deleted: [], refused: null }`. Pages `listFs(sessionId, \`/members/${memoryId}/\`)`, and for each live file calls `writeFs(store, actor, sessionId, memberId, { path, write: { op: "delete", baseRev: row.rev } })` from `src/rooms.ts`; on the first refusal stops and reports it.
 - Produces: `DELETE /rooms/:id/notes`, dash session plus CSRF, bearer 403 `dash_session_required`; 200 `{ deleted, refused }`; 404 as `notes-sharing` answers.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it("DELETE /rooms/:id/notes removes the account's room notes and no one else's, with the room's events saying so", async () => {
@@ -712,19 +712,19 @@ it("DELETE /rooms/:id/notes removes the account's room notes and no one else's, 
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run tests/http-app.test.ts -t "rooms/:id/notes"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** as the Interfaces block says.
+- [x] **Step 3: Implement** as the Interfaces block says.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `npx vitest run tests/http-app.test.ts tests/http-rooms.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/http/notes-sharing.ts src/http/rooms.ts src/memory.ts tests/
@@ -739,19 +739,19 @@ git commit -m "Memory controls: DELETE /rooms/:id/notes removes the account's ro
 - Modify: `docs/adr/0047-bellman-memory.md` (decision 13), `src/http/EGM.md`, `docs-site/src/content/docs/guides/room-files.md`
 - Modify: `docs/superpowers/plans/2026-11-07-memory-controls.md` (this file: tick what shipped)
 
-- [ ] **Step 1: ADR 0047 decision 13**
+- [x] **Step 1: ADR 0047 decision 13**
 
 Rewrite the *Pause*, *Lookup log*, *Hard delete* and *Export* bullets to the routes and calls this plan made (the "Decisions this plan makes" list above, each in one sentence), and add to the header: `revised 2026-11-07 for #531`. Keep the *Capture switch* bullet. Update decision 14's first sentence to name `lk:` and `hs` among what `DELETE /me/memory` removes.
 
-- [ ] **Step 2: `src/http/EGM.md`**
+- [x] **Step 2: `src/http/EGM.md`**
 
 In the Interface section, beside the `/me/memory` line: `PUT` takes `{capture?, paused?}`; `DELETE /me/memory` (204); `DELETE /me/memory/notes?path=` (204 | 404); `GET /me/memory/lookups` `{lookups}`; `GET /me/memory/export` (text/markdown); `DELETE /rooms/:id/notes` `{deleted, refused}`, each with its `[src/http/me.ts:meRoutes]` or `[src/http/notes-sharing.ts:notesSharingRoutes]` citation, and the rule that every one but `GET /me/memory` is dash-session only.
 
-- [ ] **Step 3: The docs site**
+- [x] **Step 3: The docs site**
 
 In `docs-site/src/content/docs/guides/room-files.md`, after the paragraph that points to home memory, add one paragraph "Controls": pause (what an agent sees: `paused`, and that `forget` and `unshare` still work), the lookup log (what a row records), delete (one note, everything; that everything includes the capture switch) and export, each as a thing done from the control panel. No route names. Then `npm run docs:gen` and `npm --prefix docs-site run build` (`npm --prefix docs-site ci` first on a fresh clone).
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `npm run verify && npm run typecheck:worker && npx wrangler deploy --dry-run`
 Expected: all green. If `verify` fails on `test:mod`, read the output: this branch touches nothing under `mod/`, so that failure is pre-existing on main; say so in the PR.

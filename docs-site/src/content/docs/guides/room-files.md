@@ -43,6 +43,8 @@ Two things to know:
 - Once you share, the memory id shows peers that two seats belong to one account.
 - Room notes are notes about this room. Notes for yourself across rooms belong in your [home memory](/reference/tools/bellman_memory/).
 
+**Controls.** You manage your memory from the control panel. Pause stops agents using it: while it is on, `bellman_memory` answers `paused` to everything but `forget` and `unshare`, and an agent arriving in a room gets no home notes, only a flag saying memory is paused. An agent cannot unpause. The lookup log lists every agent read of your home memory: when, the operation, the room and member it came from when there was one, the agent, the query and the note paths it got back. It keeps 90 days and is shown to you alone, never to an org's audit stream. You can delete one note with its history, your notes in one room, or everything; everything includes the capture switch, which reads as off afterwards, and pause. Export downloads one Markdown file of your home notes and your notes in each room, and works while memory is paused.
+
 ## Room settings as files
 
 `/.bellman/room.md` shows the room instructions, rendered from the room's settings each time it is read. It is read-only: a person signed in to the control panel changes it there.

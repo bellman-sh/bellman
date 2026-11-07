@@ -29,8 +29,8 @@ Room routes [src/http/rooms.ts:roomRoutes]:
   [src/http/rooms.ts:mintCode]
 - `RoomCaller {identity, via: "bearer" | "cookie"}`, `RoomRouteDeps {store, blobs, caller, panelOrigins}`
   [src/http/rooms.ts:RoomRouteDeps]
-- `STATUS` maps `RoomFailure` codes: not_found 404, closed/frozen/conflict 409, forbidden 403, invalid 400,
-  rate_limited 429 [src/http/rooms.ts:STATUS]
+- `STATUS` maps `RoomFailure` codes: not_found 404, closed/frozen/conflict/stale/paused 409, forbidden 403,
+  invalid 400, rate_limited 429, too_large/over_quota 413 [src/http/rooms.ts:STATUS]
 - Shared helpers `json`, `problem`, `methodNotAllowed`, `lengthRefusal`, `blobResponse`; ETag helpers
   `surfaceTag`, `searchTag`, `windowTag`, `etagMatches`, `windowParams` [src/http/rooms.ts:etagMatches]
 - Limits `MAX_ROOMS_LISTED` 50, `MAX_SURFACE_WRITE_BYTES` 64 KB, `MAX_SURFACE_BATCH_BYTES` 1 MB,
@@ -45,10 +45,19 @@ Account, org and operator routes:
 - `notesSharingRoutes`: `GET /rooms/:id/notes-sharing` returns `{shared}` for the caller's account, bearer or cookie,
   404 without a seat of the caller's in the room (present or departed); `PUT /rooms/:id/notes-sharing` `{shared: boolean}`
   sets the `ns:` row from a dash session alone (403 `dash_session_required` to a bearer, the CSRF check), 400 for any
-  other body [src/http/notes-sharing.ts:notesSharingRoutes]
+  other body; `DELETE /rooms/:id/notes` deletes the account's own notes in the room, one `writeFs` delete per file from
+  its first active seat, stopping at the first refusal, and answers 200 `{deleted, refused}` (`refused` is
+  `{path, code}` or null), 404 without a seat [src/http/notes-sharing.ts:notesSharingRoutes]
 - `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
-  (`{capture}`) to a bearer or a cookie, `PUT /me/memory` `{capture: boolean}` replaces it from a dash session alone
-  (bearer 403, cookie without Origin 403) [src/http/me.ts:meRoutes]
+  (`{capture, paused}`) to a bearer or a cookie, `PUT /me/memory` `{capture?, paused?}` (at least one, no other key,
+  else 400) merges into it [src/http/me.ts:meRoutes]
+- The rest of `meRoutes`, all dash-session only: `GET /me/memory/lookups` `{lookups}` (newest first, at most
+  `LOOKUP_KEEP` 1,000); `DELETE /me/memory` (204, the whole home room with its `hs` row); `DELETE /me/memory/notes?path=`
+  (204 | 404 `not_found` | 400 `invalid_request`, the note, its history and the path in every lookup row);
+  `GET /me/memory/export` (200 `text/markdown`, an attachment `bellman-memory-YYYY-MM-DD.md`, works while paused, logs
+  no lookup) [src/http/me.ts:meRoutes]
+- Every account memory route but `GET /me/memory` is dash-session only: a bearer gets 403 (`dash_session_required`,
+  or `forbidden` on `PUT /me/memory`) and a write is CSRF-checked [src/http/me.ts:meRoutes]
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB
   [src/http/presets.ts:presetRoutes]
 - `statsRoutes`: `GET /operator/stats` (`PlatformStats {accounts, free, paid, paidCapped}`),

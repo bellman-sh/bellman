@@ -249,4 +249,11 @@ describe("the manifests guide", () => {
     const guide = readFileSync(new URL("../docs-site/src/content/docs/guides/manifests.md", import.meta.url), "utf8");
     for (const line of SECRET_BALLOT_PROMISE.split("\n")) expect(guide).toContain(line);
   });
+
+  it("says where a secret ballot departs from an open one: a removal voids nothing, and only a reused key answers recorded", () => {
+    const guide = readFileSync(new URL("../docs-site/src/content/docs/guides/manifests.md", import.meta.url), "utf8");
+    const secret = guide.slice(guide.indexOf("### Secret ballots"), guide.indexOf("## Saved presets"));
+    expect(secret).toContain("A seat that leaves or is evicted keeps its vote counted");
+    expect(secret).toContain("A retry with the same idempotency key answers `recorded`");
+  });
 });

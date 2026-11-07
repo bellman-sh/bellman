@@ -168,7 +168,7 @@ decide:
   expires: 1h
 ```
 
-A secret vote is logged with no voter and no choice. It takes no reason, and an advisory vote (`human_approved: false`) is refused, so every vote counts. `bellman_decide` `read` shows the tally and, while the decision is open, only whether your own account has voted; who voted is shown when it closes. No one can read back a choice, their own included. A retry of the same vote answers `recorded`; to change a vote, vote again with a new idempotency key. When the decision closes, the server deletes every choice it held.
+A secret vote is logged with no voter and no choice. It takes no reason, and an advisory vote (`human_approved: false`) is refused, so every vote counts. `bellman_decide` `read` shows the tally and, while the decision is open, only whether your own account has voted; who voted is shown when it closes. No one can read back a choice, their own included. A retry with the same idempotency key answers `recorded`; to change a vote, vote again with a new key. The 5-change cap counts per account, not per seat. A seat that leaves or is evicted keeps its vote counted, and the removal voids nothing. When the decision closes, the server deletes every choice it held.
 
 The connect preview shows `ballot: secret` and this promise, word for word, before a joiner accepts a seat:
 

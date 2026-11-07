@@ -5,15 +5,15 @@
  * Runtime-free — no MCP SDK, no `cloudflare:workers` — because both
  * stores, both test programs and the projection layer import it.
  *
- * It imports manifest.ts for the slug grammar and nothing that imports store.ts,
- * so store.ts can import it without the cycle that keeps `asked` and
- * `clearSilence` in store.ts rather than heartbeat.ts.
+ * It imports manifest.ts for the slug grammar and nothing that imports store.ts.
  */
 import { z } from "zod";
 import type { ApprovedBy, SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow, WidgetLocality } from "./types.js";
 import type { StoredSession } from "./storage/stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
+import { fingerprint } from "./storage/idempotency.js";
+import type { EventBody, SurfaceAuthor, SurfaceFacts } from "./storage/store.js";
 
 export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape", "frame", "widget"] as const satisfies readonly SurfaceKind[];
 
@@ -471,3 +471,56 @@ export function normalizeSurfaceBatch(
   }
   return { ok: true, entries };
 }
+
+/**
+ * The fingerprint a keyed surface write is recorded under: the event's, with the write's `frame` folded into the
+ * payload when it has one. `frame` rides the write and never the item, so without it a key retried with another
+ * frame number would read as the same send and replay.
+ */
+export const surfacePrint = (e: EventBody, write: SurfaceWrite): string =>
+  fingerprint(write.frame === undefined ? e : { ...e, payload: { ...(e.payload as object), frame: write.frame } });
+
+/** `surfaceFacts` over rows a store holds: the counts, and the rows of the keys asked, in key order. */
+export function surfaceFactsOf(rows: Iterable<SurfaceRow>, keys: readonly string[]): SurfaceFacts {
+  const asked = new Set(keys);
+  let count = 0;
+  let frames = 0;
+  const named: SurfaceRow[] = [];
+  for (const r of rows) {
+    count++;
+    if (r.kind === "frame") frames++;
+    if (asked.has(r.key)) named.push(r);
+  }
+  return { count, frames, rows: named.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) };
+}
+
+/**
+ * The `surface` event a locked move owes each card it carries (lead ruling L2): the mover's, with no `refId`, its payload
+ * the card's full item, so every reader of a `surface` event and `restore` read it as any other version.
+ */
+export const carriedEvent = (mover: EventBody, write: SurfaceWrite): EventBody => ({
+  type: "surface", fromMemberId: mover.fromMemberId, fromUserId: mover.fromUserId, fromLabel: mover.fromLabel,
+  payload: write.item, refId: null,
+});
+
+/**
+ * The carried event as the row's own writer (L2), handed to the row rule in place of the event: the row keeps
+ * who wrote it and the event says who moved it. `createdAt` needs nothing here, since a carried card keeps its
+ * kind, and the approver is handed back beside it as `approvedBy`.
+ */
+export const asRowWriter = (event: SessionEvent, row: SurfaceRow): SessionEvent =>
+  ({ ...event, fromMemberId: row.byMemberId, fromLabel: row.byLabel });
+
+/** The event a batch's write is appended as, before placement: the author's, its payload the item or the removal. */
+export const batchEvent = (author: SurfaceAuthor, write: SurfaceWrite): EventBody =>
+  ({ type: "surface", ...author, payload: write.item ?? { key: write.key, remove: true }, refId: null });
+
+/** The fingerprint a keyed batch is recorded under: every write, in order, each with its `frame` folded in as `surfacePrint` does. */
+export const surfaceBatchPrint = (author: SurfaceAuthor, writes: readonly SurfaceWrite[]): string =>
+  fingerprint({
+    type: "surface", ...author, refId: null,
+    payload: { items: writes.map((w) => {
+      const payload = w.item ?? { key: w.key, remove: true };
+      return w.frame === undefined ? payload : { ...payload, frame: w.frame };
+    }) },
+  });

@@ -2,7 +2,9 @@ import { PUBLIC_NAME, roomNamed } from "./public-names.js";
 import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
 import { audit } from "./rooms.js";
 import { verbsOfRole } from "./roles.js";
-import { hostSeated, isActiveMember, isHostMember, isPublic, type BellmanStore } from "./storage/store.js";
+import { hostSeated, isActiveMember, isHostMember } from "./members.js";
+import { isPublic } from "./manifest.js";
+import type { BellmanStore } from "./storage/store.js";
 import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 
 /** Outside callers (A2A) of a public room: the limits, asking and answering. The task row's type is `OutsideTask`, in types.ts. */
@@ -331,3 +333,29 @@ export function decideCancel(task: OutsideTask | undefined, req: CancelRequest):
 export const cancelOutsideTask = (
   store: BellmanStore, sessionId: string, callerUserId: string, taskId: string, now: number = Date.now(),
 ): Promise<CancelResult> => store.cancelOutside(sessionId, { callerUserId, taskId, now });
+
+/** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
+export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
+
+/**
+ * The task row as an append writes it: an `outside_question` adds its own cursor and an `outside_answer` its own entry,
+ * which only the store knows once the event is numbered. Any other event writes the row as given.
+ */
+export const taskWithEvent = (task: OutsideTask, event: SessionEvent): OutsideTask =>
+  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] }
+  : event.type === "outside_answer"
+    ? { ...task, answers: [...task.answers, { cursor: event.cursor, text: (event.payload as { text: string }).text, at: event.at }] }
+  : task;
+
+/**
+ * The seat's hand-off of an outside task to the members, in place. Only a task still the seat's and WORKING moves:
+ * a skip after the seat answered, or after an earlier hand-off, is a no-op (the ruling for the races between the seat's
+ * answer, its skip and its deadline). Both stores' rule; SessionDO applies it to the row it read in its transaction.
+ */
+export function handOff(task: OutsideTask, now: number): boolean {
+  if (task.voice !== "seat" || task.state !== "TASK_STATE_WORKING") return false;
+  task.voice = "members";
+  task.seatDeadline = null;
+  task.updatedAt = now;
+  return true;
+}

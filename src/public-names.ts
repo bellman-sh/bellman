@@ -2,7 +2,7 @@
  * Public names (public names spec): the rule a name keeps (D2) and whether a room holds one (D5).
  * Runtime-free, like projections.ts, so the routes, the tools and both test programs import it.
  */
-import { isPublic } from "./storage/store.js";
+import { isPublic } from "./manifest.js";
 import type { BellmanStore, PublicNameEntry } from "./storage/store.js";
 import type { StoredSession } from "./storage/stored-session.js";
 
@@ -70,3 +70,7 @@ export async function claimName(store: BellmanStore, name: string, sessionId: st
   const mine = { id: sessionId, at: now };
   return (await store.claimPublicName(name, mine, current)) ? mine : null;
 }
+
+/** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
+export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
+  a === null || b === null ? a === b : a.id === b.id && a.at === b.at;

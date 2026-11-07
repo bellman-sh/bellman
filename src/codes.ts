@@ -72,3 +72,19 @@ export const PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/";
 export function publicRoomUrl(s: Pick<StoredSession, "id" | "publicName" | "manifest" | "unpublishedAt" | "closed">): string {
   return `${PUBLIC_ROOM_URL_BASE}${heldName(s) ?? s.id}`;
 }
+
+const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
+const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Whether a join code is live at `now`: a permanent one always is, and a temporary one until
+ * its expiry, inclusive (ADR 0020). The one place liveness is decided, read
+ * by both stores, by `revokeInvite` and by the `join_codes` projection, so a code cannot be live
+ * to one of them and expired to another. Nothing prunes an expired record, which is why every
+ * one of them has to ask.
+ */
+export const codeIsLive = (rec: { expiresAt: number | null }, now: number): boolean =>
+  rec.expiresAt === null || now <= rec.expiresAt;
+
+export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
+export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

@@ -1,28 +1,23 @@
-import type { AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator, RoomManifest, PublicView, Session, SessionEvent, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, PresetName, SessionMode, ConfigGovernance, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
-import { DEFAULT_POLICY } from "../types.js";
-import { CONFIG_RESERVE_BYTES } from "../config.js";
-import { FS_HISTORY, contentHash, decideFsCharge, memoryCeilingOf, planWrite, utf8Bytes, type FsPlanInput } from "../fs.js";
-import { OWN_MEMORY, namespaceOf } from "../fs-path.js";
-import { liftOrg } from "../orgs.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings } from "../types.js";
+import { type FsRefusal } from "../fs.js";
 import { blobBytesUsed } from "../blobs.js";
-import { type Ban, type BanScope, type CreatorBan } from "../bans.js";
-import { fingerprint, type IdempotencyRecord } from "./idempotency.js";
-import { monthKey, type StoredSession } from "./stored-session.js";
-import { type AuditIntent } from "../grant-audit.js";
-import { type AuditSettings, type AuditSinkStatus, type AuditVerification } from "../audit-sink.js";
-import { mustReport, verbsOfRole } from "../roles.js";
-import { applySurfaceWrite, needsPlacement, type SurfaceWrite } from "../surface.js";
-import { isFrameWrite, placeSurfaceWrite, readWindow, type Placed, type Window, type WindowPage } from "../frames.js";
-import { type ClosedState, type DecisionPage, type DecisionPageAsk, type Electorate, type DecisionState, type DecisionView, type FailReason, type VoteDecision } from "../decision.js";
+import type { Ban, BanScope, CreatorBan } from "../bans.js";
+import { type IdempotencyRecord } from "./idempotency.js";
+import { type StoredSession } from "./stored-session.js";
+import type { AuditIntent } from "../grant-audit.js";
+import type { AuditSettings, AuditSinkStatus, AuditVerification } from "../audit-sink.js";
+import { type SurfaceWrite } from "../surface.js";
+import { type Window, type WindowPage } from "../frames.js";
+import { type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionState, type DecisionView, type FailReason } from "../decision.js";
 import { type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult } from "../outside.js";
-import { type SendAdmission } from "../send-limit.js";
+import type { SendAdmission } from "../send-limit.js";
 import type { Suspension } from "../suspension.js";
-import { type FiledReport, type NewReport, type Report } from "../reports.js";
-import { auditRows, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery } from "../audit.js";
+import type { FiledReport, NewReport, Report } from "../reports.js";
+import { type AuditActor, type AuditFacets, type AuditPage, type AuditQuery } from "../audit.js";
+import { capacityOf, isPublic } from "../manifest.js";
+import { NO_SOCKETS, isActiveMember } from "../members.js";
+import { isAbandoned } from "../presence.js";
 export type { AuditIntent } from "../grant-audit.js";
-
-const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
-const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
 
 /** Fields of a Member that may change after it is created. */
 export type MemberPatch = Partial<
@@ -34,16 +29,6 @@ export type MemberPatch = Partial<
 // `removedAtCursor` is deliberately absent. It is the append's to write, inside
 // the transaction that stores the event it names (#113), and a patch route
 // would be a second way to write it — one that could set a cursor no event has.
-
-/**
- * Whether a join code is live at `now`: a permanent one always is, and a temporary one until
- * its expiry, inclusive (ADR 0020). The one place liveness is decided, read
- * by both stores, by `revokeInvite` and by the `join_codes` projection, so a code cannot be live
- * to one of them and expired to another. Nothing prunes an expired record, which is why every
- * one of them has to ask.
- */
-export const codeIsLive = (rec: { expiresAt: number | null }, now: number): boolean =>
-  rec.expiresAt === null || now <= rec.expiresAt;
 
 /**
  * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
@@ -59,131 +44,9 @@ export interface PublicNameEntry {
   at: number;
 }
 
-/** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
-export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
-  a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
-
 /** `listUsers`' order, both stores': first sign-in first, then user id, so equal times still read in one order. */
 export const firstSignInFirst = (users: UserRecord[]): UserRecord[] =>
   users.sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
-
-/** Outside tasks, newest first: the order they were first asked in, which their first question's cursor keeps. */
-export const newestTaskFirst = (a: OutsideTask, b: OutsideTask): number => b.questionCursors[0] - a.questionCursors[0];
-
-/**
- * The task row as an append writes it: an `outside_question` adds its own cursor and an `outside_answer` its own entry,
- * which only the store knows once the event is numbered. Any other event writes the row as given.
- */
-export const taskWithEvent = (task: OutsideTask, event: SessionEvent): OutsideTask =>
-  event.type === "outside_question" ? { ...task, questionCursors: [...task.questionCursors, event.cursor] }
-  : event.type === "outside_answer"
-    ? { ...task, answers: [...task.answers, { cursor: event.cursor, text: (event.payload as { text: string }).text, at: event.at }] }
-  : task;
-
-export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
-  s.manifest.public === true && s.unpublishedAt == null;
-
-/**
- * Whether a member is still in the room: they have not left.
- *
- * Here, and not in rooms.ts, because the stores now decide a room is empty
- * (`closeSessionIfEmpty`) and rooms.ts imports this module, not the reverse.
- * `activeMembers` is built on it, so the members rooms.ts counts and the members
- * a close is decided on are one reading of `leftAt` and cannot drift apart.
- */
-export const isActiveMember = (m: Member): boolean => m.leftAt === null;
-
-/**
- * When this member was last heard from, falling back to when it joined.
- *
- * Here beside `isActiveMember`, and not in presence.ts, because `seatMember`
- * has to read it inside the store — presence.ts imports this module, so the
- * other direction would be a cycle. The fallback is the legacy lift: members
- * stored before `lastSeenAt` existed have none, and reading `undefined` as
- * "never seen" would make every one of them reclaimable on the next join.
- * Joining is a call the member made, so `joinedAt` is the honest answer for a
- * row that predates the field — the same read-time `??` lift commit 7d19453
- * applies to `joinCode`.
- */
-export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
-
-/**
- * The hosted seat's identity (hosted seat spec, D1): the member id it holds in
- * every room, and the user every hosted seat is seated under.
- *
- * These and the two rules below are here beside `isActiveMember`, and
- * re-exported from host.ts, for the reason `lastSeen` gives: both stores read
- * them inside their own methods, and host.ts imports this module.
- */
-export const HOST_MEMBER_ID = "m_host";
-export const HOST_USER_ID = "u_bellman_host";
-export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
-
-/**
- * Every hosted seat's label (M13). The role is the creator's to name, so a label built
- * from it, `security@bellman` say, would lend Bellman's name to the creator's words.
- * Here with the seat's other facts, and not in host.ts, because member-names.ts names
- * the seat by it and host.ts imports that module.
- */
-export const HOST_LABEL = "host@bellman";
-
-/**
- * A member still in the room who is a person and not the hosted seat (hosted seat
- * spec, D5). The host does not vouch for a room, so whether a room is empty, when it
- * is abandoned and whether a hosted tick has anyone to ask all count these and only
- * these: one predicate, so the three cannot disagree about who is there.
- */
-export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
-
-/**
- * Whether the room holds a member outside any org (ADR 0031): the hosted seat has no org and is not one, since it
- * is Bellman's and no counterparty. The creator is on the roster, so `orgId` is read for a room with none yet.
- */
-export const rosterHasOrgless = (s: Pick<StoredSession, "orgId" | "members">): boolean =>
-  s.orgId === null || s.members.some((m) => m.orgId === null && !isHostMember(m));
-
-/** A member as it comes to be seated: a brief to keep beside the room, or the agent of one kept there already. */
-export type Seating = Omit<Member, "agent" | "seq" | "publicNumber"> & { agent?: AgentInfo; brief?: Brief };
-
-/**
- * Members as a room seats them, in the order given (ADR 0018, ADR 0019). Each brief leaves
- * its member for a row of its own, and the member keeps the brief's `agent`. Each member
- * takes the next `seq`. Each label takes a public number: the one the room gave it before
- * (`known`), or the next one, and none for the hosted seat, whose label names no person.
- *
- * `counts` are the last `seq` and the last public number the room has given. What comes
- * back is the members, their briefs, the labels this numbered for the first time, and the
- * counts after. Both stores seat through here, and so does the Durable Object's move of an
- * older room's members into rows, so the three cannot number a member differently.
- */
-export function seatInOrder(
-  arriving: readonly Seating[],
-  counts: { memberSeq: number; labelSeq: number },
-  known: (label: string) => number | undefined = () => undefined,
-): { members: Member[]; briefs: Record<string, Brief>; numbered: Map<string, number>; memberSeq: number; labelSeq: number } {
-  let { memberSeq, labelSeq } = counts;
-  const briefs: Record<string, Brief> = {};
-  const numbered = new Map<string, number>();
-  const members = arriving.map(({ brief, ...m }): Member => {
-    if (brief) briefs[m.memberId] = brief;
-    let publicNumber: number | null = null;
-    if (!isHostMember(m)) {
-      publicNumber = numbered.get(m.label) ?? known(m.label) ?? null;
-      if (publicNumber === null) numbered.set(m.label, (publicNumber = ++labelSeq));
-    }
-    return { ...m, agent: brief ? brief.agent : m.agent!, seq: ++memberSeq, publicNumber };
-  });
-  return { members, briefs, numbered, memberSeq, labelSeq };
-}
-
-/**
- * The room's first seat as its record keeps it (ADR 0019). A room is created with its creator
- * seated, so a creation with nobody to seat is refused here, before either store writes.
- */
-export function creatorOf(m: Member | undefined): RoomCreator {
-  if (!m) throw new Error("a room is created with its creator seated, and this one names no member");
-  return { memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt };
-}
 
 /**
  * A row of the operator's index of every room (#471), fixed at the room's creation, so the list reads
@@ -277,379 +140,10 @@ export function roomSummaryOf(
   };
 }
 
-/**
- * What `departedMembers` answers, from every member a room has seated (ADR 0019, D7): those
- * who have left, after `leftAfter` when it is given, and of those the `limit` who left most
- * recently, a later joiner first where two left at once. Handed back in join order. Both
- * stores answer through here, so they cannot choose different members to show.
- */
-export function departures(
-  members: readonly Member[],
-  { limit, leftAfter }: { limit?: number; leftAfter?: number } = {},
-): DepartedMembers {
-  const gone = members.filter((m) => m.leftAt !== null && (leftAfter === undefined || m.leftAt > leftAfter));
-  const shown = limit === undefined
-    ? gone
-    : [...gone].sort((a, b) => b.leftAt! - a.leftAt! || b.seq - a.seq).slice(0, Math.max(0, limit));
-  return { members: [...shown].sort((a, b) => a.seq - b.seq), omitted: gone.length - shown.length };
-}
-
-/**
- * Everyone a room ever seated, the hosted seat left out, as an audit row's parties (audit trail
- * spec, D2): what a purge's and a delete's rows say the room held. The roster keeps a member who
- * left, as the record's `orgs` does, because their org sat in the room. So `members` is every
- * member seated, not a read room's: MemoryStore's record holds them all, and the Durable Objects
- * store reads them from their rows, since its record holds only those in the room (ADR 0019).
- */
-export const rosterParties = (s: Pick<StoredSession, "members">): (string | null)[] =>
-  partiesOf(s.members.filter((m) => !isHostMember(m)).map((m) => m.orgId));
-
-/**
- * Whether the room's hosted seat is still in it (C1). Evicting the host is the
- * creator's one control over it, so once it has left nothing wakes it and the room
- * refuses its writes: the tick (`tickPlan`), both stores' reply wakes and
- * `decideHostCharge` all ask this.
- */
-export const hostSeated = (s: Pick<Session, "members">): boolean =>
-  s.members.some((m) => isHostMember(m) && isActiveMember(m));
-
-/** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
-export const WAKES_PER_HOUR = 8;
-
-/** A member's answer to the host: a message or a progress event whose ref names one of the host's events. */
-export function isReplyToHost(
-  e: Pick<SessionEvent, "type" | "refId">,
-  referenced: Pick<SessionEvent, "fromMemberId"> | undefined,
-): boolean {
-  if (e.refId === null || referenced === undefined) return false;
-  if (e.type !== "message" && e.type !== "progress") return false;
-  return referenced.fromMemberId === HOST_MEMBER_ID;
-}
-
-/** Nobody is on a socket. What every reading of presence assumes until it is told otherwise. */
-export const NO_SOCKETS: ReadonlySet<string> = new Set();
-
-/**
- * Which of these members a live socket vouches for, given the member ids that
- * the sockets open in this room carry (their attachments, #146).
- *
- * A socket is authenticated as one identity, and its attachment lists the
- * members that identity owned in the room when the socket was accepted. That is
- * a snapshot, and the identity is what the socket vouches for, so this widens
- * the ids to every undeparted member of the users they belong to. The bus is
- * why: it serves every session of an identity on a machine through one socket
- * per room, so a member that joins after the socket was accepted is carried by
- * that socket and cannot be named in it. Read literally, the ids would leave
- * that member stale after ten minutes, and it never calls `bellman_sync` to say
- * otherwise.
- *
- * The cost is in one direction. A member of the identity whose session died
- * stays present for as long as another of its members holds a socket here,
- * because the socket does not say which of them it is for. That holds a seat too
- * long, which #139 prefers to the opposite: reaping too early removes a live
- * member, and the removal is final.
- *
- * Here beside `seatVictims`, and not in presence.ts, because `seatMember` runs
- * it inside the store and presence.ts imports this module.
- */
-export function connectedAmong(
-  members: readonly Member[],
-  attached: Iterable<string>,
-): ReadonlySet<string> {
-  const named = new Set(attached);
-  if (named.size === 0) return NO_SOCKETS;
-  const users = new Set<string>();
-  for (const m of members) if (named.has(m.memberId)) users.add(m.userId);
-  const connected = new Set<string>();
-  for (const m of members) {
-    if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
-  }
-  return connected;
-}
-
-/**
- * How long a room may go with nobody in it before it is abandoned (#18).
- *
- * Rooms persist: there is no clock on a room, on any plan. What ends one is its
- * last member leaving (`closeSessionIfEmpty`) or this: 90 days in which no
- * active member was heard from or held a socket. An abandoned room costs
- * storage and nothing else, and the member a hub room would most regret losing
- * is its quietest one, so the window is long. It is not forever because a room
- * whose every member died with its laptop should not sit in a Durable Object
- * for good, and the sweep is also what retires its codes from the registry.
- *
- * Here beside `lastSeen`, and re-exported from presence.ts, for the reason
- * `lastSeen` gives: both stores read these inside their own methods, and
- * presence.ts imports this module.
- */
-export const ABANDONED_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
-
 /** What `departedMembers` found: the members it hands back, and how many more matched past its `limit`. */
 export interface DepartedMembers {
   members: Member[];
   omitted: number;
-}
-
-/** What the abandonment rule reads: a session, or a stored one. */
-export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members" | "kind">;
-
-/**
- * When this room becomes abandoned, or null if the question does not apply: a
- * closed room is over, a frozen one is waiting on a payment and `touchMember`
- * cannot stamp it, and an empty one is `closeSessionIfEmpty`'s. Departed members
- * do not count: a goodbye yesterday does not keep open a room that nobody else
- * has been in for a season. Nor does the hosted seat (hosted seat spec, D5): its
- * sends stamp it as seen, and a room whose people have all gone quiet still ends
- * 90 days after one of them was last there, however recently its host spoke.
- */
-export function abandonedAt(s: RoomRoster): number | null {
-  // A home room (ADR 0047) has one member who never sits in it: it ends only by hard delete, never by abandonment.
-  if (s.closed || s.frozenAt !== null || s.kind === "home") return null;
-  const active = s.members.filter(isActivePerson);
-  if (active.length === 0) return null;
-  return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
-}
-
-/**
- * Whether this room is abandoned now. `connected` is the members a live socket
- * vouches for (`connectedAmong`): a member on a socket is there whatever its
- * `lastSeenAt` says, so a room with one is never abandoned. Strict `>`, so a
- * read landing exactly on `abandonedAt` still sees the room open.
- *
- * Shared by both stores' sweeps and lazy closes, SessionDO's derived alarm and
- * every reader that answers "closed" without writing (`readsClosed`), so the
- * four cannot drift the first time one of them is edited.
- */
-export function isAbandoned(
-  s: RoomRoster,
-  now: number,
-  connected: ReadonlySet<string> = NO_SOCKETS,
-): boolean {
-  const due = abandonedAt(s);
-  if (due === null || now <= due) return false;
-  return !s.members.some((m) => isActiveMember(m) && connected.has(m.memberId));
-}
-
-/**
- * The roster with `lastSeenAt` moved to `now` on every active member, or only
- * on those named. New objects, so a caller's copy is not written into.
- *
- * Two callers. A thaw stamps every active member, so a room coming back from a
- * freeze gets a full window rather than closing on the alarm the thaw re-arms.
- * The abandonment alarm stamps the members a socket vouches for, which is the
- * stamp `webSocketClose` makes on a drop (#152), made on a schedule: without it
- * a room held open on one socket for a season would fire its alarm back to back.
- */
-export function stampSeen(members: Member[], now: number, only?: ReadonlySet<string>): Member[] {
-  return members.map((m) =>
-    isActiveMember(m) && (only === undefined || only.has(m.memberId)) ? { ...m, lastSeenAt: now } : m,
-  );
-}
-
-/**
- * Whether the room asks this member for reports.
- *
- * Here beside `isActiveMember`, and not in heartbeat.ts, because `freezeSession`
- * applies `clearSilence` inside the store and that reads this — heartbeat.ts
- * imports this module, so the other direction would be a cycle. One that works
- * only while every use sits inside a function body: the first at module
- * evaluation fails at import under the Worker's load order, and neither tsc
- * program reports it.
- */
-export const asked = (s: StoredSession, m: Member): boolean =>
-  isActiveMember(m) && mustReport(s.manifest, m.roomRole);
-
-/**
- * The roster with one member's report stamp moved forward to `at`, or null when
- * nothing moves.
- *
- * **Monotonic, and that is the whole rule.** `lastReportAt` only ever moves
- * later. A credit replayed from an older event, or one arriving out of order
- * behind a fresher report, would otherwise un-credit an answer the member had
- * already given — and the next tick would name it silent for having reported.
- * There is no reading of "it last reported earlier than we thought" that helps
- * anybody.
- *
- * Null for "no write needed" rather than an unchanged roster, so both stores
- * agree on WHEN a credit writes at all: a replay whose stamp is already forward
- * of the event touches no storage. A member the roster does not name is the same
- * answer, for `updateMember`'s reason — an unknown member is a no-op, not a
- * throw.
- *
- * Here beside `asked` and `clearSilence`, and the direction is the same: this is
- * applied INSIDE both stores, and heartbeat.ts imports this module, so the other
- * way round would be a cycle.
- */
-export function creditReport(
-  members: Member[],
-  memberId: string,
-  at: number,
-): Member[] | null {
-  const i = members.findIndex((m) => m.memberId === memberId);
-  if (i < 0) return null;
-  const was = members[i].lastReportAt;
-  if (was !== undefined && was >= at) return null;
-  const next = [...members];
-  next[i] = { ...next[i], lastReportAt: at };
-  return next;
-}
-
-/** Whether a creator removed this member, so its feed is cut (#113). */
-export const isRemovedMember = (m: Member): boolean => m.removedAtCursor !== undefined;
-
-/**
- * Record `memberId` out at `cursor`, returning the new roster or `null` when
- * there is nothing to write.
- *
- * Sets `leftAt` AND `removedAtCursor` in one go, because they are one write:
- * folded into the append's transaction, a failure leaves the member in rather
- * than half out. `creditReport` above carries the argument for why a member
- * write that must agree with an event belongs in the event's own transaction.
- *
- * `null` in three cases, and none of them is merely an optimisation.
- *
- * A member the roster does not name: `updateMember`'s rule, an unknown member is
- * a no-op and not a throw.
- *
- * A member already carrying a cursor. Without this a creator evicting the same
- * member twice would move the cut forward and widen the window the first
- * eviction closed.
- *
- * A member who has already left (#113, D6). `evictMember` returns early for one,
- * but it reads the roster once and appends later, and a voluntary leave can land
- * in between: `leaveRoom` sets `leftAt` through `updateMember`, and
- * `removedAtCursor` is not patchable, so neither bail-out above sees it. Without
- * this one that member would be handed a cut and have its own `leftAt`
- * overwritten, and a member who chose to go is the one R2 gives the open feed.
- * It is a `null` and not `leftAt: members[i].leftAt ?? at`, which would keep the
- * leave time and still write the cut — the part D6 forbids.
- *
- * Here beside `creditReport` and `isActiveMember`, and the direction is theirs:
- * this is applied INSIDE both stores, so it can live in neither.
- */
-export function markRemoved(
-  members: Member[],
-  memberId: string,
-  cursor: number,
-  at: number,
-): Member[] | null {
-  const i = members.findIndex((m) => m.memberId === memberId);
-  if (i < 0) return null;
-  if (members[i].removedAtCursor !== undefined) return null;
-  if (members[i].leftAt !== null) return null;
-  const next = [...members];
-  next[i] = { ...next[i], leftAt: at, removedAtCursor: cursor };
-  return next;
-}
-
-/** What an append owes housekeeping (#66): the fields of a session `noteAppend` may move. */
-type Books = Pick<Session, "members" | "openRequests" | "lastMemberEventAt">;
-
-/**
- * The member a departure event is about, or null when the event is not a departure.
- *
- * `member_left` is authored by the member who left. `member_evicted` and
- * `member_timed_out` are authored by "system" and name the member in their payload,
- * because no member handle authored either (`evictMember` and `announceReclaimed`
- * write them so). Reading `fromMemberId` alone would close nobody's requests for
- * exactly the two removals the server makes.
- */
-function departedMemberId(e: SessionEvent): string | null {
-  if (e.type === "member_left") return e.fromMemberId;
-  if (e.type === "member_evicted" || e.type === "member_timed_out") {
-    const id = (e.payload as { member_id?: unknown } | null)?.member_id;
-    return typeof id === "string" ? id : null;
-  }
-  return null;
-}
-
-/**
- * What an append owes housekeeping (#66): the sender's last send, the room's last member
- * event, and the set of requests still waiting. The books to write, or the very object it
- * was handed when there is nothing to write, so a caller tells "no change" by identity.
- *
- * **Only a room that declared housekeeping keeps books.** Any other returns at once, and
- * the Durable Objects store then writes exactly the rows it wrote before this existed.
- *
- * **A person's event moves the sender and the room; the server's does not, and neither
- * does the hosted seat's.** A tick, a proposal, an eviction and a timeout are all authored by
- * "system", and none of them is anybody's activity. The seat is Bellman's, not a person
- * (hosted seat spec, D5; ruling H3): it speaks on its own clock, in answer to its two wake
- * causes, so what it says is not a member writing to the room, and a room only it speaks in
- * reads idle. Departures still close the departed member's requests whoever authored them,
- * which is why that comes first.
- *
- * Requests are kept here and not derived from the log, because every read of the log is
- * bounded and a request older than the bound must not be forgotten. An `action_response`
- * closes the request whose cursor its `refId` names, and `bellman_send` has already
- * checked that it names a real one. The closing on a departure keeps the record small;
- * it is not what stops a departed member's request being named, which the rule that
- * reads the record decides for itself.
- *
- * Pure, and applied INSIDE both stores at the write, so the two cannot disagree about
- * what "open" means. Unlike `creditReport` and `markRemoved` it is not asked for by an
- * `AppendExtras` flag: the departures that close a request are written by paths no caller
- * flags (`removeMember`, `announceReclaimed`), and a flag every caller had to remember is
- * how the books would go stale. Here beside them for their reason otherwise: housekeeping.ts
- * imports this module, as heartbeat.ts does, so the other direction would be a cycle.
- *
- * NOT applied to a replay. The books went in with the first append, and applying the
- * original event again would put a request back after its answer.
- */
-export function noteAppend(s: Books & Pick<Session, "manifest">, e: SessionEvent): Books {
-  if (s.manifest.housekeeping === null) return s;
-
-  let openRequests = s.openRequests;
-  const gone = departedMemberId(e);
-  if (gone !== null && Object.values(openRequests).some((r) => r.fromMemberId === gone)) {
-    openRequests = Object.fromEntries(Object.entries(openRequests).filter(([, r]) => r.fromMemberId !== gone));
-  }
-
-  if (e.fromMemberId === "system" || isHostMember({ userId: e.fromUserId })) {
-    return openRequests === s.openRequests
-      ? s
-      : { members: s.members, openRequests, lastMemberEventAt: s.lastMemberEventAt };
-  }
-
-  if (e.type === "action_request") {
-    openRequests = { ...openRequests, [String(e.cursor)]: { at: e.at, fromMemberId: e.fromMemberId } };
-  } else if (e.type === "action_response" && e.refId !== null && Object.hasOwn(openRequests, e.refId)) {
-    const { [e.refId]: _answered, ...rest } = openRequests;
-    openRequests = rest;
-  }
-  return {
-    members: s.members.map((m) => (m.memberId === e.fromMemberId ? { ...m, lastSentAt: e.at } : m)),
-    openRequests,
-    lastMemberEventAt: e.at,
-  };
-}
-
-/**
- * The roster a thaw writes back: every seat the room asks is credited with a
- * report at `now`.
- *
- * Spec D10. "A member cannot report its way out of a frozen room, so none may be
- * named silent in one. A freeze must cost nobody their standing." `#tickIfDue`
- * honours the letter by writing no tick while frozen, but that is not enough on
- * its own: `silent_for_seconds` is measured from `lastReport`, which the freeze
- * stopped anybody from moving. A room frozen for an hour on a 5m cadence would
- * otherwise produce, on its first tick after the thaw, `silent: true` for every
- * member — a measurement of the freeze, not of anyone's behaviour, and exactly
- * the false silent D10 is written to avoid.
- *
- * What this loses is the pre-freeze report age, which after an outage long enough
- * to freeze a room is not something a peer can act on anyway. The faithful
- * alternative — carrying the frozen interval on the session and subtracting it in
- * `snapshotOf` — buys that back for a stored field and a second clock to keep
- * consistent with the first.
- *
- * Pure: it takes `now` rather than reading the clock, so the store contributes the
- * moment of the thaw and nothing else. Here for the reason `asked` gives. Who the
- * room asks is `asked`'s rule, and a store that filtered the roster itself would
- * be a second copy of it.
- */
-export function clearSilence(s: StoredSession, now: number): Member[] {
-  return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
 }
 
 /** What `appendEvent` already takes: an event without the fields the store fills. */
@@ -682,11 +176,6 @@ export interface RemovalOutcome {
 export type ScimCreate = { outcome: "written" | "linked"; user: ScimUser } | { outcome: "exists" | "conflict" | "full" | "no_org" };
 /** What an update did (SCIM spec, D6 to D8): the row after and before, or why nothing was written. */
 export type ScimUpdate = { outcome: "updated"; user: ScimUser; was: ScimUser } | { outcome: "missing" | "full" | "exists" | "conflict" };
-
-/** The grant a SCIM user holds while active (SCIM spec, D2): a team member from scim, lapsing never. */
-export const scimGrant = (key: string, orgId: string, now: number): PlanGrant => ({
-  key, plan: "team", role: "member", orgId, source: "scim", grantedAt: now, grantedBy: "scim", expiresAt: null,
-});
 
 /** The guard and the writes a removal performs, handed in by its caller. */
 export interface RemovalRequest {
@@ -785,48 +274,6 @@ export interface SeatOutcome {
   reclaimed: Member[];
   /** The seating filled the room and retired the temporary codes it held. False when it held none. */
   codesCleared: boolean;
-}
-
-/**
- * Pick the stale members to reclaim so one more can be seated, or say it cannot.
- *
- * Shared by both stores so the seat rule is one piece of code rather than two
- * that can drift — the same reason `isActiveMember` lives here. It is pure, and
- * takes the cutoff rather than a window, so the store holds no presence policy:
- * all it knows is that a member last heard from before `staleBefore` may lose
- * its seat.
- *
- * `connected` is the members a live socket vouches for (`connectedAmong`), and
- * none of them is reclaimable, however long it has been quiet: the socket is
- * the stronger evidence that it is there. It is an argument and not something
- * read here because only one store has sockets. SessionDO supplies it from the
- * sockets it holds, inside the transaction that makes the decision, and
- * MemoryStore from a hook that is empty unless a test says otherwise. The rule
- * stays one function, and the contract suite still holds both to it.
- *
- * The hosted seat holds a seat and is never reclaimable (hosted seat spec, D5).
- * Its `lastSeenAt` moves only when it sends, so a quiet host reads stale, and
- * without this it would be the first seat a full room gave up.
- *
- * `null` means refuse: the room is full of members that are not reclaimable.
- * An empty array means seat them with nobody removed.
- */
-export function seatVictims(
-  members: Member[],
-  cap: number,
-  staleBefore: number,
-  connected: ReadonlySet<string> = NO_SOCKETS,
-): Member[] | null {
-  const active = members.filter(isActiveMember);
-  const needed = active.length - cap + 1;
-  if (needed <= 0) return [];
-  // Longest-quiet first: if only one seat has to go, it is the one whose member
-  // has been gone longest.
-  const victims = active
-    .filter((m) => !isHostMember(m) && lastSeen(m) < staleBefore && !connected.has(m.memberId))
-    .sort((a, b) => lastSeen(a) - lastSeen(b))
-    .slice(0, needed);
-  return victims.length < needed ? null : victims;
 }
 
 /**
@@ -940,36 +387,6 @@ export type DecisionClose =
   | { outcome: "frozen" };
 
 /**
- * The snapshot a decision on `kind` opened now takes (ADR 0040, decisions 5, 6 and 7): every member present whose role
- * holds `vote`, each seat's account, and the seats whose role vetoes `kind`. The hosted seat never holds `vote`
- * (checkHost holds it to exactly `send`), and is left out by name besides.
- */
-export function electorateOf(manifest: RoomManifest, members: readonly Member[], kind: string): Electorate {
-  const seats = members.filter((m) => m.leftAt === null && !isHostMember(m) && verbsOfRole(manifest, m.roomRole).includes("vote"));
-  const vetoes = (role: string) => (manifest.roles[role]?.veto as readonly string[] | undefined)?.includes(kind) ?? false;
-  return {
-    electorate: seats.map((m) => m.memberId),
-    accounts: Object.fromEntries(seats.map((m) => [m.memberId, m.userId])),
-    ...(Object.keys(manifest.roles).some(vetoes) ? { veto: seats.filter((m) => vetoes(m.roomRole)).map((m) => m.memberId) } : {}),
-  };
-}
-
-/** `applyVote`'s refusal as `castVote` reports it. */
-/** A view as a store hands it out: never with an open secret ballot's book, which holds every account's choice. */
-export function withoutBook(v: DecisionView): DecisionView {
-  const { book: _book, ...rest } = v;
-  return rest;
-}
-
-export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
-  if (d.kind === "stale") return { outcome: "stale", hash: d.hash };
-  if (d.kind === "closed") return { outcome: "closed", state: d.state };
-  if (d.kind === "quota") return { outcome: "quota", limit: d.limit };
-  if (d.kind === "advisory_secret") return { outcome: "advisory_secret" };
-  return { outcome: "not_electorate" };
-}
-
-/**
  * What `appendSurface` did: `appendEventOnce`'s outcomes, the events a locked move carried, and a refusal, which
  * carries the kind `placeSurfaceWrite` gave it so a caller maps it without reading its words.
  */
@@ -980,78 +397,12 @@ export type SurfaceAppend =
   | { outcome: "frozen" }
   | { outcome: "refused"; kind: "conflict" | "invalid"; reason: string };
 
-/**
- * The fingerprint a keyed surface write is recorded under: the event's, with the write's `frame` folded into the
- * payload when it has one. `frame` rides the write and never the item, so without it a key retried with another
- * frame number would read as the same send and replay.
- */
-export const surfacePrint = (e: EventBody, write: SurfaceWrite): string =>
-  fingerprint(write.frame === undefined ? e : { ...e, payload: { ...(e.payload as object), frame: write.frame } });
-
-/**
- * The rows `placeSurfaceWrite` needs listed for `write`, or none: only a frame write, a card naming a frame and a
- * card with no placement are placed among the rows. Anything else is stored as written.
- */
-export const placesAmongRows = (write: SurfaceWrite): boolean => isFrameWrite(write) || needsPlacement(write);
-
 /** The facts `resolveSurfaceWrite` checks a write against (`BellmanStore.surfaceFacts`). */
 export interface SurfaceFacts {
   count: number;
   frames: number;
   rows: SurfaceRow[];
 }
-
-/** `surfaceFacts` over rows a store holds: the counts, and the rows of the keys asked, in key order. */
-export function surfaceFactsOf(rows: Iterable<SurfaceRow>, keys: readonly string[]): SurfaceFacts {
-  const asked = new Set(keys);
-  let count = 0;
-  let frames = 0;
-  const named: SurfaceRow[] = [];
-  for (const r of rows) {
-    count++;
-    if (r.kind === "frame") frames++;
-    if (asked.has(r.key)) named.push(r);
-  }
-  return { count, frames, rows: named.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) };
-}
-
-/**
- * The `surface` event a locked move owes each card it carries (lead ruling L2): the mover's, with no `refId`, its payload
- * the card's full item, so every reader of a `surface` event and `restore` read it as any other version.
- */
-export const carriedEvent = (mover: EventBody, write: SurfaceWrite): EventBody => ({
-  type: "surface", fromMemberId: mover.fromMemberId, fromUserId: mover.fromUserId, fromLabel: mover.fromLabel,
-  payload: write.item, refId: null,
-});
-
-/**
- * The carried event as the row's own writer (L2), handed to the row rule in place of the event: the row keeps
- * who wrote it and the event says who moved it. `createdAt` needs nothing here, since a carried card keeps its
- * kind, and the approver is handed back beside it as `approvedBy`.
- */
-export const asRowWriter = (event: SessionEvent, row: SurfaceRow): SessionEvent =>
-  ({ ...event, fromMemberId: row.byMemberId, fromLabel: row.byLabel });
-
-/**
- * `surfaceWindow`'s rule, which both stores apply to the rows they hold: the cut first, then the window over
- * what is left, and the cursor `surfaceAt` gives for that cut.
- */
-export function windowUnderCut(
-  rows: readonly SurfaceRow[],
-  recordCursor: number,
-  asked: { window?: Window; next?: string },
-  cut: number | undefined,
-): { ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string } {
-  const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
-  const read = readWindow(visible, asked);
-  if (!read.ok) return read;
-  const cursor = cut === undefined ? recordCursor : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
-  return { ok: true, page: read.page, cursor };
-}
-
-/** The event a placed write is appended as: the caller's, with the item placement gave it when that differs. */
-export const placedEvent = (e: EventBody, asked: SurfaceWrite, placed: Extract<Placed, { ok: true }>): EventBody =>
-  placed.write.item === asked.item || placed.write.item === null ? e : { ...e, payload: placed.write.item };
 
 /** Who a batch's events are by (surface widget and batch spec, D1): the writing seat, the same on every write in it. */
 export type SurfaceAuthor = Pick<EventBody, "fromMemberId" | "fromUserId" | "fromLabel">;
@@ -1067,62 +418,6 @@ export type SurfaceBatchAppend =
   | { outcome: "frozen" }
   | { outcome: "refused"; index: number; kind: "conflict" | "invalid"; reason: string };
 
-/** The event a batch's write is appended as, before placement: the author's, its payload the item or the removal. */
-export const batchEvent = (author: SurfaceAuthor, write: SurfaceWrite): EventBody =>
-  ({ type: "surface", ...author, payload: write.item ?? { key: write.key, remove: true }, refId: null });
-
-/** The fingerprint a keyed batch is recorded under: every write, in order, each with its `frame` folded in as `surfacePrint` does. */
-export const surfaceBatchPrint = (author: SurfaceAuthor, writes: readonly SurfaceWrite[]): string =>
-  fingerprint({
-    type: "surface", ...author, refId: null,
-    payload: { items: writes.map((w) => {
-      const payload = w.item ?? { key: w.key, remove: true };
-      return w.frame === undefined ? payload : { ...payload, frame: w.frame };
-    }) },
-  });
-
-/**
- * A batch placed in order over the room's rows (spec D1), in memory, so a refusal is decided before either store
- * writes: each write placed among the rows as the writes before it leave them, by `placeSurfaceWrite` when it is
- * placed among rows (`placesAmongRows`) and as written otherwise. A refusal names the entry's index. `moved` is the
- * row of each card an entry's locked move carries, as the entries before it left it, which is the row whose writer
- * and approver the carried row keeps (L2). Every position a batch writes is final: a locked frame's move carries only
- * the cards no entry writes, so a marquee move sent in any order moves no card twice. The rows are applied with
- * `applySurfaceWrite` at provisional cursors from `cursor`, the room's next, and at `at`.
- */
-export function placeSurfaceBatch(
-  rows: readonly SurfaceRow[],
-  writes: readonly SurfaceWrite[],
-  author: SurfaceAuthor,
-  cursor: number,
-  at: number,
-):
-  | { ok: true; entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] }
-  | { ok: false; index: number; kind: "conflict" | "invalid"; reason: string } {
-  const room = new Map(rows.map((r) => [r.key, r] as const));
-  const apply = (event: SessionEvent, write: SurfaceWrite, approvedBy: ApprovedBy | undefined) => {
-    const verdict = applySurfaceWrite(room.get(write.key), event, write, approvedBy);
-    if (verdict === "remove") room.delete(write.key);
-    else if (verdict !== null) room.set(write.key, verdict);
-  };
-  const entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] = [];
-  const written = new Set(writes.map((w) => w.key));
-  let next = cursor;
-  for (const [index, write] of writes.entries()) {
-    const found: Placed = placesAmongRows(write) ? placeSurfaceWrite([...room.values()], write) : { ok: true, write, carried: [] };
-    if (!found.ok) return { ok: false, index, kind: found.kind, reason: found.reason };
-    const placed = { ...found, carried: found.carried.filter((c) => !written.has(c.key)) };
-    const moved = placed.carried.map((c) => room.get(c.key)!);
-    const e = placedEvent(batchEvent(author, write), write, placed);
-    apply({ ...e, cursor: next++, at }, placed.write, undefined);
-    for (const [i, c] of placed.carried.entries()) {
-      apply(asRowWriter({ ...carriedEvent(e, c), cursor: next++, at }, moved[i]), c, moved[i].approvedBy);
-    }
-    entries.push({ placed, moved });
-  }
-  return { ok: true, entries };
-}
-
 /**
  * What `setJoinCode` did, which a boolean could not say once the write became
  * conditional: `frozen` and `live_code_exists` are different refusals and the
@@ -1136,26 +431,6 @@ export type SetJoinCode =
 export type BlobCharge =
   | { ok: true; used: number }
   | { ok: false; reason: "over_quota" | "frozen" | "closed" | "not_found"; used: number };
-
-/**
- * The charge rule (#183, D3), applied by both stores and decided nowhere else: the
- * order of the refusals, what `used` says on each, and the one comparison that is
- * the bound. Whether the room reads as closed is the caller's, because that is the
- * one input the stores compute differently (`closeIfAbandoned` in `MemoryStore`,
- * `readsClosed` in the room object). Returns the refusal, or the new total for the
- * caller to write.
- */
-export function decideBlobCharge(
-  s: Pick<StoredSession, "frozenAt" | "blobBytesCeiling" | "blobBytes">,
-  closed: boolean,
-  bytes: number,
-): BlobCharge {
-  const used = s.blobBytes ?? 0;
-  if (closed) return { ok: false, reason: "closed", used };
-  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used };
-  if (used + bytes > s.blobBytesCeiling) return { ok: false, reason: "over_quota", used };
-  return { ok: true, used: used + bytes };
-}
 
 /** Whether a hosted-room slot was taken (I7), and when refused, how many the person holds open. */
 export type HostedSlot = { ok: true } | { ok: false; open: number };
@@ -1208,161 +483,11 @@ export type FsAppend =
 export type FsEntry = Omit<FsRow, "content">;
 /** A page of `listFs` or `findFs`. `next` is the cursor of the following page, or null. */
 export interface FsPage { entries: FsEntry[]; next: string | null }
-/** A row as an entry, content dropped. */
-export const fsEntryOf = ({ content: _content, ...entry }: FsRow | FsEntry & { content?: string }): FsEntry => entry;
-
-/**
- * The path a file write lands at (ADR 0046): a room path as given, and a memory path with its id resolved. `me`
- * names the writing account's id, minted by `fresh` on its first write (`assign`); a named id must be the writing
- * account's, and a memory path needs a file under its id. Shared by both stores, read before the rows it names.
- */
-export function resolveFsPath(
-  w: Pick<FsWrite, "path" | "userId">,
-  writerMemoryId: string | null,
-  namedOwner: string | null,
-  fresh: () => string,
-): { ok: true; path: string; assign: string | null } | { ok: false } {
-  const ns = namespaceOf(w.path);
-  if (ns.ns !== "memory") return { ok: true, path: w.path, assign: null };
-  const rest = w.path.split("/").slice(3);
-  if (ns.memoryId === null || rest.length === 0) return { ok: false };
-  if (ns.memoryId === OWN_MEMORY) {
-    const id = writerMemoryId ?? fresh();
-    return { ok: true, path: `/members/${id}/${rest.join("/")}`, assign: writerMemoryId === null ? id : null };
-  }
-  return namedOwner === w.userId ? { ok: true, path: w.path, assign: null } : { ok: false };
-}
-
-/** What `decideFsWrite` hands a store to write: the row, the history revisions to delete, the new total, the event. */
-/** A refused write: every `FsAppend` but the two that wrote something. */
-export type FsRefusal = Exclude<FsAppend, { outcome: "ok" | "replayed" }>;
-
-export type FsDecision =
-  | { ok: false; result: FsRefusal }
-  | {
-    ok: true; row: FsRow; dropRevs: number[]; event: EventBody; stamp: Record<string, unknown>;
-    /** The record's totals after the write: the room's files, and each account's memory by id. */
-    fsBytes: number; fsMemoryBytes: Record<string, number> | undefined;
-  };
-
-/**
- * The shared rules of a file write, after the key and the room checks and on the rows read in the transaction:
- * the restore's source, `planWrite`, the history kept (a delete drops all of it), and the net charge. `history` is
- * the path's kept revisions, newest first; the live row is its first.
- */
-export function decideFsWrite(
-  s: Pick<Session, "frozenAt" | "fsBytesCeiling" | "fsMemoryBytes"> & { fsBytes?: number },
-  w: FsWrite,
-  path: string,
-  current: FsRow | null,
-  history: readonly FsRow[],
-  at: number,
-  plain = false,
-): FsDecision {
-  let input: FsPlanInput;
-  if (w.write.op === "restore") {
-    const want = w.write.rev;
-    const from = history.find((r) => r.rev === want);
-    if (!from) return { ok: false, result: { outcome: "invalid", detail: `revision ${want} is not kept` } };
-    input = { op: "restore", content: from.content, baseRev: w.write.baseRev };
-  } else {
-    input = w.write;
-  }
-  const plan = planWrite(current, input);
-  if (!plan.ok) {
-    if (plan.reason === "stale") {
-      const writer = current === null ? null : { memberId: current.writerMemberId, label: current.writerLabel };
-      return { ok: false, result: { outcome: "stale", currentRev: plan.currentRev, content: plan.content, writer } };
-    }
-    if (plan.reason === "too_large") return { ok: false, result: { outcome: "too_large" } };
-    return { ok: false, result: { outcome: "invalid", detail: plan.detail } };
-  }
-  const size = utf8Bytes(plan.content);
-  const row: FsRow = {
-    path, rev: plan.rev, content: plan.content, size, writerMemberId: w.memberId, writerLabel: w.label, at, deleted: plan.deleted,
-  };
-  const dropped = plan.deleted ? history : history.slice(FS_HISTORY - 1);
-  const delta = (plan.deleted ? 0 : size) - dropped.reduce((n, r) => n + r.size, 0);
-  // In a home room (ADR 0047) every path is the account's, so `/members/` is a plain directory there: `plain` says so.
-  const ns = namespaceOf(path);
-  const memoryId = !plain && ns.ns === "memory" ? ns.memoryId : null;
-  const charge = memoryId === null
-    ? decideFsCharge(s, false, delta)
-    : decideFsCharge({ frozenAt: s.frozenAt, fsBytes: s.fsMemoryBytes?.[memoryId] ?? 0, fsBytesCeiling: memoryCeilingOf(s.fsBytesCeiling) }, false, delta);
-  // Every account's memory together is bounded by the room's ceiling too, as accounts come and go over a room's life.
-  // Refused with the writer's own figures, so the refusal says nothing of other accounts' memory.
-  if (charge.ok && memoryId !== null && delta > 0) {
-    const total = Object.values(s.fsMemoryBytes ?? {}).reduce((n, b) => n + b, 0);
-    if (total + delta > s.fsBytesCeiling) {
-      return { ok: false, result: { outcome: "over_quota", used: s.fsMemoryBytes?.[memoryId] ?? 0, ceiling: memoryCeilingOf(s.fsBytesCeiling) } };
-    }
-  }
-  if (!charge.ok) {
-    if (charge.reason === "over_quota") return { ok: false, result: { outcome: "over_quota", used: charge.used, ceiling: charge.ceiling } };
-    return { ok: false, result: { outcome: charge.reason } };
-  }
-  const event: EventBody = {
-    type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null,
-    payload: { path, rev: row.rev, size, op: w.write.op === "restore" ? "restore" : plan.deleted ? "delete" : "write" },
-  };
-  return {
-    ok: true, row, dropRevs: dropped.map((r) => r.rev), event,
-    fsBytes: memoryId === null ? charge.next : s.fsBytes ?? 0,
-    fsMemoryBytes: memoryId === null ? s.fsMemoryBytes : { ...s.fsMemoryBytes, [memoryId]: charge.next },
-    stamp: { path, rev: row.rev, size, sha256: contentHash(plan.content) },
-  };
-}
-
-/** The print a keyed file write is remembered by: the path as sent and the op, never the resolved path. */
-export const fsPrint = (w: FsWrite): string =>
-  fingerprint({ type: "fs", fromMemberId: w.memberId, fromUserId: w.userId, fromLabel: w.label, refId: null, payload: { path: w.path, write: w.write } });
-
-/**
- * Live rows at `prefix` as a directory, minus hidden memory ids, `FS_LIST_PAGE` after `cursor`. Shared paging rule.
- * `keyOf` is the order and the cursor: the path by default; `newestKey` for a listing newest first (ADR 0047).
- */
-export function pageFs(rows: readonly FsEntry[], keep: (r: FsEntry) => boolean, cap: number, cursor?: string, keyOf: (r: FsEntry) => string = (r) => r.path): FsPage {
-  const entries: FsEntry[] = [];
-  for (const r of [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))) {
-    if (cursor !== undefined && keyOf(r) <= cursor) continue;
-    if (r.deleted || !keep(r)) continue;
-    if (entries.length === cap) return { entries, next: keyOf(entries[cap - 1]) };
-    entries.push(fsEntryOf(r));
-  }
-  return { entries, next: null };
-}
-
-/** The sort key that puts the newest row first: the time inverted and padded, then the path, so the order is total. */
-export const newestKey = (r: Pick<FsEntry, "at" | "path">): string =>
-  `${String(Number.MAX_SAFE_INTEGER - r.at).padStart(16, "0")}:${r.path}`;
-
-/** What a keyed home write (ADR 0047) is remembered by: no event, so the path and revision are stored with the print. */
-export interface HomeKeyRecord { print: string; path: string; rev: number }
-export const homeKey = (memberId: string, key: string): string => `hk:${encodeURIComponent(memberId)}:${key}`;
-
 /**
  * What `writeHome` answered: `appendFs`'s outcomes without an event. `forbidden` is a `/apps/` path, which a home
  * room cannot run.
  */
 export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal;
-
-/** Whether `path` is `prefix` or under it, as a directory; `/` holds everything. */
-export const underPrefix = (path: string, prefix: string): boolean =>
-  prefix === "/" || path === prefix || path.startsWith(prefix + "/");
-
-/** Whether a row is a memory file of one of the `hide` ids. */
-export const hiddenMemory = (r: FsEntry, hide: readonly string[] | undefined): boolean => {
-  if (!hide || hide.length === 0) return false;
-  const ns = namespaceOf(r.path);
-  return ns.ns === "memory" && ns.memoryId !== null && hide.includes(ns.memoryId);
-};
-
-/** Whether a path holds every word of `query`, case-insensitive. An empty query matches nothing. */
-export function pathMatches(path: string, query: string): boolean {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const p = path.toLowerCase();
-  return words.length > 0 && words.every((w) => p.includes(w));
-}
 
 /** A governed config write (#414), validated and hashed by the caller; the store adds the revision. */
 export interface ConfigWrite {
@@ -1382,84 +507,6 @@ export type ConfigWriteResult =
   | { ok: true; rev: number }
   | { ok: false; reason: "not_found" | "closed" | "over_reserve" }
   | { ok: false; reason: "stale"; currentRev: number };
-
-/**
- * The shared rules of a config write, decided before anything is written, so both stores refuse alike: `stale`
- * when `baseRev` is not the current revision, then `over_reserve` when a widening write would take the room's
- * config bytes past the reserve. Returns the row to write and the record's new numbers.
- */
-export function decideConfigWrite(
-  s: Pick<Session, "configRevs" | "configBytes">,
-  prev: ConfigRow | null,
-  w: ConfigWrite,
-  at: string,
-): { ok: false; result: ConfigWriteResult } | { ok: true; row: ConfigRow; configRevs: Partial<Record<ConfigName, number>>; configBytes: number } {
-  const current = s.configRevs?.[w.name] ?? 0;
-  if (w.baseRev !== current) return { ok: false, result: { ok: false, reason: "stale", currentRev: current } };
-  const configBytes = (s.configBytes ?? 0) - (prev?.bytes ?? 0) + w.bytes;
-  if (!w.narrowing && configBytes > CONFIG_RESERVE_BYTES) return { ok: false, result: { ok: false, reason: "over_reserve" } };
-  const rev = current + 1;
-  const row: ConfigRow = {
-    name: w.name, rev, body: w.body, sha256: w.sha256, bytes: w.bytes,
-    governance: { ...w.governance, atRev: rev }, changedBy: w.governance.approverMemberId, changedAt: at,
-  };
-  return { ok: true, row, configRevs: { ...s.configRevs, [w.name]: rev }, configBytes };
-}
-
-/** The `config_changed` event a write appends: the name, the revision and the approving seat, never the body. */
-export const configEvent = (row: ConfigRow): Omit<SessionEvent, "cursor" | "at"> => ({
-  type: "config_changed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
-  payload: { name: row.name, rev: row.rev, by: row.changedBy }, refId: null,
-});
-
-/**
- * The meter's decision (hosted seat spec, D3), shared by both stores so they
- * cannot charge differently. Returns the refusal, or the units record to write.
- * A host the room has evicted is refused (`removed`, C1) before the meter is read.
- *
- * A write of no units is the month's notice, which is outside the meter (spec D6, I9):
- * neither cap applies to it and the hour does not count it, so the spent month it reports
- * cannot refuse it. The seat also runs this read-only before it reads or calls anything
- * (I4, M7), so a wake the meter would refuse costs neither.
- */
-export function decideHostCharge(
-  s: Pick<StoredSession, "closed" | "frozenAt" | "members" | "hostUnitsPerMonth" | "hostUnits">,
-  units: number,
-  now: number,
-): { ok: false; reason: "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
-  if (s.closed) return { ok: false, reason: "closed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
-  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
-  if (!hostSeated(s)) return { ok: false, reason: "removed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
-  const month = monthKey(now);
-  const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
-  if (units === 0) return { ok: true, next: current };
-  const wakes = current.wakes.filter((t) => t > now - 3_600_000);
-  if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
-  if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
-  return { ok: true, next: { month, used: current.used + units, wakes: [...wakes, now] } };
-}
-
-/**
- * The audit rows a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for a
- * member, so a team org's stream sees the host as it sees members. The host belongs to no org
- * and acts for the room, so the parties are the room's org and the orgs of the people in it
- * (audit trail spec, D1), and the row says the room's org acted. Both stores queue them in the
- * send's own write.
- */
-export function hostSentEntries(
-  s: Pick<StoredSession, "id" | "orgId" | "members" | "manifest">,
-  e: Omit<SessionEvent, "cursor" | "at">,
-  now: number,
-): AuditEntry[] {
-  return auditRows(
-    partiesOf([s.orgId, ...s.members.filter(isActivePerson).map((m) => m.orgId)]),
-    {
-      at: now, sessionId: s.id, action: `sent_${e.type}`, roomName: s.manifest.room,
-      detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
-    },
-    { userId: e.fromUserId, label: e.fromLabel, orgId: s.orgId },
-  );
-}
 
 /**
  * What a delete on demand was told (#65, D6). `purgeAt` is the time the room is stored with: the first
@@ -2856,39 +1903,6 @@ export interface BellmanStore {
 }
 
 /**
- * The seat's hand-off of an outside task to the members, in place. Only a task still the seat's and WORKING moves:
- * a skip after the seat answered, or after an earlier hand-off, is a no-op (the ruling for the races between the seat's
- * answer, its skip and its deadline). Both stores' rule; SessionDO applies it to the row it read in its transaction.
- */
-export function handOff(task: OutsideTask, now: number): boolean {
-  if (task.voice !== "seat" || task.state !== "TASK_STATE_WORKING") return false;
-  task.voice = "members";
-  task.seatDeadline = null;
-  task.updatedAt = now;
-  return true;
-}
-
-/**
- * A record with the patch applied (orgs spec, D6, D7): a field given as undefined is left as it
- * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
- */
-export function patchedOrg(previous: Org, patch: OrgPatch): Org {
-  const next: Org = liftOrg(previous);
-  if (patch.name !== undefined) next.name = patch.name;
-  if (patch.seats !== undefined) next.seats = patch.seats;
-  if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
-  for (const [field, value] of Object.entries(patch.policy ?? {})) {
-    if (value !== undefined) (next.policy as unknown as Record<string, unknown>)[field] = value;
-  }
-  return next;
-}
-
-/** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
-export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
-  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [], policy: DEFAULT_POLICY };
-}
-
-/**
  * How many cross-object RPCs one `sessionsCreatedBy` walk may spend.
  *
  * The walk resolves each index row in another object and drops the dead ones,
@@ -2899,34 +1913,3 @@ export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, 
  * the budget is reached long before anything is at risk of being refused.
  */
 export const SWEEP_RPC_BUDGET = 300;
-
-/**
- * How many members one room holds, on every plan that can start a swarm (#18).
- *
- * A ceiling, not a plan fact. A room's record is one value in SQLite-backed Durable
- * Object storage, and a value holds 2 MB. It was 100 while the record carried every
- * brief (ADR 0001), and 1,000 once briefs had rows of their own (ADR 0018) and the
- * record still carried every member who had ever sat in the room. Members are rows of
- * their own now (ADR 0019): the record names those in the room and keeps the counts, so
- * storage no longer bounds the ceiling, and however many come and go the record keeps
- * its size.
- *
- * What bounds it is the read. Every call still loads the members in the room, about
- * 300 bytes each as members are, so 5,000 is about 1.5 MB a call, and about 7.5 MB with
- * every field at its maximum in two-byte text. worker-tests/members-as-rows seats a full
- * room at that maximum and refuses one more. Narrowing what each call reads is the next
- * step, and the one that lifts this.
- */
-export const ROOM_MEMBER_CEILING = 5000;
-
-/**
- * How many members this room holds. A `pair` room holds two because the preset
- * says so; a `swarm` room holds as many as its creator invites, up to the
- * ceiling. Derived from the manifest and never stored, for the rule written on
- * the Session type: two fields for one fact could disagree.
- */
-export const capacityOf = (manifest: RoomManifest): number =>
-  manifest.mode === "pair" ? 2 : ROOM_MEMBER_CEILING;
-
-export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
-export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

@@ -6,8 +6,8 @@
 import { z } from "zod";
 import { canonical } from "./decision.js";
 import { createHash } from "node:crypto";
-import type { ConfigName, ConfigRow } from "./types.js";
-import type { BellmanStore } from "./storage/store.js";
+import type { ConfigName, ConfigRow, Session, SessionEvent } from "./types.js";
+import type { BellmanStore, ConfigWrite, ConfigWriteResult } from "./storage/store.js";
 
 export const CONFIG_NAMES = ["room_instructions"] as const satisfies readonly ConfigName[];
 
@@ -110,3 +110,31 @@ export async function getGovernedConfig(store: BellmanStore, sessionId: string, 
   return { value: parsed.body, rev: row.rev, approver: { memberId: g.approverMemberId, label: g.approverLabel ?? "" }, clamped: [] };
 }
 
+/**
+ * The shared rules of a config write, decided before anything is written, so both stores refuse alike: `stale`
+ * when `baseRev` is not the current revision, then `over_reserve` when a widening write would take the room's
+ * config bytes past the reserve. Returns the row to write and the record's new numbers.
+ */
+export function decideConfigWrite(
+  s: Pick<Session, "configRevs" | "configBytes">,
+  prev: ConfigRow | null,
+  w: ConfigWrite,
+  at: string,
+): { ok: false; result: ConfigWriteResult } | { ok: true; row: ConfigRow; configRevs: Partial<Record<ConfigName, number>>; configBytes: number } {
+  const current = s.configRevs?.[w.name] ?? 0;
+  if (w.baseRev !== current) return { ok: false, result: { ok: false, reason: "stale", currentRev: current } };
+  const configBytes = (s.configBytes ?? 0) - (prev?.bytes ?? 0) + w.bytes;
+  if (!w.narrowing && configBytes > CONFIG_RESERVE_BYTES) return { ok: false, result: { ok: false, reason: "over_reserve" } };
+  const rev = current + 1;
+  const row: ConfigRow = {
+    name: w.name, rev, body: w.body, sha256: w.sha256, bytes: w.bytes,
+    governance: { ...w.governance, atRev: rev }, changedBy: w.governance.approverMemberId, changedAt: at,
+  };
+  return { ok: true, row, configRevs: { ...s.configRevs, [w.name]: rev }, configBytes };
+}
+
+/** The `config_changed` event a write appends: the name, the revision and the approving seat, never the body. */
+export const configEvent = (row: ConfigRow): Omit<SessionEvent, "cursor" | "at"> => ({
+  type: "config_changed", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+  payload: { name: row.name, rev: row.rev, by: row.changedBy }, refId: null,
+});

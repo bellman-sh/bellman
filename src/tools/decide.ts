@@ -1,19 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { fail, ok, refusal } from "./kit.js";
-import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
-import type { ToolResult } from "./kit.js";
+import { fail, ok, refusal, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
 import type { Identity, Member } from "../types.js";
 import { denyVerb } from "../roles.js";
 import { FROZEN, admitSend, auditEntries, findMember, touchMember } from "../rooms.js";
 import { DECISION_KINDS, isTopicRoom } from "../manifest.js";
-import { electorateOf, type BellmanStore } from "../storage/store.js";
+import { electorateOf, isSecret, ruleOf, type DecisionClosed, type DecisionDraft, type DecisionOpened, type DecisionVote, type DecisionView, type VoteInput } from "../decision.js";
+import type { BellmanStore } from "../storage/store.js";
 import type { StoredSession } from "../storage/stored-session.js";
 import { UNTRUSTED_PREAMBLE, decisionMembers, decisionShown } from "../projections.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
-import {
-  isSecret, ruleOf, type DecisionClosed, type DecisionDraft, type DecisionOpened, type DecisionVote, type DecisionView, type VoteInput,
-} from "../decision.js";
 
 /** How many decisions a `read` with no `decision` lists: the room's open-decision quota (ADR 0040, decision 18). */
 export const DECISIONS_LISTED = 20;

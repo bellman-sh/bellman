@@ -1,13 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField } from "./kit.js";
-import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
-import type { ToolResult } from "./kit.js";
+import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
 import type { Identity } from "../types.js";
 import { eventsFor, findMember, readSurface, requestWindow, sessionStatus, touchMember } from "../rooms.js";
 import { surfaceCursor } from "../surface.js";
-import { isActiveMember } from "../storage/store.js";
+import { isActiveMember } from "../members.js";
 import type { BellmanStore } from "../storage/store.js";
 import { publicEvent } from "../public-event.js";
 import { VOICE_NOTE, questionsToAnswer } from "../outside.js";

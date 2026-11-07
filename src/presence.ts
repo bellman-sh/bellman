@@ -29,8 +29,8 @@
  * Abandonment is the same reading over the whole room (#18). A room has no
  * clock; it is abandoned when no active member has been seen, by window or by
  * socket, for `ABANDONED_AFTER_MS`, and `abandonedAt`/`isAbandoned` say when.
- * They are defined in store.ts beside `lastSeen` for the reason given there and
- * re-exported here, which is where everything outside the stores reads them.
+ * They are defined below, and both stores and everything outside them read them
+ * from here.
  *
  * "On a live socket" is the second way to be present, and the reason is who
  * does not poll. A member fed by the local bus or by the room's hibernating
@@ -53,13 +53,11 @@
  * This module must stay importable by both builds: no `cloudflare:workers`,
  * directly or transitively (see src/oauth/storage.ts for the same rule).
  */
-import type { Member } from "./types.js";
-// `lastSeen` and the socket derivation live in store.ts beside `isActiveMember`,
-// because `seatMember` reads them inside the store and this module imports that
-// one.
-import { ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, isActiveMember, lastSeen } from "./storage/store.js";
-export { ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, lastSeen };
-export type { RoomRoster } from "./storage/store.js";
+import type { Member, Session } from "./types.js";
+// `lastSeen` and `NO_SOCKETS` live in members.ts beside `isActiveMember`; they are re-exported here for this
+// module's callers.
+import { NO_SOCKETS, isActiveMember, lastSeen, isActivePerson } from "./members.js";
+export { NO_SOCKETS, lastSeen };
 
 /**
  * How long a member may go unheard from before its seat is reclaimable.
@@ -142,3 +140,112 @@ export const staleMembers = (
   now: number = Date.now(),
   connected: ReadonlySet<string> = NO_SOCKETS,
 ): Member[] => members.filter((m) => presenceOf(m, now, connected) === "stale");
+
+/**
+ * Which of these members a live socket vouches for, given the member ids that
+ * the sockets open in this room carry (their attachments, #146).
+ *
+ * A socket is authenticated as one identity, and its attachment lists the
+ * members that identity owned in the room when the socket was accepted. That is
+ * a snapshot, and the identity is what the socket vouches for, so this widens
+ * the ids to every undeparted member of the users they belong to. The bus is
+ * why: it serves every session of an identity on a machine through one socket
+ * per room, so a member that joins after the socket was accepted is carried by
+ * that socket and cannot be named in it. Read literally, the ids would leave
+ * that member stale after ten minutes, and it never calls `bellman_sync` to say
+ * otherwise.
+ *
+ * The cost is in one direction. A member of the identity whose session died
+ * stays present for as long as another of its members holds a socket here,
+ * because the socket does not say which of them it is for. That holds a seat too
+ * long, which #139 prefers to the opposite: reaping too early removes a live
+ * member, and the removal is final.
+ *
+ * Both stores run it inside `seatMember` and import it from here. members.ts,
+ * which this module imports, does not read it, so that is no cycle.
+ */
+export function connectedAmong(
+  members: readonly Member[],
+  attached: Iterable<string>,
+): ReadonlySet<string> {
+  const named = new Set(attached);
+  if (named.size === 0) return NO_SOCKETS;
+  const users = new Set<string>();
+  for (const m of members) if (named.has(m.memberId)) users.add(m.userId);
+  const connected = new Set<string>();
+  for (const m of members) {
+    if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
+  }
+  return connected;
+}
+
+/**
+ * How long a room may go with nobody in it before it is abandoned (#18).
+ *
+ * Rooms persist: there is no clock on a room, on any plan. What ends one is its
+ * last member leaving (`closeSessionIfEmpty`) or this: 90 days in which no
+ * active member was heard from or held a socket. An abandoned room costs
+ * storage and nothing else, and the member a hub room would most regret losing
+ * is its quietest one, so the window is long. It is not forever because a room
+ * whose every member died with its laptop should not sit in a Durable Object
+ * for good, and the sweep is also what retires its codes from the registry.
+ *
+ * Both stores read it inside their own methods, and import it from here.
+ */
+export const ABANDONED_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** What the abandonment rule reads: a session, or a stored one. */
+export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members" | "kind">;
+
+/**
+ * When this room becomes abandoned, or null if the question does not apply: a
+ * closed room is over, a frozen one is waiting on a payment and `touchMember`
+ * cannot stamp it, and an empty one is `closeSessionIfEmpty`'s. Departed members
+ * do not count: a goodbye yesterday does not keep open a room that nobody else
+ * has been in for a season. Nor does the hosted seat (hosted seat spec, D5): its
+ * sends stamp it as seen, and a room whose people have all gone quiet still ends
+ * 90 days after one of them was last there, however recently its host spoke.
+ */
+export function abandonedAt(s: RoomRoster): number | null {
+  // A home room (ADR 0047) has one member who never sits in it: it ends only by hard delete, never by abandonment.
+  if (s.closed || s.frozenAt !== null || s.kind === "home") return null;
+  const active = s.members.filter(isActivePerson);
+  if (active.length === 0) return null;
+  return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
+}
+
+/**
+ * Whether this room is abandoned now. `connected` is the members a live socket
+ * vouches for (`connectedAmong`): a member on a socket is there whatever its
+ * `lastSeenAt` says, so a room with one is never abandoned. Strict `>`, so a
+ * read landing exactly on `abandonedAt` still sees the room open.
+ *
+ * Shared by both stores' sweeps and lazy closes, SessionDO's derived alarm and
+ * every reader that answers "closed" without writing (`readsClosed`), so the
+ * four cannot drift the first time one of them is edited.
+ */
+export function isAbandoned(
+  s: RoomRoster,
+  now: number,
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): boolean {
+  const due = abandonedAt(s);
+  if (due === null || now <= due) return false;
+  return !s.members.some((m) => isActiveMember(m) && connected.has(m.memberId));
+}
+
+/**
+ * The roster with `lastSeenAt` moved to `now` on every active member, or only
+ * on those named. New objects, so a caller's copy is not written into.
+ *
+ * Two callers. A thaw stamps every active member, so a room coming back from a
+ * freeze gets a full window rather than closing on the alarm the thaw re-arms.
+ * The abandonment alarm stamps the members a socket vouches for, which is the
+ * stamp `webSocketClose` makes on a drop (#152), made on a schedule: without it
+ * a room held open on one socket for a season would fire its alarm back to back.
+ */
+export function stampSeen(members: Member[], now: number, only?: ReadonlySet<string>): Member[] {
+  return members.map((m) =>
+    isActiveMember(m) && (only === undefined || only.has(m.memberId)) ? { ...m, lastSeenAt: now } : m,
+  );
+}

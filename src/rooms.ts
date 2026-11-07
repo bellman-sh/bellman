@@ -16,29 +16,28 @@
  */
 import { SEND_KINDS, type AuditEntry, type FsRow, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceKind, type SurfaceRow, type Verb } from "./types.js";
 import type { StoredSession } from "./storage/stored-session.js";
-import { publicRoomUrl, renderJoinCode } from "./codes.js";
+import { publicRoomUrl, renderJoinCode, JOIN_CODE_TTL, codeIsLive } from "./codes.js";
 import type { BanScope } from "./bans.js";
 import { MAX_REPORT_NOTE_CHARS, REPORTS_PER_DAY, REPORT_REASONS, type NewReport, type ReportMailer, type ReportTarget } from "./reports.js";
 import { questionTask } from "./outside.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
-import { JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember, type BellmanStore, type EventBody, type RemovalRequest, type FsPage, type FsWrite } from "./storage/store.js";
-import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
+import { JOINED_SCAN, type BellmanStore, type EventBody, type RemovalRequest, type FsPage, type FsWrite } from "./storage/store.js";
+import { ROOM_MEMBER_CEILING, capacityOf, isPublic, isTopicRoom } from "./manifest.js";
+import { isActiveMember, isActivePerson, isRemovedMember, NO_SOCKETS, lastSeen } from "./members.js";
+import { STALE_AFTER_MS, presentMembers } from "./presence.js";
 import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";
 import { briefAuthors, memoryAuthors, publicReadEvent, readableEvent, readableEvents, seesMemory } from "./public-event.js";
 import { OWN_MEMORY, namespaceOf, normalizePath } from "./fs-path.js";
 import { diffText } from "./fs.js";
 import { GOVERNED_VIEW_ROOT, governedFile, governedView } from "./governed-view.js";
-import {
-  MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite,
-} from "./surface.js";
-import { cutPage, type WindowPage, MAX_FRAMES, frameEnvelopes, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
+import { MAX_SURFACE_ITEMS, isRestorePayload, normalizeRestore, normalizeSurfaceBatch, normalizeSurfaceWrite, surfaceCursor, type SurfaceWrite } from "./surface.js";
+import { cutPage, type WindowPage, MAX_FRAMES, frameNumbers, type FrameEnvelope, type Window } from "./frames.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 import { auditRows, partiesOf } from "./audit.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, openProposalsOf } from "./action-state.js";
-import { isTopicRoom } from "./manifest.js";
 import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
 
 // ---------------------------------------------------------------------------

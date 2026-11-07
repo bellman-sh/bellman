@@ -17,9 +17,9 @@
  */
 import type { Member } from "./types.js";
 import type { StoredSession } from "./storage/stored-session.js";
-// `asked` and `clearSilence` live in store.ts beside `isActiveMember`, because
-// `freezeSession` applies them inside the store and this module imports that one.
-import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./storage/store.js";
+// `asked` and `clearSilence` live in members.ts beside `isActiveMember`, because
+// `freezeSession` applies them inside both stores and this module imports members.ts.
+import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./members.js";
 export { asked, clearSilence };
 
 /**
@@ -31,7 +31,7 @@ export { asked, clearSilence };
  * the moment the clock should start from, so `joinedAt` is the honest answer —
  * the same read-time lift `lastSeen` applies.
  *
- * Unlike `lastSeen`, this lives here rather than in store.ts: no store method
+ * Unlike `lastSeen`, this lives here rather than in members.ts: no store method
  * reads it, because seating a member does not depend on whether it has reported.
  */
 export const lastReport = (m: Member): number => m.lastReportAt ?? m.joinedAt;

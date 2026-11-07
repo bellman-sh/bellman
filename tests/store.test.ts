@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
-import { hostSentEntries, rosterParties } from "../src/storage/store.js";
+import { hostSentEntries, hostMember, type HostWake } from "../src/host.js";
+import { rosterParties, HOST_MEMBER_ID, HOST_USER_ID } from "../src/members.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { AuditEntry, Session } from "../src/types.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/storage/stored-session.js";
-import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
 import { tickStep } from "../src/heartbeat.js";
 import { clearedKeys, dueFindings } from "../src/housekeeping.js";
 import { describeStoreContract } from "./helpers/store-contract.js";

@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { MAX_DECISION_TTL_MS, MIN_DECISION_TTL_MS } from "./decision.js";
-import type {
-  DecideConfig, DecisionKind, DecisionRuleName, HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, SavedPreset, Verb,
-} from "./types.js";
+import type { DecideConfig, DecisionKind, DecisionRuleName, HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, SavedPreset, Verb } from "./types.js";
+import type { StoredSession } from "./storage/stored-session.js";
 
 /**
  * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
@@ -870,3 +869,34 @@ function checkDecide(m: RoomManifest): void {
     }
   }
 }
+
+export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
+  s.manifest.public === true && s.unpublishedAt == null;
+
+/**
+ * How many members one room holds, on every plan that can start a swarm (#18).
+ *
+ * A ceiling, not a plan fact. A room's record is one value in SQLite-backed Durable
+ * Object storage, and a value holds 2 MB. It was 100 while the record carried every
+ * brief (ADR 0001), and 1,000 once briefs had rows of their own (ADR 0018) and the
+ * record still carried every member who had ever sat in the room. Members are rows of
+ * their own now (ADR 0019): the record names those in the room and keeps the counts, so
+ * storage no longer bounds the ceiling, and however many come and go the record keeps
+ * its size.
+ *
+ * What bounds it is the read. Every call still loads the members in the room, about
+ * 300 bytes each as members are, so 5,000 is about 1.5 MB a call, and about 7.5 MB with
+ * every field at its maximum in two-byte text. worker-tests/members-as-rows seats a full
+ * room at that maximum and refuses one more. Narrowing what each call reads is the next
+ * step, and the one that lifts this.
+ */
+export const ROOM_MEMBER_CEILING = 5000;
+
+/**
+ * How many members this room holds. A `pair` room holds two because the preset
+ * says so; a `swarm` room holds as many as its creator invites, up to the
+ * ceiling. Derived from the manifest and never stored, for the rule written on
+ * the Session type: two fields for one fact could disagree.
+ */
+export const capacityOf = (manifest: RoomManifest): number =>
+  manifest.mode === "pair" ? 2 : ROOM_MEMBER_CEILING;

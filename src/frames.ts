@@ -7,8 +7,9 @@
  * grammar. Nothing here is stored. A frame's number is its rank among the frames on every call, and a card's
  * frame is decided by where its centre sits on every call.
  */
-import { GRID, SurfaceKeyShape, coveredBoxes, createdAtOf, overlaps, withPlacement, type Box, type SurfaceWrite } from "./surface.js";
-import type { SurfaceItem, SurfaceRow } from "./types.js";
+import { GRID, SurfaceKeyShape, coveredBoxes, createdAtOf, overlaps, withPlacement, type Box, type SurfaceWrite, applySurfaceWrite, needsPlacement, asRowWriter, batchEvent, carriedEvent } from "./surface.js";
+import type { SurfaceItem, SurfaceRow, ApprovedBy, SessionEvent } from "./types.js";
+import type { EventBody, SurfaceAuthor } from "./storage/store.js";
 
 /** At most this many frames on one surface (D2). */
 export const MAX_FRAMES = 100;
@@ -448,4 +449,73 @@ export function placeSurfaceWrite(rows: readonly SurfaceRow[], write: SurfaceWri
       return { ok: true, write: { key: write.key, item: { ...item, placement: at } }, carried: [] };
     }
   }
+}
+
+/**
+ * The rows `placeSurfaceWrite` needs listed for `write`, or none: only a frame write, a card naming a frame and a
+ * card with no placement are placed among the rows. Anything else is stored as written.
+ */
+export const placesAmongRows = (write: SurfaceWrite): boolean => isFrameWrite(write) || needsPlacement(write);
+
+/**
+ * `surfaceWindow`'s rule, which both stores apply to the rows they hold: the cut first, then the window over
+ * what is left, and the cursor `surfaceAt` gives for that cut.
+ */
+export function windowUnderCut(
+  rows: readonly SurfaceRow[],
+  recordCursor: number,
+  asked: { window?: Window; next?: string },
+  cut: number | undefined,
+): { ok: true; page: WindowPage; cursor: number } | { ok: false; reason: string } {
+  const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
+  const read = readWindow(visible, asked);
+  if (!read.ok) return read;
+  const cursor = cut === undefined ? recordCursor : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
+  return { ok: true, page: read.page, cursor };
+}
+
+/** The event a placed write is appended as: the caller's, with the item placement gave it when that differs. */
+export const placedEvent = (e: EventBody, asked: SurfaceWrite, placed: Extract<Placed, { ok: true }>): EventBody =>
+  placed.write.item === asked.item || placed.write.item === null ? e : { ...e, payload: placed.write.item };
+
+/**
+ * A batch placed in order over the room's rows (spec D1), in memory, so a refusal is decided before either store
+ * writes: each write placed among the rows as the writes before it leave them, by `placeSurfaceWrite` when it is
+ * placed among rows (`placesAmongRows`) and as written otherwise. A refusal names the entry's index. `moved` is the
+ * row of each card an entry's locked move carries, as the entries before it left it, which is the row whose writer
+ * and approver the carried row keeps (L2). Every position a batch writes is final: a locked frame's move carries only
+ * the cards no entry writes, so a marquee move sent in any order moves no card twice. The rows are applied with
+ * `applySurfaceWrite` at provisional cursors from `cursor`, the room's next, and at `at`.
+ */
+export function placeSurfaceBatch(
+  rows: readonly SurfaceRow[],
+  writes: readonly SurfaceWrite[],
+  author: SurfaceAuthor,
+  cursor: number,
+  at: number,
+):
+  | { ok: true; entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] }
+  | { ok: false; index: number; kind: "conflict" | "invalid"; reason: string } {
+  const room = new Map(rows.map((r) => [r.key, r] as const));
+  const apply = (event: SessionEvent, write: SurfaceWrite, approvedBy: ApprovedBy | undefined) => {
+    const verdict = applySurfaceWrite(room.get(write.key), event, write, approvedBy);
+    if (verdict === "remove") room.delete(write.key);
+    else if (verdict !== null) room.set(write.key, verdict);
+  };
+  const entries: { placed: Extract<Placed, { ok: true }>; moved: SurfaceRow[] }[] = [];
+  const written = new Set(writes.map((w) => w.key));
+  let next = cursor;
+  for (const [index, write] of writes.entries()) {
+    const found: Placed = placesAmongRows(write) ? placeSurfaceWrite([...room.values()], write) : { ok: true, write, carried: [] };
+    if (!found.ok) return { ok: false, index, kind: found.kind, reason: found.reason };
+    const placed = { ...found, carried: found.carried.filter((c) => !written.has(c.key)) };
+    const moved = placed.carried.map((c) => room.get(c.key)!);
+    const e = placedEvent(batchEvent(author, write), write, placed);
+    apply({ ...e, cursor: next++, at }, placed.write, undefined);
+    for (const [i, c] of placed.carried.entries()) {
+      apply(asRowWriter({ ...carriedEvent(e, c), cursor: next++, at }, moved[i]), c, moved[i].approvedBy);
+    }
+    entries.push({ placed, moved });
+  }
+  return { ok: true, entries };
 }

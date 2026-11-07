@@ -1,6 +1,6 @@
 /** A home room (ADR 0047) is never abandoned: the one rule both stores' sweeps share reads `kind`. */
 import { describe, expect, it } from "vitest";
-import { abandonedAt } from "../src/storage/store.js";
+import { abandonedAt } from "../src/presence.js";
 import { member, session } from "./helpers/fixtures.js";
 
 describe("abandonedAt", () => {

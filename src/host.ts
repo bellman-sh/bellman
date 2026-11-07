@@ -7,22 +7,24 @@
  * again. Both drivers (`HostDriver`) do what this module cannot — read the room, call
  * the model, write the event, keep the seat's record, set a timer — and nothing else.
  *
- * Imports `store.ts` and never the reverse at runtime: `store.ts` seats, meters and
- * wakes the host with the few facts it defines itself (the seat's ids,
- * `isHostMember`, `isReplyToHost`, the hourly cap), which this module re-exports,
- * and this module is a consumer of the store like a tool is.
+ * The seat's ids, `isHostMember` and `isReplyToHost` live in members.ts, which both
+ * stores read and this module re-exports. The hourly cap and the charge rules
+ * (`WAKES_PER_HOUR`, `decideHostCharge`, `hostSentEntries`) live here, and both stores
+ * import them. Otherwise this module is a consumer of the store like a tool is.
  */
-import type { ArrivingMember, HostModelName, Member, Plan, RoomManifest, SessionEvent } from "./types.js";
+import type { ArrivingMember, HostModelName, Member, Plan, RoomManifest, SessionEvent, AuditEntry, HostUnits } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
 import { publicNames } from "./member-names.js";
 import type { OutboxIntent } from "./storage/outbox.js";
-import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./storage/store.js";
+import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostSeated, isActivePerson } from "./members.js";
+import type { HostAppend } from "./storage/store.js";
 import { monthKey, type StoredSession } from "./storage/stored-session.js";
 import { untrusted } from "./projections.js";
 import { SEAT_SILENCE_MS, type AnswerResult } from "./outside.js";
+import { auditRows, partiesOf } from "./audit.js";
 
-// Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
-export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./storage/store.js";
+// Defined in members.ts, which both stores read; members.ts cannot import this module, which imports it.
+export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, isHostMember, isReplyToHost } from "./members.js";
 
 /**
  * The models a manifest may name: their ids, their weight in units (spec D3), and what
@@ -667,4 +669,56 @@ export async function runWake(driver: HostDriver, wake: HostWake, now: number): 
     await driver.save(wake.sessionId, { ...record, attempts: record.attempts + 1 });
     return driver.retryMs[record.attempts];
   }
+}
+
+/** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
+export const WAKES_PER_HOUR = 8;
+
+/**
+ * The meter's decision (hosted seat spec, D3), shared by both stores so they
+ * cannot charge differently. Returns the refusal, or the units record to write.
+ * A host the room has evicted is refused (`removed`, C1) before the meter is read.
+ *
+ * A write of no units is the month's notice, which is outside the meter (spec D6, I9):
+ * neither cap applies to it and the hour does not count it, so the spent month it reports
+ * cannot refuse it. The seat also runs this read-only before it reads or calls anything
+ * (I4, M7), so a wake the meter would refuse costs neither.
+ */
+export function decideHostCharge(
+  s: Pick<StoredSession, "closed" | "frozenAt" | "members" | "hostUnitsPerMonth" | "hostUnits">,
+  units: number,
+  now: number,
+): { ok: false; reason: "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
+  if (s.closed) return { ok: false, reason: "closed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (!hostSeated(s)) return { ok: false, reason: "removed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  const month = monthKey(now);
+  const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
+  if (units === 0) return { ok: true, next: current };
+  const wakes = current.wakes.filter((t) => t > now - 3_600_000);
+  if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
+  if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
+  return { ok: true, next: { month, used: current.used + units, wakes: [...wakes, now] } };
+}
+
+/**
+ * The audit rows a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for a
+ * member, so a team org's stream sees the host as it sees members. The host belongs to no org
+ * and acts for the room, so the parties are the room's org and the orgs of the people in it
+ * (audit trail spec, D1), and the row says the room's org acted. Both stores queue them in the
+ * send's own write.
+ */
+export function hostSentEntries(
+  s: Pick<StoredSession, "id" | "orgId" | "members" | "manifest">,
+  e: Omit<SessionEvent, "cursor" | "at">,
+  now: number,
+): AuditEntry[] {
+  return auditRows(
+    partiesOf([s.orgId, ...s.members.filter(isActivePerson).map((m) => m.orgId)]),
+    {
+      at: now, sessionId: s.id, action: `sent_${e.type}`, roomName: s.manifest.room,
+      detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+    },
+    { userId: e.fromUserId, label: e.fromLabel, orgId: s.orgId },
+  );
 }

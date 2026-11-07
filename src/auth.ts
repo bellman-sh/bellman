@@ -106,7 +106,7 @@ export function upgradeHint(shop: UpgradeLinks | undefined, need: (e: Entitlemen
  * resolveIdentity without a map.
  *
  * OAuth 2.1 with dynamic client registration did not replace this; it landed
- * beside it (#7, PR #21). resolveCaller in src/worker.ts tries an access token
+ * beside it (#7, PR #21). resolveCaller in src/workerd/worker.ts tries an access token
  * first and falls back to resolveIdentity.
  */
 const DEV_KEYS: Record<string, Identity> = {

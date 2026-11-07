@@ -1,5 +1,5 @@
 /**
- * The `Upgrade` header's grammar, where `src/worker.ts` and `src/store-do.ts` cannot
+ * The `Upgrade` header's grammar, where `src/workerd/worker.ts` and `src/workerd/store-do.ts` cannot
  * be tested from: both import `cloudflare:workers`. `src/upgrade.ts` holds the rule
  * for that reason, and this is where it is pinned.
  *

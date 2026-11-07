@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { AuthDO } from "../src/oauth/store.js";
+import type { AuthDO } from "../src/workerd/auth-do.js";
 import {
   AGENT_COUNT_KEY, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, newAttempt,
   type AgentClaimed, type AgentRegistration,

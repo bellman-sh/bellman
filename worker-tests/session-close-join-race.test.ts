@@ -35,7 +35,8 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
 const ROOM = "qs_close_join";

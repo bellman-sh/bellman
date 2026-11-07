@@ -53,14 +53,15 @@ const pinned = (listing: Listing): Record<string, number> =>
 /** Each caller of `publicEvent`, and what it hands out. */
 const PUBLIC_EVENT: Listing = {
   "src/public-event.ts": { calls: 2, serves: "publicEvent's definition, and publicReadEvent's call of it: the public page's shape, which leaves out every brief" },
-  "src/store-do.ts": { calls: 2, serves: "the room socket's frames, on a reconnect's replay and on each append; read as no account, so no memory fs event, and shared, so a granted brief only" },
+  "src/workerd/session-do.ts": { calls: 2, serves: "the room socket's frames, on a reconnect's replay and on each append; read as no account, so no memory fs event, and shared, so a granted brief only" },
   "src/tools/sync.ts": { calls: 1, serves: "bellman_sync, read as the caller's account, through eventsFor: briefs and memory fs events by their rules" },
   "src/http/rooms.ts": { calls: 1, serves: "the dash's Log route, read as the caller's account, through eventsFor: briefs and memory fs events by their rules" },
 };
 
 /** Each caller of a store's event read (`eventsAfter`, `waitForEvents`, `recentEvents`, `eventAt`), and what it hands out. */
 const EVENT_READS: Listing = {
-  "src/store-do.ts": { calls: 5, serves: "the store facade: passes each read on and reads for no one. The socket's own reads in this module are under PUBLIC_EVENT. SessionDO.roomSummary (#472): the newest event, of which only its cursor and time leave the object, as the operator's event count and last event time" },
+  "src/workerd/store-do.ts": { calls: 4, serves: "the store facade: passes each read on and reads for no one" },
+  "src/workerd/session-do.ts": { calls: 1, serves: "SessionDO.roomSummary (#472): the newest event, of which only its cursor and time leave the object, as the operator's event count and last event time. The socket's own reads in this module are under PUBLIC_EVENT" },
   "src/tools/sync.ts": { calls: 3, serves: "bellman_sync's events, read as the caller's account" },
   "src/http/rooms.ts": { calls: 3, serves: "the dash's Log route, as above" },
   "src/http/public.ts": { calls: 3, serves: "the public page, through publicReadEvent; and the public message search's window of the newest 200, which searchMessages reads a message's text from, so a brief_update is counted in searched.events and never matched or handed out" },
@@ -69,20 +70,20 @@ const EVENT_READS: Listing = {
   "src/rooms.ts": { calls: 6, serves: "liveRooms: bellman_rooms' and GET /me/rooms' last_event (a memory fs event by the memory rule) and outstanding requests, read as the caller's account through eventsFor. fileRoomReport: reads a reported cursor's event for its sender and hands the caller no event, only filed or refused; it applies the read rule first, as the reporter's account, or as the public for a caller with no handle in a public room or removed from it. requestWindow: the log's tail since a moment, which bellman_sync derives outstanding from, and outstanding is action requests' cursors and labels and no brief. restoreVersion: reads a restored cursor's event for its payload and author and hands the caller no event, only a card written again or a refusal that names the event's type; it applies the read rule first, as the restorer's account, so a brief_update its author keeps reads as no event at that cursor. memberLog (two reads, the newest 2,000 or the 2,000 up to a removed member's cut): the window a message search matches, and searchMessages reads a message's text alone, so a brief_update is counted in searched.events and never matched or handed out" },
   "src/outside.ts": { calls: 2, serves: "answerQuestion: reads the cursor a member answers to learn whether it is an outside_question and which task it asks, and hands out no event, only the task or a refusal. questionTask: the same read for a creator's ban or a report, which hands out no event, only the task's origin or a refusal" },
   "src/a2a/routes.ts": { calls: 3, serves: "askedOn: an A2A task's history, read only at the question cursors the task's caller asked at, handing out only the outside_question text the caller wrote. follow: the log's head cursor and a wait on the room, only to know that something happened; it then re-reads the caller's own task row and hands out nothing from the events" },
-  "src/host-do.ts": { calls: 1, serves: "the hosted seat's read; its transcript holds message and progress replies only (decide)" },
+  "src/workerd/host-do.ts": { calls: 1, serves: "the hosted seat's read; its transcript holds message and progress replies only (decide)" },
   "src/host-memory.ts": { calls: 1, serves: "the same read, on the Node server" },
 };
 
 /** Each caller of `getBriefs`, and whose briefs it hands out. */
 const BRIEF_READS: Listing = {
-  "src/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
+  "src/workerd/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
   "src/tools/connect.ts": { calls: 1, serves: "the creator's brief in a preview, when the creator grants read_context or the previewer is the creator's account" },
   "src/tools/confirm.ts": { calls: 1, serves: "the briefs a joiner is handed: peers who grant read_context, and the joiner's account's other handles" },
 };
 
 /** Each reader of a governed config row (#414). Everything else goes through getGovernedConfig. */
 const CONFIG_READS: Listing = {
-  "src/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
+  "src/workerd/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
   "src/config.ts": { calls: 1, serves: "getGovernedConfig, the one reader: a missing, invalid or unapproved row reads as the most restrictive value" },
 };
 
@@ -93,7 +94,7 @@ const CONFIG_READS: Listing = {
 const FILE_READS: Listing = {
   "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
   "src/memory.ts": { calls: 3, serves: "readHome, listHome and homeTitles (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads; homeTitles hands bellman_confirm the paths alone" },
-  "src/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
+  "src/workerd/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
 };
 
 describe("the paths a memory file can leave by (ADR 0046)", () => {

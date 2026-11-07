@@ -6,7 +6,8 @@
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import { MEMBER_PREFIX } from "../src/member-rows.js";
 import { ROOM_MEMBER_CEILING } from "../src/store.js";
 import type { Member } from "../src/types.js";

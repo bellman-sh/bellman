@@ -4,9 +4,9 @@
  */
 import { afterEach, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
-import worker from "../src/worker.js";
+import worker from "../src/workerd/worker.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
-import { DurableObjectStore } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 import { DEFAULT_POLICY, type Identity } from "../src/types.js";
 
 const ORIGIN = "https://mcp.example.test";

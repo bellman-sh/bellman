@@ -9,10 +9,12 @@
  */
 import { it, expect, vi, afterEach } from "vitest";
 import { env, SELF, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { R2BlobStore } from "../src/blobs-r2.js";
+import { R2BlobStore } from "../src/workerd/blobs-r2.js";
 import { OUTBOX_HANDLER, OUTBOX_SEQ, dueKey, outboxKey } from "../src/outbox.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
-import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import type { Session, SurfaceItem } from "../src/types.js";
 import { jesseActor, member, session } from "../tests/helpers/fixtures.js";
 

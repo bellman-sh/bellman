@@ -24,7 +24,7 @@ describe("the Worker's /mcp", () => {
 
   /** `bellman_start` for the social preset, as a max caller, through the entry; the text of the tool's answer. */
   async function startSocial(env: Record<string, unknown>): Promise<string> {
-    const worker = (await import("../src/worker.js")).default;
+    const worker = (await import("../src/workerd/worker.js")).default;
     const bound = {
       BELLMAN_KEYS: KEYS,
       SESSION: { idFromName: (n: string) => n, get: () => ({}) },
@@ -70,7 +70,7 @@ describe("the Worker's /mcp", () => {
 describe("HostDO", () => {
   /** A HostDO over an in-memory storage and a room whose reads are recorded; `getSession` answers no room. */
   async function seatOver(env: Record<string, unknown>) {
-    const { HostDO } = await import("../src/host-do.js");
+    const { HostDO } = await import("../src/workerd/host-do.js");
     const kv = new Map<string, unknown>();
     let alarmAt: number | null = null;
     const reads: string[] = [];

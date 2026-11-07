@@ -5,7 +5,7 @@
 Stripe billing. `BELLMAN_BILLING` plus the Stripe secrets choose a mode. A hand-verified webhook links Stripe
 customers to Bellman users and re-reads each subscription from the Stripe API into a serialized ledger; the best
 paid plan is then reconciled into a `"purchase"`-sourced plan grant and, for org-scoped plans, a purchased org
-with a seat count. The ledger runs on any `LedgerKV`; `AuthDO` in `src/oauth/store.ts` holds the production one.
+with a seat count. The ledger runs on any `LedgerKV`; `AuthDO` in `src/workerd/auth-do.ts` holds the production one.
 
 ## Interface
 

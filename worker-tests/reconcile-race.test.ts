@@ -17,9 +17,10 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import worker from "../src/worker.js";
-import { AuthStore, type AuthDO } from "../src/oauth/store.js";
-import { DurableObjectStore, type RegistryDO } from "../src/store-do.js";
+import worker from "../src/workerd/worker.js";
+import { AuthStore, type AuthDO } from "../src/workerd/auth-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import type { BillingLedger, SubscriptionState } from "../src/billing/ledger.js";
 
 const USER = "u_github_4242";

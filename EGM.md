@@ -14,7 +14,7 @@ Three surfaces ship from this repository:
   (`src/http/`), A2A for outside agents (`src/a2a/`), an OAuth 2.1
   authorization server (`src/oauth/`), Stripe billing (`src/billing/`) and SCIM
   provisioning (`src/scim/`). Production runs on Cloudflare Workers with five
-  Durable Object classes ([src/worker.ts:fetch] re-exports `SessionDO`,
+  Durable Object classes ([src/workerd/worker.ts:fetch] re-exports `SessionDO`,
   `RegistryDO`, `AuditDO`, `AuthDO`, `HostDO`); `npm start` runs the Node
   entry over `MemoryStore` ([src/index.ts], [src/app.ts:createApp]).
 - **The Claude Code client**: the local bridge ([src/bridge.ts:createBridge]),
@@ -39,8 +39,8 @@ Three surfaces ship from this repository:
   `--dangerously-load-development-channels server:bellman` and passes every
   other argument through; `BELLMAN_CHANNEL_SERVER` overrides the channel entry.
 - `wrangler.toml`, `tsconfig.json`, `tsconfig.test.json`,
-  `tsconfig.worker.json`: build and deploy configuration. Workers-only files
-  are excluded from the Node program by `tsconfig.json`.
+  `tsconfig.worker.json`: build and deploy configuration. `tsconfig.json`
+  excludes `src/workerd/`, where every Workers-only file lives.
 
 ## Subdirectories & System Boundaries
 
@@ -57,11 +57,13 @@ Three surfaces ship from this repository:
   - mod: [./src/mod/EGM.md](./src/mod/EGM.md) - bellman-mod's pure logic
     (approval gate, wake limiter, view), bundled into `mod/hooks/register.mjs`.
   - oauth: [./src/oauth/EGM.md](./src/oauth/EGM.md) - the OAuth 2.1
-    authorization server; `store.ts` (`AuthDO`) is Workers-only.
+    authorization server; its `AuthDO` is in workerd.
   - scim: [./src/scim/EGM.md](./src/scim/EGM.md) - SCIM 2.0 parsers, resource
     shapes, and the deprovision/reprovision walk over a person's rooms.
   - tools: [./src/tools/EGM.md](./src/tools/EGM.md) - one MCP tool per file
     plus `kit.ts`.
+  - workerd: [./src/workerd/EGM.md](./src/workerd/EGM.md) - the Workers entry
+    and the seven Durable Object classes; excluded from the Node program.
   - ui: [./src/ui/EGM.md](./src/ui/EGM.md) - the one `ui://` resource;
     `assets.ts` is generated and gitignored.
 - ui: [./ui/EGM.md](./ui/EGM.md) - the MCP Apps page as a Vite single-file
@@ -92,7 +94,7 @@ Three surfaces ship from this repository:
   answers at once, because the Durable Objects port crosses objects by RPC
   [src/store.ts:BellmanStore].
 - `waitForEvents` reads events and registers its waiter in the same turn, in
-  both stores [src/store-do.ts:SessionDO.waitForEvents],
+  both stores [src/workerd/session-do.ts:SessionDO.waitForEvents],
   [src/store.ts:MemoryStore.waitForEvents].
 - No transaction spans two Durable Objects; cross-object writes go through a
   FIFO outbox written in the mutation's transaction [src/outbox.ts:drain].
@@ -118,7 +120,7 @@ Three surfaces ship from this repository:
 ## Global Side Effects
 
 - Cloudflare: Durable Object storage for rooms, the registry, audit, auth and
-  the hosted seat; the R2 `BLOBS` bucket [src/blobs-r2.ts:R2BlobStore]; email
+  the hosted seat; the R2 `BLOBS` bucket [src/workerd/blobs-r2.ts:R2BlobStore]; email
   bindings; the docs site's assets-only Worker (`docs-site/wrangler.toml`).
 - Outbound HTTP: Stripe [src/billing/subscription.ts:readSubscription];
   GitHub, Google and OIDC identity providers and DNS-over-HTTPS

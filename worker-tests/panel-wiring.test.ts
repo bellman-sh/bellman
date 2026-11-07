@@ -2,7 +2,7 @@
  * The Worker actually reads BELLMAN_PANEL_ORIGINS.
  *
  * This file exists because of a specific miss. `oauthConfig` is module-private
- * in src/worker.ts, and src/worker.ts is excluded from the Node test program —
+ * in src/workerd/worker.ts, and src/workerd/worker.ts is excluded from the Node test program —
  * so nothing in 1374 tests reached the line that hands the parsed panel origins
  * to the authorization server. The whole feature was written, reviewed and
  * committed with that line absent, and every test passed: `panelOrigins` was
@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import worker from "../src/worker.js";
+import worker from "../src/workerd/worker.js";
 
 const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";

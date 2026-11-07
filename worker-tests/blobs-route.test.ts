@@ -26,9 +26,9 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
-import worker from "../src/worker.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import { AuthStore } from "../src/oauth/store.js";
+import worker from "../src/workerd/worker.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import { AuthStore } from "../src/workerd/auth-do.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { blobBytesUsed } from "../src/blobs.js";

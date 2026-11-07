@@ -22,7 +22,9 @@ import { it, expect, afterEach } from "vitest";
 import {
   env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
-import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import {
   OUTBOX_GRACE_MS, OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow,
 } from "../src/outbox.js";
@@ -893,7 +895,7 @@ it("does not answer over RPC for the method that wakes the waiting polls", async
 /**
  * The read-only methods converted in #126: `derivedDue`, which was the only one of the four with no
  * test reaching for it. `stored`, `nextCursor` and `events` are deliberately
- * not converted — see their docblocks in src/store-do.ts. Six tests patch those
+ * not converted — see their docblocks in src/workerd/session-do.ts. Six tests patch those
  * three, on the prototype or on the instance, to open the windows they guard.
  * The #59/#62/#69 branch converted the
  * methods that WRITE to `#private`, because a Durable Object answers RPC for

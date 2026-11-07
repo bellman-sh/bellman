@@ -1,7 +1,7 @@
 /**
  * Delivery survives the object being evicted and revived — in real workerd,
  * against the real /ws route (worker-tests/wrangler.toml sets
- * main = "../src/worker.ts").
+ * main = "../src/workerd/worker.ts").
  *
  * THE TEARDOWN IS evictAllDurableObjects(), NOT abortAllDurableObjects(), which
  * is what store-contract.test.ts uses and what this file was first written
@@ -25,7 +25,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   env, SELF, reset, abortAllDurableObjects, evictAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 import { evictMember } from "../src/rooms.js";
 import type { Identity, Member, Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
@@ -366,7 +366,7 @@ describe("a creator removes a member who holds a socket", () => {
      * order, so a swapped pair shows as a missing first entry.
      *
      * The readyState literals are 2 and 3 and not WebSocket.CLOSING and CLOSED, for the
-     * reason store-do.ts gives where it defines WS_CLOSING and WS_CLOSED: the program may
+     * reason session-do.ts gives where it defines WS_CLOSING and WS_CLOSED: the program may
      * have either WebSocket global.
      */
     const { id, store, stub } = await roomOf(mine("m_target"));

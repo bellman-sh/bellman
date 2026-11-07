@@ -17,7 +17,8 @@
  */
 import { afterEach, expect, it, vi } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type RegistryDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import { dueKey } from "../src/outbox.js";
 import { REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, type NewReport } from "../src/reports.js";
 

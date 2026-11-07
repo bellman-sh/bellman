@@ -7,17 +7,17 @@ import {
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
   type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient, type SettledAnswer,
   type SweepStorage, type SweepVerdict,
-} from "./storage.js";
+} from "../oauth/storage.js";
 import {
   AGENT_COUNT_KEY, AGENT_REGS_PER_HOUR, AGENT_UNCLAIMED_CAP, decideApprove, decidePoll, decideReissue,
   newAttempt, type AgentClaimed, type AgentGrant, type AgentRegistration, type ApproveVerdict,
   type PollVerdict, type ReissueVerdict,
-} from "./agent-auth.js";
-import { REFRESH_TOKEN_TTL_MS } from "./tokens.js";
+} from "../oauth/agent-auth.js";
+import { REFRESH_TOKEN_TTL_MS } from "../oauth/tokens.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
 import { reconcilePurchase, type PurchaseGrantStore } from "../billing/grants.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
-import type { BellmanEnv } from "../store-do.js";
+import type { BellmanEnv } from "./store-do.js";
 import type { Identity } from "../types.js";
 
 /**
@@ -865,4 +865,4 @@ export class AuthStore implements AuthStorage, BillingStorage {
 
 export type {
   AuthCode, AuthStorage, PanelSession, RefreshToken, RegisteredClient,
-} from "./storage.js";
+} from "../oauth/storage.js";

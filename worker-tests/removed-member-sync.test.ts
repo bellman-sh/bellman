@@ -23,7 +23,7 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { Identity } from "../src/types.js";
 import { Harness, envelopes } from "../tests/helpers/harness.js";
 import { member, session } from "../tests/helpers/fixtures.js";

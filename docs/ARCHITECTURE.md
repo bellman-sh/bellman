@@ -419,7 +419,7 @@ and `fetch` accepted the socket onto a closed room where nothing was left to
 close it: the close had already happened ([#133](../../../issues/133)). The
 Worker's check could not be moved and could not be trusted alone; `fetch`
 rechecks `closed` for itself, before the event read and the accept, and refuses
-with 409. One rule asked twice, from `readsClosed` in `store-do.ts`, which is
+with 409. One rule asked twice, from `readsClosed` in `session-do.ts`, which is
 also what the abandonment alarm closes a room by. The Worker's check stays because it is
 what tells 403 from 404 without naming the room to a stranger, and what spares an
 upgrade for a caller who owns nothing here. This is read-and-register again with
@@ -610,7 +610,7 @@ implementations: `MemoryStore` for tests and local development,
 comment, and it runs against both. The root vitest program runs it against
 `MemoryStore`; `worker-tests/` runs the same suite against `DurableObjectStore`
 in real workerd, with real Durable Objects. That second program exists because
-`src/store-do.ts` imports `cloudflare:workers`, which only workerd provides: a
+the object files (`src/workerd/session-do.ts` and its siblings) import `cloudflare:workers`, which only workerd provides: a
 root test can load those classes over a stub and a fake storage
 (`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 
@@ -659,7 +659,7 @@ flowchart LR
     BLOB["BlobStore<br/>src/blobs.ts"]
     R2["R2 — bellman-blobs<br/>rooms/&lt;sessionId&gt;/&lt;blobId&gt;<br/>the object's metadata is the metadata"]
     MEMB["MemoryBlobStore<br/>tests, npm start"] -.implements.-> BLOB
-    R2S["R2BlobStore<br/>src/blobs-r2.ts"] -.implements.-> BLOB
+    R2S["R2BlobStore<br/>src/workerd/blobs-r2.ts"] -.implements.-> BLOB
     R2S --> R2
 ```
 
@@ -1227,7 +1227,7 @@ admin of an org that sat in the room, under the audit log's conditions
 A `file` or an `image` item (#183) names bytes that live in R2 — and an `html`
 item may (#185) — under `rooms/<sessionId>/<blobId>`, behind the second seam
 storage has: `BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore`
-for tests and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only)
+for tests and `npm start` and `R2BlobStore` (`src/workerd/blobs-r2.ts`, Workers-only)
 for production, held to one contract by `tests/helpers/blob-store-contract.ts`
 the way the two session stores are. No row in the room object describes a blob:
 the object's own metadata — the type as decided at upload, the name, the
@@ -1999,7 +1999,7 @@ loss is findable, and the sweep at close (#65) is what finds it.
    again at once. The design's D10 and D5 carry the argument. `ob_seq`, the counter
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
-   `src/oauth/store.ts`) follows the same rule.
+   `src/workerd/auth-do.ts`) follows the same rule.
 
    `housekeep` (#66) appends a server-authored `housekeeping` event when a
    member has gone quiet, an action request is unanswered or the room is idle

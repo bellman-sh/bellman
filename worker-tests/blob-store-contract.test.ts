@@ -5,7 +5,7 @@
  * the bucket.
  */
 import { env } from "cloudflare:test";
-import { R2BlobStore } from "../src/blobs-r2.js";
+import { R2BlobStore } from "../src/workerd/blobs-r2.js";
 import { describeBlobStoreContract } from "../tests/helpers/blob-store-contract.js";
 
 const bucket = (env as unknown as { BLOBS: R2Bucket }).BLOBS;

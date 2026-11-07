@@ -40,7 +40,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { AuthDO } from "../src/oauth/store.js";
+import type { AuthDO } from "../src/workerd/auth-do.js";
 import {
   CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, REGISTRATIONS_PER_HOUR, SESSION_TOUCH_MS,
   SESSION_TTL_MS, type AuthCode, type PanelSession, type RefreshToken, type RegisteredClient,

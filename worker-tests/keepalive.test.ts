@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   env, reset, abortAllDurableObjects, evictAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
-import type { SessionDO } from "../src/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import { PING, PONG } from "../src/keepalive.js";
 
 afterEach(async () => {

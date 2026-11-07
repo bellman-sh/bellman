@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { RegistryDO } from "../src/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import type { SavedPreset } from "../src/types.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

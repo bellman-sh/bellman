@@ -6,7 +6,7 @@
  * module beside cookies.ts, so neither needs the other and both are unit
  * testable.
  *
- * The config parser lives here rather than in src/worker.ts, because that file
+ * The config parser lives here rather than in src/workerd/worker.ts, because that file
  * imports cloudflare:workers and so cannot be reached from a vitest test.
  */
 

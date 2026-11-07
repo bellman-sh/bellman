@@ -5,8 +5,9 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import worker from "../src/worker.js";
-import { DurableObjectStore, roomsPageQuery, type RegistryDO } from "../src/store-do.js";
+import worker from "../src/workerd/worker.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import { roomsPageQuery, type RegistryDO } from "../src/workerd/registry-do.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";

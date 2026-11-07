@@ -2438,7 +2438,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,512** | every request, whether or not you are in a room |
+| Tool definitions | **~11,515** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100) |
 | Receiving a message | ~220 | each |
@@ -2466,6 +2466,7 @@ decision recorded here, not a side effect of a merge.
 | Secret ballot release 1: `bellman_decide`'s secret-ballot sentence and read list, `bellman_send`'s secret vote answer | +79 | 10,523 | (#469) |
 | `bellman_fs`: room files, memory and the `/.bellman/` view (ADR 0046) | +598 | 11,121 | #430 PR B |
 | `bellman_memory`: home memory, four ops (ADR 0047; the ADR allotted 270) | +391 | 11,512 | #526 |
+| Room notes private by default: `bellman_fs`'s one sentence on who reads `/members/me/` | +3 | 11,515 | #538 (ADR 0047, 7) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

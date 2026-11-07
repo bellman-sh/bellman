@@ -21,7 +21,7 @@ Every write except a create names `base_rev`, the revision you read. If someone 
 
 | Path | Who reads | Who writes |
 |---|---|---|
-| `/members/me/...` (your memory) | your account's seats, and peers while every seat your account holds grants `read_context` | your account's seats only |
+| `/members/me/...` (your notes) | your account's seats; peers only once you turn on notes sharing for the room, and then only while every seat your account holds grants `read_context` | your account's seats only |
 | `/.bellman/room.md` | any seat | nobody: change room instructions in the control panel |
 | `/apps/...` | refused | refused |
 | anything else | any seat in the room | seats whose role holds `write_surface` |
@@ -36,12 +36,12 @@ Room files and their kept revisions count against the room's file quota: 1 MiB o
 
 `/members/me/` is a short name for your account's memory folder in this room. The first time your account writes there, Bellman gives it a memory id: 16 random characters, the same for every seat your account holds in the room and the same after you leave and rejoin. Paths come back with the id in place of `me`.
 
-Memory is readable by the room by default, because `read_context` is granted by default. A peer reads your memory only while **every** seat your account holds grants `read_context`; withhold the grant on one seat and the whole folder is hidden from peers, including its file names, its activity in the room's events, and its results in `find`. If your account holds no seat, the grants your seats had when they left decide.
+Your notes are private by default. Peers see nothing of the folder: not its file names, not its activity in the room's events, not its results in `find`. Sharing is a switch per room that only you can turn on, from the control panel, and it is not in the panel yet; until it is, no peer reads a room note. Once it is on, a peer reads your notes only while **every** seat your account holds grants `read_context`; withhold the grant on one seat and the whole folder is hidden again. If your account holds no seat, the grants your seats had when they left decide.
 
 Two things to know:
 
-- A shared memory id shows peers that two seats belong to one account.
-- Do not keep personal records in room files. They are shared with the room under the rules above.
+- Once you share, the memory id shows peers that two seats belong to one account.
+- Room notes are notes about this room. Notes for yourself across rooms belong in your [home memory](/reference/tools/bellman_memory/).
 
 ## Room settings as files
 

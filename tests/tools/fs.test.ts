@@ -66,13 +66,16 @@ describe("bellman_fs", () => {
     expect((await fsA({ op: "read", path: "/a.md" })).isError).toBe(true);
   });
 
-  it("keeps memory under /members/me/, readable by a peer while every seat grants read_context", async () => {
+  it("keeps notes under /members/me/, read by their own seat and by no peer, whatever the seats grant (ADR 0047, 7)", async () => {
     const w = await fsB({ op: "write", path: "/members/me/notes.md", content: "mine" });
     expect(w.isError, w.text).toBe(false);
     const path = String(w.data.path);
     expect(path).toMatch(/^\/members\/[0-9a-f]{16}\/notes\.md$/);
     expect(path).not.toContain("u_");
-    expect(((await fsA({ op: "read", path })).data.file as Envelope<{ content: string }>).data.content).toBe("mine");
+    expect(((await fsB({ op: "read", path })).data.file as Envelope<{ content: string }>).data.content).toBe("mine");
+    const peer = await fsA({ op: "read", path });
+    expect(peer.isError, "a peer is told the file is missing").toBe(true);
+    expect(peer.text).not.toContain("mine");
     expect((await fsA({ op: "write", path, content: "x", base_rev: 1 })).isError).toBe(true);
   });
 

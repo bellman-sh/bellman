@@ -153,19 +153,21 @@ export function memoryAuthors(events: readonly SessionEvent[]): string[] {
 }
 
 /**
- * Whether `reader` may see an account's memory (ADR 0046, decision 7). Its own account may, unless `ownAccount` is
- * false (app code, ADR B). A null reader, a path every member shares, may not. Anyone else may only when every seat
- * the account holds grants read_context; a seat that left or was evicted is not held, and with none held, every seat
- * it held must have granted. No seats is no.
+ * Whether `reader` may see an account's room notes (ADR 0047, decision 7). Its own account may, unless `ownAccount`
+ * is false (app code, ADR B). A null reader, a path every member shares, may not. Anyone else may only when the
+ * account has turned on notes sharing for the room (`shared`, the `ns:` row; false when not passed, so a caller that
+ * has not read the switch hides the notes) and every seat the account holds grants read_context; a seat that left or
+ * was evicted is not held, and with none held, every seat it held must have granted. No seats is no.
  */
 export function seesMemory(
   seats: readonly Pick<Member, "capabilities" | "leftAt">[],
   ownerUserId: string,
   reader: string | null,
-  opts: { ownAccount?: boolean } = {},
+  opts: { ownAccount?: boolean; shared?: boolean } = {},
 ): boolean {
   if (reader === null) return false;
   if ((opts.ownAccount ?? true) && reader === ownerUserId) return true;
+  if (opts.shared !== true) return false;
   const held = seats.filter((m) => m.leftAt === null);
   const judged = held.length > 0 ? held : seats;
   return judged.length > 0 && judged.every((m) => m.capabilities.includes("read_context"));

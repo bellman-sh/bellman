@@ -8,7 +8,7 @@ description: "Room files"
 **Destructive**
 
 The room's files: text at paths, 64 KiB each, last 20 revisions kept.  
-/members/me/ is your account's memory: only your seats write it; a peer reads it only while every seat you hold grants read_context. /.bellman/room.md is the room instructions, read-only. /apps/ is refused. Other paths: any seat reads; writing needs write_surface.  
+/members/me/ is your account's notes: only your seats write it; peers never read it until you turn on notes sharing for the room in the dash. /.bellman/room.md is the room instructions, read-only. /apps/ is refused. Other paths: any seat reads; writing needs write_surface.  
 ops:  
 - read (path, rev?): { file }  
 - list (prefix?, cursor?): { entries, next }  

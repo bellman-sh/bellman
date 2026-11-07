@@ -92,7 +92,7 @@ Three surfaces ship from this repository:
   answers at once, because the Durable Objects port crosses objects by RPC
   [src/store.ts:BellmanStore].
 - `waitForEvents` reads events and registers its waiter in the same turn, in
-  both stores [src/store-do.ts:SessionDO.waitForEvents],
+  both stores [src/session-do.ts:SessionDO.waitForEvents],
   [src/store.ts:MemoryStore.waitForEvents].
 - No transaction spans two Durable Objects; cross-object writes go through a
   FIFO outbox written in the mutation's transaction [src/outbox.ts:drain].

@@ -9,7 +9,7 @@
  * the socket 1003 — receive-only is enforced there, not assumed (spec D1).
  *
  * So `PING` is a protocol, not a preference. Three programs have to agree on
- * it: the server registering it (`src/store-do.ts`), the client sending it
+ * it: the server registering it (`src/session-do.ts`), the client sending it
  * (`src/room-socket.ts`), and the fake server the end-to-end tests run against
  * (`tests/helpers/fake-bellman.ts`). Before this module each held its own copy
  * — four with store-do-wiring's assertion — tied together only by comments, and

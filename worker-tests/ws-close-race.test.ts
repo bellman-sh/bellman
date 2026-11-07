@@ -23,7 +23,7 @@
  *
  * The hold is a timer await, which is why the close gets in: the input gate holds
  * other calls off only while a storage operation is outstanding (see `stored()` in
- * store-do.ts), and a parked timer is not one. That is the production gap rather
+ * session-do.ts), and a parked timer is not one. That is the production gap rather
  * than an artefact of the test — the same gap the Worker leaves between its two
  * calls, moved somewhere a test can reach.
  *
@@ -34,7 +34,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   env, SELF, reset, abortAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import type { Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";

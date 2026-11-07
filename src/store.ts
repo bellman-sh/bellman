@@ -3811,7 +3811,7 @@ export class MemoryStore implements BellmanStore {
   }
 
   /**
-   * The step `placedAppend` takes in store-do.ts, over the map (surface placement spec D3): an item that arrives
+   * The step `placedAppend` takes in session-do.ts, over the map (surface placement spec D3): an item that arrives
    * with no placement is placed from the rows the room holds, and the event goes in with the placement the row
    * takes, so the log and the row agree. Everything else comes back untouched. A replay never gets here:
    * `appendEventOnce` returns the original event first.

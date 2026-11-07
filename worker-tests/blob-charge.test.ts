@@ -9,7 +9,8 @@
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { session } from "../tests/helpers/fixtures.js";
 import { editRoom } from "../tests/helpers/rows.js";

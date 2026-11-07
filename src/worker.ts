@@ -46,7 +46,9 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
  * Durable Object classes must be exported from the entry module for the
  * runtime to bind them.
  */
-export { SessionDO, RegistryDO, AuditDO } from "./store-do.js";
+export { SessionDO } from "./session-do.js";
+export { RegistryDO } from "./registry-do.js";
+export { AuditDO } from "./audit-do.js";
 export { AuthDO } from "./oauth/store.js";
 export { HostDO } from "./host-do.js";
 export { CostDO } from "./cost-do.js";
@@ -485,7 +487,7 @@ export default {
      * members that identity owns, and then BUILDS the upgrade request. A
      * client setting x-bellman-members itself therefore achieves nothing,
      * because its request is not the one the object ever sees. Presence reads
-     * that list (see SocketAttachment in store-do.ts), and this is what keeps
+     * that list (see SocketAttachment in session-do.ts), and this is what keeps
      * it trustworthy: a list a client could write would keep any member it
      * named out of every seat reclaim.
      */

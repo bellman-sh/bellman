@@ -87,6 +87,38 @@ describe("GET /me/rooms", () => {
   });
 });
 
+// #530: the account's memory settings. Read by bearer or cookie (the bridge reads with its bearer for the Stop hook);
+// written from a dash session alone, with the panel's Origin.
+describe("GET and PUT /me/memory", () => {
+  const dash = (body: unknown, over: CallOptions = {}) =>
+    call(null, "/me/memory", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
+
+  it("reads off until the dash turns it on, for the bearer and the cookie alike, and per account", async () => {
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false });
+    const on = await dash({ capture: true });
+    expect([on.status, await bodyOf(on)]).toEqual([200, { capture: true }]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: true });
+    expect(await bodyOf(await call(null, "/me/memory", { cookie: DEV_KEY.jesse }))).toEqual({ capture: true });
+    expect(await bodyOf(await call(DEV_KEY.peer, "/me/memory"))).toEqual({ capture: false });
+    const off = await dash({ capture: false });
+    expect([off.status, await bodyOf(off)]).toEqual([200, { capture: false }]);
+    // A home room exists for nothing but the switch: no note, and bellman_memory lists none.
+    const peer = await h.connect(DEV_KEY.jesse);
+    expect((await peer.call("bellman_memory", { op: "recall" })).data).toMatchObject({ entries: [] });
+  });
+
+  it("refuses the write with a bearer, without the panel's Origin, with any other body, and anonymously", async () => {
+    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "PUT", body: { capture: true } })).status).toBe(403);
+    expect((await dash({ capture: true }, { headers: {} })).status).toBe(403);
+    for (const body of [{ capture: "yes" }, { capture: true, pause: true }, {}, [true], null]) {
+      expect((await dash(body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await call(null, "/me/memory")).status).toBe(401);
+    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "DELETE" })).headers.get("allow")).toBe("GET, PUT");
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false });
+  });
+});
+
 describe("POST /rooms/:id/codes", () => {
   const mint = (key: string | null, sessionId: string, body: unknown, over: CallOptions = {}) =>
     call(key, `/rooms/${sessionId}/codes`, { method: "POST", body, ...over });

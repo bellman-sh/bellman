@@ -725,6 +725,7 @@ describe("a room's byte ceiling", () => {
     expect(started.data.plan).toBe(plan);
     const room = (await h.store.getSession(String(started.data.session_id)))!;
     expect(room.blobBytesCeiling).toBe(ENTITLEMENTS[plan].blobBytesPerRoom);
+    expect(room.fsBytesCeiling).toBe(ENTITLEMENTS[plan].fsBytesPerRoom);
   });
 });
 

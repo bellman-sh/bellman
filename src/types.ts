@@ -251,6 +251,11 @@ export type PublicView = "canvas" | "page";
 
 export interface Session {
   id: string;
+  /**
+   * `"home"` on an account's home room (ADR 0047): hidden, one member, no codes, no events, never listed, never
+   * abandoned. Absent on every room.
+   */
+  kind?: "home";
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
   manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it
@@ -279,6 +284,10 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /** The bytes this room's files and their history may hold (ADR 0046), stamped at creation as `blobBytesCeiling` is. */
+  fsBytesCeiling: number;
+  /** Bytes of each account's kept memory revisions, by memory id (ADR 0046), charged apart from the room's files. */
+  fsMemoryBytes?: Record<string, number>;
   /**
    * Each governed config name's current revision (#414), moved in the same write as its `cfg:` row, so a poll reports
    * `room_instructions_rev` off the record it already read. Absent until the first write; readers use `?? {}`.
@@ -625,6 +634,13 @@ export interface Entitlements {
    * a plan already rations.
    */
   blobBytesPerRoom: number;
+  /** The bytes a room's files and their history may hold (ADR 0046), stamped on the room as `fsBytesCeiling`. */
+  fsBytesPerRoom: number;
+  /**
+   * The bytes an account's home memory may hold (ADR 0047, decision 12): read from the caller's plan on each home
+   * write, never stamped, so an upgrade applies at once and a downgrade keeps the notes but refuses growth.
+   */
+  homeMemoryBytes: number;
   /**
    * Rooms with a hosted seat a person may hold open at once (spec D2 as ruled on I7): a
    * slot is taken when one is created and given back when it closes. 0 means the plan
@@ -975,4 +991,30 @@ export interface FsEventPayload {
   rev: number;
   size: number;
   op: "write" | "delete" | "restore";
+}
+
+/**
+ * The account's memory settings (#530): the home room's one `hs` row. A missing row reads as `DEFAULT_HOME_SETTINGS`,
+ * and writing one makes no room record: the first note still creates the room, and settings alone are not one.
+ */
+export interface HomeSettings {
+  /** Whether the Claude Code Stop hook asks the agent, once a session, to remember what was durable. Off until the account turns it on. */
+  capture: boolean;
+}
+export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false };
+
+/**
+ * One revision of a room file (ADR 0046): the `fs:<path>` row holds the current one and `fsh:<path>:<rev>` each kept
+ * one. A delete is a tombstone revision: `deleted`, empty content, and the revision count kept so `base_rev` still
+ * means one thing. `size` is the content's UTF-8 bytes.
+ */
+export interface FsRow {
+  path: string;
+  rev: number;
+  content: string;
+  size: number;
+  writerMemberId: string;
+  writerLabel: string;
+  at: number;
+  deleted: boolean;
 }

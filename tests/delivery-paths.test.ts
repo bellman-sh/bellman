@@ -86,6 +86,22 @@ const CONFIG_READS: Listing = {
   "src/config.ts": { calls: 1, serves: "getGovernedConfig, the one reader: a missing, invalid or unapproved row reads as the most restrictive value" },
 };
 
+/**
+ * Each reader of room file rows (ADR 0046). A file under `/members/<id>/` is memory, and reaches a peer only through
+ * `readablePath` (a read or a history) or the `hide` ids (a list or a find), which apply `seesMemory`.
+ */
+const FILE_READS: Listing = {
+  "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
+  "src/memory.ts": { calls: 2, serves: "readHome and listHome (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads" },
+  "src/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
+};
+
+describe("the paths a memory file can leave by (ADR 0046)", () => {
+  it("lists every module that reads a room file row, and how many times", () => {
+    expect(callsIn(/\.(readFs|listFs|fsHistory|findFs)\(/)).toEqual(pinned(FILE_READS));
+  });
+});
+
 describe("the one reader of governed config (#414)", () => {
   it("lists every module that reads a cfg: row, and how many times", () => {
     expect(callsIn(/\.getConfigRow\(/)).toEqual(pinned(CONFIG_READS));

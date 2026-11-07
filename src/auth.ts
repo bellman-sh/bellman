@@ -16,6 +16,10 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
     // A room is what a plan already rations, so nothing here is monthly.
     blobBytesPerRoom: 50 * 1024 * 1024,
+    // ponytail: room file ceilings (ADR 0046), starting values: 1 MiB, 50 MiB, 500 MiB.
+    fsBytesPerRoom: 1 * 1024 * 1024,
+    // ponytail: home memory ceilings (ADR 0047, decision 12), starting values: 1 MiB, 50 MiB, 200 MiB, 200 MiB.
+    homeMemoryBytes: 1 * 1024 * 1024,
     hostedRooms: 0,
     hostUnitsPerRoom: 0,
     // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
@@ -31,6 +35,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 500 * 1024 * 1024,
+    fsBytesPerRoom: 50 * 1024 * 1024,
+    homeMemoryBytes: 50 * 1024 * 1024,
     hostedRooms: 0,
     hostUnitsPerRoom: 0,
     retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
@@ -49,6 +55,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    fsBytesPerRoom: 500 * 1024 * 1024,
+    homeMemoryBytes: 200 * 1024 * 1024,
     hostedRooms: 3,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
@@ -61,6 +69,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: true,
     audit: true,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    fsBytesPerRoom: 500 * 1024 * 1024,
+    homeMemoryBytes: 200 * 1024 * 1024,
     hostedRooms: 5,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,

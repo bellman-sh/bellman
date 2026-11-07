@@ -2505,16 +2505,17 @@ export interface BellmanStore {
   writeHomeSettings(id: string, settings: HomeSettings): Promise<void>;
   /**
    * `readFs` on a home room that also writes the lookup row, in one transaction; `paused` when the `hs` row says so,
-   * with nothing read or written. Rows older than LOOKUP_KEEP_MS are deleted in the same transaction.
+   * with nothing read or written. Rows older than LOOKUP_KEEP_MS are deleted in the same transaction, and past
+   * LOOKUP_KEEP + LOOKUP_SLACK rows the oldest are deleted down to LOOKUP_KEEP.
    */
   readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }>;
   /** `listFs` with `newest: true` on a home room, logged the same way. */
   listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }>;
   /** The lookup log, newest first, at most LOOKUP_KEEP rows; rows past that are deleted. */
   homeLookups(id: string): Promise<LookupRow[]>;
-  /** Empties a home room (ADR 0047 decisions 13 and 14): every fs:, fsm:, fsh:, hk:, lk: row, the hs settings row and the record. Idempotent; a home id that was never written is a no-op. Never called on a room id. */
+  /** Empties a home room (ADR 0047 decisions 13 and 14): every fs:, fsm:, fsh:, hk:, lk: row, the lkn count, the hs settings row and the record. Idempotent; a home id that was never written is a no-op. Never called on a room id. */
   purgeHome(id: string): Promise<void>;
-  /** Deletes one home note as `forget` does, at its current revision, and scrubs `path` from every lookup row (a row left with no paths is deleted). `false` when there is no live note at `path`. */
+  /** Deletes one home note as `forget` does, at its current revision, and scrubs `path` from every lookup row that returned it (a row left with no paths is deleted). `false` when there is no live note at `path`. */
   forgetHomeNote(id: string, path: string): Promise<boolean>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;

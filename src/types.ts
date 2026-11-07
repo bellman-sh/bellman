@@ -1021,6 +1021,8 @@ export interface LookupRow {
 }
 export type LookupSource = Omit<LookupRow, "at" | "paths">;
 export const LOOKUP_KEEP = 1000;
+/** Rows past `LOOKUP_KEEP` a write lets the log hold before it trims back to `LOOKUP_KEEP` (ADR 0047 decision 13). */
+export const LOOKUP_SLACK = 100;
 export const LOOKUP_KEEP_MS = 90 * 24 * 60 * 60 * 1000;
 
 /**

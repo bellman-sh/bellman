@@ -35,7 +35,7 @@ import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/aud
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
 import type { AuditEntry, Identity, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
-import { DEFAULT_POLICY, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "../../src/types.js";
+import { DEFAULT_POLICY, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/storage/stored-session.js";
@@ -121,6 +121,11 @@ export interface StoreContractHarness {
    * proves a closed secret ballot left no choice anywhere, which `BellmanStore` cannot show.
    */
   roomRows: (sessionId: string) => Promise<[string, unknown][]>;
+  /**
+   * How many lookup rows a home room holds (`lk:` rows in the Durable Objects store), which `BellmanStore` cannot show:
+   * `homeLookups` trims to `LOOKUP_KEEP` as it reads, so only this sees whether a write bounded the log (ADR 0047 decision 13).
+   */
+  lookupRows: (homeId: string) => Promise<number>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -5089,6 +5094,8 @@ export function describeStoreContract(
         expect(await store.homeLookups(homeRoomId("u_other"))).toEqual([]);
       });
 
+      // Over a thousand reads, each an RPC into the object: under 1 s alone, past the 15 s default when the full worker run contends.
+      const LONG_LOOKUP_CASE = 60_000;
       it("keeps the newest 1,000 lookup rows and 90 days", async () => {
         vi.setSystemTime(1_700_000_000_000);
         const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
@@ -5099,9 +5106,23 @@ export function describeStoreContract(
         for (let i = 0; i < LOOKUP_KEEP + 5; i++) { vi.advanceTimersByTime(1); await store.readHomeLogged(id, "/a.md", bare); }
         const kept = await store.homeLookups(id);
         expect(kept.length).toBe(LOOKUP_KEEP);
-        expect(kept[0].at).toBeGreaterThan(kept[kept.length - 1].at);
+        expect(kept[0].at).toBe(Date.now());
+        expect(kept.every((r, i) => i === 0 || r.at < kept[i - 1].at)).toBe(true);
         expect((await store.homeLookups(id)).length).toBe(LOOKUP_KEEP);
-      });
+      }, LONG_LOOKUP_CASE);
+
+      it("bounds the lookup log on write, with no dash read to trim it", async () => {
+        vi.setSystemTime(1_700_000_000_000);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        for (let i = 0; i < LOOKUP_KEEP + 150; i++) { vi.advanceTimersByTime(1); await store.readHomeLogged(id, "/a.md", bare); }
+        const held = await harness.lookupRows(id);
+        expect(held).toBeGreaterThanOrEqual(LOOKUP_KEEP);
+        expect(held).toBeLessThanOrEqual(LOOKUP_KEEP + LOOKUP_SLACK);
+        const kept = await store.homeLookups(id);
+        expect(kept.length).toBe(LOOKUP_KEEP);
+        expect(kept[0].at).toBe(Date.now());
+        expect(await harness.lookupRows(id)).toBe(LOOKUP_KEEP);
+      }, LONG_LOOKUP_CASE);
 
       it("purgeHome empties the home room: notes, history, keys, settings and lookups, and the next write starts clean", async () => {
         await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }, "k1"), 4096);
@@ -5129,6 +5150,7 @@ export function describeStoreContract(
         expect(await store.forgetHomeNote(id, "/a.md")).toBe(false);
         expect(await store.readFs(id, "/a.md")).toBeNull();
         expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect(await harness.lookupRows(id)).toBe(1);
         expect((await store.homeLookups(id)).map((r) => [r.op, r.paths])).toEqual([["list", ["/b.md"]]]);
       });
 

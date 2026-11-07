@@ -1,5 +1,5 @@
 import type { ApprovedBy, ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource } from "../types.js";
-import { DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "../types.js";
+import { DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY } from "../config.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
 import { namespaceOf } from "../fs-path.js";
@@ -1086,8 +1086,9 @@ export class MemoryStore implements BellmanStore {
 
   private logLookup(id: string, source: LookupSource, paths: string[]): void {
     const at = Date.now();
-    const rows = [detach({ ...source, at, paths }), ...(this.lookups.get(id) ?? [])];
-    this.lookups.set(id, rows.filter((r) => r.at >= at - LOOKUP_KEEP_MS));
+    const rows = [detach({ ...source, at, paths }), ...(this.lookups.get(id) ?? [])].filter((r) => r.at >= at - LOOKUP_KEEP_MS);
+    // As SessionDO's #logLookup: past LOOKUP_KEEP + LOOKUP_SLACK rows, trimmed back to LOOKUP_KEEP.
+    this.lookups.set(id, rows.length > LOOKUP_KEEP + LOOKUP_SLACK ? rows.slice(0, LOOKUP_KEEP) : rows);
   }
 
   async homeLookups(id: string): Promise<LookupRow[]> {

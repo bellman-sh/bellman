@@ -63,6 +63,14 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   // Every row of the room's object, key and value: how a case proves a closed secret ballot left no choice behind.
   roomRows: (id) =>
     runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), async (_i: SessionDO, ctx) => [...(await ctx.storage.list()).entries()]),
+  // The home room's `lk:` rows, checked against its `lkn` count: a count that drifted would trim the log at the wrong size.
+  lookupRows: (id) =>
+    runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), async (_i: SessionDO, ctx) => {
+      const rows = (await ctx.storage.list({ prefix: "lk:" })).size;
+      const count = (await ctx.storage.get<number>("lkn")) ?? 0;
+      if (count !== rows) throw new Error(`lkn says ${count}, the object holds ${rows} lk: rows`);
+      return rows;
+    }),
   // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
   // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
   forgetMemory: () => abortAllDurableObjects(),

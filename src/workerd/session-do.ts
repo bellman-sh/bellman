@@ -4,7 +4,7 @@ import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../ba
 import { codeIsLive, isPublic, newestTaskFirst, taskWithEvent } from "../storage/store.js";
 import type { BlobCharge, HostAppend, PurgeSchedule, SetJoinCode } from "../storage/store.js";
 import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PublicView, SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource } from "../types.js";
-import { DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "../types.js";
+import { DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY } from "../config.js";
 import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "../storage/store.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
@@ -135,6 +135,12 @@ const notesSharingKey = (userId: string): string => `${NOTES_SHARING_PREFIX}${us
  */
 const LOOKUP_PREFIX = "lk:";
 const lookupKey = (at: number, nonce = crypto.randomUUID().slice(0, 8)): string => `${LOOKUP_PREFIX}${String(at).padStart(14, "0")}:${nonce}`;
+/** `lkn`: how many `lk:` rows the home room holds, so a write trims the log without listing it. Purged with the room. */
+const LOOKUP_COUNT = "lkn";
+/** `keys` deleted in batches of 128, the most one `delete(keys[])` takes. */
+async function deleteKeys(txn: DurableObjectTransaction, keys: string[]): Promise<void> {
+  for (let i = 0; i < keys.length; i += 128) await txn.delete(keys.slice(i, i + 128));
+}
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -3088,20 +3094,34 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
   }
 
+  /**
+   * One `lk:` row, in the read's transaction, then the log bounded (ADR 0047 decision 13): rows past 90 days deleted,
+   * and past `LOOKUP_KEEP + LOOKUP_SLACK` rows (counted in `lkn`) the oldest deleted down to `LOOKUP_KEEP`.
+   */
   async #logLookup(txn: DurableObjectTransaction, source: LookupSource, paths: string[]): Promise<void> {
     const at = Date.now();
     await txn.put(lookupKey(at), { ...source, at, paths } satisfies LookupRow);
-    const expired = await txn.list({ prefix: LOOKUP_PREFIX, end: lookupKey(at - LOOKUP_KEEP_MS, "") });
-    for (const key of expired.keys()) await txn.delete(key);
+    const expired = [...(await txn.list({ prefix: LOOKUP_PREFIX, end: lookupKey(at - LOOKUP_KEEP_MS, "") })).keys()];
+    await deleteKeys(txn, expired);
+    let count = ((await txn.get<number>(LOOKUP_COUNT)) ?? 0) + 1 - expired.length;
+    if (count > LOOKUP_KEEP + LOOKUP_SLACK) {
+      const oldest = [...(await txn.list({ prefix: LOOKUP_PREFIX, limit: count - LOOKUP_KEEP })).keys()];
+      await deleteKeys(txn, oldest);
+      count -= oldest.length;
+    }
+    await txn.put(LOOKUP_COUNT, count);
   }
 
-  // ponytail: the whole log is read to cap it at LOOKUP_KEEP; a count row if logs grow past a few thousand before
-  // the dash reads them.
-  /** `BellmanStore.homeLookups`: newest first, the rows past `LOOKUP_KEEP` deleted. */
+  // ponytail: the log holds at most LOOKUP_KEEP + LOOKUP_SLACK rows (#logLookup trims on write), so this reads at most
+  // LOOKUP_KEEP and deletes at most LOOKUP_SLACK; each row is up to FS_LIST_PAGE paths, about 50 KB at the worst.
+  /** `BellmanStore.homeLookups`: newest first, the rows past `LOOKUP_KEEP` deleted and `lkn` reset to what is kept. */
   async homeLookups(): Promise<LookupRow[]> {
-    const rows = [...(await this.ctx.storage.list<LookupRow>({ prefix: LOOKUP_PREFIX, reverse: true }))];
-    for (const [key] of rows.slice(LOOKUP_KEEP)) await this.ctx.storage.delete(key);
-    return rows.slice(0, LOOKUP_KEEP).map(([, r]) => r);
+    return this.ctx.storage.transaction(async (txn) => {
+      const rows = [...(await txn.list<LookupRow>({ prefix: LOOKUP_PREFIX, reverse: true, limit: LOOKUP_KEEP }))];
+      if (rows.length === LOOKUP_KEEP) await deleteKeys(txn, [...(await txn.list({ prefix: LOOKUP_PREFIX, end: rows[rows.length - 1][0] })).keys()]);
+      await txn.put(LOOKUP_COUNT, rows.length);
+      return rows.map(([, r]) => r);
+    });
   }
 
   /**
@@ -3161,12 +3181,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!current || current.deleted || !s) return false;
       const w: FsWrite = { path, write: { op: "delete", baseRev: current.rev }, memberId: HOME_MEMBER_ID, userId: s.creator.userId, label: s.creator.label, key: null };
       if ((await this.#writeHomeIn(txn, null, w, 0)).outcome !== "ok") return false;
+      let emptied = 0;
       for (const [key, r] of await txn.list<LookupRow>({ prefix: LOOKUP_PREFIX })) {
         if (!r.paths.includes(path)) continue;
         const paths = r.paths.filter((p) => p !== path);
         if (paths.length > 0) await txn.put(key, { ...r, paths });
-        else await txn.delete(key);
+        else { await txn.delete(key); emptied++; }
       }
+      if (emptied > 0) await txn.put(LOOKUP_COUNT, Math.max(0, ((await txn.get<number>(LOOKUP_COUNT)) ?? 0) - emptied));
       return true;
     });
   }

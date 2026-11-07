@@ -225,7 +225,7 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
 // /ws: rooms behind a real WebSocket handshake
 // ---------------------------------------------------------------------------
 //
-// What this is a fake OF. The checks run in the order src/worker.ts's /ws route
+// What this is a fake OF. The checks run in the order src/workerd/worker.ts's /ws route
 // runs them, with its statuses: 405 for a method that is not GET, 426 for a
 // request that is not an upgrade, 400 for a missing session or a cursor that is
 // not a non-negative integer, 401 for a caller with no identity, 403 for an
@@ -236,7 +236,7 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
 // that is behind it, answers PING with PONG without any handler running, and
 // closes a socket that sends anything else with 1003.
 //
-// What it is not. The route logic is a copy, not the Worker: src/worker.ts
+// What it is not. The route logic is a copy, not the Worker: src/workerd/worker.ts
 // imports `cloudflare:workers` and cannot be loaded into this program, so
 // tests/worker-ws.test.ts is what pins the real statuses and this file has to be
 // kept in step with it by hand. Cloudflare's edge, workerd's hibernation and its

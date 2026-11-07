@@ -3,7 +3,7 @@
  * when it is absent.
  *
  * Its own module for the reason CLAUDE.md gives. Both checks live in Workers-only
- * files — `src/worker.ts`'s `/ws` route and `SessionDO.fetch` in `src/session-do.ts` —
+ * files — `src/workerd/worker.ts`'s `/ws` route and `SessionDO.fetch` in `src/workerd/session-do.ts` —
  * which import `cloudflare:workers` and so cannot be imported by a vitest test. The
  * rule goes in a runtime-free module beside them, as `src/public-event.ts` and
  * `src/stored-session.ts` do, and `tests/upgrade.test.ts` tests it directly.

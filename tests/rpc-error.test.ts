@@ -5,7 +5,7 @@
  * inside real workerd, whose "throws on a payload too deep to fingerprint" case is an
  * `instanceof` across a real RPC boundary and was the suite's one known divergence
  * until this landed. That is the case that matters, and it is the one that cannot run
- * here — `src/store-do.ts` imports `cloudflare:workers`.
+ * here — `src/workerd/store-do.ts` imports `cloudflare:workers`.
  *
  * What is left for this file is everything the real boundary makes expensive to vary:
  * the shapes a carcass can arrive in, and the rules the Proxy follows about what it

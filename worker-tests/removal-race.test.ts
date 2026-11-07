@@ -46,9 +46,9 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { SessionDO } from "../src/session-do.js";
-import type { AuditDO } from "../src/audit-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
+import type { AuditDO } from "../src/workerd/audit-do.js";
 import {
   OUTBOX_GRACE_MS, OUTBOX_HANDLER, OUTBOX_PREFIX, OUTBOX_SEQ, dueKey, type OutboxRow,
 } from "../src/outbox.js";

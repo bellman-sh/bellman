@@ -4,7 +4,7 @@ import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 // 0.22.0 dropped the `@cloudflare/vitest-pool-workers/config` subpath and
 // `defineWorkersConfig`; the pool is a plain Vite plugin now.
 
-// The /ws route refuses to serve with no key map (src/worker.ts `unconfigured`),
+// The /ws route refuses to serve with no key map (src/workerd/worker.ts `unconfigured`),
 // so ws-delivery.test.ts needs one. A binding here and not a var in
 // wrangler.toml, which mirrors production's Durable Object topology and nothing
 // else. The identity is the one tests/helpers/fixtures.ts seats in every room.

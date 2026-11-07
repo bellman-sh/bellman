@@ -44,7 +44,7 @@ const upgraded = () => Object.defineProperty(new Response(null), "status", { val
 async function world(answer: Answer | ((userId: string) => Answer), env: Record<string, unknown> = {}) {
   const asked: Request[] = [];
   const reached: string[] = [];
-  const worker = (await import("../src/worker.js")).default;
+  const worker = (await import("../src/workerd/worker.js")).default;
   const bound = {
     BELLMAN_KEYS: KEYS,
     SESSION: {
@@ -241,7 +241,7 @@ describe("GET /ws", () => {
   });
 
   it("refuses /mcp the same way, so the guard is shared and not copied", async () => {
-    // Nothing else imports src/worker.ts, so without this the guard could be
+    // Nothing else imports src/workerd/worker.ts, so without this the guard could be
     // dropped from /mcp and every other test would stay green.
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const { mcp, reached } = await world(OK, { BELLMAN_KEYS: undefined });

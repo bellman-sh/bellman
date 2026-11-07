@@ -4,15 +4,15 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import worker from "../src/worker.js";
+import worker from "../src/workerd/worker.js";
 import { hostMember } from "../src/host.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
-import { AuthStore } from "../src/oauth/store.js";
+import { AuthStore } from "../src/workerd/auth-do.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
 import type { OutboxDriver } from "../src/outbox.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { SessionDO } from "../src/session-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import type { Identity } from "../src/types.js";
 import { member, oneCode, roomManifest, session } from "../tests/helpers/fixtures.js";
 

@@ -61,7 +61,7 @@ export const OUTBOX_PREFIX = "ob:";
  * Deliberately outside OUTBOX_PREFIX. A counter inside the prefix it tracks is
  * listed by its own drain, which hands a bare number to deliver() as though it
  * were a row. The same trap is commented for the OAuth purge cursor in
- * src/oauth/store.ts.
+ * src/workerd/auth-do.ts.
  */
 export const OUTBOX_SEQ = "ob_seq";
 

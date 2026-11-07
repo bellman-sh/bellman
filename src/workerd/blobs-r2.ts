@@ -2,7 +2,7 @@
 import {
   BlobLengthError, OCTET_STREAM, blobKey, exactLength, roomOfBlobKey,
   type BlobMeta, type BlobPut, type BlobRead, type BlobStore,
-} from "./blobs.js";
+} from "../blobs.js";
 
 /**
  * The R2 half of the blob seam (#183, spec D1): one bucket, keyed

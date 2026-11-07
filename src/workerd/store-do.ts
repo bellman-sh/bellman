@@ -1,28 +1,28 @@
 /// <reference types="@cloudflare/workers-types" />
-import { OPERATOR_AUDIT_STREAM } from "./grant-index.js";
-import type { Ban, CreatorBan } from "./bans.js";
-import type { Suspension } from "./suspension.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, type ScimCreate, type ScimUpdate } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
-import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings } from "./types.js";
-import type { HomeAppend } from "./store.js";
-import { isHomeRoomId } from "./home.js";
-import type { AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch, AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts, DecisionClose, DecisionOpen, VoteWrite, RoomCounts, RoomFilter, RoomIndexRow, RoomSummary } from "./store.js";
-import type { ClosedState, DecisionPage, DecisionPageAsk, DecisionView, FailReason } from "./decision.js";
-import { roomIndexRow } from "./store.js";
+import { OPERATOR_AUDIT_STREAM } from "../grant-index.js";
+import type { Ban, CreatorBan } from "../bans.js";
+import type { Suspension } from "../suspension.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, type ScimCreate, type ScimUpdate } from "../store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "../store.js";
+import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
+import type { HomeAppend } from "../store.js";
+import { isHomeRoomId } from "../home.js";
+import type { AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch, AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts, DecisionClose, DecisionOpen, VoteWrite, RoomCounts, RoomFilter, RoomIndexRow, RoomSummary } from "../store.js";
+import type { ClosedState, DecisionPage, DecisionPageAsk, DecisionView, FailReason } from "../decision.js";
+import { roomIndexRow } from "../store.js";
 import type { HostDO } from "./host-do.js";
-import type { IdempotencyRecord } from "./idempotency.js";
-import type { StoredSession } from "./stored-session.js";
-import type { AuditActor, AuditFacets, AuditPage, AuditQuery } from "./audit.js";
-import type { AuditIntent } from "./grant-audit.js";
-import type { AuditSettings, AuditSinkStatus, AuditVerification } from "./audit-sink.js";
-import type { FiledReport, NewReport, Report } from "./reports.js";
-import { orgsOnRoster } from "./retention.js";
-import { NotReadyError, isNotImplemented, reviving } from "./rpc-error.js";
-import type { SurfaceWrite } from "./surface.js";
-import type { Window, WindowPage } from "./frames.js";
-import type { AnswerRequest, AnswerResult, AskOutcome, AskRequest, CancelRequest, CancelResult } from "./outside.js";
-import type { SendAdmission } from "./send-limit.js";
+import type { IdempotencyRecord } from "../idempotency.js";
+import type { StoredSession } from "../stored-session.js";
+import type { AuditActor, AuditFacets, AuditPage, AuditQuery } from "../audit.js";
+import type { AuditIntent } from "../grant-audit.js";
+import type { AuditSettings, AuditSinkStatus, AuditVerification } from "../audit-sink.js";
+import type { FiledReport, NewReport, Report } from "../reports.js";
+import { orgsOnRoster } from "../retention.js";
+import { NotReadyError, isNotImplemented, reviving } from "../rpc-error.js";
+import type { SurfaceWrite } from "../surface.js";
+import type { Window, WindowPage } from "../frames.js";
+import type { AnswerRequest, AnswerResult, AskOutcome, AskRequest, CancelRequest, CancelResult } from "../outside.js";
+import type { SendAdmission } from "../send-limit.js";
 import type { SessionDO } from "./session-do.js";
 import type { RegistryDO } from "./registry-do.js";
 import type { AuditDO } from "./audit-do.js";
@@ -32,7 +32,7 @@ import type { AuditDO } from "./audit-do.js";
  *
  * Topology — the three classes this facade routes to, of the five Durable Object
  * classes, each in its own file (session-do.ts, registry-do.ts, audit-do.ts; AuthDO
- * is in src/oauth/store.ts, HostDO in src/host-do.ts), each matching a real scope
+ * is in src/workerd/auth-do.ts, HostDO in src/workerd/host-do.ts), each matching a real scope
  * in the data:
  *
  *   SessionDO   one per room. Holds the session record, its events, its surface

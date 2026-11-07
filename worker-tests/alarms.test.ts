@@ -5,8 +5,8 @@
  */
 import { it, expect, afterEach, vi } from "vitest";
 import { env, SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { SessionDO } from "../src/session-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import { DUE_PREFIX } from "../src/outbox.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { member, session } from "../tests/helpers/fixtures.js";

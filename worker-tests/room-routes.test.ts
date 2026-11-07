@@ -10,10 +10,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { newBlobId } from "../src/blobs.js";
-import { R2BlobStore } from "../src/blobs-r2.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { RegistryDO } from "../src/registry-do.js";
-import worker from "../src/worker.js";
+import { R2BlobStore } from "../src/workerd/blobs-r2.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
+import worker from "../src/workerd/worker.js";
 import { text } from "../tests/helpers/blob-bytes.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 

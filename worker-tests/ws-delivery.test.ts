@@ -1,7 +1,7 @@
 /**
  * Delivery survives the object being evicted and revived — in real workerd,
  * against the real /ws route (worker-tests/wrangler.toml sets
- * main = "../src/worker.ts").
+ * main = "../src/workerd/worker.ts").
  *
  * THE TEARDOWN IS evictAllDurableObjects(), NOT abortAllDurableObjects(), which
  * is what store-contract.test.ts uses and what this file was first written
@@ -25,7 +25,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   env, SELF, reset, abortAllDurableObjects, evictAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 import { evictMember } from "../src/rooms.js";
 import type { Identity, Member, Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";

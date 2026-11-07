@@ -6,7 +6,7 @@ The A2A (Agent2Agent) surface: an outside agent that holds no seat asks a public
 JSON-RPC and reads back its own tasks. `/a2a` speaks A2A v1.0 and names the room by `tenant`; `/a2a/<tenant>`
 speaks v0.3, taking the room from the path, and is translated to and from the v1.0 handlers rather than run as
 a second copy. The directory also builds the AgentCards a room publishes (v1.0 and v0.3 shapes, plus Bellman's
-own card); `src/http/public.ts` serves them. `src/app.ts` and `src/worker.ts` mount `a2aRoutes`.
+own card); `src/http/public.ts` serves them. `src/app.ts` and `src/workerd/worker.ts` mount `a2aRoutes`.
 
 ## Interface
 

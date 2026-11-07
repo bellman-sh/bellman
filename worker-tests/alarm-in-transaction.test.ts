@@ -30,7 +30,7 @@
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { RegistryDO } from "../src/registry-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 
 afterEach(async () => {
   await reset();

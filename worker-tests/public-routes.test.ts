@@ -11,8 +11,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID } from "../src/host.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import worker from "../src/worker.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import worker from "../src/workerd/worker.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";

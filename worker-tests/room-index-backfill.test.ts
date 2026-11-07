@@ -6,8 +6,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { RegistryDO } from "../src/registry-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
 import { roomIndexKey, type RoomIndexRow } from "../src/store.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 

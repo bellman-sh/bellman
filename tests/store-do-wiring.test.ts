@@ -75,10 +75,10 @@ vi.stubGlobal("Response", class extends NodeResponse {
   }
 });
 
-import * as facade from "../src/store-do.js";
-import * as sessionDo from "../src/session-do.js";
-import * as registryDo from "../src/registry-do.js";
-import type { BellmanEnv } from "../src/store-do.js";
+import * as facade from "../src/workerd/store-do.js";
+import * as sessionDo from "../src/workerd/session-do.js";
+import * as registryDo from "../src/workerd/registry-do.js";
+import type { BellmanEnv } from "../src/workerd/store-do.js";
 import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 import { publicEvent } from "../src/public-event.js";
@@ -429,9 +429,9 @@ async function loadStoreDoWithoutGuard(): Promise<StoreDo> {
   vi.doMock("../src/stored-session.js", () => ({ hydrateStoredSession: (raw: unknown) => raw }));
   try {
     return {
-      ...(await import("../src/store-do.js")),
-      ...(await import("../src/session-do.js")),
-      ...(await import("../src/registry-do.js")),
+      ...(await import("../src/workerd/store-do.js")),
+      ...(await import("../src/workerd/session-do.js")),
+      ...(await import("../src/workerd/registry-do.js")),
     };
   } finally {
     vi.doUnmock("../src/stored-session.js");

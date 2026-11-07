@@ -19,7 +19,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { AuthStore, type AuthDO } from "../src/oauth/store.js";
+import { AuthStore, type AuthDO } from "../src/workerd/auth-do.js";
 import { CLIENT_COUNT_KEY, type RegisteredClient } from "../src/oauth/storage.js";
 import { describeAuthStoreContract } from "../tests/helpers/auth-store-contract.js";
 

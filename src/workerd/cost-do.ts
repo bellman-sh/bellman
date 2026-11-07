@@ -8,11 +8,11 @@
  * tsconfig.test.json exclude it).
  */
 import { DurableObject } from "cloudflare:workers";
-import { reviving } from "./rpc-error.js";
+import { reviving } from "../rpc-error.js";
 import {
   COST_SCHEMA, isTooOld, previousMonth,
   type BlobRow, type CostStore, type MonthRecords, type PlansDay, type RoomRecord, type RunRecord, type TotalsRecord, type UsageRecord,
-} from "./cost/records.js";
+} from "../cost/records.js";
 
 type Row = Record<string, SqlStorageValue>;
 

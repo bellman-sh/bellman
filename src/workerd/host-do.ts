@@ -12,18 +12,18 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
-import type { HostAppend } from "./store.js";
-import { billingSettings, type BillingEnv } from "./billing/config.js";
-import { parseOverrides } from "./oauth/providers.js";
-import { planOf } from "./oauth/routes.js";
-import { answerQuestion } from "./outside.js";
+import type { HostAppend } from "../store.js";
+import { billingSettings, type BillingEnv } from "../billing/config.js";
+import { parseOverrides } from "../oauth/providers.js";
+import { planOf } from "../oauth/routes.js";
+import { answerQuestion } from "../outside.js";
 
 /** What the seat reads beyond the room's own bindings: what resolving a room creator's plan needs (I7). */
 type HostEnv = BellmanEnv & BillingEnv & { BELLMAN_USERS?: string };
 import {
   ANTHROPIC_MESSAGES_URL, HOST_MEMBER_ID, RETRY_MS, callMessages, emptyHostRecord, hostedSeatOn, hostedSeatUsers, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
-} from "./host.js";
+} from "../host.js";
 
 /** The seat's queue of wakes, oldest first. The head is the one being handled, or waiting on a retry. */
 const PENDING = "pending";

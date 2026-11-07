@@ -2,9 +2,9 @@ import { it, expect, afterEach, vi } from "vitest";
 import {
   env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { RegistryDO } from "../src/registry-do.js";
-import type { AuditDO } from "../src/audit-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { RegistryDO } from "../src/workerd/registry-do.js";
+import type { AuditDO } from "../src/workerd/audit-do.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow } from "../src/outbox.js";
 import type { AuditEntry, PlanGrant } from "../src/types.js";
 

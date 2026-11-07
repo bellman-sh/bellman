@@ -4,8 +4,8 @@
  */
 import { afterEach, expect, it, vi } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { AuditDO } from "../src/audit-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { AuditDO } from "../src/workerd/audit-do.js";
 import { SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/audit-sink.js";
 import { backoffMs } from "../src/outbox.js";
 

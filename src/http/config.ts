@@ -12,10 +12,10 @@
  * Runtime-free, as rooms.ts: a web Request in, a Response out.
  */
 import { csrfRefusal } from "../oauth/browser.js";
-import { auditEntries, findMember, gateSeat } from "../rooms.js";
+import { auditEntries, findMember, gateSeat } from "../room/rooms.js";
 import {
   CONFIG_RESERVE_BYTES, bodyBytes, bodyHash, getGovernedConfig, isConfigName, isNarrowing, parseConfigBody,
-} from "../config.js";
+} from "../files/config.js";
 import type { ConfigName, ConfigRow } from "../types.js";
 import { STATUS, adminWriteRefusal, json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 

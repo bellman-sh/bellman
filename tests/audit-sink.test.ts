@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import {
   chainHash, chainWalk, sweepPlan, nextSinkState, sinkStatus, newSink, batchBody, signBatch,
   retentionDaysOf, sinkUrlOf, deliverBatch, NO_ANCHOR, SINK_DEAD_AFTER_MS, type ChainRow, type AuditSink,
-} from "../src/audit-sink.js";
-import { recordOf } from "../src/audit.js";
+} from "../src/orgs/audit-sink.js";
+import { recordOf } from "../src/orgs/audit.js";
 import { backoffMs } from "../src/storage/outbox.js";
 import type { AuditEntry } from "../src/types.js";
 

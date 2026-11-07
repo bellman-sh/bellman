@@ -11,7 +11,7 @@ import { it, expect, vi, afterEach } from "vitest";
 import { env, SELF, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { R2BlobStore } from "../src/workerd/blobs-r2.js";
 import { OUTBOX_HANDLER, OUTBOX_SEQ, dueKey, outboxKey } from "../src/storage/outbox.js";
-import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import { ABANDONED_AFTER_MS } from "../src/room/presence.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { RegistryDO } from "../src/workerd/registry-do.js";

@@ -4,7 +4,7 @@ import {
   BELL_COLUMNS, BELL_ROWS, CANVAS_MAX, LOGS_MAX, REQUEST_DRAWN_MAX, bellRows, canvasOf, chooseLayout, drawingOf, fitLogs, kept, lineOf,
   pendingRequests, roomLabel, safeLinks, sidebarMove, toastFor, unreadCount, type KeptEvent,
 } from "../src/mod/view.js";
-import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, assertPayloadDepth } from "../src/payload.js";
+import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, assertPayloadDepth } from "../src/room/payload.js";
 
 const seats = [{ session_id: "qs_room1", member_id: "m-me" }];
 const ev = (over: Partial<DoorEvent>): DoorEvent => ({

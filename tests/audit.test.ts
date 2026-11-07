@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AUDIT_COLUMNS, SYSTEM_ACTOR, auditRow, auditRows, auditWhere, entryOf, partiesOf, recordOf, type AuditRecord,
-} from "../src/audit.js";
+} from "../src/orgs/audit.js";
 import type { AuditEntry } from "../src/types.js";
 
 const facts = { at: 7, sessionId: "qs_q3", action: "sent_message", roomName: "q3-plan", detail: { chars: 5 } };

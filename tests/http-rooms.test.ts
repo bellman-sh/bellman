@@ -7,15 +7,15 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { hostMember } from "../src/host.js";
 import {
   MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, MAX_VIEW_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, searchTag, windowTag, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
-import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_HTTP } from "../src/frames.js";
-import { resolveManifest } from "../src/manifest.js";
-import { STALE_AFTER_MS } from "../src/presence.js";
-import { isPublic } from "../src/rooms.js";
+import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_HTTP } from "../src/surface/frames.js";
+import { resolveManifest } from "../src/room/manifest.js";
+import { STALE_AFTER_MS } from "../src/room/presence.js";
+import { isPublic } from "../src/room/rooms.js";
 import { JOINED_SCAN } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";

@@ -11,8 +11,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
-import { snapshotOf } from "../../src/heartbeat.js";
-import { ATTENTION } from "../../src/attention.js";
+import { snapshotOf } from "../../src/room/heartbeat.js";
+import { ATTENTION } from "../../src/room/attention.js";
 import { SEND_KINDS } from "../../src/tools/kit.js";
 
 let h: Harness;

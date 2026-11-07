@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import {
   GRID, MAX_SLOT_SEARCH, MAX_SURFACE_ITEMS, PLACED_KINDS, MAX_SURFACE_BATCH, isBatchPayload, normalizeSurfaceBatch, SurfaceKeyShape, applySurfaceWrite, createdAtOf, gridSlot, needsPlacement, normalizeSurfaceWrite, withPlacement, surfaceCursor,
   type SurfaceWrite,
-} from "../src/surface.js";
+} from "../src/surface/surface.js";
 import { GRID as VIEWER_GRID, gridSlot as viewerSlot } from "../ui/src/canvas-layout.js";
 import { surfaceIndex, surfaceItem } from "../src/projections.js";
 import type { SessionEvent, SurfaceItem, SurfaceRow } from "../src/types.js";

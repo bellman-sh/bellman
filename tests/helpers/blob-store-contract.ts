@@ -9,7 +9,7 @@
  * worker pool's `reset()` emptying the bucket between cases.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { BlobLengthError, type BlobMeta, type BlobStore } from "../../src/blobs.js";
+import { BlobLengthError, type BlobMeta, type BlobStore } from "../../src/files/blobs.js";
 import { drain, stream, text } from "./blob-bytes.js";
 
 const meta = (bytes: number, over: Partial<Omit<BlobMeta, "etag">> = {}) => ({

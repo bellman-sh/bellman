@@ -1,6 +1,6 @@
 /**
  * `bellman_surface` with `query`: one room's cards or messages, matched by
- * `src/search.ts`, answered as pointers in untrusted envelopes (room search
+ * `src/surface/search.ts`, answered as pointers in untrusted envelopes (room search
  * spec, section 1). A search writes nothing and keeps no seat alive.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -8,8 +8,8 @@ import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, startRoom, type PairedSession } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
-import { searchLog } from "../../src/rooms.js";
-import { surfaceCursor } from "../../src/surface.js";
+import { searchLog } from "../../src/room/rooms.js";
+import { surfaceCursor } from "../../src/surface/surface.js";
 import { IN_NEEDS_QUERY } from "../../src/tools/surface.js";
 
 let h: Harness;

@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { askRoom, type Caller } from "../src/outside.js";
 import { creatorReportView, operatorReportView } from "../src/reports.js";
-import { banAsker, evictMember } from "../src/rooms.js";
+import { banAsker, evictMember } from "../src/room/rooms.js";
 import type { Identity } from "../src/types.js";
 import { publicRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness, type Peer } from "./helpers/harness.js";

@@ -5,10 +5,10 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { builtinPresets, resolveManifest } from "../src/manifest.js";
-import { asManifest, checkPreset } from "../src/presets.js";
+import { builtinPresets, resolveManifest } from "../src/room/manifest.js";
+import { asManifest, checkPreset } from "../src/room/presets.js";
 import { roomPreview } from "../src/projections.js";
-import { isPublic } from "../src/rooms.js";
+import { isPublic } from "../src/room/rooms.js";
 import { hydrateStoredSession } from "../src/storage/stored-session.js";
 import type { SavedPreset, Session } from "../src/types.js";
 import { brief, roomManifest, session } from "./helpers/fixtures.js";

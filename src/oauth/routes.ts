@@ -1,11 +1,11 @@
 import { ENTITLEMENTS, entitlementsFor, keyedPlan } from "../auth.js";
 import { isOrgId } from "../storage/grant-index.js";
-import { handleFromSegment } from "../handles.js";
-import { homeRoomId } from "../home.js";
+import { handleFromSegment } from "../room/handles.js";
+import { homeRoomId } from "../files/home.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
-import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, inviteLive, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
+import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, inviteLive, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs/orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { AuditIntent, BellmanStore } from "../storage/store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
@@ -14,7 +14,7 @@ import { parseSsoKey,
   isProviderName, isStableIdentityKey, ssoKey, ssoKeyForUser,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import { inviteNamedBy, verifyInviteLink, type InviteClaim } from "../invite-mail.js";
+import { inviteNamedBy, verifyInviteLink, type InviteClaim } from "../orgs/invite-mail.js";
 import { domainOf } from "./dns.js";
 import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
 import { unseal } from "./sealed.js";

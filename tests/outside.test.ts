@@ -2,14 +2,14 @@
  * Outside callers (A2A): the limits and the verb (Task 1), and asking a public room (Task 2).
  */
 import { afterEach, beforeEach, describe, it, expect } from "vitest";
-import { VERBS, builtinPresets, resolveManifest, PRESET_NAMES } from "../src/manifest.js";
-import { verbsOfRole } from "../src/roles.js";
+import { VERBS, builtinPresets, resolveManifest, PRESET_NAMES } from "../src/room/manifest.js";
+import { verbsOfRole } from "../src/room/roles.js";
 import { pairUp } from "./helpers/flows.js";
 import { Harness } from "./helpers/harness.js";
 import {
   answerQuestion, askRoom, cancelOutsideTask, isVoice, outsideTask, outsideTasksOf, OUTSIDE_TASK_TTL_MS, type AskInput, type Caller,
 } from "../src/outside.js";
-import { evictMember } from "../src/rooms.js";
+import { evictMember } from "../src/room/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, RoomManifest, Session } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";

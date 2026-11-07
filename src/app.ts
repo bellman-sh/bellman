@@ -4,7 +4,7 @@ import express, { type Express, type Request as ExpressRequest, type Response as
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { a2aRoutes } from "./a2a/routes.js";
 import { resolveIdentity } from "./auth.js";
-import type { BlobStore } from "./blobs.js";
+import type { BlobStore } from "./files/blobs.js";
 import { handleRoutes } from "./http/handles.js";
 import { meRoutes } from "./http/me.js";
 import { moderationRoutes } from "./http/moderation.js";

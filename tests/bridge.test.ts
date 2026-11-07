@@ -19,7 +19,7 @@ import {
 } from "../src/client/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/client/inbox.js";
 import { buildServer } from "../src/server.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { readServer, writeServer } from "../src/client/credentials.js";
@@ -28,7 +28,7 @@ import { connectSignedIn } from "../src/client/signin.js";
 import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
-import { STALE_AFTER_MS } from "../src/presence.js";
+import { STALE_AFTER_MS } from "../src/room/presence.js";
 import { SYNC_PAGE } from "../src/tools/sync.js";
 
 /**

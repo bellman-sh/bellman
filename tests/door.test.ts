@@ -12,7 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { doorPathFor, doorRoot, startDoor, statusOf, type DoorSource } from "../src/client/door.js";
 import { drain, enqueue, pendingCount, type PeerEvent } from "../src/client/inbox.js";
-import { SurfaceKeyShape } from "../src/surface.js";
+import { SurfaceKeyShape } from "../src/surface/surface.js";
 
 let root: string;
 /** Every door a test started, closed in afterEach so that no listener outlives the test that opened it. */

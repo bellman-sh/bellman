@@ -311,7 +311,7 @@ role names. Every page, count and detail read writes an entry to the operator's 
 in the room; a write that fails answers 500 and no room. A registry still on the
 code before a deploy answers the filtered list and the counts 503 `not_ready`.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The room read carries `preset` (ADR 0032). The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 0034): `src/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a card search's ETag carries its query and the room's link. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. A public room's creator chooses whether its page opens on the canvas or as a page, `publicView` on the record, through `PUT /rooms/:id/view`, and both room reads, `GET /public/rooms/:id` and `GET /rooms/:id`, carry it as `view` (ADR 0028). The room read carries `preset` (ADR 0032). The surface and events reads, the members' and the public's, take `?query=` and answer a search in place of their items or events (ADR 0034): `src/surface/search.ts` ranks once for them and for `bellman_surface`, a member's message search reads the last 2,000 events and the public's the newest 200, and a card search's ETag carries its query and the room's link. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/room/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -521,7 +521,7 @@ it does three things.
   inbox's counts through the door, which takes nothing from it, and starts a
   turn with a prompt of fixed text (`WAKE_TEXT`) in an idle session, or appends
   the same text as a row to the turn that is running, once for a batch. What
-  interrupts is the server's call (`ambient` on the event, `src/attention.ts`),
+  interrupts is the server's call (`ambient` on the event, `src/room/attention.ts`),
   so the mod keeps no list of types of its own, and a roster change wakes as a
   message does, as channel delivery's push already starts a turn on one. After
   `WAKE_LIMIT` (three) wakes in a row with no input from the person (a prompt
@@ -619,7 +619,7 @@ root test can load those classes over a stub and a fake storage
 **Governed config (ADR 0044, #414)** is the one part of a room a person changes inside its fixed manifest:
 `cfg:<name>` rows in `SessionDO`, the last 20 revisions as `cfgh:<name>:<rev>`, and `configRevs`/`configBytes` on
 the record. `writeConfig` writes the row, its history, a `config_changed` event and its audit rows in one
-transaction; `getGovernedConfig` (`src/config.ts`) is the only reader.
+transaction; `getGovernedConfig` (`src/files/config.ts`) is the only reader.
 
 **Room files (ADR 0046, #430)** are `fs:<path>` rows in `SessionDO`, the last 20 revisions as `fsh:<path>:<rev>`, and
 `mi:<userId>` for each account's memory id. One store call, `appendFs`, writes the row, its history, an `fs` event (path,
@@ -658,7 +658,7 @@ flowchart LR
 
     SDO -.->|"outbox: host wakes"| HDO
 
-    BLOB["BlobStore<br/>src/blobs.ts"]
+    BLOB["BlobStore<br/>src/files/blobs.ts"]
     R2["R2 — bellman-blobs<br/>rooms/&lt;sessionId&gt;/&lt;blobId&gt;<br/>the object's metadata is the metadata"]
     MEMB["MemoryBlobStore<br/>tests, npm start"] -.implements.-> BLOB
     R2S["R2BlobStore<br/>src/workerd/blobs-r2.ts"] -.implements.-> BLOB
@@ -692,7 +692,7 @@ Why the split is shaped that way:
   it was resolved, with its `rc:` and `rr:` rows, and an account's `rl:` row once
   its newest filing has left the day.
 - **`AuditDO` is per org** because an action in a room that holds more than one org is written
-  to every one of their streams (`auditEntries`, `src/rooms.ts`), and each side must see only
+  to every one of their streams (`auditEntries`, `src/room/rooms.ts`), and each side must see only
   the crossings that touched its own boundary. Its rows are a SQL table (`entries`, with the
   delivery marks in `delivered`), so one query serves the panel's filters, paging and export.
   Each row is hash-chained to the one before it in `append`'s transaction; the object's one alarm
@@ -915,7 +915,7 @@ included, and its member rows, events, audit trail and members' own views keep t
 label. It never joins by code and never holds a socket. ADR 0002 records the decisions.
 
 **Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
-control over the seat, and `hostSeated` (`src/members.ts`) is the one predicate
+control over the seat, and `hostSeated` (`src/room/members.ts`) is the one predicate
 behind it: once the host has left, `tickPlan` arms and wakes nothing for it,
 neither store queues it a reply wake, `admit` settles a wake already queued with
 no model call, and `decideHostCharge` refuses its write (`removed`), so a wake
@@ -942,7 +942,7 @@ asks its first question when the room starts, and a cadence after each question 
 A reporting seat's deadline still writes a tick, for the reporter, and never
 wakes the host: each question resets the three answers and spends units, and
 reporters' ticks once had a room that declared `1h` asking every 20 to 40
-minutes. `tickPlan` (`src/heartbeat.ts`), which both stores call, decides before
+minutes. `tickPlan` (`src/room/heartbeat.ts`), which both stores call, decides before
 the tick's write moves either clock: the host is woken when its cadence has come
 round and a person (`isActivePerson`: not the host, not departed) was seen since
 it last asked or holds a socket in the room now. Otherwise the firing advances
@@ -1149,7 +1149,7 @@ record, so a poll that does not ask for the surface never reads one. The row
 is written by `#writeEvent` in the transaction that stores the `surface`
 event, through `AppendExtras.surface`, the `creditReport` pattern: the caller
 says what to index and the store writes the event and the row together. Last
-write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface.ts`,
+write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface/surface.ts`,
 one rule for both stores). A row also keeps when its key was first written,
 `createdAt`, which an edit carries over and a removal ends; a row from before it
 reads its `at` as `createdAt` (`createdAtOf`), and every read of an item carries
@@ -1163,7 +1163,7 @@ A member a creator removed (#113) is told a number derived from the items it is
 shown instead, because the record's could claim a change it never saw.
 
 An item that arrives with no placement is placed in the append that stores it (ADR 0030).
-`withPlacement` (`src/surface.ts`) gives a `text`, `link`, `diagram`, `file`, `image` or `html`
+`withPlacement` (`src/surface/surface.ts`) gives a `text`, `link`, `diagram`, `file`, `image` or `html`
 item the placement its key already holds, so replacing an item moves nothing, and otherwise the
 lowest slot of the viewers' grid (`GRID` and `gridSlot`: four columns of 320 by 200 cells, 40
 apart, left to right and then down) that no row's box covers. A shape's box covers the cells
@@ -1174,14 +1174,14 @@ appended with the placement the row takes, and an idempotent retry is judged by 
 caller sent, so it replays however the room has filled since. The search ends at
 `MAX_SLOT_SEARCH` slots (4,000, a row of four for each of the surface's 1,000 items), and an item
 that finds none is stored unplaced, with the write still succeeding, and laid out by the
-viewers. The grid lives in three places that must agree: `src/surface.ts`,
+viewers. The grid lives in three places that must agree: `src/surface/surface.ts`,
 `ui/src/canvas-layout.ts` (held to it by `tests/working-surface.test.ts`) and dash's
 `src/lib/canvas.ts`. A connector has no placement, and a shape is refused without one.
 
 A surface holds 1,000 items, and a read of it is a window (ADR 0038). The `frame` kind is a titled
 rectangle; a card belongs to the frame holding its centre, and a frame's number is its rank by
 `createdAt`, computed on every read and never stored. `BellmanStore.surfaceWindow` cuts the room's rows
-inside its object (`src/frames.ts` ranks, places and pages them, runtime-free, for both stores) and
+inside its object (`src/surface/frames.ts` ranks, places and pages them, runtime-free, for both stores) and
 returns one page of at most 64 items with `frames[]`, the window it answered and `next`, a keyset
 position, so a read crosses RPC with one page and not a thousand rows. A tool read with no window is the
 front: frame 1 when the room has frames, else the newest items, and so is an HTTP read with no window.
@@ -1210,7 +1210,7 @@ given at its first seat. A room stored before then is moved to rows by its objec
 constructor, its inline briefs with it, before any request reaches it. A swarm room
 seats 5,000: every call still loads the members in the room, about 300 bytes each.
 
-`writeSurface` in `src/rooms.ts` is the one write path — guards, shape, the
+`writeSurface` in `src/room/rooms.ts` is the one write path — guards, shape, the
 rows for the cap and a connector's ends, the append, the audit row — and
 `bellman_send` and the `PUT` and `DELETE /rooms/:id/surface/:key` routes (#184)
 both call it. The reads are projections: the join preview gets an index with no
@@ -1230,7 +1230,7 @@ admin of an org that sat in the room, under the audit log's conditions
 
 A `file` or an `image` item (#183) names bytes that live in R2 — and an `html`
 item may (#185) — under `rooms/<sessionId>/<blobId>`, behind the second seam
-storage has: `BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore`
+storage has: `BlobStore` (`src/files/blobs.ts`, runtime-free), with `MemoryBlobStore`
 for tests and `npm start` and `R2BlobStore` (`src/workerd/blobs-r2.ts`, Workers-only)
 for production, held to one contract by `tests/helpers/blob-store-contract.ts`
 the way the two session stores are. No row in the room object describes a blob:
@@ -1275,7 +1275,7 @@ whole prefix goes with it, after a sweep at close has taken the objects no item
 names.
 
 A body that is not its declared length is refused by the store itself, with
-`BlobLengthError`, and nothing stays behind. `exactLength` (`src/blobs.ts`) is
+`BlobLengthError`, and nothing stays behind. `exactLength` (`src/files/blobs.ts`) is
 the one place the rule lives: `MemoryBlobStore` reads through it, and
 `R2BlobStore` pipes through it into R2's `FixedLengthStream`, because R2's own
 failure for a wrong length is a plain `Error` that cannot be told from any other
@@ -2081,7 +2081,7 @@ It is used four times:
   `deleteGrantIfSource`) take an `AuditIntent` and queue their audit entries in
   the grant's own transaction. Auditing afterwards loses them: a delete that
   committed and then failed to audit answers `missing` on retry. The rule for
-  what a grant change records lives once, in `src/grant-audit.ts`.
+  what a grant change records lives once, in `src/orgs/grant-audit.ts`.
 
   **This queue holds only `audit` rows**, and the registry's `#deliver` throws
   `outbox: unknown kind` for anything else. The object is a singleton shared by
@@ -2093,7 +2093,7 @@ It is used four times:
   path. #123 read the singleton as meaning otherwise, and that is the
   distinction it turned on.
 
-  An org-less grant queues **nothing** (`hasOrg`, `src/grant-audit.ts`), and only
+  An org-less grant queues **nothing** (`hasOrg`, `src/orgs/grant-audit.ts`), and only
   `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro`, `max` or `free`
   purchase reconcile owes no audit row at all — and still calls `deliverNow()`,
   draining whatever other orgs left behind. That is the hold time #123 asked
@@ -2260,7 +2260,7 @@ off its documentation, decide how code here is written.
    `"undefined"` and `"null"`, which `isOrgId` accepts. An entry filed against a
    falsy org id is therefore delivered, into a stream no org reads or into the
    stream of an org called `undefined`: a bad id misfiles instead of stalling.
-   Check an id before it names an object; `hasOrg` in `src/grant-audit.ts`, the
+   Check an id before it names an object; `hasOrg` in `src/orgs/grant-audit.ts`, the
    guard in `RegistryDO`'s `#deliver` and the one in `SessionDO`'s are three
    defences for that reason. `removeMember` also drops org-less entries at the
    producer, before they are queued, so for a removal the guard is the second
@@ -2362,7 +2362,7 @@ one listing — a room that a lapsed plan does not freeze, a room missing from a
 joined listing, or a closed room missing from an admin's list — never the room
 itself. That is the reasoning for logging rather than
 retrying, and it is the same window the outbox closes elsewhere. Room activity
-is audited by `audit()` in `src/rooms.ts`, which calls `AuditDO.append`
+is audited by `audit()` in `src/room/rooms.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes and the rows of a
 leave or an eviction are guaranteed to reach the audit stream. A removal's rows
 are queued by `removeMember` in its own transaction, and every path it does not

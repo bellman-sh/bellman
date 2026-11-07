@@ -1,4 +1,4 @@
-import { PayloadTooDeepError } from "./payload.js";
+import { PayloadTooDeepError } from "./room/payload.js";
 
 /**
  * Give a typed error back its class after it has crossed a Durable Object RPC

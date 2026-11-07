@@ -1,11 +1,11 @@
 /**
- * `publicNames` (src/member-names.ts): the one map from a room's labels to the names a reader outside
+ * `publicNames` (src/room/member-names.ts): the one map from a room's labels to the names a reader outside
  * the room is shown. The public routes swap it into each page, and the hosted seat's prompt names the
  * senders of the replies it answers by it, so what both rely on is pinned here, once.
  */
 import { describe, expect, it } from "vitest";
 import { HOST_LABEL, hostMember } from "../src/host.js";
-import { publicNames } from "../src/member-names.js";
+import { publicNames } from "../src/room/member-names.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 

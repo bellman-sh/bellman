@@ -4,9 +4,9 @@
  * answers it. Tasks 1 and 2 of the plan add to this file.
  */
 import { describe, expect, it } from "vitest";
-import { snapshotOf } from "../src/heartbeat.js";
-import { ManifestError, resolveManifest } from "../src/manifest.js";
-import { checkPreset } from "../src/presets.js";
+import { snapshotOf } from "../src/room/heartbeat.js";
+import { ManifestError, resolveManifest } from "../src/room/manifest.js";
+import { checkPreset } from "../src/room/presets.js";
 import { roomPreview } from "../src/projections.js";
 import { hydrateStoredSession, type StoredSession } from "../src/storage/stored-session.js";
 import { member, session } from "./helpers/fixtures.js";

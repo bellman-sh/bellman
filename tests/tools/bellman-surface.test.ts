@@ -9,7 +9,7 @@ import { brief, pairVerbs } from "../helpers/fixtures.js";
 import { pairUp, seatAgain, startRoom, type PairedSession } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE, roomPreview } from "../../src/projections.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
-import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_TOOL } from "../../src/frames.js";
+import { NEXT_ALONE, NEXT_REFUSAL, QUERY_WITH_WINDOW, WINDOW_REFUSAL_TOOL } from "../../src/surface/frames.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });

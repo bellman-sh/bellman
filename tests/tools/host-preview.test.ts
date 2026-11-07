@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Outcome } from "../helpers/harness.js";
 import { brief } from "../helpers/fixtures.js";
-import { SOCIAL_HOST_INSTRUCTIONS } from "../../src/manifest.js";
+import { SOCIAL_HOST_INSTRUCTIONS } from "../../src/room/manifest.js";
 
 const TEXT = "Ask about the week.";
 

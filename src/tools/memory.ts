@@ -2,8 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { NEED_ROOM, fail, ok, refusal, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, fsEntry, fsFile, untrusted } from "../projections.js";
-import { listHome, readHome, shareHome, unshareNotes, writeHome } from "../memory.js";
-import type { RoomResult } from "../rooms.js";
+import { listHome, readHome, shareHome, unshareNotes, writeHome } from "../files/memory.js";
+import type { RoomResult } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 

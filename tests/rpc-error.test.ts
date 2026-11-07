@@ -18,7 +18,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { isNotImplemented, reviveRpcError, reviving } from "../src/rpc-error.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/room/payload.js";
 
 /**
  * An error as workerd hands it back: name, message and own properties, no prototype,

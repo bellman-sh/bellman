@@ -59,6 +59,12 @@ Three surfaces ship from this repository:
     (approval gate, wake limiter, view), bundled into `mod/hooks/register.mjs`.
   - oauth: [./src/oauth/EGM.md](./src/oauth/EGM.md) - the OAuth 2.1
     authorization server; its `AuthDO` is in workerd.
+  - room: [./src/room/EGM.md](./src/room/EGM.md) - the room's rules.
+  - surface: [./src/surface/EGM.md](./src/surface/EGM.md) - surface writes,
+    frames, search, proposals.
+  - files: [./src/files/EGM.md](./src/files/EGM.md) - room files, config,
+    home memory, blobs.
+  - orgs: [./src/orgs/EGM.md](./src/orgs/EGM.md) - orgs and audit.
   - scim: [./src/scim/EGM.md](./src/scim/EGM.md) - SCIM 2.0 parsers, resource
     shapes, and the deprovision/reprovision walk over a person's rooms.
   - storage: [./src/storage/EGM.md](./src/storage/EGM.md) - `BellmanStore`,
@@ -129,7 +135,7 @@ Three surfaces ship from this repository:
   GitHub, Google and OIDC identity providers and DNS-over-HTTPS
   [src/oauth/providers.ts], [src/oauth/dns.ts:domainVerified]; the Anthropic
   Messages API for the hosted seat [src/host.ts:callMessages]; org SIEM sinks
-  [src/audit-sink.ts:deliverBatch].
+  [src/orgs/audit-sink.ts:deliverBatch].
 - Client machine: `~/.config/bellman/credentials.json`, and inbox, bus and door
   sockets under `~/.claude/bellman/`; a loopback sign-in listener on
   127.0.0.1:51004-51008 [src/client/signin.ts:connectSignedIn].

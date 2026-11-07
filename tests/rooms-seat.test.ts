@@ -4,7 +4,7 @@
  * person whose every handle was removed stops reading (#113).
  */
 import { describe, it, expect } from "vitest";
-import { cutAtFor, cutFor, handlesOf } from "../src/rooms.js";
+import { cutAtFor, cutFor, handlesOf } from "../src/room/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, session } from "./helpers/fixtures.js";
 

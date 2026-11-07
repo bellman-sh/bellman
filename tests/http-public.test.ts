@@ -6,12 +6,12 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
-import { NEXT_REFUSAL, WINDOW_REFUSAL_HTTP } from "../src/frames.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
+import { NEXT_REFUSAL, WINDOW_REFUSAL_HTTP } from "../src/surface/frames.js";
 import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, searchTag, type RoomRouteDeps } from "../src/http/rooms.js";
-import { resolveManifest } from "../src/manifest.js";
+import { resolveManifest } from "../src/room/manifest.js";
 import { askRoom } from "../src/outside.js";
 import { storedMember } from "../src/projections.js";
 import { MemoryStore } from "../src/storage/memory-store.js";

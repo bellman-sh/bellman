@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { text } from "./helpers/blob-bytes.js";
 import { describeBlobStoreContract } from "./helpers/blob-store-contract.js";
 

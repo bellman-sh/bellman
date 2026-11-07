@@ -7,7 +7,7 @@ import { env, reset, abortAllDurableObjects, runInDurableObject, runDurableObjec
 import { answerQuestion, askRoom, cancelOutsideTask, OUTSIDE_TASK_TTL_MS, type AskRequest } from "../src/outside.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
-import { banAsker } from "../src/rooms.js";
+import { banAsker } from "../src/room/rooms.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {

@@ -29,8 +29,8 @@
  * bearer), and never refused while paused: it reads the store, not the logged read, so the lookup log is untouched.
  */
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { deleteMemory, exportMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../memory.js";
-import { liveRooms } from "../rooms.js";
+import { deleteMemory, exportMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../files/memory.js";
+import { liveRooms } from "../room/rooms.js";
 import type { HomeSettings } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 

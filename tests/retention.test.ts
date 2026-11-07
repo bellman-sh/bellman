@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
-} from "../src/retention.js";
+} from "../src/room/retention.js";
 import { member, session } from "./helpers/fixtures.js";
 
 const base = { closed: true, closedAt: 1_000, retainAfterCloseMs: 500, purgeAt: null };

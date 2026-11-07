@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEV_KEY, Harness, type Envelope } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
-import { homeRoomId } from "../../src/home.js";
+import { homeRoomId } from "../../src/files/home.js";
 
 let h: Harness;
 let p: PairedSession;

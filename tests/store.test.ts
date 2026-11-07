@@ -1,15 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
+import { MemoryBlobStore, blobBytesUsed } from "../src/files/blobs.js";
 import { hostSentEntries, hostMember, type HostWake } from "../src/host.js";
-import { rosterParties, HOST_MEMBER_ID, HOST_USER_ID } from "../src/members.js";
+import { rosterParties, HOST_MEMBER_ID, HOST_USER_ID } from "../src/room/members.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { AuditEntry, Session } from "../src/types.js";
-import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import { ABANDONED_AFTER_MS } from "../src/room/presence.js";
 import { hydrateStoredSession } from "../src/storage/stored-session.js";
-import { tickStep } from "../src/heartbeat.js";
-import { clearedKeys, dueFindings } from "../src/housekeeping.js";
+import { tickStep } from "../src/room/heartbeat.js";
+import { clearedKeys, dueFindings } from "../src/room/housekeeping.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
-import { SINK_BATCH, SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/audit-sink.js";
+import { SINK_BATCH, SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/orgs/audit-sink.js";
 import { backoffMs } from "../src/storage/outbox.js";
 import { member, roomManifest, session, type SeededSession } from "./helpers/fixtures.js";
 

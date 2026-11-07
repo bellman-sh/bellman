@@ -1,4 +1,4 @@
-import { isAmbient } from "./attention.js";
+import { isAmbient } from "./room/attention.js";
 import type { Member, SessionEvent } from "./types.js";
 
 // Deliberately in neither server.ts nor store-do.ts. store-do.ts imports

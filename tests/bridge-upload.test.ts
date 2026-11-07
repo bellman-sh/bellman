@@ -18,7 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { MAX_BLOB_BYTES } from "../src/blobs.js";
+import { MAX_BLOB_BYTES } from "../src/files/blobs.js";
 import { createBridge, readLocalFile, typeFromExtension, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
 import { PNG } from "./helpers/blob-bytes.js";

@@ -36,7 +36,7 @@ import {
 } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
-import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import { ABANDONED_AFTER_MS } from "../src/room/presence.js";
 import type { Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SEND_LIMIT, SEND_WINDOW_MS, STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT, admitAt, sendKeyFor, sendLimitFor,
-} from "../src/send-limit.js";
+} from "../src/room/send-limit.js";
 
 describe("the send limit (spec D5)", () => {
   it("is 30 a minute for a member and 6 for one who joined through a permanent code", () => {

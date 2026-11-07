@@ -8,10 +8,10 @@
  * of the fix: the derived presence reading, and the seat actually coming back.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, presenceOf, presentMembers, staleMembers, stampSeen } from "../src/presence.js";
-import { lastSeen, seatVictims } from "../src/members.js";
-import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { ROOM_MEMBER_CEILING, capacityOf } from "../src/manifest.js";
+import { ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, presenceOf, presentMembers, staleMembers, stampSeen } from "../src/room/presence.js";
+import { lastSeen, seatVictims } from "../src/room/members.js";
+import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/room/rooms.js";
+import { ROOM_MEMBER_CEILING, capacityOf } from "../src/room/manifest.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { hostMember } from "../src/host.js";
 import type { Identity } from "../src/types.js";

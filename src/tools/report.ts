@@ -4,7 +4,7 @@ import { NEED_ROOM, RoomRefShape, fail, ok, refusal, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { MAX_REPORT_NOTE_CHARS, REPORT_REASONS, type ReportMailer } from "../reports.js";
-import { fileRoomReport } from "../rooms.js";
+import { fileRoomReport } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 
 export function registerReport(server: McpServer, identity: Identity, s: BellmanStore, mail: ReportMailer): void {

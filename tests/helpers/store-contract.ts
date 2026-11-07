@@ -16,29 +16,29 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend, FsPage } from "../../src/storage/store.js";
-import { type SurfaceWrite, MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface.js";
+import { type SurfaceWrite, MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface/surface.js";
 import type { HomeSettings, LookupSource } from "../../src/types.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/codes.js";
-import { ROOM_MEMBER_CEILING, resolveManifest } from "../../src/manifest.js";
-import { newestKey } from "../../src/fs.js";
-import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
-import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
-import { applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput } from "../../src/decision.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
-import { lastReport } from "../../src/heartbeat.js";
-import { ABANDONED_AFTER_MS } from "../../src/presence.js";
-import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/frames.js";
-import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/audit.js";
-import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/room/codes.js";
+import { ROOM_MEMBER_CEILING, resolveManifest } from "../../src/room/manifest.js";
+import { newestKey } from "../../src/files/fs.js";
+import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/files/home.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/room/action-state.js";
+import { applyVote, capacityOfVote, decisionHash, decisionsOf, type DecisionDraft, type DecisionRule, type DecisionVote, type VoteInput } from "../../src/room/decision.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/room/payload.js";
+import { lastReport } from "../../src/room/heartbeat.js";
+import { ABANDONED_AFTER_MS } from "../../src/room/presence.js";
+import { NEXT_REFUSAL, SURFACE_PAGE } from "../../src/surface/frames.js";
+import { blobBytesUsed, type BlobStore } from "../../src/files/blobs.js";
+import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/orgs/audit.js";
+import { chainHash, NO_ANCHOR } from "../../src/orgs/audit-sink.js";
 import { type AuditEntry, type Identity, type Org, type OrgIdp, type OrgInvite, type PlanGrant, type SavedPreset, type ScimUser, type Session, type SessionEvent, type SurfaceItem, DEFAULT_POLICY } from "../../src/types.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs/orgs.js";
 import { LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../../src/types.js";
-import { scimIntent } from "../../src/grant-audit.js";
-import { HOST_MEMBER_ID, HOST_USER_ID } from "../../src/members.js";
+import { scimIntent } from "../../src/orgs/grant-audit.js";
+import { HOST_MEMBER_ID, HOST_USER_ID } from "../../src/room/members.js";
 import { WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/storage/stored-session.js";
-import { sendKeyFor } from "../../src/send-limit.js";
+import { sendKeyFor } from "../../src/room/send-limit.js";
 import type { NewReport, Report } from "../../src/reports.js";
 import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
@@ -4489,7 +4489,7 @@ export function describeStoreContract(
         expect(await used(s.id)).toBe(5);
       });
 
-      // Closed wins over frozen, as in closeIfEmpty (src/rooms.ts): "frozen" tells the caller to restore the plan, which cannot reopen a room that is over.
+      // Closed wins over frozen, as in closeIfEmpty (src/room/rooms.ts): "frozen" tells the caller to restore the plan, which cannot reopen a room that is over.
       it("reads a room that is both frozen and closed as closed", async () => {
         const s = session({ blobBytesCeiling: 100 });
         await store.createSession(s);

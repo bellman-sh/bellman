@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderExport } from "../src/memory-export.js";
+import { renderExport } from "../src/files/memory-export.js";
 import type { FsRow } from "../src/types.js";
 
 const row = (path: string, content: string, rev = 1): FsRow => ({ path, rev, content, size: content.length, writerMemberId: "home", writerLabel: "j", at: 1_700_000_000_000, deleted: false });

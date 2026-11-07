@@ -3,7 +3,7 @@
  * place on it is `heartbeat_on`, and the old words keep working. Presets are Task 2's.
  */
 import { describe, expect, it } from "vitest";
-import { resolveManifest } from "../src/manifest.js";
+import { resolveManifest } from "../src/room/manifest.js";
 
 const roles = (lead: Record<string, unknown> = {}, observer: Record<string, unknown> = {}) => ({
   lead: { can: ["send"], ...lead }, observer: { can: [], ...observer },

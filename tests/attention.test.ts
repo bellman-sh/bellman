@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ATTENTION, attentionOf, isAmbient } from "../src/attention.js";
+import { ATTENTION, attentionOf, isAmbient } from "../src/room/attention.js";
 import type { EventType } from "../src/types.js";
 
 /**

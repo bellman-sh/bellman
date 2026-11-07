@@ -231,7 +231,7 @@ const DECLINE_BODY_MAX = 1024;
 /** A canvas item (#465): PUT writes it and DELETE removes it. */
 const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 /**
- * `SurfaceKeyShape` (src/surface.ts), repeated so that the hooks importing this file bundle no zod; `__proto__` fails
+ * `SurfaceKeyShape` (src/surface/surface.ts), repeated so that the hooks importing this file bundle no zod; `__proto__` fails
  * the pattern. tests/door.test.ts holds the two to one grammar.
  */
 const SURFACE_KEY = /^[a-z][a-z0-9_-]{0,30}$/;

@@ -4,8 +4,8 @@
  * including the unknown-role case that no tool path can produce (design D5).
  */
 import { describe, it, expect } from "vitest";
-import { denyVerb, mustReport, verbsOfRole } from "../src/roles.js";
-import { resolveManifest } from "../src/manifest.js";
+import { denyVerb, mustReport, verbsOfRole } from "../src/room/roles.js";
+import { resolveManifest } from "../src/room/manifest.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 const swarm = resolveManifest({ room: "r", preset: "swarm" });

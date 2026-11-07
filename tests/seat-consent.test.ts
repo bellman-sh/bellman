@@ -6,7 +6,7 @@
  * ones, over one MemoryStore.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { orgRoutes } from "../src/http/orgs.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
 import { scimRoutes } from "../src/http/scim.js";
@@ -14,12 +14,12 @@ import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/o
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { seal } from "../src/oauth/sealed.js";
 import { sha256Base64url, signJwt } from "../src/oauth/tokens.js";
-import { INVITE_AUDIENCE } from "../src/invite-mail.js";
+import { INVITE_AUDIENCE } from "../src/orgs/invite-mail.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, Org, PlanGrant } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
-import { INVITE_TTL_MS, RESEND_COOLDOWN_MS } from "../src/orgs.js";
+import { INVITE_TTL_MS, RESEND_COOLDOWN_MS } from "../src/orgs/orgs.js";
 import { brief, manifestFixture, member as seatOf, session } from "./helpers/fixtures.js";
 import { Harness } from "./helpers/harness.js";
 

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadRoomManifest } from "../src/client/bridge.js";
-import { resolveManifest } from "../src/manifest.js";
+import { resolveManifest } from "../src/room/manifest.js";
 
 const OLD_WORDS = `room: "my_review"
 purpose: "Review where the reviewer may ask too"

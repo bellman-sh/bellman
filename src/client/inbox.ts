@@ -29,7 +29,7 @@ export interface PeerEvent {
   payload: unknown;
   /**
    * The server said this event should not interrupt (#111). Read it rather than
-   * naming types: attention is declared once, in src/attention.ts, and carried
+   * naming types: attention is declared once, in src/room/attention.ts, and carried
    * by publicEvent so that every client reads one answer.
    */
   ambient?: boolean;

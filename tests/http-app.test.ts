@@ -6,11 +6,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { homeRoomId } from "../src/home.js";
+import { homeRoomId } from "../src/files/home.js";
 import { meRoutes } from "../src/http/me.js";
-import type { LookupShown } from "../src/memory.js";
+import type { LookupShown } from "../src/files/memory.js";
 import { MAX_CODE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
-import { SEND_LIMIT } from "../src/send-limit.js";
+import { SEND_LIMIT } from "../src/room/send-limit.js";
 import { joinWith, pairUp, publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 

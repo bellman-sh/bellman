@@ -1,6 +1,6 @@
 /** Room files (ADR 0046): the pure planning of each op, and the byte charge. */
 import { describe, expect, it } from "vitest";
-import { decideFsCharge, diffText, FS_FILE_MAX_BYTES, planWrite, utf8Bytes } from "../src/fs.js";
+import { decideFsCharge, diffText, FS_FILE_MAX_BYTES, planWrite, utf8Bytes } from "../src/files/fs.js";
 import type { FsRow } from "../src/types.js";
 
 const row = (content: string, rev = 1, deleted = false): FsRow => ({

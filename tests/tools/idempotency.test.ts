@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
-import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
+import { MAX_PAYLOAD_DEPTH } from "../../src/room/payload.js";
 
 let h: Harness;
 

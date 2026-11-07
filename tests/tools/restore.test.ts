@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { card, joinWith, pairUp, propose, topicRoom, type TopicRoom } from "../helpers/flows.js";
 import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
-import { newBlobId } from "../../src/blobs.js";
+import { newBlobId } from "../../src/files/blobs.js";
 import { text } from "../helpers/blob-bytes.js";
 
 let h: Harness;

@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/storage/memory-store.js";
 import { Harness, envelopes } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
-import { decisionHash, type DecisionDraft } from "../../src/decision.js";
+import { decisionHash, type DecisionDraft } from "../../src/room/decision.js";
 
 let store: MemoryStore;
 let h: Harness;

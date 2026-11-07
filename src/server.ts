@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Identity } from "./types.js";
 import type { BellmanStore } from "./storage/store.js";
-import type { BlobStore } from "./blobs.js";
+import type { BlobStore } from "./files/blobs.js";
 import type { UpgradeLinks } from "./auth.js";
 import { registerStart } from "./tools/start.js";
 import { registerConnect } from "./tools/connect.js";

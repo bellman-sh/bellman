@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isMemoryEvent, isMemoryPath, memoryAuthors, publicReadEvent, readableEvent, readableEvents, seesMemory,
 } from "../src/public-event.js";
-import { eventsFor } from "../src/rooms.js";
+import { eventsFor } from "../src/room/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Capability, Member, SessionEvent } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";

@@ -2440,7 +2440,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,604** | every request, whether or not you are in a room |
+| Tool definitions | **~11,621** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,640 | once — `connect` 746 plus `confirm` 893, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100); the `confirm` reply itself is at most 24,000 characters (ADR 0047 decision 9) |
 | Receiving a message | ~220 | each |
@@ -2471,7 +2471,7 @@ decision recorded here, not a side effect of a merge.
 | Room notes private by default: `bellman_fs`'s one sentence on who reads `/members/me/` | +3 | 11,515 | #538 (ADR 0047, 7) |
 | Recall on arrival: `bellman_confirm`'s `recall` block, `members` present first, the reply's 24,000-character ceiling | +55 | 11,570 | #528 (ADR 0047, 9; the ADR allotted 30) |
 | Notes sharing: `bellman_memory`'s `unshare` op | +32 | 11,602 | #538 PR 2 (ADR 0047, 7) |
-| Memory controls: `bellman_memory`'s `paused` refusal | +2 | 11,604 | #531 (ADR 0047, 13) |
+| Memory controls: `bellman_memory`'s `paused` refusal, `bellman_confirm`'s `recall.paused` | +19 | 11,621 | #531 (ADR 0047, 13) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

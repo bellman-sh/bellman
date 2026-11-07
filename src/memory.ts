@@ -83,15 +83,16 @@ export async function listHome(
 
 /**
  * The account's home-note paths for arrival (decision 9, #528), newest first: the first page of its home room, in a
- * call of its own after the seat commits. A failed read is logged and hands back none; it never fails the join.
+ * call of its own after the seat commits, logged as `source` (decision 13). `paused` says the account holds the notes
+ * back (nothing read, nothing logged). A failed read is logged and hands back none; it never fails the join.
  */
-export async function homeTitles(store: BellmanStore, actor: Identity): Promise<string[]> {
+export async function homeTitles(store: BellmanStore, actor: Identity, source: LookupSource): Promise<{ titles: string[]; paused: boolean }> {
   try {
-    const page = await store.listFs(homeRoomId(actor.userId), "/", { newest: true });
-    return page.entries.map((e) => e.path);
+    const out = await store.listHomeLogged(homeRoomId(actor.userId), "/", undefined, source);
+    return out.paused ? { titles: [], paused: true } : { titles: out.page.entries.map((e) => e.path), paused: false };
   } catch (error) {
     console.error("recall on arrival: the home room could not be read:", error);
-    return [];
+    return { titles: [], paused: false };
   }
 }
 

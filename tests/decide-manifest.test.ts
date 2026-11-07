@@ -75,13 +75,33 @@ describe("the decide block", () => {
       .toBe('decide.expires must be between 5m and 7d (got "4m")');
   });
 
-  it("refuses ballot: secret in release 1, naming the field, and accepts ballot: open", () => {
-    expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", ballot: "secret" } } })))
-      .toContain("decide.surface_proposal.ballot");
+  const noVeto = { ...authored().roles, security: { can: ["send", "vote"] } };
+
+  it("accepts ballot: secret, keeps ballot: open, and reads a rule with no ballot as it was", () => {
+    expect(resolveManifest(authored({ roles: noVeto, decide: { surface_proposal: { rule: "majority", ballot: "secret" } } })).decide!.rules)
+      .toEqual({ surface_proposal: { rule: "majority", quorum: null, ballot: "secret" } });
     expect(resolveManifest(authored({ decide: { surface_proposal: { rule: "majority", ballot: "open" } } })).decide!.rules)
       .toEqual({ surface_proposal: { rule: "majority", quorum: null, ballot: "open" } });
+    expect(resolveManifest(authored()).decide!.rules).toEqual({ surface_proposal: { rule: "majority", quorum: null } });
     expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", ballot: "hidden" } } })))
       .toBe('decide.surface_proposal.ballot: unknown ballot "hidden" (valid: open, secret)');
+  });
+
+  it("refuses ballot: secret on single, and allows ballot: open there", () => {
+    expect(refusal(authored({ roles: noVeto, decide: { surface_proposal: { rule: "single", ballot: "secret" } } })))
+      .toBe("decide.surface_proposal: single is one approver's action request; a secret ballot needs a vote.");
+    expect(resolveManifest(authored({ roles: noVeto, decide: { surface_proposal: { rule: "single", ballot: "open" } } })).decide!.rules)
+      .toEqual({ surface_proposal: { rule: "single", quorum: null, ballot: "open" } });
+    // single is checked in resolveDecide, before checkDecide reads the veto
+    expect(refusal(authored({ decide: { surface_proposal: { rule: "single", ballot: "secret" } } })))
+      .toContain("single is one approver's action request");
+  });
+
+  it("refuses ballot: secret on a kind a role vetoes, in a manifest and in a saved preset", () => {
+    const veto = 'role "security" vetoes surface_proposal, which uses ballot: secret; drop veto on surface_proposal or use ballot: open; a veto reveals its holder\'s choice.';
+    expect(refusal(authored({ decide: { surface_proposal: { rule: "majority", ballot: "secret" } } }))).toBe(veto);
+    const { room: _room, ...body } = authored({ decide: { surface_proposal: { rule: "majority", ballot: "secret" } } });
+    expect(checkPreset("council", body, 0)).toMatchObject({ ok: false, status: 400, error: "invalid_manifest", description: veto });
   });
 
   it("has no relay field, and reserves require for phase 2", () => {

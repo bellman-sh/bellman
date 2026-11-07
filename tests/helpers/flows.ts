@@ -167,8 +167,8 @@ export async function seatAgain(h: Harness, peer: Peer, sessionId: string, roomR
 }
 
 /**
- * Marks a room's `surface_proposal` kind a secret ballot on MemoryStore's stored manifest. Release 1's parser refuses
- * `ballot: secret`, so a test reaches the secret paths this way (secret ballot release 1 plan, R1).
+ * Marks a room's `surface_proposal` kind a secret ballot on MemoryStore's stored manifest, so a test can keep a fixture
+ * that declares an open ballot and still reach the secret paths.
  */
 export function secretBallot(store: MemoryStore, sessionId: string): void {
   const s = (store as unknown as { sessions: Map<string, Session> }).sessions.get(sessionId);

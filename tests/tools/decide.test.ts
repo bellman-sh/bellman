@@ -4,9 +4,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/storage/memory-store.js";
-import { Harness, envelopes, type Outcome } from "../helpers/harness.js";
+import { DEV_KEY, Harness, envelopes, type Outcome } from "../helpers/harness.js";
 import { pairUp, secretBallot, type PairedSession } from "../helpers/flows.js";
 import { decisionHash } from "../../src/decision.js";
+import { SECRET_BALLOT_PROMISE } from "../../src/projections.js";
+import { brief } from "../helpers/fixtures.js";
 
 let h: Harness;
 let p: PairedSession;
@@ -256,9 +258,29 @@ describe("a removal voids the seat's votes (#407)", () => {
   });
 });
 
-describe("secret ballots, release 1", () => {
-  const openedRule = async () =>
-    ((await h.store.eventsAfter(p.sessionId, 0)).find((e) => e.type === "decision_opened")!.payload as { rule: unknown; hash: string });
+describe("secret ballots", () => {
+  const openedRule = async (sessionId = p.sessionId) =>
+    ((await h.store.eventsAfter(sessionId, 0)).find((e) => e.type === "decision_opened")!.payload as { rule: unknown; hash: string });
+
+  it("a manifest that declares ballot: secret starts, shows its promise at connect, and opens a secret decision", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: manifest({ decide: { surface_proposal: { rule: "majority", ballot: "secret" } } }), brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    expect((started.data.room as any).decide.rules.surface_proposal).toMatchObject({ ballot: "secret", ballot_promise: SECRET_BALLOT_PROMISE });
+    const outsider = await h.connect(DEV_KEY.outsider);
+    const preview = await outsider.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect(preview.isError, preview.text).toBe(false);
+    expect((preview.data.room as any).decide.rules.surface_proposal.ballot_promise).toBe(SECRET_BALLOT_PROMISE);
+    const sessionId = String(started.data.session_id);
+    const opened = await creator.call("bellman_decide", {
+      session_id: sessionId, member_id: String(started.data.member_id), action: "open", kind: "surface_proposal",
+      key: "plan", effect: { title: "Plan" }, base: 0,
+    });
+    expect(opened.isError, opened.text).toBe(false);
+    expect((await openedRule(sessionId)).rule).toEqual({ rule: "majority", ballot: "secret" });
+  });
 
   it("opens a decision on a secret kind with ballot in its rule, and an open kind as before", async () => {
     expect((await open()).isError).toBeFalsy();

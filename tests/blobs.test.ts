@@ -10,7 +10,7 @@ import {
   BLOB_ID, IMAGE_TYPES, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   BlobLengthError, attachmentDisposition, blobBytesUsed, blobKey, exactLength, isBlobId,
   newBlobId, normalizeMediaType, readExactly, readHead, sanitizeName, sniffImageType, storedType,
-} from "../src/blobs.js";
+} from "../src/files/blobs.js";
 import { PNG, drain, stream, text } from "./helpers/blob-bytes.js";
 
 const bytes = (...b: number[]) => new Uint8Array(b);

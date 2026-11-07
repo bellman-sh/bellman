@@ -5,9 +5,9 @@
  * router goes through the one gate, as the org routes' writes do. The org is always the
  * caller's own, never a parameter.
  */
-import { auditRefusal, entryView, type AuditEntryView, type AuditPage, type AuditQuery } from "../audit.js";
-import { RETENTION_FLOOR_DAYS, retentionDaysOf, sinkUrlOf, type AuditSettings } from "../audit-sink.js";
-import { attachmentDisposition } from "../blobs.js";
+import { auditRefusal, entryView, type AuditEntryView, type AuditPage, type AuditQuery } from "../orgs/audit.js";
+import { RETENTION_FLOOR_DAYS, retentionDaysOf, sinkUrlOf, type AuditSettings } from "../orgs/audit-sink.js";
+import { attachmentDisposition } from "../files/blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
@@ -80,7 +80,7 @@ export function parseAuditQuery(
   return { query, format };
 }
 
-export { entryView, type AuditEntryView } from "../audit.js";
+export { entryView, type AuditEntryView } from "../orgs/audit.js";
 
 /** Rows the export reads per page: one page per pull, so a long stream is never held whole. */
 export const AUDIT_EXPORT_PAGE = 500;

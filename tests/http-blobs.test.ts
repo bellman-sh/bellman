@@ -10,9 +10,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import {
   MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, MemoryBlobStore, blobBytesUsed, blobKey, newBlobId, type BlobPut, type BlobRead,
-} from "../src/blobs.js";
+} from "../src/files/blobs.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
-import { STALE_AFTER_MS } from "../src/presence.js";
+import { STALE_AFTER_MS } from "../src/room/presence.js";
 import { type BlobCharge } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity } from "../src/types.js";

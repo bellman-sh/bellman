@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Harness, DEV_KEY, type Outcome } from "../helpers/harness.js";
 import { brief } from "../helpers/fixtures.js";
-import { bodyBytes, bodyHash } from "../../src/config.js";
+import { bodyBytes, bodyHash } from "../../src/files/config.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });

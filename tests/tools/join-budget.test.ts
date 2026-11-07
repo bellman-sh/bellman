@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
 import { brief, member, swarmSession } from "../helpers/fixtures.js";
 import { BRIEFS_ON_JOIN, CONFIRM_REPLY_CHARS, RECALL_CHARS } from "../../src/tools/confirm.js";
-import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
+import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/files/home.js";
 import type { SeededMember } from "../helpers/fixtures.js";
 
 let h: Harness;

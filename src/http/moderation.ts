@@ -29,7 +29,7 @@
 import { banView, creatorBanView } from "../bans.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { creatorReportView, reportMailer, type ReportMailer } from "../reports.js";
-import { banAsker, evictMember, fileRoomReport, handlesOf } from "../rooms.js";
+import { banAsker, evictMember, fileRoomReport, handlesOf } from "../room/rooms.js";
 import { STATUS, json, lengthRefusal, methodNotAllowed, problem, type RoomCaller, type RoomRouteDeps } from "./rooms.js";
 
 export type ModerationDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {

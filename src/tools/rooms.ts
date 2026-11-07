@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE } from "../projections.js";
-import { liveRooms } from "../rooms.js";
+import { liveRooms } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 import { APP_UI_META } from "../ui/resource.js";

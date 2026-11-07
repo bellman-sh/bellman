@@ -8,10 +8,10 @@
  * A deactivation's room walk (D6) runs after the registry has answered and before the response: the IdP's call
  * is the only thing that runs it, and a repeat of the call finishes a walk cut short.
  */
-import { scimIntent } from "../grant-audit.js";
+import { scimIntent } from "../orgs/grant-audit.js";
 import { sha256Base64url, randomId } from "../oauth/tokens.js";
 import { parseSsoKey } from "../oauth/providers.js";
-import { userIdForKey } from "../orgs.js";
+import { userIdForKey } from "../orgs/orgs.js";
 import { parseFilter } from "../scim/filter.js";
 import { applyOperations, readUser } from "../scim/patch.js";
 import { listResponse, resourceTypes, schemas, scimError, scimJson, serviceProviderConfig, userResource } from "../scim/resource.js";

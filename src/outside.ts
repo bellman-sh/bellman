@@ -1,9 +1,9 @@
-import { PUBLIC_NAME, roomNamed } from "./public-names.js";
-import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./send-limit.js";
-import { audit } from "./rooms.js";
-import { verbsOfRole } from "./roles.js";
-import { hostSeated, isActiveMember, isHostMember } from "./members.js";
-import { isPublic } from "./manifest.js";
+import { PUBLIC_NAME, roomNamed } from "./room/public-names.js";
+import { STRANGER_KEY_PREFIX, STRANGER_SEND_LIMIT } from "./room/send-limit.js";
+import { audit } from "./room/rooms.js";
+import { verbsOfRole } from "./room/roles.js";
+import { hostSeated, isActiveMember, isHostMember } from "./room/members.js";
+import { isPublic } from "./room/manifest.js";
 import type { BellmanStore } from "./storage/store.js";
 import type { Member, OutsideCaller, OutsideTask, Session, SessionEvent } from "./types.js";
 

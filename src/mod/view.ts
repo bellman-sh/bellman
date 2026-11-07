@@ -13,9 +13,9 @@
  * that file, one constant from `action-state.ts`, which itself imports only a type, and the payload
  * bounds from `payload.ts`, which imports nothing.
  */
-import { ACTION_REQUEST_TTL_MS } from "../action-state.js";
+import { ACTION_REQUEST_TTL_MS } from "../room/action-state.js";
 import { cleanBlock, cleanText, eventLine, type DoorEvent, type DoorStatus } from "../client/door-protocol.js";
-import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH } from "../payload.js";
+import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH } from "../room/payload.js";
 
 /** Columns the sidebar asks for when the pane docks. */
 export const SIDEBAR_COLUMNS = 22;
@@ -122,7 +122,7 @@ function later(a: KeptEvent, b: KeptEvent): boolean {
   return apart !== 0 ? apart > 0 : a.cursor >= b.cursor;
 }
 
-/** Longest a sender's label or a room's name runs in a line: the server's limit on a public name (`PUBLIC_NAME` in `src/public-names.ts`). */
+/** Longest a sender's label or a room's name runs in a line: the server's limit on a public name (`PUBLIC_NAME` in `src/room/public-names.ts`). */
 export const NAME_MAX = 40;
 /** The toast's whole line. */
 const TOAST_MAX = 120;
@@ -339,7 +339,7 @@ export function fitLogs(byRoom: Record<string, KeptEvent[]>, waiting: (e: KeptEv
 export const memberLine = (m: { label: string; room_role: string; presence: string }): string =>
   [m.presence === "present" ? "●" : "◌", cleanText(m.room_role, NAME_MAX), cleanText(m.label, NAME_MAX)].filter(Boolean).join(" ");
 
-/** Longest a preset's name runs (`MAX_ROLE_KEY_LENGTH` in `src/manifest.ts`), so the id's end below always fits in `NAME_MAX`. */
+/** Longest a preset's name runs (`MAX_ROLE_KEY_LENGTH` in `src/room/manifest.ts`), so the id's end below always fits in `NAME_MAX`. */
 const PRESET_MAX = 31;
 
 /**

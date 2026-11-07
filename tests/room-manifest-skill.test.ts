@@ -1,7 +1,7 @@
 /**
  * plugin/skills/room-manifest/SKILL.md is the authoring guide a Claude Code session loads
  * when someone asks for a .bellman/room.yaml. It restates the closed verb set, the preset
- * catalog and the server's validation rules — all of which live in src/manifest.ts, and
+ * catalog and the server's validation rules — all of which live in src/room/manifest.ts, and
  * all of which will change. A guide that drifts is worse than no guide: it tells a model
  * to write a manifest the server then rejects, confidently.
  *
@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
-import { MAX_ROLE_KEY_LENGTH, PRESET_NAMES, VERBS, resolveManifest } from "../src/manifest.js";
+import { MAX_ROLE_KEY_LENGTH, PRESET_NAMES, VERBS, resolveManifest } from "../src/room/manifest.js";
 
 const SKILL = readFileSync(
   new URL("../plugin/skills/room-manifest/SKILL.md", import.meta.url),

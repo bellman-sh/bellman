@@ -1,11 +1,11 @@
 /**
- * Room files through `src/rooms.ts` (ADR 0046): `writeFs` and the reads, with the memory rule on every path that
+ * Room files through `src/room/rooms.ts` (ADR 0046): `writeFs` and the reads, with the memory rule on every path that
  * reveals a memory file, against a `MemoryStore`. The tool and routes are tested over these in their own files.
  */
 import { describe, expect, it } from "vitest";
 import { MemoryStore } from "../src/storage/memory-store.js";
-import { eventsFor, findFsFor, fsHistoryFor, leaveRoom, listFsFor, readFsFor, writeFs, evictMember } from "../src/rooms.js";
-import { SEND_LIMIT } from "../src/send-limit.js";
+import { eventsFor, findFsFor, fsHistoryFor, leaveRoom, listFsFor, readFsFor, writeFs, evictMember } from "../src/room/rooms.js";
+import { SEND_LIMIT } from "../src/room/send-limit.js";
 import type { Capability, Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 

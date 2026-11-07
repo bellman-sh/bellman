@@ -15,9 +15,9 @@
  */
 import { BANNED } from "../bans.js";
 import { askRoom, cancelOutsideTask, MAX_OPEN_OUTSIDE_TASKS, outsideTask, outsideTasksOf, type AskError } from "../outside.js";
-import { MAX_PAYLOAD_CHARS } from "../payload.js";
-import { PUBLIC_NAME } from "../public-names.js";
-import { isPublic } from "../manifest.js";
+import { MAX_PAYLOAD_CHARS } from "../room/payload.js";
+import { PUBLIC_NAME } from "../room/public-names.js";
+import { isPublic } from "../room/manifest.js";
 import type { BellmanStore } from "../storage/store.js";
 import { SUSPENDED } from "../suspension.js";
 import { MAX_WAIT_SECONDS } from "../tools/kit.js";

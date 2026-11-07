@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
-import { STALE_AFTER_MS } from "../../src/presence.js";
+import { STALE_AFTER_MS } from "../../src/room/presence.js";
 import { SYNC_PAGE } from "../../src/tools/sync.js";
 
 /**

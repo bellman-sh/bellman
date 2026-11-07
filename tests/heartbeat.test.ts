@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { clearSilence, NO_SOCKETS } from "../src/members.js";
-import { hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickBroughtForward, tickPlan, tickStep } from "../src/heartbeat.js";
+import { clearSilence, NO_SOCKETS } from "../src/room/members.js";
+import { hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickBroughtForward, tickPlan, tickStep } from "../src/room/heartbeat.js";
 import { hostMember } from "../src/host.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";

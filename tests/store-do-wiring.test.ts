@@ -80,10 +80,10 @@ import * as sessionDo from "../src/workerd/session-do.js";
 import * as registryDo from "../src/workerd/registry-do.js";
 import type { BellmanEnv } from "../src/workerd/store-do.js";
 import type { Member, Session } from "../src/types.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/room/payload.js";
 import { publicEvent } from "../src/public-event.js";
-import { ABANDONED_AFTER_MS } from "../src/presence.js";
-import { resolveManifest } from "../src/manifest.js";
+import { ABANDONED_AFTER_MS } from "../src/room/presence.js";
+import { resolveManifest } from "../src/room/manifest.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 /** The facade and the two objects it reaches here, as one namespace, as when they were one module. */

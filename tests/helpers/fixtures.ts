@@ -1,11 +1,11 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
-import type { AuditActor } from "../../src/audit.js";
+import type { AuditActor } from "../../src/orgs/audit.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
-import { resolveManifest } from "../../src/manifest.js";
+import { resolveManifest } from "../../src/room/manifest.js";
 import { monthKey } from "../../src/storage/stored-session.js";
-import { JOIN_CODE_TTL } from "../../src/codes.js";
-import { creatorOf, seatInOrder, type Seating } from "../../src/members.js";
-import { orgsOnRoster } from "../../src/retention.js";
+import { JOIN_CODE_TTL } from "../../src/room/codes.js";
+import { creatorOf, seatInOrder, type Seating } from "../../src/room/members.js";
+import { orgsOnRoster } from "../../src/room/retention.js";
 
 export const anthropicAgent = {
   provider: "anthropic",

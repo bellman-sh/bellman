@@ -18,7 +18,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, member, roomManifest, session } from "../helpers/fixtures.js";
-import { capacityOf } from "../../src/manifest.js";
+import { capacityOf } from "../../src/room/manifest.js";
 
 let h: Harness;
 
@@ -605,7 +605,7 @@ describe("platform role and room role are different things", () => {
   // write an exemption, and these behavioural tests are what backs it: an exemption
   // for one kind ("admins may approve") would otherwise slip past all the others.
   // The scan reads src/server.ts and src/tools/, and a surface write's guard lives
-  // in src/rooms.ts, so for that kind this row is the only thing that backs it.
+  // in src/room/rooms.ts, so for that kind this row is the only thing that backs it.
   it.each([
     ["message", "send", { text: "I administer this org" }],
     ["artifact", "send", { name: "admin.diff", content: "x" }],
@@ -687,12 +687,12 @@ describe("platform role and room role are different things", () => {
     // added later is covered by existing, rather than by someone remembering
     // to add it here. It happened again when the audit routes began to ask the
     // gate bellman_audit asks (audit trail spec, D7): the three conditions moved
-    // into auditRefusal, so src/audit.ts is read too, and the tool reads the
+    // into auditRefusal, so src/orgs/audit.ts is read too, and the tool reads the
     // role only through it.
     const tools = new URL("../../src/tools/", import.meta.url);
     const files = [
       new URL("../../src/server.ts", import.meta.url),
-      new URL("../../src/audit.ts", import.meta.url),
+      new URL("../../src/orgs/audit.ts", import.meta.url),
       ...readdirSync(tools).filter((f) => f.endsWith(".ts")).map((f) => new URL(f, tools)),
     ];
     const readsRole = /identity\s*(?:\.\s*role\b|\[\s*(['"])role\1\s*\])/;
@@ -707,15 +707,15 @@ describe("platform role and room role are different things", () => {
     const audit = hits.find(([where]) => where.startsWith("audit.ts:"));
     const policy = hits.find(([where]) => where.startsWith("start.ts:"));
     // Where each hit is, is the positive control. A scan that never reached
-    // src/audit.ts would report one and fail above; naming the files proves the
+    // src/orgs/audit.ts would report one and fail above; naming the files proves the
     // read got there rather than passing on an empty list.
     expect(audit?.[1]).toContain("the audit log requires the admin role");
     expect(policy?.[1]).toContain('whoMayCreate === "admins_only"');
   });
 
-  it("never names Identity in src/roles.ts's code", async () => {
+  it("never names Identity in src/room/roles.ts's code", async () => {
     const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../../src/roles.ts", import.meta.url), "utf8");
+    const src = readFileSync(new URL("../../src/room/roles.ts", import.meta.url), "utf8");
     // Comments are stripped first, and must be: the docblock deliberately says
     // "takes a Session and a Member and NOT an Identity" and "DO NOT add an
     // Identity parameter". That warning belongs where an editor sees it, so the

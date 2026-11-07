@@ -3,7 +3,7 @@ import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 import type { Duplex } from "node:stream";
 import { ignoreResets } from "./upgrade-socket.js";
 import { resolveIdentity } from "../../src/auth.js";
-import { MemoryBlobStore } from "../../src/blobs.js";
+import { MemoryBlobStore } from "../../src/files/blobs.js";
 import { roomRoutes } from "../../src/http/rooms.js";
 import {
   caller, handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig,

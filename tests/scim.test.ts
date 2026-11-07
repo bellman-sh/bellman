@@ -4,7 +4,7 @@
  * the person created and joined runs end to end here, over rooms the store holds.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { scimIntent } from "../src/grant-audit.js";
+import { scimIntent } from "../src/orgs/grant-audit.js";
 import { MAX_SCIM_BODY_BYTES, SCIM_PAGE_MAX, scimRoutes } from "../src/http/scim.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";

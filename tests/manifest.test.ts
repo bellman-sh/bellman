@@ -7,8 +7,8 @@ import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
   MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
   SOCIAL_HOST_INSTRUCTIONS, HostInstructionsShape, isTopicRoom,
-} from "../src/manifest.js";
-import * as manifestModule from "../src/manifest.js";
+} from "../src/room/manifest.js";
+import * as manifestModule from "../src/room/manifest.js";
 import type { PresetName } from "../src/types.js";
 
 function authored(over: Record<string, unknown> = {}) {

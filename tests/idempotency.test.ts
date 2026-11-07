@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { fingerprint, idempotencyKey } from "../src/storage/idempotency.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/room/payload.js";
 import type { SessionEvent } from "../src/types.js";
 
 const draft = (over: Partial<Omit<SessionEvent, "cursor" | "at">> = {}) => ({

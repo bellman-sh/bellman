@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { AuditDO } from "../src/workerd/audit-do.js";
-import { SWEEP_EVERY_MS } from "../src/audit-sink.js";
+import { SWEEP_EVERY_MS } from "../src/orgs/audit-sink.js";
 
 afterEach(async () => {
   await reset();

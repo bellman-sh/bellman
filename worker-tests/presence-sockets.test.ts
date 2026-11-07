@@ -20,7 +20,7 @@ import {
   env, SELF, reset, abortAllDurableObjects, evictAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
-import { STALE_AFTER_MS, presenceOf } from "../src/presence.js";
+import { STALE_AFTER_MS, presenceOf } from "../src/room/presence.js";
 import type { Member } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
@@ -272,7 +272,7 @@ describe("an open socket is liveness", () => {
   });
 
   it("writes nothing to a closed room when its socket closes", async () => {
-    // `touchMember`'s rule (src/rooms.ts): a closed room's record is over, and a
+    // `touchMember`'s rule (src/room/rooms.ts): a closed room's record is over, and a
     // liveness write must not reopen it. The socket outlives the close of the
     // room it watched, so this is reachable rather than defensive.
     const { id, store } = await room([here("m_here"), quiet("m_quiet")]);

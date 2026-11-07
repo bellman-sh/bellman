@@ -4,7 +4,7 @@ import { fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
-import { leaveRoom } from "../rooms.js";
+import { leaveRoom } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 
 export function registerLeave(server: McpServer, identity: Identity, s: BellmanStore): void {

@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, session } from "./helpers/fixtures.js";

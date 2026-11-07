@@ -16,7 +16,7 @@ import {
   MAX_PAYLOAD_CHARS,
   MAX_PAYLOAD_DEPTH,
   PayloadTooDeepError,
-} from "../src/payload.js";
+} from "../src/room/payload.js";
 import { fingerprint } from "../src/storage/idempotency.js";
 import type { SessionEvent } from "../src/types.js";
 

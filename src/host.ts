@@ -14,17 +14,17 @@
  */
 import type { ArrivingMember, HostModelName, Member, Plan, RoomManifest, SessionEvent, AuditEntry, HostUnits } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
-import { publicNames } from "./member-names.js";
+import { publicNames } from "./room/member-names.js";
 import type { OutboxIntent } from "./storage/outbox.js";
-import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostSeated, isActivePerson } from "./members.js";
+import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostSeated, isActivePerson } from "./room/members.js";
 import type { HostAppend } from "./storage/store.js";
 import { monthKey, type StoredSession } from "./storage/stored-session.js";
 import { untrusted } from "./projections.js";
 import { SEAT_SILENCE_MS, type AnswerResult } from "./outside.js";
-import { auditRows, partiesOf } from "./audit.js";
+import { auditRows, partiesOf } from "./orgs/audit.js";
 
 // Defined in members.ts, which both stores read; members.ts cannot import this module, which imports it.
-export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, isHostMember, isReplyToHost } from "./members.js";
+export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, isHostMember, isReplyToHost } from "./room/members.js";
 
 /**
  * The models a manifest may name: their ids, their weight in units (spec D3), and what

@@ -4,13 +4,13 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
 import { HANDLE_PAGE_BATCH, HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { parseOperators, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
-import { HOST_USER_ID } from "../src/members.js";
+import { HOST_USER_ID } from "../src/room/members.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity } from "../src/types.js";
 import { jesseActor, member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";

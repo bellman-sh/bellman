@@ -86,11 +86,11 @@ No transaction spans two Durable Objects; cross-object writes go through the out
   the registry through the room's outbox, not the facade.
 - `[src/workerd/store-do.ts:DurableObjectStore.getSessionByJoinCode]` treats the registry row as a hint: the room must be open,
   still hold the code, and `codeIsLive` must pass. The public-name index works the same way: claims are
-  compare-and-set (`[src/workerd/registry-do.ts:RegistryDO.claimPublicName]`) and `[src/public-names.ts:holdsName]` checks the room
+  compare-and-set (`[src/workerd/registry-do.ts:RegistryDO.claimPublicName]`) and `[src/room/public-names.ts:holdsName]` checks the room
   record.
 - `[src/workerd/store-do.ts:DurableObjectStore]` neither retries an RPC nor falls back when a stub lacks a method.
 - `[src/workerd/audit-do.ts:AuditDO.append]` dedupes by intent id in the same `transactionSync` as the insert, so outbox
-  redelivery files one row; each row's `hash` chains to the previous (`[src/audit-sink.ts:chainHash]`).
+  redelivery files one row; each row's `hash` chains to the previous (`[src/orgs/audit-sink.ts:chainHash]`).
 
 ### Trust boundaries
 

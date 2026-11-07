@@ -14,12 +14,12 @@ import { PNG, text } from "../helpers/blob-bytes.js";
 import { MemoryStore } from "../../src/storage/memory-store.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
-import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
+import { IMAGE_TYPES, newBlobId } from "../../src/files/blobs.js";
 import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS, gridSlot,
-} from "../../src/surface.js";
+} from "../../src/surface/surface.js";
 import type { SurfaceItem } from "../../src/types.js";
-import { resolveSurfaceBatch } from "../../src/rooms.js";
+import { resolveSurfaceBatch } from "../../src/room/rooms.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });

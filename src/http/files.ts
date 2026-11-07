@@ -11,7 +11,7 @@
  * Runtime-free, as rooms.ts: web Request in, Response out.
  */
 import { csrfRefusal } from "../oauth/browser.js";
-import { findMember, listFsFor, readFsFor, writeFs, type RoomResult } from "../rooms.js";
+import { findMember, listFsFor, readFsFor, writeFs, type RoomResult } from "../room/rooms.js";
 import { fsEntryView, fsFileView } from "../projections.js";
 import { STATUS, adminWriteRefusal, json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 

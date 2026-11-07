@@ -23,7 +23,7 @@ nothing to paste: the first time Desktop starts the bridge it opens a browser
 to sign you in, and caches the credential on this machine.
 
 > `extension/manifest.json` is the bundle manifest, the thing Claude Desktop
-> reads. `src/manifest.ts` is the unrelated *room* manifest — the roles and
+> reads. `src/room/manifest.ts` is the unrelated *room* manifest — the roles and
 > verbs a room declares. The names collide; nothing else about them does.
 
 ---

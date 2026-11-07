@@ -1,20 +1,20 @@
 import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb, FsRow } from "./types.js";
-import { actionStates } from "./action-state.js";
-import { isTopicRoom, capacityOf, isPublic } from "./manifest.js";
-import type { CardHit, MessageHit } from "./search.js";
-import { mustReport, verbsOfRole } from "./roles.js";
-import { presenceOf } from "./presence.js";
-import { reportRow } from "./heartbeat.js";
-import { asked, isActiveMember } from "./members.js";
-import { codeIsLive, joinUrl } from "./codes.js";
+import { actionStates } from "./room/action-state.js";
+import { isTopicRoom, capacityOf, isPublic } from "./room/manifest.js";
+import type { CardHit, MessageHit } from "./surface/search.js";
+import { mustReport, verbsOfRole } from "./room/roles.js";
+import { presenceOf } from "./room/presence.js";
+import { reportRow } from "./room/heartbeat.js";
+import { asked, isActiveMember } from "./room/members.js";
+import { codeIsLive, joinUrl } from "./room/codes.js";
 import type { BellmanStore } from "./storage/store.js";
-import { activeMembers, sessionStatus } from "./rooms.js";
-import { heldName } from "./public-names.js";
-import { purgeDueAt } from "./retention.js";
-import { createdAtOf } from "./surface.js";
+import { activeMembers, sessionStatus } from "./room/rooms.js";
+import { heldName } from "./room/public-names.js";
+import { purgeDueAt } from "./room/retention.js";
+import { createdAtOf } from "./surface/surface.js";
 import type { StoredSession } from "./storage/stored-session.js";
 import { accountAliases } from "./public-event.js";
-import { isSecret, type DecisionClosed, type DecisionView, type DecisionVote } from "./decision.js";
+import { isSecret, type DecisionClosed, type DecisionView, type DecisionVote } from "./room/decision.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
 // itself: these turn a Session into what a client sees, and server.ts imports
@@ -88,7 +88,7 @@ export function publicMember(m: Member, connected: ReadonlySet<string>) {
      * not have its roster change shape under it. `presence` is the finer
      * answer: a `stale` member has not left, but has not been heard from, and
      * that is the distinction #66, #81 and #82 all need. A member on a live
-     * socket is present whatever it last said (#146). See src/presence.ts.
+     * socket is present whatever it last said (#146). See src/room/presence.ts.
      */
     presence: presenceOf(m, Date.now(), connected),
   };

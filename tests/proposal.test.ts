@@ -3,8 +3,8 @@
  * card must link. Pure; the room-level rules are tests/tools/proposals.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { hasSourceLink, readProposal, sourceRefusal } from "../src/proposal.js";
-import type { SurfaceWrite } from "../src/surface.js";
+import { hasSourceLink, readProposal, sourceRefusal } from "../src/surface/proposal.js";
+import type { SurfaceWrite } from "../src/surface/surface.js";
 import type { SurfaceItem } from "../src/types.js";
 
 const item = { key: "tools", kind: "text", title: "Tools", body: "See https://modelcontextprotocol.io/specification" };

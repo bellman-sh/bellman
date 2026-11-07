@@ -24,7 +24,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
-import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "../blobs.js";
+import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "../files/blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import type {
   DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorMemory, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,

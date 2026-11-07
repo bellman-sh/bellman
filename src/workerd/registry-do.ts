@@ -1,17 +1,17 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, NO_ORG, orgIndexKey, orgIndexPrefix, orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys } from "../storage/grant-index.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs/orgs.js";
 import { isBanId, oldestFirst, type CreatorBan } from "../bans.js";
 import type { Suspension } from "../suspension.js";
 import { firstSignInFirst, type ScimCreate, type ScimUpdate, type GrantDelete, type GrantWrite, type HostedSlot, type PublicNameEntry, type RoomCounts, type RoomFilter, type RoomIndexRow } from "../storage/store.js";
-import { sameEntry } from "../public-names.js";
+import { sameEntry } from "../room/public-names.js";
 import type { AuditEntry, PendingConnect, PlanGrant, SavedPreset, UserRecord, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry } from "../types.js";
 import { KEYS_PER_CALL, getRows } from "../storage/member-rows.js";
-import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "../grant-audit.js";
+import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "../orgs/grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "../storage/outbox.js";
 import { REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow, type FiledReport, type NewReport, type Report } from "../reports.js";
-import { presetInNewWords } from "../presets.js";
+import { presetInNewWords } from "../room/presets.js";
 import type { BellmanEnv } from "./store-do.js";
 import { auditIntent } from "./session-do.js";
 import { moveKv } from "./audit-do.js";

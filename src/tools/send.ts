@@ -6,22 +6,22 @@ import {
 import type { ToolResult } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
-import { denyVerb, verbsOfRole } from "../roles.js";
+import { denyVerb, verbsOfRole } from "../room/roles.js";
 import {
   FROZEN, NO_ANSWERER, activeMembers, admitSend, audit, checkProposal, findMember, resolveSurfaceWrite, surfaceAuditDetail,
   touchMember, writeSurface, writeSurfaceBatch,
-} from "../rooms.js";
-import { isProposalPayload } from "../action-state.js";
+} from "../room/rooms.js";
+import { isProposalPayload } from "../room/action-state.js";
 import { answerQuestion, type AnswerError } from "../outside.js";
-import { isTopicRoom } from "../manifest.js";
-import { readProposal } from "../proposal.js";
+import { isTopicRoom } from "../room/manifest.js";
+import { readProposal } from "../surface/proposal.js";
 import { voteOn } from "./decide.js";
 import type { StoredSession } from "../storage/stored-session.js";
 import type { AppendExtras, BellmanStore, EventWrite, ProposalApproval } from "../storage/store.js";
-import { isBatchPayload, type SurfaceWrite } from "../surface.js";
-import type { BlobStore } from "../blobs.js";
-import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
-import { SEND_LIMIT, STRANGER_SEND_LIMIT } from "../send-limit.js";
+import { isBatchPayload, type SurfaceWrite } from "../surface/surface.js";
+import type { BlobStore } from "../files/blobs.js";
+import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../room/payload.js";
+import { SEND_LIMIT, STRANGER_SEND_LIMIT } from "../room/send-limit.js";
 
 /**
  * The proposal an answer approves (topic rooms plan, R1): the request's payload read as one, when the answer is

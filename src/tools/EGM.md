@@ -4,7 +4,7 @@
 
 The MCP tools, one file per tool plus `kit.ts` for what they share. Each file exports one `register*` function
 that registers one tool on the `McpServer` that `src/server.ts` builds per request, bound to the caller's
-`Identity` and a `BellmanStore`. Most room logic lives in `src/rooms.ts` (`evictMember`, `issueInvite`,
+`Identity` and a `BellmanStore`. Most room logic lives in `src/room/rooms.ts` (`evictMember`, `issueInvite`,
 `leaveRoom`, `writeSurface`, ...); the tool files validate input, gate, and shape the answer. A new tool also
 means editing `extension/manifest.json` and running `npm run docs:gen` (root `CLAUDE.md`;
 `tests/extension.test.ts` and `tests/docs-reference.test.ts` fail otherwise).
@@ -33,7 +33,7 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
 - `bellman_sync` takes `since_cursor`, `wait_seconds` (0..`MAX_WAIT_SECONDS` = 25), `surface`; returns
   `{events, cursor, session_status, more?, outstanding?, removed?, surface_cursor?, surface?}`; `SYNC_PAGE` = 50
   [src/tools/sync.ts:SYNC_PAGE]. In a room whose manifest has a `decide` block, `outstanding` also lists the open
-  decisions waiting on the caller's human, each with `decision: {kind, key, hash}` [src/decision.ts:decisionsAwaiting]
+  decisions waiting on the caller's human, each with `decision: {kind, key, hash}` [src/room/decision.ts:decisionsAwaiting]
 - `bellman_decide` takes `action` (`open | vote | read`). `open` returns `{decision, hash, rule, expires_at,
   electorate, superseded?, replayed?, warning?}`; `vote` returns `{cursor, capacity, state?, reason?, replayed?,
   note?}` (`note` on an advisory vote), or on a secret ballot `{ballot, capacity, state, reason?}` or
@@ -49,7 +49,7 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
   paths, newest first, at most `RECALL_CHARS`), `briefs` (at most `BRIEFS_ON_JOIN` = 25) and `surface`, the whole
   reply at most `CONFIRM_REPLY_CHARS` as rendered: the surface is cut first (`next` pages the rest), briefs second;
   the room, its instructions and the roster are never cut (ADR 0047 decision 9)
-  [src/tools/connect.ts:registerConnect] [src/tools/confirm.ts:CONFIRM_REPLY_CHARS] [src/rooms.ts:readSurfaceWithin]
+  [src/tools/connect.ts:registerConnect] [src/tools/confirm.ts:CONFIRM_REPLY_CHARS] [src/room/rooms.ts:readSurfaceWithin]
 - `start`, `connect`, `confirm`, `rooms` and `surface` carry `_meta: APP_UI_META` (see
   [`../ui/EGM.md`](../ui/EGM.md)) [src/tools/start.ts:registerStart]
 - Annotations: `audit`, `rooms`, `surface` read-only; `evict` destructive and not idempotent; `leave` and

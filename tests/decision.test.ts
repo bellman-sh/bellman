@@ -9,9 +9,9 @@ import {
   MAX_DECISION_TTL_MS, MAX_OPEN_DECISIONS, MAX_OPEN_PER_SEAT, MAX_REVISIONS, MIN_DECISION_TTL_MS,
   type Ballot, type DecisionClosed, type DecisionOpened, type DecisionRule, type FailReason, type DecisionView, type DecisionVote,
   type BallotBook, type Choice, type OpenDecisions, type VoterRemoved,
-} from "../src/decision.js";
-import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "../src/action-state.js";
-import { SYSTEM_ACTOR, auditRows } from "../src/audit.js";
+} from "../src/room/decision.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS } from "../src/room/action-state.js";
+import { SYSTEM_ACTOR, auditRows } from "../src/orgs/audit.js";
 import type { EventType, SessionEvent } from "../src/types.js";
 
 const draft = () => ({

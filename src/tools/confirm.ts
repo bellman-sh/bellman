@@ -4,13 +4,13 @@ import { randomUUID } from "node:crypto";
 import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, renderedLength, roomInstructionsField, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
-import { homeTitles } from "../memory.js";
-import { forbiddenCapabilityRefusal, joinRefusal } from "../orgs.js";
+import { homeTitles } from "../files/memory.js";
+import { forbiddenCapabilityRefusal, joinRefusal } from "../orgs/orgs.js";
 import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
-import { FROZEN, announceReclaimed, audit, fullMessage, mostThatFits, readSurfaceWithin } from "../rooms.js";
-import { STALE_AFTER_MS, type Presence } from "../presence.js";
-import { isActiveMember, lastSeen, rosterHasOrgless } from "../members.js";
+import { FROZEN, announceReclaimed, audit, fullMessage, mostThatFits, readSurfaceWithin } from "../room/rooms.js";
+import { STALE_AFTER_MS, type Presence } from "../room/presence.js";
+import { isActiveMember, lastSeen, rosterHasOrgless } from "../room/members.js";
 import type { BellmanStore } from "../storage/store.js";
 import { APP_UI_META } from "../ui/resource.js";
 

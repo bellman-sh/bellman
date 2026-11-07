@@ -5,8 +5,8 @@
  * write is keyed by the caller's own user id.
  */
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { PresetNameShape, builtinPresets } from "../manifest.js";
-import { MAX_PRESETS, checkPreset } from "../presets.js";
+import { PresetNameShape, builtinPresets } from "../room/manifest.js";
+import { MAX_PRESETS, checkPreset } from "../room/presets.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type PresetRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;

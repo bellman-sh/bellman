@@ -8,7 +8,7 @@ import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import type { Report } from "../src/reports.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity } from "../src/types.js";
-import { policyView } from "../src/orgs.js";
+import { policyView } from "../src/orgs/orgs.js";
 import { COOKIE, ISSUER, PANEL, panelConfig, routeWith, seedSession } from "./helpers/panel.js";
 
 const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };

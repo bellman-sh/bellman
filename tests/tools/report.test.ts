@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { reportMail, type Report } from "../../src/reports.js";
-import { fileRoomReport } from "../../src/rooms.js";
+import { fileRoomReport } from "../../src/room/rooms.js";
 import { NEED_ROOM, SEND_KINDS } from "../../src/tools/kit.js";
 import type { EventType } from "../../src/types.js";
 import { brief } from "../helpers/fixtures.js";

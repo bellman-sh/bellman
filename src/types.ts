@@ -621,6 +621,12 @@ export interface UserRecord {
    * email was unverified.
    */
   googleEmail?: string;
+  /**
+   * The campaign tag the browser carried at this account's first sign-in: the `bm_ref` cookie bellman.sh sets when
+   * a link arrives with `?ref=` (#540). Written once, when the record is created, and never changed after. Absent
+   * when the first sign-in carried none, or came before it was kept (2026-11-07).
+   */
+  ref?: string;
 }
 
 export interface Entitlements {

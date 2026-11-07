@@ -90,8 +90,8 @@ describe("/admin/accounts", () => {
     expect([res.status, await res.json()]).toEqual([200, {
       total: 2,
       accounts: [
-        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-20T00:00:00.000Z", github_login: "octo", google_email: null },
-        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z", github_login: null, google_email: "two@example.dev" },
+        { user_id: "u_github_9", first_seen_at: "2026-10-01T00:00:00.000Z", last_seen_at: "2026-10-20T00:00:00.000Z", github_login: "octo", google_email: null, ref: null },
+        { user_id: "u_google_2", first_seen_at: "2026-10-03T00:00:00.000Z", last_seen_at: "2026-10-03T00:00:00.000Z", github_login: null, google_email: "two@example.dev", ref: null },
       ],
     }]);
     const one = await (await send("GET", "/admin/accounts?limit=1", await bearer(OPERATOR))).json() as { total: number; accounts: unknown[] };

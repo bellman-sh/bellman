@@ -9528,6 +9528,17 @@ export function describeStoreContract(
           expect((await store.listUsers(1))[0]?.googleEmail).toBe("b@example.dev");
         });
 
+        // The tag says which campaign brought the account in, so only the sign-in that created it may set it (#540).
+        it("keeps the campaign tag of the first sign-in, and no later sign-in's", async () => {
+          await store.recordSignIn("u_github_9", 1_000, "octo", undefined, "rd-film");
+          await store.recordSignIn("u_github_9", 2_000, undefined, undefined, "rd-problem");
+          await store.recordSignIn("u_github_9", 3_000);
+          expect((await store.listUsers(1))[0]).toStrictEqual({ userId: "u_github_9", firstSeenAt: 1_000, lastSeenAt: 3_000, githubLogin: "octo", ref: "rd-film" });
+          await store.recordSignIn("u_google_2", 4_000);
+          await store.recordSignIn("u_google_2", 5_000, undefined, undefined, "rd-founder");
+          expect((await store.listUsers(2))[1], "a tag after the first sign-in is no tag").toStrictEqual({ userId: "u_google_2", firstSeenAt: 4_000, lastSeenAt: 5_000 });
+        });
+
         // The operator's GET /admin/accounts. Signed in out of order, so the order it answers in is first sign-in's.
         it("lists people by first sign-in, ties by id, a later sign-in moving only lastSeenAt, cut at the limit", async () => {
           expect(await store.listUsers(10)).toEqual([]);

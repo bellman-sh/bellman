@@ -548,6 +548,13 @@ describe("the operator's /admin/handles routes", () => {
     const res = await release("jesse", await bearer(OPERATOR, "default"));
     expect(res.status).toBe(204);
     expect(await store.handleOf("u_jesse")).toBeUndefined();
+    // The operator's stream (#556): the release names the handle and whose it was.
+    expect(await store.operatorAudit(10)).toMatchObject([{
+      action: "operator_handle_released", actorUserId: OPERATOR.userId, sessionId: "operator:handles",
+      detail: { handle: "jesse", user_id: "u_jesse" },
+    }]);
+    expect((await release("nobody", await bearer(OPERATOR, "default"))).status).toBe(404);
+    expect((await store.operatorAudit(10)).length, "a 404 released nothing, so it audits nothing").toBe(1);
     expect(await store.signedRooms("u_jesse")).toEqual([]);
     expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
     expect((await pub("/public/handles/jesse"))!.status).toBe(404);

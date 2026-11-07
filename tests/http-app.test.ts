@@ -115,7 +115,7 @@ describe("GET and PUT /me/memory", () => {
       expect((await dash(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect((await call(null, "/me/memory")).status).toBe(401);
-    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "DELETE" })).headers.get("allow")).toBe("GET, PUT");
+    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "PATCH" })).headers.get("allow")).toBe("GET, PUT, DELETE");
     expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: false });
   });
 
@@ -146,6 +146,47 @@ describe("GET /me/memory/lookups", () => {
     expect(peer.status).toBe(200);
     expect(((await bodyOf(peer)) as { lookups: LookupShown[] }).lookups.map((l) => [l.op, l.room?.session_id, l.paths])).toEqual([["arrival", pair.sessionId, []]]);
     expect((await call(null, "/me/memory/lookups", { method: "PUT", cookie: DEV_KEY.jesse, body: {} })).headers.get("allow")).toBe("GET");
+  });
+});
+
+// #531, ADR 0047 decision 14: hard delete, from a dash session alone, and never refused as paused.
+describe("DELETE /me/memory and /me/memory/notes", () => {
+  const dash = (body: unknown) => call(null, "/me/memory", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+
+  it("deletes everything from the dash and nothing with a bearer", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    await dash({ capture: true });
+    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "DELETE" })).status).toBe(403);
+    expect((await call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse })).status).toBe(403); // no Origin
+    expect((await call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(204);
+    expect((await jesse.call("bellman_memory", { op: "recall" })).data).toMatchObject({ entries: [] });
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: false });
+  });
+
+  it("deletes one note by path, 404 for a note that is not there, 400 without a path", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    const del = (q: string) => call(null, `/me/memory/notes${q}`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect((await del("?path=%2Fa.md")).status).toBe(204);
+    expect((await del("?path=%2Fa.md")).status).toBe(404);
+    expect((await del("")).status).toBe(400);
+    expect((await jesse.call("bellman_memory", { op: "recall", path: "/a.md" })).isError).toBe(true);
+  });
+
+  it("deletes while paused, refuses a bearer on /notes, and takes DELETE alone there", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    await jesse.call("bellman_memory", { op: "remember", path: "/b.md", content: "b" });
+    await dash({ paused: true });
+    const bearer = await call(DEV_KEY.jesse, "/me/memory/notes?path=%2Fa.md", { method: "DELETE" });
+    expect([bearer.status, (await bodyOf(bearer)).error]).toEqual([403, "dash_session_required"]);
+    expect((await call(null, "/me/memory/notes?path=%2Fa.md", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(204);
+    expect((await call(null, "/me/memory/notes?path=%2Fapps%2Fx", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(400);
+    expect((await call(DEV_KEY.jesse, "/me/memory/notes", { method: "GET" })).headers.get("allow")).toBe("DELETE");
+    expect((await call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(204);
+    await dash({ paused: false });
+    expect((await jesse.call("bellman_memory", { op: "recall" })).data).toMatchObject({ entries: [] });
   });
 });
 

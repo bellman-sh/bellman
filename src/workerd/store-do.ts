@@ -758,6 +758,16 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(id).homeLookups();
   }
 
+  async purgeHome(id: string): Promise<void> {
+    // deleteAll() on a room's object would leave its registry, audit and blobs behind: a home id or nothing.
+    if (!isHomeRoomId(id)) throw new Error(`purgeHome: ${id} is not a home room`);
+    return this.session(id).purgeHome();
+  }
+
+  async forgetHomeNote(id: string, path: string): Promise<boolean> {
+    return this.session(id).forgetHomeNote(path);
+  }
+
   async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {
     return this.session(sessionId).memoryIdOf(userId);
   }

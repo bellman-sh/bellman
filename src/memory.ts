@@ -108,6 +108,16 @@ export async function setMemorySettings(store: BellmanStore, actor: Identity, pa
   return next;
 }
 
+/** Hard delete (ADR 0047 decision 14): the account's home room emptied, settings and lookup log included. Never paused. */
+export const deleteMemory = (store: BellmanStore, actor: Identity): Promise<void> => store.purgeHome(homeRoomId(actor.userId));
+
+/** One note deleted from the dash, as `forget` does, and scrubbed from the lookup log (decision 14). Never paused. */
+export async function forgetNote(store: BellmanStore, actor: Identity, raw: string): Promise<RoomResult<null>> {
+  const path = homePath(raw);
+  if (!path.ok) return path;
+  return (await store.forgetHomeNote(homeRoomId(actor.userId), path.value)) ? succeed(null) : refuse("not_found", NO_NOTE);
+}
+
 /** One lookup as the dash shows it (ADR 0047 decision 13): the row, with its room named. */
 export interface LookupShown {
   at: number;

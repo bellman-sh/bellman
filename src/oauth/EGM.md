@@ -23,6 +23,7 @@ Routes and callers:
   `POST /agent/identity/claim`, `GET|POST /agent/claim`, `GET /upgrade/:link`, `GET /auth/signin`,
   `GET /invite/:token`, `GET /auth/session`, `POST /auth/signout`, `POST /auth/invites`, `GET /account`,
   `GET|POST|DELETE /admin/grants`, `GET /admin/accounts`, `GET /admin/handles`, `DELETE /admin/handles/:handle`,
+  `DELETE /admin/accounts/:userId/memory`,
   `POST|DELETE /admin/suspensions/:userId`, `GET /admin/reports`, `POST /admin/reports/:id/resolve`,
   `POST /admin/rooms/backfill`, `POST /admin/orgs`, `PATCH /admin/orgs/:orgId`, and OPTIONS on `/auth/session`, `/auth/signout`, `/account`
   [src/oauth/routes.ts:handleOAuth]
@@ -34,7 +35,7 @@ Routes and callers:
 - `OAuthConfig` (issuer, resource, secret, `store: AuthStorage`, credentials, overrides, panel and public-page
   origins, payment links, `plans?: PlanStore`, operators, `fetchImpl`) [src/oauth/routes.ts:OAuthConfig]
 - `PlanStore`: a `Pick<BellmanStore, ...>` of grant, org, invite, user and report methods, plus
-  `backfillRoomIndex` [src/oauth/routes.ts:PlanStore]
+  `backfillRoomIndex` and `purgeHome` [src/oauth/routes.ts:PlanStore]
 - Plan resolution: `resolvePlan`, `replanOnRefresh`, `signedInPlan`, `standingOf`; `PlanSource = "operator" |
   "grant" | "default"` [src/oauth/routes.ts:resolvePlan]
 - Errors `SignInRefused`, `SsoRequired`, `AccessRemoved` (both extend `SignInRefused`), `SeatsFull`
@@ -124,8 +125,8 @@ Primitives:
   `openidconnect.googleapis.com`), OIDC discovery, token and userinfo, `cloudflare-dns.com`
   [src/oauth/providers.ts:github] [src/oauth/oidc.ts:discover] [src/oauth/dns.ts:txtRecords]
 - Plan store writes with audit intent: grants, SSO member provisioning, orgs, suspensions, reports, handle
-  release; `recordSignIn` on each resolution; `moveGrant` of an address grant; `backfillRoomIndex` on
-  `/admin/rooms/backfill` [src/oauth/routes.ts:handleOAuth]
+  release; `purgeHome` on `DELETE /admin/accounts/:userId/memory`; `recordSignIn` on each resolution; `moveGrant`
+  of an address grant; `backfillRoomIndex` on `/admin/rooms/backfill` [src/oauth/routes.ts:handleOAuth]
 - Cookies: sign-in nonce set on `/auth/signin` and `/invite/:token`, session cookie set on panel sign-in, cleared
   on `/auth/signout` (always 204) [src/oauth/routes.ts:completeSession]
 - 302 redirects to provider authorize URLs and to the Stripe Payment Link [src/oauth/routes.ts:finishUpgrade]

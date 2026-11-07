@@ -9,6 +9,7 @@ import { CONFIG_HISTORY } from "../config.js";
 import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "../store.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
 import { namespaceOf } from "../fs-path.js";
+import { HOME_MEMBER_ID } from "../home.js";
 import type { AppendExtras, ApprovalWrite, ConfigWrite, ConfigWriteResult, FsAppend, FsEntry, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch, AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts, DecisionClose, DecisionOpen, VoteWrite, RoomSummary } from "../store.js";
 import { electorateOf, voteRefusal, withoutBook } from "../store.js";
 import { applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../decision.js";
@@ -3110,39 +3111,71 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * history deleted. No event, no outbox intent, no alarm: nothing is owed, so nothing is armed.
    */
   async writeHome(home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
-    return this.ctx.storage.transaction<HomeAppend>(async (txn) => {
-      const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
-      if (keyed !== null) {
-        const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
-        if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
-      }
-      if (w.write.op === "write" && (await txn.get<HomeSettings>("hs"))?.paused) return { outcome: "paused" };
-      if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
-      const read = await this.stored(txn);
-      let s = read, seeded: Record<string, unknown> = {};
-      if (!s) {
-        const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
-        const { events: _events, members: _arriving, ...others } = home;
-        s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
-        seeded = { ...seatRows(seat), cursor: 0 };
-      }
-      const at = Date.now();
-      const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
-      const history = await this.#fsHistory(txn, w.path);
-      const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
-      if (!decided.ok) return decided.result;
-      const { row } = decided;
-      await putRows(txn, {
-        ...seeded,
-        ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
-        [fsKey(w.path)]: row,
-        [fsIndexKey(w.path)]: fsEntryOf(row),
-        ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
-        ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
-      });
-      for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
-      return { outcome: "ok", path: w.path, rev: row.rev };
+    return this.ctx.storage.transaction<HomeAppend>((txn) => this.#writeHomeIn(txn, home, w, ceiling));
+  }
+
+  /** `writeHome`'s body, in the caller's transaction. `home` null: the record must be stored, or `not_found`. */
+  async #writeHomeIn(txn: DurableObjectTransaction, home: NewSession | null, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
+    if (keyed !== null) {
+      const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
+      if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    }
+    if (w.write.op === "write" && (await txn.get<HomeSettings>("hs"))?.paused) return { outcome: "paused" };
+    if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+    const read = await this.stored(txn);
+    let s = read, seeded: Record<string, unknown> = {};
+    if (!s) {
+      if (home === null) return { outcome: "not_found" };
+      const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+      const { events: _events, members: _arriving, ...others } = home;
+      s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
+      seeded = { ...seatRows(seat), cursor: 0 };
+    }
+    const at = Date.now();
+    const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
+    const history = await this.#fsHistory(txn, w.path);
+    const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
+    if (!decided.ok) return decided.result;
+    const { row } = decided;
+    await putRows(txn, {
+      ...seeded,
+      ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
+      [fsKey(w.path)]: row,
+      [fsIndexKey(w.path)]: fsEntryOf(row),
+      ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
+      ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
     });
+    for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
+    return { outcome: "ok", path: w.path, rev: row.rev };
+  }
+
+  /**
+   * `BellmanStore.forgetHomeNote` (ADR 0047 decision 14), in one transaction: `writeHome`'s delete at the current
+   * revision, as the account, then each `lk:` row that returned the path rewritten without it, or deleted when empty.
+   */
+  async forgetHomeNote(path: string): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<FsRow>(fsKey(path));
+      const s = await this.stored(txn);
+      if (!current || current.deleted || !s) return false;
+      const w: FsWrite = { path, write: { op: "delete", baseRev: current.rev }, memberId: HOME_MEMBER_ID, userId: s.creator.userId, label: s.creator.label, key: null };
+      if ((await this.#writeHomeIn(txn, null, w, 0)).outcome !== "ok") return false;
+      for (const [key, r] of await txn.list<LookupRow>({ prefix: LOOKUP_PREFIX })) {
+        if (!r.paths.includes(path)) continue;
+        const paths = r.paths.filter((p) => p !== path);
+        if (paths.length > 0) await txn.put(key, { ...r, paths });
+        else await txn.delete(key);
+      }
+      return true;
+    });
+  }
+
+  /** `BellmanStore.purgeHome` (ADR 0047 decision 14): every row. A home room holds no blobs, registry rows, audit or outbox. */
+  async purgeHome(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    // A home room arms no alarm; deleted all the same, for the reason #purgeIfDue gives.
+    await this.ctx.storage.deleteAlarm();
   }
 
   /** `BellmanStore.findFs`, for this room. */

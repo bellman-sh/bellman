@@ -8,7 +8,7 @@ import { DEFAULT_HOME_SETTINGS, DEFAULT_POLICY, LOOKUP_KEEP, LOOKUP_KEEP_MS } fr
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
-import { isHomeRoomId } from "./home.js";
+import { HOME_MEMBER_ID, isHomeRoomId } from "./home.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "./orgs.js";
 import { MemoryBlobStore, blobBytesUsed, type BlobStore } from "./blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
@@ -2549,6 +2549,10 @@ export interface BellmanStore {
   listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }>;
   /** The lookup log, newest first, at most LOOKUP_KEEP rows; rows past that are deleted. */
   homeLookups(id: string): Promise<LookupRow[]>;
+  /** Empties a home room (ADR 0047 decisions 13 and 14): every fs:, fsm:, fsh:, hk:, lk: row, the hs settings row and the record. Idempotent; a home id that was never written is a no-op. Never called on a room id. */
+  purgeHome(id: string): Promise<void>;
+  /** Deletes one home note as `forget` does, at its current revision, and scrubs `path` from every lookup row (a row left with no paths is deleted). `false` when there is no live note at `path`. */
+  forgetHomeNote(id: string, path: string): Promise<boolean>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */
@@ -3995,8 +3999,36 @@ export class MemoryStore implements BellmanStore {
     return detach(kept);
   }
 
+  async purgeHome(id: string): Promise<void> {
+    // The home room's rows, as SessionDO's deleteAll() takes them; a waiter is answered with nothing, as purgeNow does.
+    if (!isHomeRoomId(id)) throw new Error(`purgeHome: ${id} is not a home room`);
+    for (const w of this.waiters.get(id) ?? []) w.resolve([]);
+    for (const map of [this.waiters, this.sessions, this.files, this.homeKeys, this.homeSettings, this.lookups, this.sends, this.briefs]) map.delete(id);
+  }
+
+  async forgetHomeNote(id: string, path: string): Promise<boolean> {
+    const s = this.sessions.get(id);
+    const current = this.files.get(id)?.get(path)?.current;
+    if (!s || !current || current.deleted) return false;
+    // `forget` at the current revision, as the account: a delete is never paused and frees bytes, so the ceiling is moot.
+    const w: FsWrite = { path, write: { op: "delete", baseRev: current.rev }, memberId: HOME_MEMBER_ID, userId: s.creator.userId, label: s.creator.label, key: null };
+    if (this.writeHomeIn(id, null, w, 0).outcome !== "ok") return false;
+    // Only the rows that returned the note change; one left with no paths goes.
+    const rows = this.lookups.get(id) ?? [];
+    this.lookups.set(id, rows.flatMap((r) => {
+      if (!r.paths.includes(path)) return [r];
+      const paths = r.paths.filter((p) => p !== path);
+      return paths.length > 0 ? [{ ...r, paths }] : [];
+    }));
+    return true;
+  }
+
   async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
-    // Synchronous from the key check to the last row, as appendFs.
+    return this.writeHomeIn(id, home, w, ceiling);
+  }
+
+  /** `writeHome`, synchronous from the key check to the last row, as appendFs. `home` null: the record must exist, or `not_found`. */
+  private writeHomeIn(id: string, home: NewSession | null, w: FsWrite, ceiling: number): HomeAppend {
     const storageKey = w.key === null ? null : homeKey(w.memberId, w.key);
     const print = fsPrint(w);
     const record = storageKey === null ? undefined : this.homeKeys.get(id)?.get(storageKey);
@@ -4005,6 +4037,7 @@ export class MemoryStore implements BellmanStore {
     if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
     let s = this.sessions.get(id);
     if (!s) {
+      if (home === null) return { outcome: "not_found" };
       // Created by the first write, and indexed nowhere: not by creator, member, org or the operator's room table.
       const { members, briefs } = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
       s = detach({ ...home, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });

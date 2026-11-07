@@ -5102,6 +5102,44 @@ export function describeStoreContract(
         expect(kept[0].at).toBeGreaterThan(kept[kept.length - 1].at);
         expect((await store.homeLookups(id)).length).toBe(LOOKUP_KEEP);
       });
+
+      it("purgeHome empties the home room: notes, history, keys, settings and lookups, and the next write starts clean", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }, "k1"), 4096);
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a2", baseRev: 1 }), 4096);
+        await store.writeHomeSettings(id, { capture: true, paused: false });
+        await store.readHomeLogged(id, "/a.md", { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" });
+        await store.purgeHome(id);
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect(await store.listFs(id, "/")).toEqual({ entries: [], next: null });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        expect(await store.homeLookups(id)).toEqual([]);
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "again" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        await store.purgeHome(homeRoomId("u_never"));
+        await expect(store.purgeHome("qs_a_room")).rejects.toThrow(/not a home room/);
+      });
+
+      it("forgetHomeNote deletes the note with its history and scrubs it from the lookup log", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096);
+        const src = { op: "list" as const, sessionId: null, memberId: null, agent: null, query: "/" };
+        await store.listHomeLogged(id, "/", undefined, src);
+        await store.readHomeLogged(id, "/a.md", { ...src, op: "read", query: "/a.md" });
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(true);
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(false);
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect((await store.homeLookups(id)).map((r) => [r.op, r.paths])).toEqual([["list", ["/b.md"]]]);
+      });
+
+      it("forgetHomeNote leaves a lookup row that never returned the note, and forgets while paused", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.readHomeLogged(id, "/nope.md", { op: "read", sessionId: null, memberId: null, agent: null, query: "/nope.md" });
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(true);
+        expect(await store.forgetHomeNote(homeRoomId("u_never"), "/a.md")).toBe(false);
+        expect((await store.homeLookups(id)).map((r) => [r.query, r.paths])).toEqual([["/nope.md", []]]);
+      });
     });
 
     // ------------------------------------------------ a live room's host instructions

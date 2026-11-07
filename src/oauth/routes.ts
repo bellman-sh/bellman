@@ -1,6 +1,7 @@
 import { ENTITLEMENTS, entitlementsFor, keyedPlan } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
 import { handleFromSegment } from "../handles.js";
+import { homeRoomId } from "../home.js";
 import { operatorReportView } from "../reports.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
@@ -120,6 +121,7 @@ export type PlanStore = Pick<
   | "suspend" | "unsuspend"
   | "listReports" | "resolveReport"
   | "backfillRoomIndex"
+  | "purgeHome"
 >;
 
 // ponytail: two hundred reports a read, not tuned, and no paging. The queue lists the open reports first and then the
@@ -2408,6 +2410,31 @@ export async function handleOAuth(
     return json({ user_id: userId, note, suspended_at: new Date(at).toISOString() });
   }
 
+  // ---------------------------------------- /admin/accounts/:userId/memory
+  // The operator hard-deletes an account's home memory (ADR 0047 decision 14), for a deletion request the person
+  // cannot make from the dash: the home room emptied, settings and lookup log included, as DELETE /me/memory does.
+  // On /admin/handles' gate; the segment is read as /admin/suspensions/:userId reads it.
+  const memory = ADMIN_ACCOUNT_MEMORY.exec(path);
+  if (memory) {
+    const gate = await operatorGate(request, config, "deleting an account's memory");
+    if (gate instanceof Response) return gate;
+    if (method !== "DELETE") {
+      return new Response("Method not allowed", { status: 405, headers: { allow: "DELETE" } });
+    }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    let userId: string;
+    try {
+      userId = decodeURIComponent(memory[1]);
+    } catch {
+      return oauthError("invalid_request", "the path's user id is not a valid percent-encoding");
+    }
+    if (!isLinkableUserId(userId)) {
+      return oauthError("invalid_request", "the path must name a user id: u_ and up to 198 letters, digits, - or _");
+    }
+    await config.plans.purgeHome(homeRoomId(userId));
+    return new Response(null, { status: 204 });
+  }
+
   // ------------------------------------------------------ /admin/reports
   // The operator reads the report queue and closes a report with a note (abuse protections spec, section 3). On
   // /admin/handles' gate, and outside the suspension check as /admin/suspensions is (R8). Every route here takes the
@@ -2506,6 +2533,7 @@ const ADMIN_ORGS = "/admin/orgs";
 const ADMIN_ORG = /^\/admin\/orgs\/([^/]+)$/;
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
 const ADMIN_SUSPENSION = /^\/admin\/suspensions\/([^/]+)$/;
+const ADMIN_ACCOUNT_MEMORY = /^\/admin\/accounts\/([^/]+)\/memory$/;
 const ADMIN_REPORT_RESOLVE = /^\/admin\/reports\/([^/]+)\/resolve$/;
 
 /** The body as a JSON object, or undefined: not JSON, `null`, an array and a scalar are all no body. */

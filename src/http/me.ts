@@ -18,9 +18,14 @@
  *
  * `GET /me/memory/lookups` (#531, decision 13): the lookup log, `{ lookups }` newest first, each row's room named. Dash
  * session only (403 `dash_session_required` to a bearer): the log is for the person, and an agent has no use for it.
+ *
+ * `DELETE /me/memory` and `DELETE /me/memory/notes?path=<path>` (#531, decision 14): hard delete, 204. The first empties
+ * the home room, settings and lookup log included; the second deletes one note as `forget` does and scrubs it from the
+ * log (404 `not_found`, 400 `invalid_request` for a missing or invalid path). Dash session only, Origin checked, and
+ * never refused while paused.
  */
-import { allowedOrigin, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { memoryLookups, readMemorySettings, setMemorySettings } from "../memory.js";
+import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
+import { deleteMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../memory.js";
 import { liveRooms } from "../rooms.js";
 import type { HomeSettings } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -30,6 +35,7 @@ export type MeRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins
 const ROOMS = "/me/rooms";
 const MEMORY = "/me/memory";
 const LOOKUPS = "/me/memory/lookups";
+const NOTES = "/me/memory/notes";
 
 /** The body as a settings patch: a non-empty object whose every key is `capture` or `paused`, each a boolean; else `null`. */
 function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
@@ -42,10 +48,10 @@ function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
 /** `undefined` for any other path, so the server carries on. */
 export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Response | undefined> {
   const path = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS) return undefined;
+  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS && path !== NOTES) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   if (request.method === "OPTIONS") return preflightResponse(origin);
-  const allowed = path === MEMORY ? "GET, PUT" : "GET";
+  const allowed = path === MEMORY ? "GET, PUT, DELETE" : path === NOTES ? "DELETE" : "GET";
   if (!allowed.split(", ").includes(request.method)) return methodNotAllowed(allowed, origin);
   try {
     const who = await deps.caller(request);
@@ -54,6 +60,17 @@ export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Res
     if (path === LOOKUPS) {
       if (who.via !== "cookie") return problem(403, "dash_session_required", "the lookup log is read by the person signed in to the dash", origin);
       return json(200, { lookups: await memoryLookups(deps.store, who.identity) }, origin);
+    }
+    if (request.method === "DELETE") {
+      if (who.via !== "cookie") return problem(403, "dash_session_required", "memory is deleted by the person signed in to the dash, never with a bearer token", origin);
+      const refusal = csrfRefusal(request, who.via, origin);
+      if (refusal) return refusal;
+      if (path === MEMORY) await deleteMemory(deps.store, who.identity);
+      else {
+        const out = await forgetNote(deps.store, who.identity, new URL(request.url).searchParams.get("path") ?? "");
+        if (!out.ok) return out.code === "not_found" ? problem(404, "not_found", out.reason, origin) : problem(400, "invalid_request", out.reason, origin);
+      }
+      return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
     if (request.method === "GET") return json(200, await readMemorySettings(deps.store, who.identity), origin);
     if (who.via !== "cookie") return problem(403, "forbidden", "memory settings are changed by the person signed in to the dash, never with a bearer token", origin);

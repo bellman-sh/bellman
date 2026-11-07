@@ -31,7 +31,8 @@ through it. The page itself lives in `ui/` at the repository root; `npm run buil
 
 ## Side Effects
 
-- `server.registerResource` on the `McpServer`, with `_meta.ui.prefersBorder` true on the content
+- `server.registerResource` on the `McpServer`, with `_meta.ui.prefersBorder` true and
+  `_meta.ui.permissions.clipboardWrite` requested on the content
   [src/ui/resource.ts:registerAppResource]
 
 ## Verification

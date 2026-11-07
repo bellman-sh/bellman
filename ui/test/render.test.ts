@@ -6,7 +6,7 @@
  * identifiers only (spec D6). Each assertion was first run against a renderer
  * that used innerHTML, and failed there.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { CAPABILITIES, renderJoin, verdictMessage, type Verdict } from "../src/join.js";
 import { renderMonitor } from "../src/monitor.js";
 import { createCanvas, dashRoomUrl } from "../src/canvas.js";
@@ -283,6 +283,16 @@ describe("renderMonitor", () => {
     expect(codes).toContain("BELL-AAAA-11-HELPER");
     expect(codes).toContain("no expiry");
     expect(codes).not.toContain("left");
+  });
+
+  it("puts a Copy button beside each code it can show, and none beside a live code", () => {
+    const r = roomsFixture();
+    const written = stubClipboard(async () => {});
+    r.rooms[0].join_codes.push({ ...r.rooms[0].join_codes[0], code: undefined });
+    const buttons = renderMonitor(r, new Map(), () => {}, NOW).querySelectorAll<HTMLButtonElement>(".codes button[data-copy]");
+    expect(buttons).toHaveLength(r.rooms[0].join_codes.length - 1);
+    buttons[0].click();
+    expect(written).toEqual(["BELL-AAAA-11-HELPER"]);
   });
 
   it("counts events since the view first saw the room, from its own memory", () => {
@@ -569,4 +579,30 @@ describe("renderCard", () => {
     (node.querySelector("button[data-open='join']") as HTMLButtonElement).click();
     expect(opened).toEqual(["https://bellman.sh/j/BELL-7F3K-92"]);
   });
+
+  it("copies the join code and the join link, and says so", async () => {
+    const written = stubClipboard(async () => {});
+    const node = renderCard(startFixture(), () => {}, NOW);
+    const code = node.querySelector("button[data-copy='code']") as HTMLButtonElement;
+    code.click();
+    await vi.waitFor(() => expect(code.textContent).toBe("Copied"));
+    (node.querySelector("button[data-copy='join']") as HTMLButtonElement).click();
+    expect(written).toEqual(["BELL-7F3K-92", "https://bellman.sh/j/BELL-7F3K-92"]);
+  });
+
+  it("says to select the code when the host refuses the clipboard", async () => {
+    stubClipboard(async () => { throw new DOMException("denied", "NotAllowedError"); });
+    const button = renderCard(startFixture(), () => {}, NOW).querySelector("button[data-copy='code']") as HTMLButtonElement;
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe("Select it to copy"));
+  });
 });
+
+function stubClipboard(write: (text: string) => Promise<void>): string[] {
+  const written: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => { written.push(text); return write(text); } },
+  });
+  return written;
+}

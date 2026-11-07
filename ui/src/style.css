@@ -54,5 +54,7 @@ fieldset label { display: block; margin: 4px 0; }
 .item iframe.artifact { display: block; width: 100%; border: 0; background: var(--bg); border-radius: 4px; }
 
 /* The room card: the code and its links, selectable whole. */
+.codes code { user-select: all; }
+.codes button, .card button[data-copy] { padding: 2px 8px; font-size: 12px; }
 .card .code { font-family: ui-monospace, monospace; font-size: 1.4em; letter-spacing: 0.05em; user-select: all; }
 .card .link { font-family: ui-monospace, monospace; word-break: break-all; user-select: all; }

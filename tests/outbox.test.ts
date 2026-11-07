@@ -3,7 +3,7 @@ import {
   DUE_PREFIX, MAX_DRAIN_PASSES, OUTBOX_GRACE_MS, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver,
   backoffMs, drain, dueKey, dueNames, earliestDue, enqueueRows, mergeDue, outboxKey,
   type OutboxRow, type OutboxStorage,
-} from "../src/outbox.js";
+} from "../src/storage/outbox.js";
 
 describe("named alarms", () => {
   /**

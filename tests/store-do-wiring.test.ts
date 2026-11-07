@@ -24,7 +24,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { serialize } from "node:v8";
-import { legacyRows, memberKey } from "../src/member-rows.js";
+import { legacyRows, memberKey } from "../src/storage/member-rows.js";
 import { PING, PONG } from "../src/keepalive.js";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
@@ -426,7 +426,7 @@ async function worldOn(
  */
 async function loadStoreDoWithoutGuard(): Promise<StoreDo> {
   vi.resetModules();
-  vi.doMock("../src/stored-session.js", () => ({ hydrateStoredSession: (raw: unknown) => raw }));
+  vi.doMock("../src/storage/stored-session.js", () => ({ hydrateStoredSession: (raw: unknown) => raw }));
   try {
     return {
       ...(await import("../src/workerd/store-do.js")),
@@ -434,7 +434,7 @@ async function loadStoreDoWithoutGuard(): Promise<StoreDo> {
       ...(await import("../src/workerd/registry-do.js")),
     };
   } finally {
-    vi.doUnmock("../src/stored-session.js");
+    vi.doUnmock("../src/storage/stored-session.js");
     vi.resetModules();
   }
 }

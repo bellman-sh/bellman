@@ -7,7 +7,7 @@ import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableO
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { AuditDO } from "../src/workerd/audit-do.js";
 import { SINK_DEAD_AFTER_MS, SINK_DELAY_MS } from "../src/audit-sink.js";
-import { backoffMs } from "../src/outbox.js";
+import { backoffMs } from "../src/storage/outbox.js";
 
 afterEach(async () => {
   vi.useRealTimers();

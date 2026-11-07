@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
-import { HOST_USER_ID, MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
+import { HOST_USER_ID, ROOM_MEMBER_CEILING } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
 import type { ArrivingMember, Identity, Member } from "../src/types.js";
 

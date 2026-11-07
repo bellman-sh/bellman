@@ -37,8 +37,8 @@ import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
 import { checkQuery } from "../search.js";
-import type { BellmanStore } from "../store.js";
-import type { StoredSession } from "../stored-session.js";
+import type { BellmanStore } from "../storage/store.js";
+import type { StoredSession } from "../storage/stored-session.js";
 import { surfaceCursor } from "../surface.js";
 import {
   AFTER_WITH_QUERY, MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, searchTag, surfaceBody, surfaceTag, windowParams, windowTag,

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { NEED_ROOM, RoomRefShape, fail, ok, refusal, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, fsEntry, fsFile, untrusted } from "../projections.js";
 import { findFsFor, fsHistoryFor, listFsFor, readFsFor, writeFs, type RoomResult } from "../rooms.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 
 const OPS = ["read", "list", "find", "history", "write", "append", "edit", "delete", "restore"] as const;

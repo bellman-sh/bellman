@@ -13,9 +13,9 @@ import { asManifest } from "../presets.js";
 import { forbiddenCapabilityRefusal } from "../orgs.js";
 import { claimName, publicNameRefusal } from "../public-names.js";
 import { audit } from "../rooms.js";
-import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING } from "../store.js";
-import type { BellmanStore } from "../store.js";
-import { monthKey } from "../stored-session.js";
+import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING } from "../storage/store.js";
+import type { BellmanStore } from "../storage/store.js";
+import { monthKey } from "../storage/stored-session.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean; upgrade?: UpgradeLinks }): void {

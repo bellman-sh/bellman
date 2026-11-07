@@ -20,7 +20,8 @@ import {
 import { drain, pendingCount, readMemberships } from "../src/client/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { type BellmanStore } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { readServer, writeServer } from "../src/client/credentials.js";
 import { VERSION } from "../src/client/version.js";
 import { connectSignedIn } from "../src/client/signin.js";

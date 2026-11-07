@@ -15,14 +15,14 @@
 import type { ArrivingMember, HostModelName, Member, Plan, RoomManifest, SessionEvent } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
 import { publicNames } from "./member-names.js";
-import type { OutboxIntent } from "./outbox.js";
-import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./store.js";
-import { monthKey, type StoredSession } from "./stored-session.js";
+import type { OutboxIntent } from "./storage/outbox.js";
+import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./storage/store.js";
+import { monthKey, type StoredSession } from "./storage/stored-session.js";
 import { untrusted } from "./projections.js";
 import { SEAT_SILENCE_MS, type AnswerResult } from "./outside.js";
 
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
-export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./store.js";
+export { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./storage/store.js";
 
 /**
  * The models a manifest may name: their ids, their weight in units (spec D3), and what

@@ -5,7 +5,7 @@ import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { entitlementsFor, upgradeHint, type UpgradeLinks } from "../auth.js";
 import { auditRefusal } from "../audit.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 
 export function registerAudit(server: McpServer, identity: Identity, s: BellmanStore, features: { upgrade?: UpgradeLinks }): void {
   server.registerTool(

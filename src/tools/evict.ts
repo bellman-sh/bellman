@@ -5,7 +5,7 @@ import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { banAsker, evictMember } from "../rooms.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 
 export function registerEvict(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(

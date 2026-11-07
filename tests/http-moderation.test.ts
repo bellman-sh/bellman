@@ -8,7 +8,7 @@ import { HOST_MEMBER_ID, HOST_USER_ID } from "../src/host.js";
 import { MAX_BAN_BYTES, MAX_REPORT_BYTES, moderationRoutes } from "../src/http/moderation.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { askRoom } from "../src/outside.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 

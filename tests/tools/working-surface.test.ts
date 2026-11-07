@@ -11,7 +11,7 @@ import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { PNG, text } from "../helpers/blob-bytes.js";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";

@@ -13,7 +13,8 @@ import {
   presentMembers, staleMembers,
 } from "../src/presence.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { MemoryStore, ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/store.js";
+import { ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { hostMember } from "../src/host.js";
 import type { Identity } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";

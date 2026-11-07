@@ -1,5 +1,5 @@
 import { ENTITLEMENTS, entitlementsFor, keyedPlan } from "../auth.js";
-import { isOrgId } from "../grant-index.js";
+import { isOrgId } from "../storage/grant-index.js";
 import { handleFromSegment } from "../handles.js";
 import { homeRoomId } from "../home.js";
 import { operatorReportView } from "../reports.js";
@@ -7,7 +7,7 @@ import { isLinkableUserId } from "../billing/stripe.js";
 import { isRecord } from "../billing/subscription.js";
 import { MAX_ORG_NAME_CHARS, MAX_SEATS, drawnOrgName, inviteLive, isUnownedSeat, orgView, parseOrgName, parseSeats, userIdForKey } from "../orgs.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
-import type { AuditIntent, BellmanStore } from "../store.js";
+import type { AuditIntent, BellmanStore } from "../storage/store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type OrgInvite, type Plan, type PlanGrant } from "../types.js";
 import { parseSsoKey,
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,

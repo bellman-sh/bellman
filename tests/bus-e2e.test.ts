@@ -16,7 +16,8 @@ import { identityFromAccessToken, unauthorizedHeaders } from "../src/oauth/route
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { connectSignedIn } from "../src/client/signin.js";
-import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { type BellmanStore } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { fakeBellman, RESOURCE, type FakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";

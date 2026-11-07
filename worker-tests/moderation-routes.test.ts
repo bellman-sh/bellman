@@ -10,7 +10,7 @@ import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { AuthStore } from "../src/workerd/auth-do.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
-import type { OutboxDriver } from "../src/outbox.js";
+import type { OutboxDriver } from "../src/storage/outbox.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { Identity } from "../src/types.js";

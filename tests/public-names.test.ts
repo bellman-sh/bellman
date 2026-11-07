@@ -5,12 +5,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PUBLIC_NAME, PUBLIC_NAME_LEASE_MS, claimName, heldName, holdsName, nameFree, publicNameRefusal, roomNamed } from "../src/public-names.js";
-import { MemoryStore } from "../src/store.js";
-import type { BellmanStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
+import type { BellmanStore } from "../src/storage/store.js";
 import { roomPreview } from "../src/projections.js";
 import { DEV_KEY, Harness, type Peer } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
-import { hydrateStoredSession } from "../src/stored-session.js";
+import { hydrateStoredSession } from "../src/storage/stored-session.js";
 import { brief, roomManifest, session } from "./helpers/fixtures.js";
 
 describe("the name rule (D2)", () => {

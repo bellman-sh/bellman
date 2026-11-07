@@ -9,7 +9,7 @@ import {
   isMemoryEvent, isMemoryPath, memoryAuthors, publicReadEvent, readableEvent, readableEvents, seesMemory,
 } from "../src/public-event.js";
 import { eventsFor } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Capability, Member, SessionEvent } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 

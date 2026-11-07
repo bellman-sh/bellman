@@ -9,7 +9,7 @@ import { manifestFixture, member, session } from "../helpers/fixtures.js";
 import { newBlobId } from "../../src/blobs.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { sendKeyFor, sendLimitFor } from "../../src/send-limit.js";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { MAX_SURFACE_ITEMS, gridSlot } from "../../src/surface.js";
 import type { SurfaceItem } from "../../src/types.js";
 import { text } from "../helpers/blob-bytes.js";

@@ -96,7 +96,7 @@ const FILE_READS: Listing = {
   "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
   "src/workerd/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
   "src/memory.ts": { calls: 3, serves: "exportMemory's readAll (ADR 0047 decision 14): the caller's own home room, and the caller's own memory id's files in a room it holds an active seat in, handed back to that account alone as a download; and deleteRoomNotes' listFs of the same prefix, paths and revisions only, each then deleted through writeFs. It applies no memory rule because the prefix is the account's own id, never a peer's" },
-  "src/store.ts": { calls: 2, serves: "MemoryStore's readHomeLogged and listHomeLogged (ADR 0047 decision 13): the home room's read and newest-first list, handed back with no memory rule as readFs and listFs are, and logged" },
+  "src/storage/memory-store.ts": { calls: 2, serves: "MemoryStore's readHomeLogged and listHomeLogged (ADR 0047 decision 13): the home room's read and newest-first list, handed back with no memory rule as readFs and listFs are, and logged" },
 };
 
 describe("the paths a memory file can leave by (ADR 0046)", () => {

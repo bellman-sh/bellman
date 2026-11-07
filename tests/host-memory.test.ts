@@ -5,10 +5,10 @@ import { createApp } from "../src/app.js";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { roomRoutes } from "../src/http/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { MemoryHost, nodeModel } from "../src/host-memory.js";
 import { HOST_MEMBER_ID, hostMember, type HostWake } from "../src/host.js";
-import { monthKey } from "../src/stored-session.js";
+import { monthKey } from "../src/storage/stored-session.js";
 import type { SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 

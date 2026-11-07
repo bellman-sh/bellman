@@ -4,7 +4,7 @@ import { tickStep } from "./heartbeat.js";
 import { clearedKeys, dueFindings } from "./housekeeping.js";
 import { MemoryHost, nodeModel } from "./host-memory.js";
 import { hostedSeatOn } from "./host.js";
-import { MemoryStore } from "./store.js";
+import { MemoryStore } from "./storage/memory-store.js";
 
 const port = parseInt(process.env.PORT || "3900", 10);
 

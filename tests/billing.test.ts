@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
 import { reconcilePurchase } from "../src/billing/grants.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import {
   MAX_WEBHOOK_BYTES, handleStripeWebhook, parsePaymentLinks, planForPrice, verifyStripeSignature,
 } from "../src/billing/stripe.js";

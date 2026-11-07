@@ -18,7 +18,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, member, roomManifest, session } from "../helpers/fixtures.js";
-import { capacityOf } from "../../src/store.js";
+import { capacityOf } from "../../src/storage/store.js";
 
 let h: Harness;
 

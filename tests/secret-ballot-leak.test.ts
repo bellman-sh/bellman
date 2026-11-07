@@ -10,7 +10,7 @@ import { decisionHash, type DecisionDraft } from "../src/decision.js";
 import { publicRoutes } from "../src/http/public.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
 import { liveRooms } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { RoomManifest } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness, type Peer } from "./helpers/harness.js";

@@ -15,7 +15,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
 import { DEV_KEY } from "./helpers/harness.js";

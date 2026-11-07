@@ -7,8 +7,8 @@ import { UNTRUSTED_PREAMBLE, roomPreview, soleSeat, yourSeats } from "../project
 import { cutFor, handlesOf, memberLog, readSurfaceWindow, searchLog, searchSurface } from "../rooms.js";
 import { QUERY_WITH_WINDOW, parseWindow, type Window } from "../frames.js";
 import { SEARCH_IN, checkQuery } from "../search.js";
-import { isActiveMember } from "../store.js";
-import type { BellmanStore } from "../store.js";
+import { isActiveMember } from "../storage/store.js";
+import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 import { APP_UI_META } from "../ui/resource.js";
 

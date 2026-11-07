@@ -51,8 +51,8 @@ import type { SessionDO } from "../src/workerd/session-do.js";
 import type { AuditDO } from "../src/workerd/audit-do.js";
 import {
   OUTBOX_GRACE_MS, OUTBOX_HANDLER, OUTBOX_PREFIX, OUTBOX_SEQ, dueKey, type OutboxRow,
-} from "../src/outbox.js";
-import type { EventBody, RemovalRequest } from "../src/store.js";
+} from "../src/storage/outbox.js";
+import type { EventBody, RemovalRequest } from "../src/storage/store.js";
 import type { AuditEntry, EventType, JoinCodeRecord, Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 

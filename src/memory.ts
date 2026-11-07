@@ -9,7 +9,7 @@ import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { renderExport, type ExportRoom } from "./memory-export.js";
 import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomFailure, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
-import { isActiveMember, type BellmanStore, type FsPage, type FsWrite } from "./store.js";
+import { isActiveMember, type BellmanStore, type FsPage, type FsWrite } from "./storage/store.js";
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "./types.js";
 
 const NO_NOTE = "no such note.";

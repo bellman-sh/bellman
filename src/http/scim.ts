@@ -16,7 +16,7 @@ import { parseFilter } from "../scim/filter.js";
 import { applyOperations, readUser } from "../scim/patch.js";
 import { listResponse, resourceTypes, schemas, scimError, scimJson, serviceProviderConfig, userResource } from "../scim/resource.js";
 import { departedRooms, scimIdentity, thawRooms } from "../scim/rooms.js";
-import type { BellmanStore, ScimUpdate } from "../store.js";
+import type { BellmanStore, ScimUpdate } from "../storage/store.js";
 import type { ScimUser, ScimUserPatch } from "../types.js";
 
 export type ScimRouteDeps = { store: BellmanStore };

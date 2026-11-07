@@ -11,8 +11,8 @@ import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, mostThatFits, readSurfaceWithin } from "../rooms.js";
 import { STALE_AFTER_MS, type Presence } from "../presence.js";
-import { isActiveMember, lastSeen, rosterHasOrgless } from "../store.js";
-import type { BellmanStore } from "../store.js";
+import { isActiveMember, lastSeen, rosterHasOrgless } from "../storage/store.js";
+import type { BellmanStore } from "../storage/store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 /**

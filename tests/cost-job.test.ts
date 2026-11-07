@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCostJob, type CostJobDeps } from "../src/cost/job.js";
 import { MemoryCostStore } from "../src/cost/memory.js";
-import { MemoryStore, type RoomIndexRow } from "../src/store.js";
+import { type RoomIndexRow } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 
 const NOW = Date.UTC(2026, 10, 2, 3, 17);
 const room: RoomIndexRow = { sessionId: "qs_a", createdAt: 1, createdBy: "u_github_1", orgId: null, preset: null, mode: "collab" as RoomIndexRow["mode"], public: false, hosted: false };

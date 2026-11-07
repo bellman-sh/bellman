@@ -8,7 +8,7 @@ import { snapshotOf } from "../src/heartbeat.js";
 import { ManifestError, resolveManifest } from "../src/manifest.js";
 import { checkPreset } from "../src/presets.js";
 import { roomPreview } from "../src/projections.js";
-import { hydrateStoredSession, type StoredSession } from "../src/stored-session.js";
+import { hydrateStoredSession, type StoredSession } from "../src/storage/stored-session.js";
 import { member, session } from "./helpers/fixtures.js";
 
 export const authored = (lead: Record<string, unknown> = {}) => ({

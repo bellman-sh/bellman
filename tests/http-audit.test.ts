@@ -9,7 +9,7 @@ import {
 } from "../src/http/audit.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { audit } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { AuditEntry, Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 

@@ -7,9 +7,9 @@
  */
 import { describe, expect, it } from "vitest";
 import { bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../src/housekeeping.js";
-import { noteAppend } from "../src/store.js";
+import { noteAppend } from "../src/storage/store.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
-import type { StoredSession } from "../src/stored-session.js";
+import type { StoredSession } from "../src/storage/stored-session.js";
 import type { Member, RoomManifest, SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 

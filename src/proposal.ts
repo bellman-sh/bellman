@@ -11,7 +11,7 @@ import { z } from "zod";
 import { PROPOSAL_KIND } from "./action-state.js";
 import { describeIssue, isTopicRoom } from "./manifest.js";
 import { verbsOfRole } from "./roles.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 import type { SurfaceWrite } from "./surface.js";
 import type { ApprovedBy, SessionEvent, SurfaceRow } from "./types.js";
 

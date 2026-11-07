@@ -4,10 +4,10 @@ import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { HostDO } from "../src/workerd/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
-import { monthKey } from "../src/stored-session.js";
+import { monthKey } from "../src/storage/stored-session.js";
 import type { OutsideTask, SessionEvent } from "../src/types.js";
 import { answerQuestion, askRoom, questionsToAnswer } from "../src/outside.js";
-import type { StoredSession } from "../src/stored-session.js";
+import type { StoredSession } from "../src/storage/stored-session.js";
 import worker from "../src/workerd/worker.js";
 import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
 

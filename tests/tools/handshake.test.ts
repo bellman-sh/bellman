@@ -17,7 +17,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
-import { JOIN_CODE_TTL, MemoryStore, ROOM_MEMBER_CEILING, capacityOf } from "../../src/store.js";
+import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf } from "../../src/storage/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import type { Identity } from "../../src/types.js";
 

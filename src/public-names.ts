@@ -2,9 +2,9 @@
  * Public names (public names spec): the rule a name keeps (D2) and whether a room holds one (D5).
  * Runtime-free, like projections.ts, so the routes, the tools and both test programs import it.
  */
-import { isPublic } from "./store.js";
-import type { BellmanStore, PublicNameEntry } from "./store.js";
-import type { StoredSession } from "./stored-session.js";
+import { isPublic } from "./storage/store.js";
+import type { BellmanStore, PublicNameEntry } from "./storage/store.js";
+import type { StoredSession } from "./storage/stored-session.js";
 
 /** D2. No `_`, so a name can never be read as a session id, which always has one. */
 export const PUBLIC_NAME = /^(?=.{3,40}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;

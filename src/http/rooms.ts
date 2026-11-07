@@ -39,8 +39,8 @@ import { checkQuery } from "../search.js";
 import { configRoutes } from "./config.js";
 import { notesSharingRoutes } from "./notes-sharing.js";
 import { fileRoutes } from "./files.js";
-import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
-import type { StoredSession } from "../stored-session.js";
+import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../storage/store.js";
+import type { StoredSession } from "../storage/stored-session.js";
 import { surfaceCursor } from "../surface.js";
 import type { Identity, Member, SessionEvent } from "../types.js";
 

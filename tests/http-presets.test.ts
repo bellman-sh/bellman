@@ -7,7 +7,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { MAX_PRESET_BYTES, presetRoutes, type PresetRouteDeps } from "../src/http/presets.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { MAX_PRESETS } from "../src/presets.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";

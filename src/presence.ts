@@ -57,11 +57,9 @@ import type { Member } from "./types.js";
 // `lastSeen` and the socket derivation live in store.ts beside `isActiveMember`,
 // because `seatMember` reads them inside the store and this module imports that
 // one.
-import {
-  ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, isActiveMember, lastSeen,
-} from "./store.js";
+import { ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, isActiveMember, lastSeen } from "./storage/store.js";
 export { ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, lastSeen };
-export type { RoomRoster } from "./store.js";
+export type { RoomRoster } from "./storage/store.js";
 
 /**
  * How long a member may go unheard from before its seat is reclaimable.

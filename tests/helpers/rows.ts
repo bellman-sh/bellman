@@ -5,8 +5,8 @@
  * storage it is handed.
  */
 import type { Member } from "../../src/types.js";
-import { MEMBER_PREFIX, loadPresent, memberKey, putRows, type RowReader } from "../../src/member-rows.js";
-import { isActiveMember } from "../../src/store.js";
+import { MEMBER_PREFIX, loadPresent, memberKey, putRows, type RowReader } from "../../src/storage/member-rows.js";
+import { isActiveMember } from "../../src/storage/store.js";
 
 /** The slice of Durable Object storage these read and write. */
 export interface RoomStorage extends RowReader {

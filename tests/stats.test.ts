@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { MAX_ACCOUNTS_ANSWERED, MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity, PlanGrant } from "../src/types.js";
 import { DEV_KEY } from "./helpers/harness.js";
 

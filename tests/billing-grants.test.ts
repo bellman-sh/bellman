@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { MemoryStore, type GrantDelete, type GrantWrite } from "../src/store.js";
+import { type GrantDelete, type GrantWrite } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
 import { DEFAULT_POLICY } from "../src/types.js";
 import {

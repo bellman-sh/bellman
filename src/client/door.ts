@@ -24,7 +24,7 @@ import { parentPid, pendingSummary } from "./inbox.js";
  * the canvas, and a refusal of an action request. The writes are that refusal, a seat status the Claude Code hooks set
  * (#432), which carries no words, and a canvas item written or removed (#465), for a terminal's `canvas` and `draw`,
  * which hold no Bellman token of their own. The folder is 0700 and the socket 0600, which is the only check there is on
- * who may connect, as on the bus (src/bus.ts): any process running as the person can decline a request, set a status
+ * who may connect, as on the bus (src/client/bus.ts): any process running as the person can decline a request, set a status
  * or edit a room's canvas as the person's seat through this door, as it can already read the person's Bellman sign-in.
  *
  * The hooks run under Claude Code, beside the bridge and not under it, so they cannot find a socket named for the
@@ -144,7 +144,7 @@ export function findDoor(startPid: number = process.ppid, root = doorRoot(), max
 
 /**
  * What a door reports and reads, handed over as functions so that each request sees the bridge as it is then.
- * `seats`, `recent` and `readEvents` are the bridge's own (see createBridge in src/bridge.ts); whoever starts the
+ * `seats`, `recent` and `readEvents` are the bridge's own (see createBridge in src/client/bridge.ts); whoever starts the
  * door supplies the rest.
  */
 export interface DoorSource {
@@ -155,7 +155,7 @@ export interface DoorSource {
   recent(): DoorEvent[];
   /** Hook and queue delivery's inbox. Channel delivery keeps none. */
   inboxDir?: string;
-  /** The bridge's own never rejects (see readEvents in src/bridge.ts). The door answers with the status and body it gives. */
+  /** The bridge's own never rejects (see readEvents in src/client/bridge.ts). The door answers with the status and body it gives. */
   readEvents(sessionId: string, after?: number): Promise<{ status: number; body: unknown }>;
   /** The rooms the bridge holds a seat in, as `bellman_rooms` gave them. Never rejects, like `readEvents`. */
   readRooms(): Promise<{ status: number; body: unknown }>;
@@ -429,7 +429,7 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
  *
  * close() drops every open connection before it waits for them: a request the bridge is still answering, a log read
  * waiting on the server, must not hold up the shutdown that awaits this. Closing a server unlinks its socket (Node's
- * documentation, and src/bus.ts measured it), so nothing is left at `path`.
+ * documentation, and src/client/bus.ts measured it), so nothing is left at `path`.
  *
  * `log` is the bridge's own (its stderr): each 500 is one line there.
  */

@@ -1,6 +1,6 @@
 /**
  * A tool call's result as data: how the bridge's door reads what its own connection's calls return (`callLive` in
- * src/bridge.ts), and how the Claude Code mod reads its `$.mcp.call` of `bellman_whoami`.
+ * src/client/bridge.ts), and how the Claude Code mod reads its `$.mcp.call` of `bellman_whoami`.
  *
  * Claude Code hands a plugin's call back with `content` and `isError` alone. It passes `structuredContent` on only
  * for a tool that declares an output schema, and no Bellman tool does, so the JSON is in the first text block: the

@@ -339,7 +339,7 @@ identity. Everything around the event differs, because a poll is per member and
 a socket is per room. The poll is permanent, so a change to what a watcher sees
 has to land on both. And a socket frame carries no wrapper, so whatever reads it
 must frame it as untrusted and escape `<` before a model sees it. The bridge does
-that in `renderEvent` (`src/inbox.ts`), whichever path brought the event.
+that in `renderEvent` (`src/client/inbox.ts`), whichever path brought the event.
 
 **Why the socket is cheaper.** A long poll is an in-flight request, an in-flight
 request keeps the object resident, and a resident object bills duration for its
@@ -456,8 +456,8 @@ missed from the server, as the member it is. It is also where a room's stream
 becomes each member's: every event is addressed to each subscribing member, less
 that member's own. Delivery itself did not move. Each bridge still writes its
 own session's channel or inbox, so what is shared is the connection and not the
-writer. `src/bus.ts` holds the election, the wire and the window,
-`src/room-socket.ts` the upstream socket, and `src/bus-link.ts` what a bridge
+writer. `src/client/bus.ts` holds the election, the wire and the window,
+`src/client/room-socket.ts` the upstream socket, and `src/client/bus-link.ts` what a bridge
 asks of them.
 
 **The socket is the election.** A bridge connects to the bus path. If something
@@ -561,7 +561,7 @@ plugin's own tool call (`tool.check skipped: re-entry`). That is why the rooms,
 the canvas and the decline are door routes and not tool calls, and why they work
 from a timer, since `$.http.fetch` over a socket is covered by no permission
 check. A `$.mcp.call` result carries no `structuredContent`; the JSON is in its
-first text block (`resultData`, `src/result-data.ts`). The mod reads each
+first text block (`resultData`, `src/client/result-data.ts`). The mod reads each
 door's status every `DOOR_POLL_MS` (two seconds), a read on this machine, and
 the Log the room pane shows through the door at the same pace; the rooms and
 their logs every `ROOMS_POLL_MS` (fifteen seconds, the MCP Apps monitor's
@@ -579,7 +579,7 @@ be an uncaught exception in a process with no handler for one. A 500 leaves one
 line in the bridge's log: the method, the route's shape and the error, never the
 room's id or what the request sent. A bridge older than the door names none
 either, and the mod says to update it. The Claude Desktop bundle, which runs the
-same `src/channel.ts`, opens no door at all: nothing there reads one. A door
+same `src/client/channel.ts`, opens no door at all: nothing there reads one. A door
 that cannot be read (a bridge restarting, say) keeps its socket and the last
 status it gave, so its rooms stay on screen, reading reconnecting, and the gate
 stays shut on them; every tick reads the same socket again, and the mod's next
@@ -1405,7 +1405,7 @@ Three paths, and no operator in any of them:
 - **The bridge signs itself in.** It is a local stdio process, so it cannot be
   redirected to by a hosted callback. Instead it binds loopback on one of
   ports 51004–51008, opens a browser once, and stores its own tokens
-  (`src/signin.ts`, `src/credentials.ts`) under `~/.config/bellman`
+  (`src/client/signin.ts`, `src/client/credentials.ts`) under `~/.config/bellman`
   (`$XDG_CONFIG_HOME/bellman` when that is an absolute path). Because
   `tools/list` is itself a call to Bellman, this happens at Claude Code launch
   rather than on the first `bellman_*` call. A file lock keeps concurrent
@@ -1519,8 +1519,8 @@ loud:
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
   instead, so the client that reads it does the wrapping and owns this rule.
-  The bridge is that client: `renderEvent` (`src/inbox.ts`) does the wrapping,
-  after the bus. `deliver` (`src/bridge.ts`) calls it for a channel push, and the
+  The bridge is that client: `renderEvent` (`src/client/inbox.ts`) does the wrapping,
+  after the bus. `deliver` (`src/client/bridge.ts`) calls it for a channel push, and the
   Stop hook and `bellman_wait` call it, through `renderBatch`, for the events
   `deliver` queued. An event is escaped and framed as untrusted whichever path
   brought it, and it does not become trusted by passing through a local process.
@@ -1702,7 +1702,7 @@ loud:
   narrowing the umask around the bind and not by a chmod afterwards, which would
   leave it connectable for the moment between; a folder that already exists is
   left as it is, as the bus's is. Those modes are the only check on who may
-  connect, as on the bus (`src/bus.ts`), so any process running as the person
+  connect, as on the bus (`src/client/bus.ts`), so any process running as the person
   can use the door: read a room's log and canvas through it, decline an
   action request, and edit a room's canvas, as it can already read the person's Bellman sign-in under
   `~/.config/bellman/`. The decline is a `bellman_send` of one `action_response`
@@ -1723,7 +1723,7 @@ loud:
   and the two that name a request carry only a room id and a cursor the server
   made, checked first. Every peer string the mod draws (a label, a room name, a
   message, a request, a canvas body) passes `cleanText` or `cleanBlock`
-  (`src/door-protocol.ts`) first, so a toast, a title or a row never carries an
+  (`src/client/door-protocol.ts`) first, so a toast, a title or a row never carries an
   escape sequence, a line break or one of the characters, named there, that draw
   nothing or turn the direction a line reads in; what an action request asks is
   drawn whole, each such character spelled out as its code point instead, and

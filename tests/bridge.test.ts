@@ -16,14 +16,14 @@ import { resolveIdentity } from "../src/auth.js";
 import {
   createBridge, deliveryOf, installOf, loadRoomManifest,
   type BridgeOptions, type Delivery, type Install, type Remote, type WhoAmI,
-} from "../src/bridge.js";
-import { drain, pendingCount, readMemberships } from "../src/inbox.js";
+} from "../src/client/bridge.js";
+import { drain, pendingCount, readMemberships } from "../src/client/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
-import { readServer, writeServer } from "../src/credentials.js";
-import { VERSION } from "../src/version.js";
-import { connectSignedIn } from "../src/signin.js";
+import { readServer, writeServer } from "../src/client/credentials.js";
+import { VERSION } from "../src/client/version.js";
+import { connectSignedIn } from "../src/client/signin.js";
 import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
@@ -773,7 +773,7 @@ describe("the update notice", () => {
     expect(notices((await a.call("bellman_rooms")).text).join("\n")).toContain(step);
   });
 
-  // src/channel.ts reads BELLMAN_INSTALL through this, and each package's env sets it: the Desktop manifest and the
+  // src/client/channel.ts reads BELLMAN_INSTALL through this, and each package's env sets it: the Desktop manifest and the
   // plugin's .mcp.json. An npm install sets nothing, and anything unknown is npm's step, which works anywhere npm does.
   it("reads BELLMAN_INSTALL: bundle and plugin by name, anything else as npm", () => {
     expect(installOf("bundle")).toBe("bundle");
@@ -782,7 +782,7 @@ describe("the update notice", () => {
   });
 });
 
-// src/channel.ts reads BELLMAN_DELIVERY through this, and tests/extension.test.ts reads the bundle's manifest through
+// src/client/channel.ts reads BELLMAN_DELIVERY through this, and tests/extension.test.ts reads the bundle's manifest through
 // it: a value it drops is a bridge running a delivery nobody asked for.
 it("reads BELLMAN_DELIVERY: hook and queue by name, anything else as channel", () => {
   expect(deliveryOf("hook")).toBe("hook");
@@ -932,7 +932,7 @@ describe("bellman_whoami", () => {
     });
   });
 
-  // The Claude Code mod finds the bridge's door here (src/door.ts). The text a person is shown is the same with and
+  // The Claude Code mod finds the bridge's door here (src/client/door.ts). The text a person is shown is the same with and
   // without one, and so is every other field: the door is one more key, which a bridge with none reports as null.
   it("names the bridge's door, and changes nothing else in the answer", async () => {
     const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn, door: () => "/tmp/bellman-door.sock" });

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   discardThrough, drain, enqueue, findInbox, inboxDirFor, pendingCount, pendingSummary, readMemberships,
   renderBatch, renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent,
-} from "../src/inbox.js";
+} from "../src/client/inbox.js";
 
 function event(over: Partial<PeerEvent> = {}): PeerEvent {
   return {
@@ -65,7 +65,7 @@ describe("inbox queue", () => {
       enqueue(dir, event({ cursor: i, at: new Date(Date.UTC(2026, 8, 17) + i).toISOString() }));
     }
     const drainer = `
-      import { drain } from ${JSON.stringify(join(process.cwd(), "src/inbox.ts"))};
+      import { drain } from ${JSON.stringify(join(process.cwd(), "src/client/inbox.ts"))};
       const got = [];
       for (let i = 0; i < 20; i++) got.push(...drain(${JSON.stringify(dir)}).map((e) => e.cursor));
       process.stdout.write(JSON.stringify(got));
@@ -148,7 +148,7 @@ describe("inbox queue", () => {
       };
     });
     try {
-      const mocked = await import("../src/inbox.js");
+      const mocked = await import("../src/client/inbox.js");
       mocked.enqueue(dir, event({ member_id: "m1", cursor: 1 }));
       mocked.enqueue(dir, event({ member_id: "m2", cursor: 2 }));
       expect(mocked.pendingSummary(dir)).toEqual([{ member_id: "m2", interrupting: 1, ambient: 0 }]);
@@ -196,7 +196,7 @@ describe("a queue entry that cannot be removed", () => {
       };
     });
     try {
-      const mocked = await import("../src/inbox.js");
+      const mocked = await import("../src/client/inbox.js");
       mocked.enqueue(dir, event({ cursor: 1 }));
       mocked.enqueue(dir, event({ cursor: 2, at: "2026-09-17T00:00:02.000Z" }));
 

@@ -8,8 +8,8 @@ wide room pane (Log, Canvas, Members, Approve tabs), toasts, a wake for an idle
 session when a peer writes, and an approval gate on action responses.
 
 It finds each local bridge with one `bellman_whoami` call, then reads and
-writes only through that bridge's door, a Unix socket served by `src/door.ts`
-with its protocol in `src/door-protocol.ts`. The pure logic it draws on lives in
+writes only through that bridge's door, a Unix socket served by `src/client/door.ts`
+with its protocol in `src/client/door-protocol.ts`. The pure logic it draws on lives in
 `src/mod/` (`view.js`, `gate.js`, `wake.js`, `calls.js`) and is bundled in.
 esbuild bundles this directory into [`../hooks/register.mjs`](../hooks/EGM.md)
 (`npm run build:mod`); the committed bundle is what Claude Code runs.

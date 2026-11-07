@@ -135,7 +135,7 @@ removed: true: a creator removed you. You still get the history up to and includ
       const status = sessionStatus(answering);
 
       // An answer that says `closed` is never a page (#208). Every released client stops at
-      // `closed` without reading `more` (src/bridge.ts, src/bus-link.ts), and a closed room's
+      // `closed` without reading `more` (src/client/bridge.ts, src/client/bus-link.ts), and a closed room's
       // log is final, so the answer carries the rest of it, capped at the cut, as every answer
       // did before pages: a member far behind when its room closed would otherwise be handed
       // one page of what it missed and never the rest.
@@ -366,7 +366,7 @@ removed: true: a creator removed you. You still get the history up to and includ
           // costs one poll: the next one reads a fresh record and the feed
           // reopens. This flag cannot. A client reads it as "stop asking" and
           // marks the handle departed for the life of the process
-          // (`markDeparted` in src/bridge.ts), so emitting it wrongly ends a
+          // (`markDeparted` in src/client/bridge.ts), so emitting it wrongly ends a
           // feed for good, and nothing self-heals.
           //
           // Wrongly is reachable: `me` read before a leave shows the member

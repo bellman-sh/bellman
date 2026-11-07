@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventLine, type DoorEvent } from "../src/door-protocol.js";
+import { eventLine, type DoorEvent } from "../src/client/door-protocol.js";
 import {
   BELL_COLUMNS, BELL_ROWS, CANVAS_MAX, LOGS_MAX, REQUEST_DRAWN_MAX, bellRows, canvasOf, chooseLayout, drawingOf, fitLogs, kept, lineOf,
   pendingRequests, roomLabel, safeLinks, sidebarMove, toastFor, unreadCount, type KeptEvent,

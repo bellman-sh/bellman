@@ -4,14 +4,14 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { busPath } from "../src/bus.js";
-import { createBusLink, type BusConnection, type BusLink, type BusLinkOptions } from "../src/bus-link.js";
-import type { PeerEvent } from "../src/inbox.js";
+import { busPath } from "../src/client/bus.js";
+import { createBusLink, type BusConnection, type BusLink, type BusLinkOptions } from "../src/client/bus-link.js";
+import type { PeerEvent } from "../src/client/inbox.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 
-// The bus link is what a bridge does with the bus (src/bus.ts) and a room's socket
-// (src/room-socket.ts): it elects, subscribes, and when it is the coordinator keeps each
+// The bus link is what a bridge does with the bus (src/client/bus.ts) and a room's socket
+// (src/client/room-socket.ts): it elects, subscribes, and when it is the coordinator keeps each
 // room's upstream open. Every test here runs real Unix sockets in a per-test temp directory
 // and Node's real WebSocket against tests/helpers/fake-bellman.ts. The only thing scripted is
 // the bridge's connection to Bellman, because that is an MCP client and `bellman_sync` is

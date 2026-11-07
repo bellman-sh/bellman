@@ -19,10 +19,11 @@ export function readVersion(file: URL): string {
 /**
  * The version of the package this file ships in: what the bridge tells every MCP host and what `bellman
  * version` prints. It is read from package.json at run time because a constant here is a number somebody has
- * to remember to bump, and src/bridge.ts still said 0.1.0 at 0.3.1.
+ * to remember to bump, and the bridge still said 0.1.0 at 0.3.1.
  *
- * `../package.json` is the repository root from src/ (vitest, tsx) and the package root from dist/ (an npm
- * install). In the Claude Desktop bundle it is the package.json extension/build.sh stages beside server/,
+ * `../../package.json` is the repository root from src/client/ (vitest, tsx) and the package root from
+ * dist/client/ (an npm install). In the Claude Desktop bundle it is the package.json extension/build.sh stages
+ * beside server/,
  * which carries the version of the code packed inside. It is read as a file and not imported as JSON:
  * tsconfig.json's rootDir is src, and a JSON import from outside it fails the build.
  *
@@ -35,7 +36,7 @@ declare const BELLMAN_BUNDLE_VERSION: string | undefined;
 export const VERSION =
   typeof BELLMAN_BUNDLE_VERSION === "string"
     ? BELLMAN_BUNDLE_VERSION
-    : readVersion(new URL("../package.json", import.meta.url));
+    : readVersion(new URL("../../package.json", import.meta.url));
 
 /** "0.4.0-rc.1" is [0, 4, 0]: a prerelease or build suffix is dropped. Null for anything that is not dotted numbers. */
 function numbers(version: string): number[] | null {

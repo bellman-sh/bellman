@@ -1,5 +1,5 @@
 /**
- * The `bellman` command (src/cli.ts) and the version it and the bridge both report (src/version.ts).
+ * The `bellman` command (src/client/cli.ts) and the version it and the bridge both report (src/client/version.ts).
  *
  * run() takes everything with a side effect as a dependency, so most of this drives the real command
  * against fakes and asserts what it printed, what it spawned and what it exited with. Two things a
@@ -16,17 +16,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createBridge } from "../src/bridge.js";
+import { createBridge } from "../src/client/bridge.js";
 import {
   browserOpener, featureRequestUrl, installKind, run, type CliDeps, type Launch,
-} from "../src/cli.js";
-import { VERSION, compareVersions, readVersion } from "../src/version.js";
+} from "../src/client/cli.js";
+import { VERSION, compareVersions, readVersion } from "../src/client/version.js";
 
 const pkg: { version: string; bin: Record<string, string> } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 );
 const repo = fileURLToPath(new URL("..", import.meta.url));
-const entry = join(repo, "src", "cli.ts");
+const entry = join(repo, "src", "client", "cli.ts");
 
 const PKG = "@bellman-sh/mcp-server";
 const FORM = "https://github.com/bellman-sh/bellman/issues/new?template=feature_request.yml";
@@ -497,8 +497,8 @@ describe("VERSION", () => {
 });
 
 describe("the bellman bin", () => {
-  it("is declared in package.json at dist/cli.js, and the source keeps the shebang that makes it runnable", () => {
-    expect(pkg.bin.bellman).toBe("dist/cli.js");
+  it("is declared in package.json at dist/client/cli.js, and the source keeps the shebang that makes it runnable", () => {
+    expect(pkg.bin.bellman).toBe("dist/client/cli.js");
     expect(readFileSync(entry, "utf8").split("\n")[0]).toBe("#!/usr/bin/env node");
   });
 

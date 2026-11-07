@@ -14,7 +14,7 @@
  * bounds from `payload.ts`, which imports nothing.
  */
 import { ACTION_REQUEST_TTL_MS } from "../action-state.js";
-import { cleanBlock, cleanText, eventLine, type DoorEvent, type DoorStatus } from "../door-protocol.js";
+import { cleanBlock, cleanText, eventLine, type DoorEvent, type DoorStatus } from "../client/door-protocol.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH } from "../payload.js";
 
 /** Columns the sidebar asks for when the pane docks. */

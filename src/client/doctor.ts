@@ -35,7 +35,7 @@ export interface DoctorDeps {
   cwd: string;
   /** `process.platform`: Windows reports group and other permission bits on every folder. */
   platform: string;
-  /** Where bridges open their doors: `doorRoot()` in src/door.ts. */
+  /** Where bridges open their doors: `doorRoot()` in src/client/door.ts. */
   doorRoot: string;
   /** True when `BELLMAN_DOOR_ROOT` is unset: only then is the folder one a bridge made 0700. */
   doorRootIsDefault: boolean;
@@ -332,7 +332,7 @@ export async function diagnose(deps: DoctorDeps): Promise<Finding[]> {
     findings.push({ status: "ok", line: `bellman-mod ${modVersion} is installed and enabled.` });
   }
 
-  // The doors: what the mod reads. The folder's 0700 is the only check on who may connect (src/door.ts).
+  // The doors: what the mod reads. The folder's 0700 is the only check on who may connect (src/client/door.ts).
   const mode = deps.mode(deps.doorRoot);
   const sockets = (deps.listDir(deps.doorRoot) ?? []).filter((name) => name.endsWith(".sock")).sort();
   if (mode === null) {

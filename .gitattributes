@@ -1,2 +1,2 @@
-# Built by `npm run build:plugin` from src/channel.ts and src/stop-hook.ts, and rebuilt in release PRs.
+# Built by `npm run build:plugin` from src/client/channel.ts and src/client/stop-hook.ts, and rebuilt in release PRs.
 plugin/bridge/*.mjs linguist-generated=true -diff

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = join(root, "node_modules", ".bin", "tsx");
-const ENTRY = join(root, "src", "channel.ts");
+const ENTRY = join(root, "src", "client", "channel.ts");
 
 interface Bellman {
   server: Server;
@@ -374,7 +374,7 @@ function answers(bridge: Bridge): Map<number, Answer> {
 
 describe("the update notice through the process", () => {
   /**
-   * src/channel.ts is the one place the bridge learns how it was installed, from the env each package sets. Every
+   * src/client/channel.ts is the one place the bridge learns how it was installed, from the env each package sets. Every
    * other test hands its bridge an install of its own, so a channel.ts that never passed one would ship with every
    * test green and tell a Desktop user to run npm.
    */
@@ -397,7 +397,7 @@ describe("the update notice through the process", () => {
 
 describe("bellman_upload through the process", () => {
   /**
-   * src/channel.ts is the one place the bridge is told where to post and as whom (#183). Every other test builds a
+   * src/client/channel.ts is the one place the bridge is told where to post and as whom (#183). Every other test builds a
    * bridge of its own with an `upload` of its own, and the tool is listed whether or not it has a target, so a
    * channel.ts that never passed one would ship with every test green and `bellman_upload` answering "no upload
    * target". The room refuses (403) on purpose: the request is what is observed, and a refusal needs no Bellman

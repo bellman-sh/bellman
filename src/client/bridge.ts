@@ -24,7 +24,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
-import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
+import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "../blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import type {
   DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorMemory, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
@@ -35,7 +35,7 @@ import {
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import { resultData } from "./result-data.js";
-import type { EventType } from "./types.js";
+import type { EventType } from "../types.js";
 import { compareVersions, VERSION } from "./version.js";
 
 /**
@@ -205,13 +205,13 @@ export interface BridgeOptions {
   /** Who this bridge signed in as. Absent means a static BELLMAN_KEY. */
   whoami?: () => WhoAmI;
   /**
-   * The path of this bridge's door (src/door.ts), for bellman_whoami to name, or null while it has none. Asked on
+   * The path of this bridge's door (src/client/door.ts), for bellman_whoami to name, or null while it has none. Asked on
    * every call, because the door opens after the bridge is built and may never open. Absent, the bridge has none.
    */
   door?: () => string | null;
   /**
-   * Share one upstream connection per room with every other bridge on this machine, through a local bus (src/bus.ts,
-   * src/bus-link.ts). Absent, every member is long-polled by this bridge on its own, as it was before the bus
+   * Share one upstream connection per room with every other bridge on this machine, through a local bus (src/client/bus.ts,
+   * src/client/bus-link.ts). Absent, every member is long-polled by this bridge on its own, as it was before the bus
    * existed. That is also what happens, member by member, whenever the bus cannot be had or stops being usable for
    * one: the bus is an optimisation, and nothing here depends on it.
    */
@@ -1428,7 +1428,7 @@ export function createBridge(opts: BridgeOptions) {
       if (response.status === 401) {
         // The bearer is read from the credential file, and a signed-in access token lasts ten minutes, with nothing
         // refreshing it between calls. The MCP transport does, on a 401 of its own, and writes the new token to
-        // that file (src/signin.ts). So it is given one: a tools/list through the connection the bridge holds,
+        // that file (src/client/signin.ts). So it is given one: a tools/list through the connection the bridge holds,
         // whose failure, or the sign-in it could not complete, changes nothing here. The post is repeated once,
         // and only if the bearer read now is not the one just refused: a BELLMAN_KEY cannot be refreshed, and a
         // second post of up to 25 MB that must fail the same way is not a retry. A 401 that stays is reported as it
@@ -1773,7 +1773,7 @@ export function createBridge(opts: BridgeOptions) {
      * The seats this bridge watches, for the door: each member in its room, and whether its long poll is failing and
      * being retried.
      * ponytail: a member on the bus shows `retrying` only once `onFallback` puts it back on polling, and a room
-     * socket degraded inside src/bus-link.ts is not reported; surface it from there if the door should say so.
+     * socket degraded inside src/client/bus-link.ts is not reported; surface it from there if the door should say so.
      */
     seats: (): DoorSeat[] =>
       [...watches.values()].map((w) => ({ session_id: w.sessionId, member_id: w.memberId, retrying: w.retrying })),

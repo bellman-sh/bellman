@@ -1,7 +1,7 @@
 # Bellman
 
 Cross-session, cross-provider agent collaboration over MCP. A server (`src/`),
-a local bridge for Claude Code (`src/bridge.ts`), and one deployment target
+a local bridge for Claude Code (`src/client/bridge.ts`), and one deployment target
 (Cloudflare Workers + Durable Objects).
 
 ## Commands
@@ -40,7 +40,7 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
   so the HTTP routes can import it without the MCP SDK; `src/public-event.ts` is
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
-- `src/workerd/` — everything that runs only in workerd: the Workers entry (`worker.ts`) and the seven Durable
+- `src/workerd/` — everything that runs only in workerd: the Workers entry (`worker.ts`) and the six Durable
   Object classes. `store-do.ts` is `DurableObjectStore`, the production `BellmanStore`, which routes each call to
   `SessionDO` (`session-do.ts`), `RegistryDO` (`registry-do.ts`) or `AuditDO` (`audit-do.ts`); `AuthDO`, `HostDO`
   and `CostDO` are `auth-do.ts`, `host-do.ts` and `cost-do.ts`.
@@ -53,8 +53,10 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
   `src/workerd/cost-do.ts` is `CostDO`, the object it records into.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
-- `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` / `src/status-hook.ts` — the Claude Code client side.
-- `src/door.ts` / `src/door-protocol.ts` — the bridge's door: a Unix socket per bridge that the mod in the
+- `src/client/` — the Claude Code client side, which no server entry imports: the bridge (`bridge.ts`, started by
+  `channel.ts`), the local bus, the inbox, the Stop, status and join hooks, sign-in, credentials and the `bellman`
+  CLI. The npm bins run from `dist/client/`.
+- `src/client/door.ts` / `src/client/door-protocol.ts` — the bridge's door: a Unix socket per bridge that the mod in the
   same session reads (seven routes, three writes: a decline, a seat status the plugin's hooks set, and a canvas item
   put or deleted as the bridge's seat, for a terminal that holds no token). The protocol file is runtime-free and shared
   with the mod.
@@ -159,7 +161,7 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `plugin-authoring` skill, which writes this build's API (`types/claude-code.d.ts`) and names its path; put
   the `tsconfig.json` from that file's header outside the repository, its `include` naming that file,
   `mod/src` and `mod/types`, and run `npx tsc -p <that tsconfig>` from the root. It reports errors in
-  `src/inbox.ts`, which has no Node types there, and in `bellRows`' indexed access in `src/mod/view.ts`:
+  `src/client/inbox.ts`, which has no Node types there, and in `bellRows`' indexed access in `src/mod/view.ts`:
   those are expected. One in `mod/` is real.
 
 ## Testing

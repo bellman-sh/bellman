@@ -9,14 +9,14 @@
  * bundle died at import and Claude Desktop said "Server disconnected". Nothing
  * before the packed artifact can show that, so this runs on the artifact.
  *
- *   node extension/check-deps.mjs <stage-dir> [entry, default server/channel.js]
+ *   node extension/check-deps.mjs <stage-dir> [entry, default server/client/channel.js]
  */
 import { existsSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 
 const stage = resolve(process.argv[2] ?? ".");
-const entry = resolve(stage, process.argv[3] ?? "server/channel.js");
+const entry = resolve(stage, process.argv[3] ?? "server/client/channel.js");
 const builtins = new Set(builtinModules);
 
 const SPECIFIER =

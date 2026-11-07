@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   openRoomSocket, type RoomSocketState, type WebSocketConstructor, type Why,
-} from "../src/room-socket.js";
+} from "../src/client/room-socket.js";
 
 // Defaults to the local Node server; point BELLMAN_URL at a wrangler dev
 // instance or the deployed Worker to run the same proof against those.
@@ -179,7 +179,7 @@ async function main(): Promise<void> {
     // WebSocket cannot be what is tested: sent nothing for the whole idle below, it would exercise no keepalive, and
     // an "it still delivers" check on it would pass with the server's `ping` changed to anything. The same goes for
     // sending "ping" by hand, which would check the server against a fourth copy of the literal and not against the
-    // one in src/room-socket.ts. So Node's WebSocket is wrapped only to record the text frames each way, and the
+    // one in src/client/room-socket.ts. So Node's WebSocket is wrapped only to record the text frames each way, and the
     // module does the rest.
     const frames = { sent: [] as string[], received: [] as string[] };
     const NodeWebSocket = globalThis.WebSocket as unknown as WebSocketConstructor;

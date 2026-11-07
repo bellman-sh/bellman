@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { enqueue, inboxDirFor, pendingCount, writeMemberships, type PeerEvent } from "../src/inbox.js";
+import { enqueue, inboxDirFor, pendingCount, writeMemberships, type PeerEvent } from "../src/client/inbox.js";
 import { statusDoor } from "./helpers/status-door.js";
 
 /**
@@ -17,7 +17,7 @@ import { statusDoor } from "./helpers/status-door.js";
 const hookInput = (sessionId = "sess-1") =>
   JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false, session_id: sessionId });
 
-const SOURCE = `"${process.execPath}" --import tsx src/stop-hook.ts`;
+const SOURCE = `"${process.execPath}" --import tsx src/client/stop-hook.ts`;
 
 function runHook(root: string, env: Record<string, string> = {}, command = SOURCE, input = hookInput()) {
   return new Promise<{ code: number | null; stderr: string; ms: number }>((resolve, reject) => {

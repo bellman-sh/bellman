@@ -11,7 +11,7 @@ import {
   acquireLock, busCredentials, credentialsDir, decodeIdentity, LOCK_FILE, readServer, storedAccessToken,
   storedUserId, tokensUsable, writeServer,
   type LockHandle,
-} from "../src/credentials.js";
+} from "../src/client/credentials.js";
 import type { Identity } from "../src/types.js";
 
 const PROD = "https://mcp.bellman.sh/mcp";
@@ -117,7 +117,7 @@ describe("the credential file", () => {
       };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       expect(() => mocked.writeServer(dir, PROD, { client: { client_id: "prod" } })).toThrow(/EPERM/);
     } finally {
       vi.doUnmock("node:fs");
@@ -305,7 +305,7 @@ describe("credentialsDir", () => {
       return { ...real, homedir: () => "", userInfo: () => ({ ...real.userInfo(), homedir: "" }) };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       expect(() => mocked.credentialsDir()).toThrow(/home directory/);
     } finally {
       vi.doUnmock("node:os");
@@ -566,7 +566,7 @@ describe("the lock", () => {
       };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       const lock = await mocked.acquireLock(dir, fast);
       lock!.release(); // and it must not throw
     } finally {
@@ -600,7 +600,7 @@ describe("the lock", () => {
 
   it("installs no signal listeners, which would stop Ctrl-C killing the process", async () => {
     // A listener for SIGINT or SIGTERM replaces Node's default of terminating, so
-    // every handler would have to re-raise. src/channel.ts already ends in
+    // every handler would have to re-raise. src/client/channel.ts already ends in
     // process.exit, which is all 'exit' needs.
     const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
     const before = signals.map((signal) => process.listenerCount(signal));
@@ -650,7 +650,7 @@ describe("the lock", () => {
       };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       const before = process.listenerCount("exit");
       const handle = (await mocked.acquireLock(dir, fast))!;
 
@@ -689,7 +689,7 @@ describe("the lock", () => {
     });
     const before = new Set(process.listeners("exit"));
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       await mocked.acquireLock(dir, fast);
       const onExit = process.listeners("exit").find((listener) => !before.has(listener)) as () => void;
       expect(() => onExit()).not.toThrow();
@@ -701,12 +701,12 @@ describe("the lock", () => {
 
   it("leaves no lock behind when the bridge is told to quit while holding it", async () => {
     // Not a stand-in: a real process, and a real SIGTERM handled the way
-    // src/channel.ts handles it, by calling process.exit, which is what runs 'exit'
+    // src/client/channel.ts handles it, by calling process.exit, which is what runs 'exit'
     // listeners. The child never calls release().
     const path = join(dir, LOCK_FILE);
     const script = join(dir, "holder.mjs");
     writeFileSync(script, [
-      `import { acquireLock } from ${JSON.stringify(new URL("../src/credentials.ts", import.meta.url).href)};`,
+      `import { acquireLock } from ${JSON.stringify(new URL("../src/client/credentials.ts", import.meta.url).href)};`,
       `process.on("SIGTERM", () => process.exit(0));`,
       `const lock = await acquireLock(${JSON.stringify(dir)}, { waitMs: 0 });`,
       `if (!lock) process.exit(3);`,
@@ -872,7 +872,7 @@ describe("the lock", () => {
       };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       const lock = await mocked.acquireLock(dir, { ...fast, waitMs: 0, pidAlive: () => true });
       expect(lock === undefined).toBe(!reclaimed);
       lock?.release();
@@ -904,7 +904,7 @@ describe("the lock", () => {
       };
     });
     try {
-      const mocked = await import("../src/credentials.js");
+      const mocked = await import("../src/client/credentials.js");
       await expect(mocked.acquireLock(dir, fast)).rejects.toThrow(/EACCES/);
     } finally {
       vi.doUnmock("node:fs");

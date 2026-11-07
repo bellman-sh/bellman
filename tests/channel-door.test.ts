@@ -5,8 +5,8 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DOOR_VERSION, type DoorStatus } from "../src/door-protocol.js";
-import type { WireEnvelope } from "../src/inbox.js";
+import { DOOR_VERSION, type DoorStatus } from "../src/client/door-protocol.js";
+import type { WireEnvelope } from "../src/client/inbox.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 /**
@@ -23,7 +23,7 @@ import { DEV_KEY } from "./helpers/harness.js";
  */
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const ENTRY = join(ROOT, "src", "channel.ts");
+const ENTRY = join(ROOT, "src", "client", "channel.ts");
 const DISCARD = "http://127.0.0.1:9/mcp";
 
 // Every test starts a tsx process, which takes seconds on a loaded machine: the longest of them needs more than the

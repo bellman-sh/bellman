@@ -3,7 +3,7 @@ import { constants as fsConstants, lstatSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadRoomManifest } from "../src/bridge.js";
+import { loadRoomManifest } from "../src/client/bridge.js";
 
 /**
  * loadRoomManifest refuses a symlinked room.yaml with two layers, and each has to be proved without the

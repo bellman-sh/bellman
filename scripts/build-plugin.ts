@@ -1,5 +1,5 @@
 /**
- * src/channel.ts, src/stop-hook.ts, src/status-hook.ts and src/join-hook.ts → plugin/bridge/channel.mjs,
+ * src/client/channel.ts, src/client/stop-hook.ts, src/client/status-hook.ts and src/client/join-hook.ts → plugin/bridge/channel.mjs,
  * stop-hook.mjs, status-hook.mjs and join-hook.mjs, the files the Claude Code plugin runs. Claude Code copies plugin/ into its cache and installs
  * nothing beside it (plugin/ holds no package.json, on purpose), so each entry carries every
  * dependency it imports. The output is committed, and rebuilt in release PRs, which rebuild the
@@ -12,7 +12,7 @@ import { buildMod } from "./build-mod.js";
 const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
 
 const { metafile } = await build({
-  entryPoints: { channel: "src/channel.ts", "stop-hook": "src/stop-hook.ts", "status-hook": "src/status-hook.ts", "join-hook": "src/join-hook.ts" },
+  entryPoints: { channel: "src/client/channel.ts", "stop-hook": "src/client/stop-hook.ts", "status-hook": "src/client/status-hook.ts", "join-hook": "src/client/join-hook.ts" },
   outdir: "plugin/bridge",
   outExtension: { ".js": ".mjs" },
   bundle: true,
@@ -26,7 +26,7 @@ const { metafile } = await build({
   // Bundled CommonJS dependencies require() Node's built-ins, and an ES module has no require.
   // Without this line the bridge dies at load: Dynamic require of "process" is not supported.
   banner: { js: "import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);" },
-  // src/version.ts reads ../package.json, and the bundle has none to read.
+  // src/client/version.ts reads ../package.json, and the bundle has none to read.
   define: { BELLMAN_BUNDLE_VERSION: JSON.stringify(version) },
 });
 

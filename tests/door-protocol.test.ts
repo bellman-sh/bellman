@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanBlock, cleanText, eventLine } from "../src/door-protocol.js";
+import { cleanBlock, cleanText, eventLine } from "../src/client/door-protocol.js";
 
 /** The characters that draw nothing or turn the direction a line reads in: each one the cleaners drop. */
 const INVISIBLE = [

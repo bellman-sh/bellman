@@ -220,7 +220,7 @@ const reply = (status: number, body: unknown) => ({
   value: { status, ok: status >= 200 && status < 300, headers: { "content-type": "application/json" }, text: JSON.stringify(body) },
 });
 
-/** A decline's body as the door takes it (`refIdOf` in src/door.ts): exactly `{ "ref_id": "<at most fifteen digits>" }`. */
+/** A decline's body as the door takes it (`refIdOf` in src/client/door.ts): exactly `{ "ref_id": "<at most fifteen digits>" }`. */
 function isDeclineBody(body: unknown): boolean {
   if (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).join() !== "ref_id") return false;
   const refId = (body as { ref_id: unknown }).ref_id;
@@ -332,7 +332,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     if (!bridge) return { deny: `no MCP server is named ${e.server}` };
     switch (e.tool) {
       case "bellman_whoami": {
-        // The bridge's own tool (`describeSelf` in src/bridge.ts), its JSON compact as the live look saw it.
+        // The bridge's own tool (`describeSelf` in src/client/bridge.ts), its JSON compact as the live look saw it.
         const door = bridge.door;
         await w.asking;
         if (w.whoamiFails) return { deny: "bellman_whoami failed" };
@@ -374,7 +374,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
   // The engine's own sections, which the mod adds to and never replaces.
   on("prompt.compose", () => ({ sections: [{ id: "intro", text: "You are Claude Code.", scope: "shared" }] }));
 
-  // A door answers on its bridge's socket, its routes as src/door.ts serves them. Any other socket is one nothing
+  // A door answers on its bridge's socket, its routes as src/client/door.ts serves them. Any other socket is one nothing
   // listens on, which refuses.
   on("http.fetch", async ($, e) => {
     const socket = e.init?.socketPath;

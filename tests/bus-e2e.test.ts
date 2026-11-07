@@ -7,15 +7,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type BridgeBus, type Remote } from "../src/bridge.js";
-import { busPath } from "../src/bus.js";
-import { createBusLink } from "../src/bus-link.js";
-import { busCredentials, readServer } from "../src/credentials.js";
-import type { PeerEvent } from "../src/inbox.js";
+import { createBridge, type BridgeBus, type Remote } from "../src/client/bridge.js";
+import { busPath } from "../src/client/bus.js";
+import { createBusLink } from "../src/client/bus-link.js";
+import { busCredentials, readServer } from "../src/client/credentials.js";
+import type { PeerEvent } from "../src/client/inbox.js";
 import { identityFromAccessToken, unauthorizedHeaders } from "../src/oauth/routes.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { connectSignedIn } from "../src/signin.js";
+import { connectSignedIn } from "../src/client/signin.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { fakeBellman, RESOURCE, type FakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
@@ -452,7 +452,7 @@ function mcpOver(
 
 describe("an access token that is no longer accepted", () => {
   it("is replaced by the poll the 401 sends the room to, and the next upgrade carries the new one", async () => {
-    // The chain src/credentials.ts's storedAccessToken says is built from two tested halves: a 401 on the upgrade
+    // The chain src/client/credentials.ts's storedAccessToken says is built from two tested halves: a 401 on the upgrade
     // makes the room socket poll, the poll goes through the MCP connection, whose transport refreshes on its own 401
     // and writes the file, and the socket reads the file again and is let in. Here it is run once, whole.
     const bellman = fakeBellman();

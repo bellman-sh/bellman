@@ -10,7 +10,7 @@ import {
 } from "./room-socket.js";
 
 /**
- * What a bridge does with the local bus (src/bus.ts) and a room's socket (src/room-socket.ts): keep each
+ * What a bridge does with the local bus (src/client/bus.ts) and a room's socket (src/client/room-socket.ts): keep each
  * member's events flowing through them, and say so, once, when they cannot (spec D7-D11).
  *
  * A bridge asks for one thing, `watch`: deliver this member's events from the cursor it has reached. If this
@@ -30,7 +30,7 @@ import {
  * bus half way.
  */
 
-/** The one tool of the bridge's connection that the link calls. `Remote` (src/bridge.ts) satisfies it. */
+/** The one tool of the bridge's connection that the link calls. `Remote` (src/client/bridge.ts) satisfies it. */
 export interface BusConnection {
   callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult>;
 }

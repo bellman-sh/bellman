@@ -527,7 +527,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * closed, so a client's keepalive has to be exactly that.
    *
    * The text comes from src/keepalive.ts, which is the only place it is written
-   * (#144). The client that sends it (src/room-socket.ts) and the fake server
+   * (#144). The client that sends it (src/client/room-socket.ts) and the fake server
    * the end-to-end tests run against (tests/helpers/fake-bellman.ts) import the
    * same two constants, so the three cannot drift. They each held their own copy
    * until #144, tied together only by comments, and nothing compiled or ran any
@@ -4321,7 +4321,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * object until its client gave up on it.
    *
    * The close is the ordinary 1000, with a reason for the developer reading their client's close event.
-   * No close code means "room gone" to the bridge: src/room-socket.ts reconnects after any close, whatever
+   * No close code means "room gone" to the bridge: src/client/room-socket.ts reconnects after any close, whatever
    * its code, and learns the room's state from the upgrade's answer or from its poll.
    *
    * It never throws. The purge has committed, and a socket that will not close must not turn it into an

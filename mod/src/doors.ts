@@ -3,7 +3,7 @@
  *
  * A bridge is any MCP server that lists `bellman_whoami`, whatever it is registered as (the plugin's, or one
  * the person added); the claude.ai connector lists none, so its rooms are not the mod's (spec D1). The tool's
- * result names the bridge's door (`describeSelf` in src/bridge.ts), and the door serves the rest (src/door.ts).
+ * result names the bridge's door (`describeSelf` in src/client/bridge.ts), and the door serves the rest (src/client/door.ts).
  *
  * `bellman_whoami` is the one Claude Code tool the mod calls, and only from inside its own hooks: Claude Code
  * refuses a mod's own tool call from its timers and presses, and allows it inside one of the mod's hooks (R15). So
@@ -28,9 +28,9 @@
  */
 import { read, update } from "claude-code";
 import type { EngineInterface, HttpInit, Timer } from "claude-code";
-import { cleanText } from "../../src/door-protocol.js";
+import { cleanText } from "../../src/client/door-protocol.js";
 import { DOOR_POLL_MS, NAME_MAX, ROOMS_POLL_MS, canvasOf, fitLogs, kept, noteLine, pendingRequests } from "../../src/mod/view.js";
-import { resultData } from "../../src/result-data.js";
+import { resultData } from "../../src/client/result-data.js";
 import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, KeptEvent, PendingRequest, RoomMember, RoomView } from "../types";
 import { shownTab } from "./drawn";
 import { canvas, doors, logs, openedThrough, pending, room, rooms } from "./state";
@@ -347,7 +347,7 @@ export async function readCanvas($: EngineInterface): Promise<void> {
 
 /**
  * The person's Deny of the action request at `cursor`, through the door at `socketPath`: its one write, which answers
- * the request `approved: false` as the bridge's seat in the room and sends nothing else (`decline` in src/door.ts).
+ * the request `approved: false` as the bridge's seat in the room and sends nothing else (`decline` in src/client/door.ts).
  * Resolves once the door says the room was answered, and throws otherwise.
  */
 export async function decline($: EngineInterface, socketPath: string, sessionId: string, cursor: number): Promise<void> {

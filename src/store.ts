@@ -3950,7 +3950,7 @@ export class MemoryStore implements BellmanStore {
   }
 
   async readHomeSettings(id: string): Promise<HomeSettings> {
-    return detach(this.homeSettings.get(id) ?? DEFAULT_HOME_SETTINGS);
+    return detach({ ...DEFAULT_HOME_SETTINGS, ...this.homeSettings.get(id) });
   }
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {

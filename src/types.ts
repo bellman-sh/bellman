@@ -1000,8 +1000,10 @@ export interface FsEventPayload {
 export interface HomeSettings {
   /** Whether the Claude Code Stop hook asks the agent, once a session, to remember what was durable. Off until the account turns it on. */
   capture: boolean;
+  /** Pause (ADR 0047 decision 13): every `bellman_memory` op but `forget` and `unshare` is refused `paused`, and arrival reads no home titles. Only the dash sets it. */
+  paused: boolean;
 }
-export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false };
+export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false, paused: false };
 
 /**
  * One revision of a room file (ADR 0046): the `fs:<path>` row holds the current one and `fsh:<path>:<rev>` each kept

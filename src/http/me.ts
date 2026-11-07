@@ -10,20 +10,30 @@
  * No ETag: the body has to be built to be hashed, so a 304 would save the bytes and none of the reads, and
  * `silent_for_seconds` moves every second, so a live room would almost never match one.
  *
- * `GET /me/memory` (#530, ADR 0047 decision 13): the account's memory settings, `{ capture }`, for the dash and for
- * the bridge, which reads it with its bearer when the Stop hook asks. `PUT /me/memory` with exactly `{ "capture":
- * boolean }` sets it, from a signed-in dash session only, Origin checked: a bearer is refused, since turning capture on
- * is what makes an agent write memory unasked, and an agent reads peer content that can ask for it.
+ * `GET /me/memory` (#530, #531, ADR 0047 decision 13): the account's memory settings, `{ capture, paused }`, for the dash
+ * and for the bridge, which reads it with its bearer when the Stop hook asks. `PUT /me/memory` with a non-empty object of
+ * `capture` and/or `paused` booleans sets them, from a signed-in dash session only, Origin checked: a bearer is refused,
+ * since turning capture on is what makes an agent write memory unasked, turning pause off is what lets it write again,
+ * and an agent reads peer content that can ask for either. `paused` is pause: the tool refuses all but `forget` and `unshare`.
  */
 import { allowedOrigin, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { readMemorySettings, setMemoryCapture } from "../memory.js";
+import { readMemorySettings, setMemorySettings } from "../memory.js";
 import { liveRooms } from "../rooms.js";
+import type { HomeSettings } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type MeRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
 
 const ROOMS = "/me/rooms";
 const MEMORY = "/me/memory";
+
+/** The body as a settings patch: a non-empty object whose every key is `capture` or `paused`, each a boolean; else `null`. */
+function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const entries = Object.entries(raw);
+  if (entries.length === 0 || !entries.every(([k, v]) => (k === "capture" || k === "paused") && typeof v === "boolean")) return null;
+  return Object.fromEntries(entries);
+}
 
 /** `undefined` for any other path, so the server carries on. */
 export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Response | undefined> {
@@ -42,9 +52,9 @@ export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Res
     const refusal = csrfRefusal(request, who.via, origin);
     if (refusal) return refusal;
     const raw: unknown = await request.json().catch(() => null);
-    const capture = typeof raw === "object" && raw !== null && Object.keys(raw).join() === "capture" ? (raw as { capture: unknown }).capture : undefined;
-    if (typeof capture !== "boolean") return problem(400, "invalid_request", 'send {"capture": true} or {"capture": false}', origin);
-    return json(200, await setMemoryCapture(deps.store, who.identity, capture), origin);
+    const patch = memoryPatch(raw);
+    if (!patch) return problem(400, "invalid_request", 'send {"capture": boolean} and/or {"paused": boolean}', origin);
+    return json(200, await setMemorySettings(deps.store, who.identity, patch), origin);
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);
     return problem(500, "internal", "the request failed on the server", origin);

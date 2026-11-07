@@ -93,10 +93,10 @@ export async function homeTitles(store: BellmanStore, actor: Identity): Promise<
 export const readMemorySettings = (store: BellmanStore, actor: Identity): Promise<HomeSettings> =>
   store.readHomeSettings(homeRoomId(actor.userId));
 
-/** The capture switch set, from a dash session only (the route checks); the settings as they now are. */
-export async function setMemoryCapture(store: BellmanStore, actor: Identity, capture: boolean): Promise<HomeSettings> {
+/** Settings patched, from a dash session only (the route checks); the settings as they now are. */
+export async function setMemorySettings(store: BellmanStore, actor: Identity, patch: Partial<HomeSettings>): Promise<HomeSettings> {
   const id = homeRoomId(actor.userId);
-  const next = { ...(await store.readHomeSettings(id)), capture };
+  const next = { ...(await store.readHomeSettings(id)), ...patch };
   await store.writeHomeSettings(id, next);
   return next;
 }

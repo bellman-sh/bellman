@@ -3049,7 +3049,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /** `BellmanStore.readHomeSettings` (#530): the `hs` row, or the defaults. Reads the record for nothing, so none is needed. */
   async readHomeSettings(): Promise<HomeSettings> {
-    return (await this.ctx.storage.get<HomeSettings>("hs")) ?? DEFAULT_HOME_SETTINGS;
+    return { ...DEFAULT_HOME_SETTINGS, ...(await this.ctx.storage.get<HomeSettings>("hs")) };
   }
 
   /** `BellmanStore.writeHomeSettings`: the `hs` row replaced. No record, event, outbox intent or alarm: settings alone are not a home room. */

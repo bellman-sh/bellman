@@ -94,14 +94,14 @@ describe("GET and PUT /me/memory", () => {
     call(null, "/me/memory", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
 
   it("reads off until the dash turns it on, for the bearer and the cookie alike, and per account", async () => {
-    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false });
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: false });
     const on = await dash({ capture: true });
-    expect([on.status, await bodyOf(on)]).toEqual([200, { capture: true }]);
-    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: true });
-    expect(await bodyOf(await call(null, "/me/memory", { cookie: DEV_KEY.jesse }))).toEqual({ capture: true });
-    expect(await bodyOf(await call(DEV_KEY.peer, "/me/memory"))).toEqual({ capture: false });
+    expect([on.status, await bodyOf(on)]).toEqual([200, { capture: true, paused: false }]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: true, paused: false });
+    expect(await bodyOf(await call(null, "/me/memory", { cookie: DEV_KEY.jesse }))).toEqual({ capture: true, paused: false });
+    expect(await bodyOf(await call(DEV_KEY.peer, "/me/memory"))).toEqual({ capture: false, paused: false });
     const off = await dash({ capture: false });
-    expect([off.status, await bodyOf(off)]).toEqual([200, { capture: false }]);
+    expect([off.status, await bodyOf(off)]).toEqual([200, { capture: false, paused: false }]);
     // A home room exists for nothing but the switch: no note, and bellman_memory lists none.
     const peer = await h.connect(DEV_KEY.jesse);
     expect((await peer.call("bellman_memory", { op: "recall" })).data).toMatchObject({ entries: [] });
@@ -115,7 +115,14 @@ describe("GET and PUT /me/memory", () => {
     }
     expect((await call(null, "/me/memory")).status).toBe(401);
     expect((await call(DEV_KEY.jesse, "/me/memory", { method: "DELETE" })).headers.get("allow")).toBe("GET, PUT");
-    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false });
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: false });
+  });
+
+  it("sets paused and capture independently, in either order", async () => {
+    expect(await bodyOf(await dash({ paused: true }))).toEqual({ capture: false, paused: true });
+    expect(await bodyOf(await dash({ capture: true }))).toEqual({ capture: true, paused: true });
+    expect(await bodyOf(await dash({ paused: false, capture: false }))).toEqual({ capture: false, paused: false });
+    for (const body of [{ paused: "yes" }, { paused: true, pause: true }]) expect((await dash(body)).status, JSON.stringify(body)).toBe(400);
   });
 });
 

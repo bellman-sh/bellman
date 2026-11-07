@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
+import type { HomeSettings } from "../../src/types.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/store.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
@@ -5021,16 +5022,23 @@ export function describeStoreContract(
       });
 
       it("keeps the account's settings without a room: defaults until written, and the first note still creates the room", async () => {
-        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
-        await store.writeHomeSettings(id, { capture: true });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        await store.writeHomeSettings(id, { capture: true, paused: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
         expect(await store.readFs(id, "/a.md")).toBeNull();
         expect(await store.listFs(id, "/", {})).toEqual({ entries: [], next: null });
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "hello" }), 1024)).toMatchObject({ outcome: "ok", rev: 1 });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
-        await store.writeHomeSettings(id, { capture: false });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
-        expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
+        await store.writeHomeSettings(id, { capture: false, paused: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false, paused: false });
+      });
+
+      it("reads paused false from a row written before the field existed", async () => {
+        await store.writeHomeSettings(id, { capture: true } as HomeSettings);
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
+        await store.writeHomeSettings(id, { capture: true, paused: true });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: true });
       });
 
       it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {

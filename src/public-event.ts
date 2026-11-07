@@ -110,10 +110,12 @@ export function readableEvent(
   author: Pick<Member, "capabilities"> | undefined,
   reader: string | null,
   accountSeats?: readonly Pick<Member, "capabilities" | "leftAt">[],
+  shared = false,
 ): SessionEvent | null {
-  // An account's memory (ADR 0046, decision 7), judged from every seat the account has held, not the one that wrote it.
-  // No seats passed fails closed: the two single-event readers in rooms.ts refuse every type an fs event could be.
-  if (isMemoryEvent(e)) return seesMemory(accountSeats ?? [], e.fromUserId, reader) ? e : null;
+  // An account's room notes (ADR 0047, decision 7), judged from its sharing switch and every seat the account has held,
+  // not the one that wrote it. No seats or no switch passed fails closed: the two single-event readers in rooms.ts
+  // refuse every type an fs event could be.
+  if (isMemoryEvent(e)) return seesMemory(accountSeats ?? [], e.fromUserId, reader, { shared }) ? e : null;
   if (!carriesBrief(e)) return e;
   if (seesBrief({ userId: e.fromUserId, capabilities: author?.capabilities ?? [] }, reader)) return e;
   if (e.type === "brief_update") return null;
@@ -123,17 +125,19 @@ export function readableEvent(
 /**
  * `readableEvent` over a list, each author looked up by `fromMemberId`; a dropped event is left out
  * and the order kept. A grant belongs to a handle, so one account's two handles can differ, and each
- * brief is judged by the row of the handle that wrote it. A memory event is judged by every seat of its account,
- * looked up in `seatsByUser` by `fromUserId` (ADR 0046).
+ * brief is judged by the row of the handle that wrote it. A memory event is judged by its account's sharing switch
+ * (`sharers` holds the accounts that turned it on) and every seat of its account, looked up in `seatsByUser` by
+ * `fromUserId` (ADR 0047).
  */
 export function readableEvents(
   events: readonly SessionEvent[],
   members: readonly Pick<Member, "memberId" | "capabilities">[],
   reader: string | null,
   seatsByUser?: ReadonlyMap<string, readonly Pick<Member, "capabilities" | "leftAt">[]>,
+  sharers?: ReadonlySet<string>,
 ): SessionEvent[] {
   const rows = new Map(members.map((m) => [m.memberId, m]));
-  return events.flatMap((e) => readableEvent(e, rows.get(e.fromMemberId), reader, seatsByUser?.get(e.fromUserId)) ?? []);
+  return events.flatMap((e) => readableEvent(e, rows.get(e.fromMemberId), reader, seatsByUser?.get(e.fromUserId), sharers?.has(e.fromUserId) ?? false) ?? []);
 }
 
 /** A room file under `/members/`: an account's memory (ADR 0046). */

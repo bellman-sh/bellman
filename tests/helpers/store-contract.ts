@@ -4881,6 +4881,21 @@ export function describeStoreContract(
         expect(JSON.stringify((await store.eventsAfter(id, 0)).filter((e) => e.type === "fs").map((e) => e.payload))).not.toContain("u_jesse");
       });
 
+      it("keeps which accounts share their room notes, per room, off by default and off again when turned off (ADR 0047, 7)", async () => {
+        const id = await room("qs_ns_a", { members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer" })] });
+        const other = await room("qs_ns_b", { members: [member()] });
+        expect(await store.notesSharers(id)).toEqual([]);
+        await store.setNotesSharing(id, "u_jesse", true);
+        await store.setNotesSharing(id, "u_peer", true);
+        expect((await store.notesSharers(id)).sort()).toEqual(["u_jesse", "u_peer"]);
+        expect(await store.notesSharers(other), "another room's switch is its own").toEqual([]);
+        await store.setNotesSharing(id, "u_jesse", false);
+        await store.setNotesSharing(id, "u_jesse", false);
+        expect(await store.notesSharers(id)).toEqual(["u_peer"]);
+        // No record is needed: a room that was never created answers off.
+        expect(await store.notesSharers("qs_ns_none")).toEqual([]);
+      });
+
       it("refuses a frozen room and a closed one, and a missing one", async () => {
         const frozen = await room("qs_fs_frozen");
         await store.freezeSession(frozen, Date.now());

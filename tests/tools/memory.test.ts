@@ -66,4 +66,22 @@ describe("bellman_memory", () => {
     const read = await p.creator.call("bellman_fs", { session_id: p.sessionId, member_id: p.creatorMemberId, op: "read", path });
     expect((read.data.file as Envelope<{ content: string }>).data.content).toBe("squash merges");
   });
+
+  it("unshare turns the account's notes sharing off from any of its seats, and nothing in the tool turns it on", async () => {
+    await p.creator.call("bellman_memory", { op: "remember", path: "/a.md", content: "mine" });
+    const shared = await p.creator.call("bellman_memory", { op: "share", session_id: p.sessionId, member_id: p.creatorMemberId, path: "/a.md", to: "notes" });
+    const path = String(shared.data.path);
+    const peerReads = async () => (await p.joiner.call("bellman_fs", { session_id: p.sessionId, member_id: p.joinerMemberId, op: "read", path })).isError === false;
+    expect(await peerReads(), "private by default").toBe(false);
+    await h.store.setNotesSharing(p.sessionId, p.creator.identity.userId, true);
+    expect(await peerReads(), "the dash turned it on").toBe(true);
+
+    expect((await p.joiner.call("bellman_memory", { op: "unshare", session_id: p.sessionId, member_id: p.creatorMemberId })).isError, "not the joiner's seat").toBe(true);
+    expect(await peerReads()).toBe(true);
+    const off = await p.creator.call("bellman_memory", { op: "unshare", session_id: p.sessionId, member_id: p.creatorMemberId });
+    expect([off.isError, off.data]).toEqual([false, { shared: false }]);
+    expect(await peerReads()).toBe(false);
+    expect((await p.creator.call("bellman_memory", { op: "unshare" })).text).toContain("session_id is required");
+    expect((await p.creator.call("bellman_memory", { op: "unshare", session_id: p.sessionId })).text).toContain("unshare needs member_id");
+  });
 });

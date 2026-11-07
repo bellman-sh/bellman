@@ -42,6 +42,10 @@ Account, org and operator routes:
   `PUT|DELETE /audit/sink`, `POST /audit/sink/resume`; `parseAuditQuery`, `AUDIT_PAGE` 100,
   `AUDIT_EXPORT_PAGE` 500, CSV helpers `csvRow`/`csvCell`, `exportFilename` [src/http/audit.ts:auditRoutes]
 - `handleRoutes`: `GET|PUT|DELETE /account/handle` [src/http/handles.ts:handleRoutes]
+- `notesSharingRoutes`: `GET /rooms/:id/notes-sharing` returns `{shared}` for the caller's account, bearer or cookie,
+  404 without a seat of the caller's in the room (present or departed); `PUT /rooms/:id/notes-sharing` `{shared: boolean}`
+  sets the `ns:` row from a dash session alone (403 `dash_session_required` to a bearer, the CSRF check), 400 for any
+  other body [src/http/notes-sharing.ts:notesSharingRoutes]
 - `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
   (`{capture}`) to a bearer or a cookie, `PUT /me/memory` `{capture: boolean}` replaces it from a dash session alone
   (bearer 403, cookie without Origin 403) [src/http/me.ts:meRoutes]

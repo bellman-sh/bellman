@@ -224,7 +224,9 @@ room's creator to choose whether its page opens on the canvas or as a page,
 `GET /me/rooms` for the open rooms a person sits in, exactly as `bellman_rooms`
 returns them (`liveRooms` builds both), `GET|PUT /me/memory` for the account's
 memory settings (#530: the capture switch the Stop hook reads through the bridge;
-the PUT takes a dash session only), and `POST /rooms/:id/codes` to mint a
+the PUT takes a dash session only), `GET|PUT /rooms/:id/notes-sharing` for an
+account's room-notes sharing switch in a room (ADR 0047 decision 7; the PUT takes
+a dash session only, and `bellman_memory` `unshare` is the agent's way off), and `POST /rooms/:id/codes` to mint a
 join code through `issueInvite`, the operation `bellman_invite` calls (#434;
 desktop apps use both, with an OAuth bearer), and
 `GET /audit` and `GET /audit/export` for an org
@@ -2438,7 +2440,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,570** | every request, whether or not you are in a room |
+| Tool definitions | **~11,602** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,640 | once — `connect` 746 plus `confirm` 893, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100); the `confirm` reply itself is at most 24,000 characters (ADR 0047 decision 9) |
 | Receiving a message | ~220 | each |
@@ -2468,6 +2470,7 @@ decision recorded here, not a side effect of a merge.
 | `bellman_memory`: home memory, four ops (ADR 0047; the ADR allotted 270) | +391 | 11,512 | #526 |
 | Room notes private by default: `bellman_fs`'s one sentence on who reads `/members/me/` | +3 | 11,515 | #538 (ADR 0047, 7) |
 | Recall on arrival: `bellman_confirm`'s `recall` block, `members` present first, the reply's 24,000-character ceiling | +55 | 11,570 | #528 (ADR 0047, 9; the ADR allotted 30) |
+| Notes sharing: `bellman_memory`'s `unshare` op | +32 | 11,602 | #538 PR 2 (ADR 0047, 7) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

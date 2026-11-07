@@ -548,7 +548,22 @@ export async function eventsFor(
   // Each account whose memory these events touch, with every seat it has held (ADR 0046): one read per account.
   const accounts = memoryAuthors(events);
   const seats = new Map(await Promise.all(accounts.map(async (u) => [u, await s.membersOfUser(sessionId, u)] as const)));
-  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader, seats);
+  const sharers = accounts.length === 0 ? new Set<string>() : await notesSharersOf(s, sessionId);
+  return readableEvents(events, authors.length === 0 ? [] : await s.getMembers(sessionId, authors), reader, seats, sharers);
+}
+
+/**
+ * The accounts sharing their room notes (ADR 0047 decision 7): the room's `ns:` rows. Read as none when the room's
+ * object cannot answer, as a live object does for some minutes after a deploy that adds the method: the notes stay
+ * private rather than the read failing.
+ */
+export async function notesSharersOf(store: BellmanStore, sessionId: string): Promise<ReadonlySet<string>> {
+  try {
+    return new Set(await store.notesSharers(sessionId));
+  } catch (error) {
+    console.error(`notes sharing of ${sessionId} could not be read; its notes stay private:`, error);
+    return new Set();
+  }
 }
 
 /**
@@ -2092,15 +2107,21 @@ async function gateFsRead(store: BellmanStore, actor: Identity, sessionId: strin
   return succeed(session);
 }
 
-/** Whether `reader` may see the memory of `owner`: its own, or a peer when the memory rule allows (ADR 0046, 7). */
-async function seesMemoryOf(store: BellmanStore, sessionId: string, owner: string, reader: string): Promise<boolean> {
-  return owner === reader || seesMemory(await store.membersOfUser(sessionId, owner), owner, reader);
+/**
+ * Whether `reader` may see the room notes of `owner`: its own, or a peer when the owner shares in this room and the
+ * memory rule allows (ADR 0047, 7). `sharers` is passed by a caller that read the switch once for many owners.
+ */
+async function seesMemoryOf(store: BellmanStore, sessionId: string, owner: string, reader: string, sharers?: ReadonlySet<string>): Promise<boolean> {
+  if (owner === reader) return true;
+  const shared = (sharers ?? await notesSharersOf(store, sessionId)).has(owner);
+  return shared && seesMemory(await store.membersOfUser(sessionId, owner), owner, reader, { shared });
 }
 
 /** The memory ids `reader` may not see, for the store to drop before it pages or caps. */
 async function hiddenMemoryIds(store: BellmanStore, sessionId: string, reader: string): Promise<string[]> {
   const ids = await store.memoryIds(sessionId);
-  const seen = await Promise.all(ids.map((m) => seesMemoryOf(store, sessionId, m.userId, reader)));
+  const sharers = ids.some((m) => m.userId !== reader) ? await notesSharersOf(store, sessionId) : new Set<string>();
+  const seen = await Promise.all(ids.map((m) => seesMemoryOf(store, sessionId, m.userId, reader, sharers)));
   return ids.filter((_, i) => !seen[i]).map((m) => m.memoryId);
 }
 

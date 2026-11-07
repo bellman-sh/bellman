@@ -106,6 +106,52 @@ describe("CUJ 2: a member's agent keeps memory", () => {
     expect(again).toMatchObject({ ok: true, value: { content: "kept", path: a.ok ? a.value.path : "" } });
   });
 
+  it("shows a peer the notes of an account that turned sharing on, on every read path and in the events, until it turns it off", async () => {
+    const store = await roomWith("qs_shared", seats);
+    const a = await writeFs(store, A, "qs_shared", "m_a", { path: "/members/me/notes.md", write: { op: "write", content: "a's notes" } });
+    const b = await writeFs(store, B, "qs_shared", "m_b", { path: "/members/me/notes.md", write: { op: "write", content: "b's notes" } });
+    const aPath = a.ok ? a.value.path : "", bPath = b.ok ? b.value.path : "";
+    await store.setNotesSharing("qs_shared", "u_a", true);
+    await store.setNotesSharing("qs_shared", "u_b", true);
+
+    // A shares and every seat of A's grants: C reads. B shares but its one seat withholds read_context: hidden still.
+    expect(await readFsFor(store, C, "qs_shared", "m_c", aPath)).toMatchObject({ ok: true, value: { content: "a's notes" } });
+    expect(await fsHistoryFor(store, C, "qs_shared", "m_c", aPath)).toMatchObject({ ok: true });
+    expect(await readFsFor(store, C, "qs_shared", "m_c", bPath)).toMatchObject({ ok: false, code: "not_found" });
+    const list = await listFsFor(store, C, "qs_shared", "m_c", "/members");
+    expect(list.ok && list.value.entries.map((r) => r.path)).toEqual([aPath]);
+    const found = await findFsFor(store, C, "qs_shared", "m_c", "notes");
+    expect(found.ok && found.value.entries.map((r) => r.path)).toEqual([aPath]);
+    const events = await eventsFor(store, "qs_shared", await store.eventsAfter("qs_shared", 0), "u_c");
+    expect(events.filter((e) => e.type === "fs").map((e) => (e.payload as { path: string }).path)).toEqual([aPath]);
+
+    // Off again: hidden on every path.
+    await store.setNotesSharing("qs_shared", "u_a", false);
+    expect(await readFsFor(store, C, "qs_shared", "m_c", aPath)).toMatchObject({ ok: false, code: "not_found" });
+    const hidden = await listFsFor(store, C, "qs_shared", "m_c", "/members");
+    expect(hidden.ok && hidden.value.entries).toEqual([]);
+    const gone = await eventsFor(store, "qs_shared", await store.eventsAfter("qs_shared", 0), "u_c");
+    expect(gone.filter((e) => e.type === "fs")).toEqual([]);
+  });
+
+  it("keeps notes private when the room cannot say who shares, rather than failing the read", async () => {
+    const store = await roomWith("qs_ns_down", seats);
+    const a = await writeFs(store, A, "qs_ns_down", "m_a", { path: "/members/me/notes.md", write: { op: "write", content: "a's notes" } });
+    const aPath = a.ok ? a.value.path : "";
+    await store.setNotesSharing("qs_ns_down", "u_a", true);
+    store.notesSharers = async () => { throw new Error("does not implement notesSharers"); };
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      expect(await readFsFor(store, C, "qs_ns_down", "m_c", aPath)).toMatchObject({ ok: false, code: "not_found" });
+      const events = await eventsFor(store, "qs_ns_down", await store.eventsAfter("qs_ns_down", 0), "u_c");
+      expect(events.filter((e) => e.type === "fs")).toEqual([]);
+      expect(await readFsFor(store, A, "qs_ns_down", "m_a", aPath), "its own account reads without the switch").toMatchObject({ ok: true });
+    } finally {
+      console.error = quiet;
+    }
+  });
+
   it("withholds from peers the memory of an account with one granting and one withholding seat", async () => {
     const store = await roomWith("qs_mixed", [seat("m_a", "u_a"), seat("m_a2", "u_a", KEEP), seat("m_c", "u_c")]);
     const a = await writeFs(store, A, "qs_mixed", "m_a", { path: "/members/me/n.md", write: { op: "write", content: "x" } });

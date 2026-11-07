@@ -2545,6 +2545,10 @@ export interface BellmanStore {
   memoryIdOwner(sessionId: string, memoryId: string): Promise<string | null>;
   /** Every account in the room with a memory id, for the readers that hide withheld memory. */
   memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>>;
+  /** The accounts that have turned on notes sharing in this room (ADR 0047 decision 7): the `ns:` rows. */
+  notesSharers(sessionId: string): Promise<string[]>;
+  /** Turn an account's notes sharing in this room on or off. Purged with the room. */
+  setNotesSharing(sessionId: string, userId: string, shared: boolean): Promise<void>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -2950,6 +2954,8 @@ export class MemoryStore implements BellmanStore {
   private files = new Map<string, Map<string, { current: FsRow; history: FsRow[] }>>();
   /** Memory ids per room, by account. */
   private memoryIdRows = new Map<string, Map<string, string>>();
+  /** Room id to the accounts sharing their room notes there (ADR 0047 decision 7). */
+  private notesSharing = new Map<string, Set<string>>();
   /** Keyed home writes (ADR 0047), per home room: no event to point at, so the path and revision are kept. */
   private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   /** Home settings rows (#530), by home room; a room record is not needed for one. */
@@ -4051,6 +4057,16 @@ export class MemoryStore implements BellmanStore {
 
   async memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>> {
     return [...(this.memoryIdRows.get(sessionId) ?? [])].map(([userId, memoryId]) => ({ userId, memoryId }));
+  }
+
+  async notesSharers(sessionId: string): Promise<string[]> {
+    return [...(this.notesSharing.get(sessionId) ?? [])];
+  }
+
+  async setNotesSharing(sessionId: string, userId: string, shared: boolean): Promise<void> {
+    const sharers = this.notesSharing.get(sessionId) ?? new Set<string>();
+    if (shared) sharers.add(userId); else sharers.delete(userId);
+    this.notesSharing.set(sessionId, sharers);
   }
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
@@ -5810,6 +5826,7 @@ export class MemoryStore implements BellmanStore {
     this.configs.delete(s.id);
     this.files.delete(s.id);
     this.memoryIdRows.delete(s.id);
+    this.notesSharing.delete(s.id);
     this.outsideTasks.delete(s.id);
     this.outsideCallerRows.delete(s.id);
     this.outsideVisitors.delete(s.id);

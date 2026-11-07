@@ -2,9 +2,9 @@ import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, PresetName, SessionMode,
-  ConfigGovernance, ConfigName, ConfigRow, FsRow, HomeSettings,
+  ConfigGovernance, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource,
 } from "./types.js";
-import { DEFAULT_HOME_SETTINGS, DEFAULT_POLICY } from "./types.js";
+import { DEFAULT_HOME_SETTINGS, DEFAULT_POLICY, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
@@ -2539,6 +2539,15 @@ export interface BellmanStore {
   readHomeSettings(id: string): Promise<HomeSettings>;
   /** The home room's settings row, replaced. No record, event or index row: the first note still creates the room. */
   writeHomeSettings(id: string, settings: HomeSettings): Promise<void>;
+  /**
+   * `readFs` on a home room that also writes the lookup row, in one transaction; `paused` when the `hs` row says so,
+   * with nothing read or written. Rows older than LOOKUP_KEEP_MS are deleted in the same transaction.
+   */
+  readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }>;
+  /** `listFs` with `newest: true` on a home room, logged the same way. */
+  listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }>;
+  /** The lookup log, newest first, at most LOOKUP_KEEP rows; rows past that are deleted. */
+  homeLookups(id: string): Promise<LookupRow[]>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */
@@ -2960,6 +2969,8 @@ export class MemoryStore implements BellmanStore {
   private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   /** Home settings rows (#530), by home room; a room record is not needed for one. */
   private homeSettings = new Map<string, HomeSettings>();
+  /** The lookup log (ADR 0047 decision 13), by home room, newest first. */
+  private lookups = new Map<string, LookupRow[]>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3955,6 +3966,32 @@ export class MemoryStore implements BellmanStore {
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
     this.homeSettings.set(id, detach(settings));
+  }
+
+  async readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {
+    if (this.homeSettings.get(id)?.paused) return { paused: true };
+    const file = await this.readFs(id, path);
+    this.logLookup(id, source, file ? [file.path] : []);
+    return { paused: false, file };
+  }
+
+  async listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }> {
+    if (this.homeSettings.get(id)?.paused) return { paused: true };
+    const page = await this.listFs(id, prefix, { newest: true, cursor });
+    this.logLookup(id, source, page.entries.map((e) => e.path));
+    return { paused: false, page };
+  }
+
+  private logLookup(id: string, source: LookupSource, paths: string[]): void {
+    const at = Date.now();
+    const rows = [detach({ ...source, at, paths }), ...(this.lookups.get(id) ?? [])];
+    this.lookups.set(id, rows.filter((r) => r.at >= at - LOOKUP_KEEP_MS));
+  }
+
+  async homeLookups(id: string): Promise<LookupRow[]> {
+    const kept = (this.lookups.get(id) ?? []).slice(0, LOOKUP_KEEP);
+    if (this.lookups.has(id)) this.lookups.set(id, kept);
+    return detach(kept);
   }
 
   async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {

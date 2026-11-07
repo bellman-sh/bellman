@@ -3,8 +3,8 @@ import { DurableObject } from "cloudflare:workers";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
 import { codeIsLive, isPublic, newestTaskFirst, taskWithEvent } from "../store.js";
 import type { BlobCharge, HostAppend, PurgeSchedule, SetJoinCode } from "../store.js";
-import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PublicView, SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
-import { DEFAULT_HOME_SETTINGS } from "../types.js";
+import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PublicView, SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource } from "../types.js";
+import { DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "../types.js";
 import { CONFIG_HISTORY } from "../config.js";
 import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "../store.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
@@ -128,6 +128,12 @@ const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
 /** `ns:<userId>`: the account shares its room notes here (ADR 0047 decision 7). Absent is off. Purged with the room. */
 const NOTES_SHARING_PREFIX = "ns:";
 const notesSharingKey = (userId: string): string => `${NOTES_SHARING_PREFIX}${userId}`;
+/**
+ * `lk:<at>:<nonce>`: one home memory read (ADR 0047 decision 13), `at` zero-padded so a reverse list reads newest
+ * first, the nonce so two reads in one millisecond do not collide. Purged with the room.
+ */
+const LOOKUP_PREFIX = "lk:";
+const lookupKey = (at: number, nonce = crypto.randomUUID().slice(0, 8)): string => `${LOOKUP_PREFIX}${String(at).padStart(14, "0")}:${nonce}`;
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -3038,8 +3044,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   // ponytail: a list or find reads every `fsm:` index row under the prefix, because the hidden memory ids are
   // filtered before the page is cut. Rows carry no content, so this is metadata only; bounded batches if rooms reach
   // hundreds of thousands of files.
-  async #fsRows(prefix: string): Promise<FsEntry[]> {
-    return [...(await this.ctx.storage.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
+  async #fsRows(prefix: string, from: { list: DurableObjectStorage["list"] } = this.ctx.storage): Promise<FsEntry[]> {
+    return [...(await from.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
   }
 
   /** `BellmanStore.listFs`, for this room. */
@@ -3055,6 +3061,46 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /** `BellmanStore.writeHomeSettings`: the `hs` row replaced. No record, event, outbox intent or alarm: settings alone are not a home room. */
   async writeHomeSettings(settings: HomeSettings): Promise<void> {
     await this.ctx.storage.put("hs", settings);
+  }
+
+  /**
+   * `BellmanStore.readHomeLogged` (ADR 0047 decision 13): the `hs` read, the file read, the `lk:` row and the
+   * retention prune in one transaction, so a hard delete racing the read cannot leave a lookup row in an emptied room.
+   */
+  async readHomeLogged(path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get<HomeSettings>("hs"))?.paused) return { paused: true as const };
+      const row = await txn.get<FsRow>(fsKey(path));
+      const file = row && !row.deleted ? row : null;
+      await this.#logLookup(txn, source, file ? [file.path] : []);
+      return { paused: false as const, file };
+    });
+  }
+
+  /** `BellmanStore.listHomeLogged`: `listFs` newest first, read and logged in one transaction as `readHomeLogged`. */
+  async listHomeLogged(prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get<HomeSettings>("hs"))?.paused) return { paused: true as const };
+      const page = pageFs(await this.#fsRows(prefix, txn), (r) => underPrefix(r.path, prefix), FS_LIST_PAGE, cursor, newestKey);
+      await this.#logLookup(txn, source, page.entries.map((e) => e.path));
+      return { paused: false as const, page };
+    });
+  }
+
+  async #logLookup(txn: DurableObjectTransaction, source: LookupSource, paths: string[]): Promise<void> {
+    const at = Date.now();
+    await txn.put(lookupKey(at), { ...source, at, paths } satisfies LookupRow);
+    const expired = await txn.list({ prefix: LOOKUP_PREFIX, end: lookupKey(at - LOOKUP_KEEP_MS, "") });
+    for (const key of expired.keys()) await txn.delete(key);
+  }
+
+  // ponytail: the whole log is read to cap it at LOOKUP_KEEP; a count row if logs grow past a few thousand before
+  // the dash reads them.
+  /** `BellmanStore.homeLookups`: newest first, the rows past `LOOKUP_KEEP` deleted. */
+  async homeLookups(): Promise<LookupRow[]> {
+    const rows = [...(await this.ctx.storage.list<LookupRow>({ prefix: LOOKUP_PREFIX, reverse: true }))];
+    for (const [key] of rows.slice(LOOKUP_KEEP)) await this.ctx.storage.delete(key);
+    return rows.slice(0, LOOKUP_KEEP).map(([, r]) => r);
   }
 
   /**

@@ -1005,6 +1005,24 @@ export interface HomeSettings {
 }
 export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false, paused: false };
 
+/** One agent read of home memory (ADR 0047 decision 13): an `lk:` row in the home room, shown to the account only. */
+export interface LookupRow {
+  at: number;
+  op: "read" | "list" | "share" | "arrival";
+  /** The room and seat the read came from; null for a bare `recall`, which names no seat. */
+  sessionId: string | null;
+  memberId: string | null;
+  /** The seat's brief agent, when the read named a seat. */
+  agent: AgentInfo | null;
+  /** `read` and `share`: the path asked for. `list`: the prefix. `arrival`: null. */
+  query: string | null;
+  /** The paths the read returned, in the order returned. */
+  paths: string[];
+}
+export type LookupSource = Omit<LookupRow, "at" | "paths">;
+export const LOOKUP_KEEP = 1000;
+export const LOOKUP_KEEP_MS = 90 * 24 * 60 * 60 * 1000;
+
 /**
  * One revision of a room file (ADR 0046): the `fs:<path>` row holds the current one and `fsh:<path>:<rev>` each kept
  * one. A delete is a tombstone revision: `deleted`, empty content, and the revision count kept so `base_rev` still

@@ -15,9 +15,9 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
+import type { BellmanStore, ConfigWrite, EventBody, FsPage, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/store.js";
 import type { SurfaceWrite } from "../../src/surface.js";
-import type { HomeSettings } from "../../src/types.js";
+import type { HomeSettings, LookupSource } from "../../src/types.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, newestKey } from "../../src/store.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../../src/home.js";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates } from "../../src/action-state.js";
@@ -35,7 +35,7 @@ import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/aud
 import { chainHash, NO_ANCHOR } from "../../src/audit-sink.js";
 import type { AuditEntry, Identity, Org, OrgIdp, OrgInvite, PlanGrant, SavedPreset, ScimUser, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs.js";
-import { DEFAULT_POLICY } from "../../src/types.js";
+import { DEFAULT_POLICY, LOOKUP_KEEP, LOOKUP_KEEP_MS } from "../../src/types.js";
 import { scimIntent } from "../../src/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
@@ -5055,6 +5055,44 @@ export function describeStoreContract(
         expect(newest.next).toBeNull();
         expect((await store.listFs(id, "/", { newest: true, cursor: newestKey(newest.entries[0]) })).entries.map((r) => r.path)).toEqual(["/b.md", "/a.md"]);
         expect((await store.listFs(id, "/c", { newest: true })).entries.map((r) => r.path)).toEqual(["/c/d.md"]);
+      });
+
+      it("logs each read in the home room, newest first, with the paths it returned, and nothing when paused", async () => {
+        vi.setSystemTime(1_699_999_999_999);
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        vi.advanceTimersByTime(1); // a newest-first tie breaks by path, so /b.md is written later to list first
+        await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        expect(await store.readHomeLogged(id, "/a.md", bare)).toMatchObject({ paused: false, file: { path: "/a.md", content: "a" } });
+        vi.advanceTimersByTime(1);
+        expect(await store.readHomeLogged(id, "/nope.md", { ...bare, query: "/nope.md" })).toEqual({ paused: false, file: null });
+        vi.advanceTimersByTime(1);
+        const seat: LookupSource = { op: "list", sessionId: "qs_room", memberId: "m_1", agent: { provider: "anthropic", model: "claude", client: "claude-code" }, query: "/" };
+        const listed = await store.listHomeLogged(id, "/", undefined, seat);
+        expect(listed).toMatchObject({ paused: false, page: { next: null } });
+        expect((listed as { page: FsPage }).page.entries.map((e) => e.path)).toEqual(["/b.md", "/a.md"]);
+        const log = await store.homeLookups(id);
+        expect(log.map((r) => [r.op, r.query, r.paths])).toEqual([["list", "/", ["/b.md", "/a.md"]], ["read", "/nope.md", []], ["read", "/a.md", ["/a.md"]]]);
+        expect(log[0]).toMatchObject({ sessionId: "qs_room", memberId: "m_1", agent: { client: "claude-code" }, at: 1_700_000_000_002 });
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.readHomeLogged(id, "/a.md", bare)).toEqual({ paused: true });
+        expect(await store.listHomeLogged(id, "/", undefined, bare)).toEqual({ paused: true });
+        expect((await store.homeLookups(id)).length).toBe(3);
+        expect(await store.homeLookups(homeRoomId("u_other"))).toEqual([]);
+      });
+
+      it("keeps the newest 1,000 lookup rows and 90 days", async () => {
+        vi.setSystemTime(1_700_000_000_000);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        await store.readHomeLogged(id, "/a.md", bare);
+        vi.advanceTimersByTime(LOOKUP_KEEP_MS + 1);
+        await store.readHomeLogged(id, "/a.md", bare);
+        expect((await store.homeLookups(id)).map((r) => r.at)).toEqual([1_700_000_000_000 + LOOKUP_KEEP_MS + 1]);
+        for (let i = 0; i < LOOKUP_KEEP + 5; i++) { vi.advanceTimersByTime(1); await store.readHomeLogged(id, "/a.md", bare); }
+        const kept = await store.homeLookups(id);
+        expect(kept.length).toBe(LOOKUP_KEEP);
+        expect(kept[0].at).toBeGreaterThan(kept[kept.length - 1].at);
+        expect((await store.homeLookups(id)).length).toBe(LOOKUP_KEEP);
       });
     });
 

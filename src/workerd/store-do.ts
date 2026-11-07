@@ -4,7 +4,7 @@ import type { Ban, CreatorBan } from "../bans.js";
 import type { Suspension } from "../suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, type ScimCreate, type ScimUpdate } from "../store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "../store.js";
-import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings } from "../types.js";
+import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource } from "../types.js";
 import type { HomeAppend } from "../store.js";
 import { isHomeRoomId } from "../home.js";
 import type { AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch, AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts, DecisionClose, DecisionOpen, VoteWrite, RoomCounts, RoomFilter, RoomIndexRow, RoomSummary } from "../store.js";
@@ -744,6 +744,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
     return this.session(id).writeHomeSettings(settings);
+  }
+
+  async readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {
+    return this.session(id).readHomeLogged(path, source);
+  }
+
+  async listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }> {
+    return this.session(id).listHomeLogged(prefix, cursor, source);
+  }
+
+  async homeLookups(id: string): Promise<LookupRow[]> {
+    return this.session(id).homeLookups();
   }
 
   async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {

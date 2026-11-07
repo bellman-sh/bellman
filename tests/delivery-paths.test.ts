@@ -95,6 +95,7 @@ const FILE_READS: Listing = {
   "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
   "src/memory.ts": { calls: 3, serves: "readHome, listHome and homeTitles (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads; homeTitles hands bellman_confirm the paths alone" },
   "src/workerd/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
+  "src/store.ts": { calls: 2, serves: "MemoryStore's readHomeLogged and listHomeLogged (ADR 0047 decision 13): the home room's read and newest-first list, handed back with no memory rule as readFs and listFs are, and logged" },
 };
 
 describe("the paths a memory file can leave by (ADR 0046)", () => {

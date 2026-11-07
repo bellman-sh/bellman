@@ -16,26 +16,26 @@ and never `src/`. Read and edit the sources; never the bundles.
 | `stop-hook.mjs` | `src/stop-hook.ts` | `Stop` hook |
 | `status-hook.mjs` | `src/status-hook.ts` | `UserPromptSubmit` and `Notification` hooks |
 
-[build-plugin.ts:(top-level CLI)] [plugin/.mcp.json:mcpServers.bellman]
+[scripts/build-plugin.ts:(top-level CLI)] [plugin/.mcp.json:mcpServers.bellman]
 [plugin/hooks/hooks.json:hooks]
 
 - `THIRD-PARTY-NOTICES.txt`: one entry per bundled `node_modules` package
-  [build-plugin.ts:notices]
+  [scripts/build-plugin.ts:notices]
 
 ## Invariants
 
 - Built with esbuild for platform node, ESM, target node22, minified
-  [build-plugin.ts:(top-level CLI)]
+  [scripts/build-plugin.ts:(top-level CLI)]
 - Each bundle starts with a shebang and a `createRequire` banner, because
   bundled CommonJS calls `require()` for Node built-ins
-  [build-plugin.ts:banner] [plugin/bridge/*.mjs:header]
+  [scripts/build-plugin.ts:banner] [plugin/bridge/*.mjs:header]
 - `package.json`'s version is inlined as `BELLMAN_BUNDLE_VERSION`, since the
   bundle has no `package.json` to read; the spawned `channel.mjs` reports it as
-  `serverInfo.version` [build-plugin.ts:define.BELLMAN_BUNDLE_VERSION]
+  `serverInfo.version` [scripts/build-plugin.ts:define.BELLMAN_BUNDLE_VERSION]
   [tests/plugin.test.ts:reports package.json's version]
 - Notices are keyed `name@version` and sorted by code point, so the output is
   deterministic; they must include `@modelcontextprotocol/sdk@`, `fast-uri@`,
-  `yaml@` and `zod@` [build-plugin.ts:notices]
+  `yaml@` and `zod@` [scripts/build-plugin.ts:notices]
   [tests/plugin.test.ts:carries Bellman's license and the notices of every package it bundles]
 - Every file `.mcp.json` and `hooks.json` name exists here
   [tests/plugin.test.ts:runs only files that exist under plugin/]
@@ -48,7 +48,7 @@ and never `src/`. Read and edit the sources; never the bundles.
 
 - Building writes the four bundles and `THIRD-PARTY-NOTICES.txt`, reads
   `node_modules` package and license files, and also rebuilds
-  `mod/hooks/register.mjs` through `buildMod()` [build-plugin.ts:build]
+  `mod/hooks/register.mjs` through `buildMod()` [scripts/build-plugin.ts:build]
 - At run time, the effects of their sources under `src/` (not documented here)
 
 ## Verification

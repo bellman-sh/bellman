@@ -878,9 +878,9 @@ describe("hook delivery (the fallback)", () => {
  */
 describe("bellman_whoami", () => {
   const signedIn = {
-    source: "oauth", label: "jesse@github", plan: "free", role: "member", org_id: null,
+    source: "oauth", label: "jesse@github", user_id: "u_github_4242", plan: "free", role: "member", org_id: null,
   } satisfies WhoAmI;
-  const SIGNED_IN_TEXT = "Signed in as jesse@github — free plan, role member, org none.";
+  const SIGNED_IN_TEXT = "Signed in as jesse@github (u_github_4242) — free plan, role member, org none.";
   const ENV_TEXT =
     "Using a BELLMAN_KEY from the environment. This bridge cannot tell whose key it is; " +
     "the server resolves it on every call.";
@@ -918,7 +918,7 @@ describe("bellman_whoami", () => {
     expect(await asked(a)).toEqual({
       isError: false,
       data: { ...inOrg, door: null },
-      text: "Signed in as jesse@github — free plan, role member, org org_codenerd.",
+      text: "Signed in as jesse@github (u_github_4242) — free plan, role member, org org_codenerd.",
     });
   });
 
@@ -1004,21 +1004,23 @@ describe("bellman_whoami", () => {
   // any of them, while TypeScript — which believes `label: string` — cannot see it, and a template
   // literal would print it. A person must never be told "Signed in as undefined".
   describe("an answer the bridge cannot trust", () => {
-    const whole = { label: "jesse@github", plan: "free", role: "member", org_id: null };
+    const whole = { label: "jesse@github", user_id: "u_github_4242", plan: "free", role: "member", org_id: null };
     const unreadable: [string, Record<string, unknown>, string][] = [
-      ["no label", { plan: "free", role: "member", org_id: null }, "label"],
+      ["no label", { user_id: "u_github_4242", plan: "free", role: "member", org_id: null }, "label"],
       ["a null label", { ...whole, label: null }, "label"],
       ["an empty label", { ...whole, label: "" }, "label"],
       ["a blank label", { ...whole, label: "   " }, "label"],
       ["a numeric label", { ...whole, label: 42 }, "label"],
       ["an object label", { ...whole, label: { name: "jesse" } }, "label"],
-      ["no plan", { label: "jesse@github", role: "member", org_id: null }, "plan"],
+      ["no user id", { label: "jesse@github", plan: "free", role: "member", org_id: null }, "user_id"],
+      ["a blank user id", { ...whole, user_id: " " }, "user_id"],
+      ["no plan", { label: "jesse@github", user_id: "u_github_4242", role: "member", org_id: null }, "plan"],
       ["a blank plan", { ...whole, plan: " " }, "plan"],
-      ["no role", { label: "jesse@github", plan: "free", org_id: null }, "role"],
+      ["no role", { label: "jesse@github", user_id: "u_github_4242", plan: "free", org_id: null }, "role"],
       ["a numeric role", { ...whole, role: 7 }, "role"],
       ["an empty org", { ...whole, org_id: "" }, "org_id"],
       ["a numeric org", { ...whole, org_id: 42 }, "org_id"],
-      ["an empty claim", {}, "label, plan, role"],
+      ["an empty claim", {}, "label, user_id, plan, role"],
     ];
 
     it.each(unreadable)("reports a sign-in with %s as unknown, not as a sign-in", async (_what, claim, unusable) => {
@@ -1039,14 +1041,14 @@ describe("bellman_whoami", () => {
     it("takes an absent org to mean no org", async () => {
       // A server that leaves null fields out sends an org-less user a claim with no orgId at all.
       const a = await open(DEV_KEY.jesse, "channel", {
-        whoami: () => ({ source: "oauth", label: "jesse@github", plan: "free", role: "member" }) as unknown as WhoAmI,
+        whoami: () => ({ source: "oauth", label: "jesse@github", user_id: "u_github_4242", plan: "free", role: "member" }) as unknown as WhoAmI,
       });
 
       expect(await asked(a)).toEqual({ isError: false, data: { ...signedIn, door: null }, text: SIGNED_IN_TEXT });
     });
 
     const carrying: [string, unknown, WhoAmI, string][] = [
-      ["a sign-in", { ...signedIn, user_id: "u_jesse", access_token: "secret-token" }, signedIn, SIGNED_IN_TEXT],
+      ["a sign-in", { ...signedIn, access_token: "secret-token" }, signedIn, SIGNED_IN_TEXT],
       ["a static key", { source: "env", label: "jesse@github", access_token: "secret-token" },
         { source: "env", label: null }, ENV_TEXT],
       ["an unknown", { source: "unknown", label: "jesse@github", access_token: "secret-token" },

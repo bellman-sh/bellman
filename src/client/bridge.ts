@@ -1539,13 +1539,13 @@ export function createBridge(opts: BridgeOptions) {
   /**
    * The account's memory settings for the door's `/memory` (#530): `GET /me/memory` with the bridge's own credential,
    * read when the Stop hook asks, so a switch the person turns in the dash reaches the next session's check with no
-   * restart. Only `capture` is passed on. It never rejects.
+   * restart. Only `capture` is passed on, off while the account is paused (ADR 0047 decision 13). It never rejects.
    */
   async function readMemory(): Promise<{ status: number; body: DoorMemory | { error: string } }> {
-    const got = await readOwn<{ capture?: unknown }>("/me/memory");
+    const got = await readOwn<{ capture?: unknown; paused?: unknown }>("/me/memory");
     if (!("read" in got)) return got;
     if (typeof got.read.capture !== "boolean") return { status: 502, body: { error: "upstream" } };
-    return { status: 200, body: { capture: got.read.capture } };
+    return { status: 200, body: { capture: got.read.capture && got.read.paused !== true } };
   }
 
   /**

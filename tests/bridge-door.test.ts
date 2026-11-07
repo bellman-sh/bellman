@@ -246,6 +246,11 @@ describe("readMemory (#530)", () => {
     expect(seen[0].headers.get("authorization")).toBe("Bearer tok");
   });
 
+  it("says capture off while the account is paused, so the Stop hook asks nothing", async () => {
+    const { bridge } = await armedBridge({ sync: [], upload: uploadTo(serving(() => Response.json({ capture: true, paused: true })).fetchImpl) });
+    expect(await bridge.readMemory()).toEqual({ status: 200, body: { capture: false } });
+  });
+
   it("answers 503 with no credential, upstream with the server's status, and 502 for a body it cannot read", async () => {
     const none = await armedBridge({ sync: [] });
     expect(await none.bridge.readMemory()).toEqual({ status: 503, body: { error: "no_credential" } });

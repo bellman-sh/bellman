@@ -103,27 +103,28 @@ facts, keyword search now, memory on every plan.
       `recall` block always carries `paused: boolean` and, paused, reads nothing. An agent cannot unpause.
     - *Lookup log:* every agent read of home memory writes an `lk:` row in the home room, in the read's transaction:
       time, op, room and member it came from, the agent, the query and the paths returned. The agent, room and member
-      are the seat's when the read names one (`share`, arrival) and null for a bare `recall`, which has no seat. A
-      logged read deletes rows older than 90 days; `GET /me/memory/lookups` returns the newest 1,000 and deletes the
-      rest, so a home room never opened in the dash is bounded by time alone. It is shown to the account only, never
-      sent to an org's audit stream.
-    - *Hard delete:* `DELETE /me/memory` empties the whole home room, the `hs` row included, so capture and pause read
-      as off afterwards: the person deleted their memory, and capture off is the safer default.
-      `DELETE /me/memory/notes?path=` deletes one note and its history as `forget` does and scrubs the path from every
-      `lk:` row, deleting a row left with no paths. `DELETE /rooms/:id/notes` deletes the account's own notes in one
-      room as one `writeFs` delete per file from its first active seat, so each is a send, counted and audited as any
-      room file delete; it stops at the first refusal and answers what it deleted.
+      are the seat's when the read names one (`share`, arrival) and null for a bare `recall`, which has no seat. The
+      log keeps the newest 1,000 rows (trimmed on write past about 1,100, and to 1,000 on each dash read) or 90 days;
+      an `lkn` row counts the rows, so a write trims without listing the log. `GET /me/memory/lookups` returns the
+      newest 1,000. It is shown to the account only, never sent to an org's audit stream.
+    - *Hard delete:* `DELETE /me/memory` deletes everything: the whole home room, the `hs` row included, and the
+      capture switch is turned off; a pause stays (written back after the purge), since deleting what agents can read
+      is not a reason to let them read again. `DELETE /me/memory/notes?path=` deletes one note and its history as
+      `forget` does and scrubs the path from every lookup row that returned it, deleting a row left with no paths.
+      `DELETE /rooms/:id/notes` deletes the account's own notes in one room as one `writeFs` delete per file from its
+      first active seat, so each is a send, counted and audited as any room file delete; it stops at the first refusal
+      (with `retry_after` when it is `rate_limited`) and answers what it deleted.
     - *Export:* `GET /me/memory/export` is one `text/markdown` document: home notes, then the account's room notes per
       room, each note verbatim under its heading, one read per object. It works while paused and writes no `lk:` row.
     - *Capture switch* (#530): `PUT /me/memory` `{ capture }`, the one `hs` row in the home room, written without a
       record (settings alone are not a home room; the first note still creates it). Off until turned on. `GET /me/memory`
       answers a bearer too: the Claude Code bridge reads it, once a session, when the Stop hook asks through its door
-      whether to run the memory check. The hook reads no transcript and sends nothing; the agent writes with
-      `bellman_memory`.
+      whether to run the memory check; while paused the bridge reports capture off, so the hook asks nothing. The hook
+      reads no transcript and sends nothing; the agent writes with `bellman_memory`.
 14. **Purge** (amends ADR 0046 decision 11). A room's purge deletes its `ns:` rows with `fs:`, `fsh:` and `mi:`. A
-    home room, every `fs:`, `fsh:` and `lk:` row, the `hs` row and the record, is purged by `DELETE /me/memory` or by
-    the operator's `DELETE /admin/accounts/:userId/memory`, which the account-deletion runbook runs and any later
-    account deletion calls.
+    home room, every row of the home room (`fs:`, `fsm:`, `fsh:`, `hk:`, `lk:`, `lkn`, `hs`) and the record, is purged
+    by `DELETE /me/memory` (which writes a pause back, decision 13) or by the operator's
+    `DELETE /admin/accounts/:userId/memory`, which the account-deletion runbook runs and any later account deletion calls.
 
 ## Consequences
 

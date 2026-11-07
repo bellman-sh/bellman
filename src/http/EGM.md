@@ -47,12 +47,15 @@ Account, org and operator routes:
   sets the `ns:` row from a dash session alone (403 `dash_session_required` to a bearer, the CSRF check), 400 for any
   other body; `DELETE /rooms/:id/notes` deletes the account's own notes in the room, one `writeFs` delete per file from
   its first active seat, stopping at the first refusal, and answers 200 `{deleted, refused}` (`refused` is
-  `{path, code}` or null), 404 without a seat [src/http/notes-sharing.ts:notesSharingRoutes]
+  `{path, code}`, with `retry_after` seconds when `code` is `rate_limited`, or null), 404 without a seat. Each delete
+  spends one of the seat's sends, so a folder past the minute's limit stops at `rate_limited`
+  [src/http/notes-sharing.ts:notesSharingRoutes]
 - `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
   (`{capture, paused}`) to a bearer or a cookie, `PUT /me/memory` `{capture?, paused?}` (at least one, no other key,
   else 400) merges into it [src/http/me.ts:meRoutes]
 - The rest of `meRoutes`, all dash-session only: `GET /me/memory/lookups` `{lookups}` (newest first, at most
-  `LOOKUP_KEEP` 1,000); `DELETE /me/memory` (204, the whole home room with its `hs` row); `DELETE /me/memory/notes?path=`
+  `LOOKUP_KEEP` 1,000, the log trimmed to that); `DELETE /me/memory` (204, the whole home room with its `hs` row; a pause is
+  written back, capture stays off); `DELETE /me/memory/notes?path=`
   (204 | 404 `not_found` | 400 `invalid_request`, the note, its history and the path in every lookup row);
   `GET /me/memory/export` (200 `text/markdown`, an attachment `bellman-memory-YYYY-MM-DD.md`, works while paused, logs
   no lookup) [src/http/me.ts:meRoutes]

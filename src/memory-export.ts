@@ -12,6 +12,9 @@ export interface ExportRoom { sessionId: string; room: string; notes: FsRow[] }
 
 const byPath = (a: FsRow, b: FsRow): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
+/** A peer-chosen room name on one line, so a newline in it cannot open a heading of its own. */
+const oneLine = (name: string): string => name.replace(/\s+/g, " ").trim();
+
 function note(heading: string, r: FsRow): string {
   return `${heading} ${r.path}\n\nRevision ${r.rev} · ${new Date(r.at).toISOString()}\n\n${r.content}\n\n---\n`;
 }
@@ -21,6 +24,6 @@ export function renderExport(input: { label: string; at: number; home: FsRow[]; 
   let md = `# Bellman memory export\n\nAccount: ${input.label}\nExported: ${new Date(input.at).toISOString()}\n\n## Home memory\n\n`;
   md += input.home.length === 0 ? "_No home notes._\n\n" : [...input.home].sort(byPath).map((r) => note("###", r)).join("\n") + "\n";
   md += "## Room notes\n\n";
-  md += input.rooms.length === 0 ? "_No room notes._\n" : input.rooms.map((room) => `### ${room.room} (${room.sessionId})\n\n${[...room.notes].sort(byPath).map((r) => note("####", r)).join("\n")}`).join("\n");
+  md += input.rooms.length === 0 ? "_No room notes._\n" : input.rooms.map((room) => `### ${oneLine(room.room)} (${room.sessionId})\n\n${[...room.notes].sort(byPath).map((r) => note("####", r)).join("\n")}`).join("\n");
   return md;
 }

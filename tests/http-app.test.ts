@@ -6,9 +6,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
+import { homeRoomId } from "../src/home.js";
 import { meRoutes } from "../src/http/me.js";
 import type { LookupShown } from "../src/memory.js";
 import { MAX_CODE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { SEND_LIMIT } from "../src/send-limit.js";
 import { joinWith, pairUp, publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 
@@ -166,21 +168,55 @@ describe("GET /me/memory/export", () => {
     expect((await call(DEV_KEY.jesse, "/me/memory/export")).status).toBe(403);
     expect((await call(null, "/me/memory/export", { method: "PUT", cookie: DEV_KEY.jesse, body: {} })).headers.get("allow")).toBe("GET");
   });
+
+  const exported = async () => (await call(null, "/me/memory/export", { cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).text();
+
+  it("leaves out the account's notes in a room it left and in a closed room", async () => {
+    const left = await pairUp(h);
+    await left.creator.call("bellman_fs", { op: "write", session_id: left.sessionId, member_id: left.creatorMemberId, path: "/members/me/l.md", content: "left note" });
+    expect((await left.creator.call("bellman_leave", { session_id: left.sessionId, member_id: left.creatorMemberId })).isError).toBe(false);
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const closed = await startRoom(jesse, SWARM);
+    await jesse.call("bellman_fs", { op: "write", session_id: closed.sessionId, member_id: closed.memberId, path: "/members/me/c.md", content: "closed note" });
+    await h.store.closeSession(closed.sessionId);
+    const open = await startRoom(jesse, SWARM);
+    await jesse.call("bellman_fs", { op: "write", session_id: open.sessionId, member_id: open.memberId, path: "/members/me/o.md", content: "open note" });
+    const md = await exported();
+    expect(md).toContain("open note");
+    expect(md).not.toContain("left note");
+    expect(md).not.toContain("closed note");
+  });
+
+  it("works while paused and writes no lookup row", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "home note" });
+    await jesse.call("bellman_memory", { op: "recall", path: "/a.md" });
+    const home = homeRoomId(resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!.userId);
+    const before = (await h.store.homeLookups(home)).length;
+    await call(null, "/me/memory", { method: "PUT", body: { paused: true }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(await exported()).toContain("home note");
+    expect((await h.store.homeLookups(home)).length).toBe(before);
+  });
 });
 
 // #531, ADR 0047 decision 14: hard delete, from a dash session alone, and never refused as paused.
 describe("DELETE /me/memory and /me/memory/notes", () => {
   const dash = (body: unknown) => call(null, "/me/memory", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
 
-  it("deletes everything from the dash and nothing with a bearer", async () => {
+  it("deletes everything from the dash and nothing with a bearer, turning capture off and keeping a pause", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
     await dash({ capture: true });
+    const purge = () => call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
     expect((await call(DEV_KEY.jesse, "/me/memory", { method: "DELETE" })).status).toBe(403);
     expect((await call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse })).status).toBe(403); // no Origin
-    expect((await call(null, "/me/memory", { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(204);
+    expect((await purge()).status).toBe(204);
     expect((await jesse.call("bellman_memory", { op: "recall" })).data).toMatchObject({ entries: [] });
     expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: false });
+    await dash({ capture: true, paused: true });
+    expect((await purge()).status).toBe(204);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/memory"))).toEqual({ capture: false, paused: true });
+    expect((await jesse.call("bellman_memory", { op: "recall" })).isError).toBe(true);
   });
 
   it("deletes one note by path, 404 for a note that is not there, 400 without a path", async () => {
@@ -270,7 +306,7 @@ describe("POST /rooms/:id/codes", () => {
 
 // #531, ADR 0047 decision 14: the account's own room notes in one room, from a dash session alone.
 describe("DELETE /rooms/:id/notes", () => {
-  it("DELETE /rooms/:id/notes removes the account's room notes and no one else's, with the room's events saying so", async () => {
+  it("removes the account's room notes and no one else's, to the dash alone", async () => {
     const pair = await pairUp(h);
     await pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/members/me/a.md", content: "a" });
     await pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/members/me/b.md", content: "b" });
@@ -284,5 +320,29 @@ describe("DELETE /rooms/:id/notes", () => {
     expect((await pair.joiner.call("bellman_fs", { op: "read", session_id: pair.sessionId, member_id: pair.joinerMemberId, path: "/members/me/p.md" })).isError).toBe(false);
     expect((await call(DEV_KEY.jesse, `/rooms/${pair.sessionId}/notes`, { method: "DELETE" })).status).toBe(403);
     expect((await call(null, `/rooms/qs_nope/notes`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(404);
+  });
+
+  it("stops at the seat's send limit with what it deleted, the refusal and its wait, and one fs event per delete", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const pair = await pairUp(h);
+    const write = (i: number) => pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: `/members/me/n${String(i).padStart(2, "0")}.md`, content: "n" });
+    // Each write is a send too, so the 31 notes are written over two minutes and the delete starts on a fresh one.
+    for (let i = 0; i < SEND_LIMIT; i++) expect((await write(i)).isError).toBe(false);
+    vi.advanceTimersByTime(61_000);
+    expect((await write(SEND_LIMIT)).isError).toBe(false);
+    vi.advanceTimersByTime(61_000);
+    const cursor = (await h.store.eventsAfter(pair.sessionId, 0)).at(-1)!.cursor;
+    const paths = (await h.store.listFs(pair.sessionId, "/members")).entries.map((e) => e.path);
+    expect(paths).toHaveLength(SEND_LIMIT + 1);
+    const res = await call(null, `/rooms/${pair.sessionId}/notes`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(res.status).toBe(200);
+    const body = await bodyOf(res) as { deleted: string[]; refused: { path: string; code: string; retry_after: number } };
+    expect(body.deleted).toEqual(paths.slice(0, SEND_LIMIT));
+    expect(body.refused).toEqual({ path: paths[SEND_LIMIT], code: "rate_limited", retry_after: expect.any(Number) });
+    expect(body.refused.retry_after).toBeGreaterThan(0);
+    for (const p of body.deleted) expect(await h.store.readFs(pair.sessionId, p)).toBeNull();
+    expect(await h.store.readFs(pair.sessionId, paths[SEND_LIMIT])).not.toBeNull();
+    const deletes = (await h.store.eventsAfter(pair.sessionId, cursor)).filter((e) => e.type === "fs");
+    expect(deletes.map((e) => [(e.payload as { op: string }).op, (e.payload as { path: string }).path])).toEqual(body.deleted.map((p) => ["delete", p]));
   });
 });

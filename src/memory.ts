@@ -13,7 +13,7 @@ import { isActiveMember, type BellmanStore, type FsPage, type FsWrite } from "./
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "./types.js";
 
 const NO_NOTE = "no such note.";
-const PAUSED = "paused: your human paused home memory in the dash; forget still works.";
+const PAUSED = "paused: your human paused home memory in the dash; forget and unshare still work.";
 
 /** A home path: normalized, and never under `/apps/`, which a home room cannot run. Every other path is the account's. */
 function homePath(raw: string): RoomResult<string> {
@@ -102,6 +102,7 @@ export const readMemorySettings = (store: BellmanStore, actor: Identity): Promis
   store.readHomeSettings(homeRoomId(actor.userId));
 
 /** Settings patched, from a dash session only (the route checks); the settings as they now are. */
+// ponytail: read-merge-write in two RPCs, so two tabs racing can drop a field; a DO-side patch method if it bites.
 export async function setMemorySettings(store: BellmanStore, actor: Identity, patch: Partial<HomeSettings>): Promise<HomeSettings> {
   const id = homeRoomId(actor.userId);
   const next = { ...(await store.readHomeSettings(id)), ...patch };
@@ -109,8 +110,16 @@ export async function setMemorySettings(store: BellmanStore, actor: Identity, pa
   return next;
 }
 
-/** Hard delete (ADR 0047 decision 14): the account's home room emptied, settings and lookup log included. Never paused. */
-export const deleteMemory = (store: BellmanStore, actor: Identity): Promise<void> => store.purgeHome(homeRoomId(actor.userId));
+/**
+ * Hard delete (ADR 0047 decision 14): the account's home room emptied, settings and lookup log included. Never paused.
+ * Capture ends off; a pause is written back, so deleting cannot let agents read again. An unpaused account keeps no `hs` row.
+ */
+export async function deleteMemory(store: BellmanStore, actor: Identity): Promise<void> {
+  const id = homeRoomId(actor.userId);
+  const { paused } = await store.readHomeSettings(id);
+  await store.purgeHome(id);
+  if (paused) await store.writeHomeSettings(id, { capture: false, paused: true });
+}
 
 /** One note deleted from the dash, as `forget` does, and scrubbed from the lookup log (decision 14). Never paused. */
 export async function forgetNote(store: BellmanStore, actor: Identity, raw: string): Promise<RoomResult<null>> {
@@ -139,6 +148,8 @@ async function readAll(store: BellmanStore, roomId: string, prefix: string): Pro
  * (`/members/<memory id>/`) in each open room it holds an active seat in. Reads the store directly, so the lookup
  * log is untouched and a paused account can still take its notes out.
  */
+// ponytail: every room from roomIdsOf (rooms past JOINED_SCAN are left out), about four RPCs per room plus one per
+// note, unbatched; a heavy account can meet the Workers subrequest cap. Page the export if one does.
 export async function exportMemory(store: BellmanStore, actor: Identity): Promise<string> {
   const home = await readAll(store, homeRoomId(actor.userId), "/");
   const rooms: ExportRoom[] = [];
@@ -156,11 +167,12 @@ export async function exportMemory(store: BellmanStore, actor: Identity): Promis
 /**
  * Delete the account's own notes (`/members/<memory id>/`) in one room (ADR 0047 decision 14), one room file delete
  * per note through the seat's own write: its verb, send count and quota apply, and each leaves its `fs` event and
- * audit entry. Stops at the first refusal and reports it; what was deleted before it stays deleted.
+ * audit entry. Stops at the first refusal and reports it, with `retry_after` (seconds) when it is `rate_limited`; what
+ * was deleted before it stays deleted.
  */
 export async function deleteRoomNotes(
   store: BellmanStore, actor: Identity, sessionId: string,
-): Promise<RoomResult<{ deleted: string[]; refused: { path: string; code: RoomFailure } | null }>> {
+): Promise<RoomResult<{ deleted: string[]; refused: { path: string; code: RoomFailure; retry_after?: number } | null }>> {
   const session = await store.getSession(sessionId);
   const seat = session?.members.find((m) => m.userId === actor.userId && isActiveMember(m));
   if (!session || !seat) return refuse("not_found", "no such room, or no seat of yours in it.");
@@ -176,7 +188,10 @@ export async function deleteRoomNotes(
   const deleted: string[] = [];
   for (const row of rows) {
     const out = await writeFs(store, actor, sessionId, seat.memberId, { path: row.path, write: { op: "delete", baseRev: row.rev } });
-    if (!out.ok) return succeed({ deleted, refused: { path: row.path, code: out.code } });
+    if (!out.ok) {
+      const wait = out.code === "rate_limited" && out.retryAfter !== undefined ? { retry_after: out.retryAfter } : {};
+      return succeed({ deleted, refused: { path: row.path, code: out.code, ...wait } });
+    }
     deleted.push(row.path);
   }
   return succeed({ deleted, refused: null });

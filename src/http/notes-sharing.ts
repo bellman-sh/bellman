@@ -4,6 +4,8 @@
  *
  *   GET /rooms/:id/notes-sharing            { shared } for the caller's account; bearer or cookie
  *   PUT /rooms/:id/notes-sharing { shared }  from a signed-in dash session alone, Origin checked
+ *   DELETE /rooms/:id/notes                  { deleted, refused }: the account's own notes in the room, deleted; dash
+ *                                            session alone, Origin checked (decision 14)
  *
  * A bearer is refused the write even from a seat of the caller's: turning sharing on is what exposes notes, and an
  * agent reads peer content that can ask for it. Turning it off is also `bellman_memory` `unshare`, from any seat.
@@ -12,15 +14,32 @@
  * Runtime-free, as rooms.ts: a web Request in, a Response out.
  */
 import { csrfRefusal } from "../oauth/browser.js";
+import { deleteRoomNotes } from "../files/memory.js";
 import { notesSharersOf } from "../room/rooms.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export const NOTES_SHARING = /^\/rooms\/([^/]+)\/notes-sharing$/;
 
+export const NOTES = /^\/rooms\/([^/]+)\/notes$/;
+
 const NOT_FOUND = "no such room, or no seat of yours in it";
+
+/** `DELETE /rooms/:id/notes`: a bearer is refused, since an agent deleting a person's notes is the person's call. */
+async function deleteNotes(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  if (who.via !== "cookie") return problem(403, "dash_session_required", "deleting notes is done by the person signed in to the dash, never with a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const out = await deleteRoomNotes(deps.store, who.identity, sessionId);
+  if (!out.ok) return problem(404, "not_found", NOT_FOUND, origin);
+  return json(200, out.value, origin);
+}
 
 /** Dispatch the notes-sharing route, or undefined when `path` is not it. */
 export async function notesSharingRoutes(request: Request, path: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response | undefined> {
+  const notes = NOTES.exec(path);
+  if (notes) return request.method === "DELETE" ? deleteNotes(request, notes[1], origin, deps) : methodNotAllowed("DELETE", origin);
   const match = NOTES_SHARING.exec(path);
   if (!match) return undefined;
   if (request.method !== "GET" && request.method !== "PUT") return methodNotAllowed("GET, PUT", origin);

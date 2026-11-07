@@ -1,8 +1,8 @@
-import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, DEFAULT_HOME_SETTINGS } from "../types.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId, type HomeKeyRecord, decideFsWrite, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix } from "../files/fs.js";
 import { namespaceOf } from "../files/fs-path.js";
-import { isHomeRoomId } from "../files/home.js";
+import { HOME_MEMBER_ID, isHomeRoomId } from "../files/home.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs/orgs.js";
 import { MemoryBlobStore, type BlobStore, decideBlobCharge } from "../files/blobs.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
@@ -72,6 +72,8 @@ export class MemoryStore implements BellmanStore {
   private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   /** Home settings rows (#530), by home room; a room record is not needed for one. */
   private homeSettings = new Map<string, HomeSettings>();
+  /** The lookup log (ADR 0047 decision 13), by home room, newest first. */
+  private lookups = new Map<string, LookupRow[]>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -1062,22 +1064,79 @@ export class MemoryStore implements BellmanStore {
   }
 
   async readHomeSettings(id: string): Promise<HomeSettings> {
-    return detach(this.homeSettings.get(id) ?? DEFAULT_HOME_SETTINGS);
+    return detach({ ...DEFAULT_HOME_SETTINGS, ...this.homeSettings.get(id) });
   }
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
     this.homeSettings.set(id, detach(settings));
   }
 
+  async readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {
+    if (this.homeSettings.get(id)?.paused) return { paused: true };
+    const file = await this.readFs(id, path);
+    this.logLookup(id, source, file ? [file.path] : []);
+    return { paused: false, file };
+  }
+
+  async listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }> {
+    if (this.homeSettings.get(id)?.paused) return { paused: true };
+    const page = await this.listFs(id, prefix, { newest: true, cursor });
+    this.logLookup(id, source, page.entries.map((e) => e.path));
+    return { paused: false, page };
+  }
+
+  private logLookup(id: string, source: LookupSource, paths: string[]): void {
+    const at = Date.now();
+    const rows = [detach({ ...source, at, paths }), ...(this.lookups.get(id) ?? [])].filter((r) => r.at >= at - LOOKUP_KEEP_MS);
+    // As SessionDO's #logLookup: past LOOKUP_KEEP + LOOKUP_SLACK rows, trimmed back to LOOKUP_KEEP.
+    this.lookups.set(id, rows.length > LOOKUP_KEEP + LOOKUP_SLACK ? rows.slice(0, LOOKUP_KEEP) : rows);
+  }
+
+  async homeLookups(id: string): Promise<LookupRow[]> {
+    const kept = (this.lookups.get(id) ?? []).slice(0, LOOKUP_KEEP);
+    if (this.lookups.has(id)) this.lookups.set(id, kept);
+    return detach(kept);
+  }
+
+  async purgeHome(id: string): Promise<void> {
+    // The home room's rows, as SessionDO's deleteAll() takes them; a waiter is answered with nothing, as purgeNow does.
+    if (!isHomeRoomId(id)) throw new Error(`purgeHome: ${id} is not a home room`);
+    for (const w of this.waiters.get(id) ?? []) w.resolve([]);
+    for (const map of [this.waiters, this.sessions, this.files, this.homeKeys, this.homeSettings, this.lookups, this.sends, this.briefs]) map.delete(id);
+  }
+
+  async forgetHomeNote(id: string, path: string): Promise<boolean> {
+    const s = this.sessions.get(id);
+    const current = this.files.get(id)?.get(path)?.current;
+    if (!s || !current || current.deleted) return false;
+    // `forget` at the current revision, as the account: a delete is never paused and frees bytes, so the ceiling is moot.
+    const w: FsWrite = { path, write: { op: "delete", baseRev: current.rev }, memberId: HOME_MEMBER_ID, userId: s.creator.userId, label: s.creator.label, key: null };
+    if (this.writeHomeIn(id, null, w, 0).outcome !== "ok") return false;
+    // Only the rows that returned the note change; one left with no paths goes.
+    const rows = this.lookups.get(id) ?? [];
+    this.lookups.set(id, rows.flatMap((r) => {
+      if (!r.paths.includes(path)) return [r];
+      const paths = r.paths.filter((p) => p !== path);
+      return paths.length > 0 ? [{ ...r, paths }] : [];
+    }));
+    return true;
+  }
+
   async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
-    // Synchronous from the key check to the last row, as appendFs.
+    return this.writeHomeIn(id, home, w, ceiling);
+  }
+
+  /** `writeHome`, synchronous from the key check to the last row, as appendFs. `home` null: the record must exist, or `not_found`. */
+  private writeHomeIn(id: string, home: NewSession | null, w: FsWrite, ceiling: number): HomeAppend {
     const storageKey = w.key === null ? null : homeKey(w.memberId, w.key);
     const print = fsPrint(w);
     const record = storageKey === null ? undefined : this.homeKeys.get(id)?.get(storageKey);
     if (record) return record.print === print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    if (w.write.op === "write" && this.homeSettings.get(id)?.paused) return { outcome: "paused" };
     if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
     let s = this.sessions.get(id);
     if (!s) {
+      if (home === null) return { outcome: "not_found" };
       // Created by the first write, and indexed nowhere: not by creator, member, org or the operator's room table.
       const { members, briefs } = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
       s = detach({ ...home, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });

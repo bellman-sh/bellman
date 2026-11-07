@@ -15,7 +15,7 @@ beforeEach(() => { h = new Harness(); });
 afterEach(async () => { await h.close(); });
 
 interface Block { items: { data: { key: string } }[]; next: string | null }
-interface Reply { surface: Block; briefs: unknown[]; briefs_omitted: number; recall: { home: string[]; home_omitted: number }; members: { member_id: string; presence: string }[]; room_instructions?: { data: { content: string } } }
+interface Reply { session_id: string; member_id: string; surface: Block; briefs: unknown[]; briefs_omitted: number; recall: { home: string[]; home_omitted: number; paused: boolean }; members: { member_id: string; presence: string }[]; room_instructions?: { data: { content: string } } }
 
 /** A room seeded from `members`, with `n` cards of `body` on its surface, written by the first member. */
 async function roomWith(members: SeededMember[], n: number, body: string): Promise<string> {
@@ -119,8 +119,29 @@ describe("recall on arrival", () => {
     const preview = await other.call("bellman_connect", { join_code: "BELL-TEST-01" });
     const joined = await other.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
     expect(joined.isError, joined.text).toBe(false);
-    expect(joined.data.recall, "no home room yet, and no home room is created by a join").toEqual({ home: [], home_omitted: 0 });
+    expect(joined.data.recall, "no home room yet, and no home room is created by a join").toEqual({ home: [], home_omitted: 0, paused: false });
     expect(await h.store.getSession(homeRoomId(other.identity.userId))).toBeUndefined();
+  });
+
+  it("arrival logs a lookup with the room, seat and agent, and a paused account gets no titles and no row", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    const roomA = await roomWith([member()], 0, "");
+    const first = await join(jesse);
+    expect(first.data.recall).toEqual({ home: ["/a.md"], home_omitted: 0, paused: false });
+    const log = await h.store.homeLookups(homeRoomId(jesse.identity.userId));
+    expect(log.map((r) => [r.op, r.sessionId, r.memberId, r.query, r.paths])).toEqual([["arrival", roomA, first.data.member_id, null, ["/a.md"]]]);
+    expect(log[0].agent).toEqual(brief({ goal: "the joiner's" }).agent);
+    await h.store.writeHomeSettings(homeRoomId(jesse.identity.userId), { capture: false, paused: true });
+    const other = await h.connect(DEV_KEY.jesse);
+    const second = swarmSession({ id: "qs_other", members: [member({ memberId: "m_other", label: "other@x" })] });
+    second.joinCodes = { [second.manifest.defaultRole]: { code: "BELL-TEST-02", expiresAt: Date.now() + 60_000 } };
+    await h.store.createSession(second);
+    const preview = await other.call("bellman_connect", { join_code: "BELL-TEST-02" });
+    const joined = await other.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief({ goal: "the joiner's" }) });
+    expect(joined.isError, joined.text).toBe(false);
+    expect(joined.data.recall).toEqual({ home: [], home_omitted: 0, paused: true });
+    expect((await h.store.homeLookups(homeRoomId(jesse.identity.userId))).length).toBe(1);
   });
 
   it("keeps recall under its own ceiling and counts the paths left out", async () => {
@@ -145,10 +166,10 @@ describe("recall on arrival", () => {
     const errors: unknown[] = [];
     const quiet = console.error;
     console.error = (...args: unknown[]) => { errors.push(args); };
-    h.store.listFs = async () => { throw new Error("home unreachable"); };
+    h.store.listHomeLogged = async () => { throw new Error("home unreachable"); };
     try {
       const { data } = await join(joiner);
-      expect(data.recall).toEqual({ home: [], home_omitted: 0 });
+      expect(data.recall).toEqual({ home: [], home_omitted: 0, paused: false });
       expect(data.members.map((m) => m.member_id)).toContain("m_00");
     } finally {
       console.error = quiet;

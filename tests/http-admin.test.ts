@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { MAX_ACCOUNTS_LISTED, MAX_BACKFILL_WINDOW, MAX_REPORTS_LISTED, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import type { Report } from "../src/reports.js";
+import { HOME_MEMBER_ID, homeRoomId, homeSession } from "../src/files/home.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity } from "../src/types.js";
 import { policyView } from "../src/orgs/orgs.js";
@@ -120,6 +121,24 @@ describe("/admin/accounts", () => {
     expect([post.status, post.headers.get("allow")]).toEqual([405, "GET"]);
     const bare = routeWith(panelConfig({ plans: undefined, operators: new Set([OPERATOR.userId]) }));
     expect((await send("GET", "/admin/accounts", await bearer(OPERATOR), undefined, bare)).status).toBe(501);
+  });
+});
+
+describe("/admin/accounts/:userId/memory", () => {
+  it("empties the account's home room for an operator, and for no one else", async () => {
+    const id = homeRoomId("u_target");
+    await store.writeHome(id, homeSession({ userId: "u_target", orgId: null, plan: "free", role: "member", label: "t@x" }, Date.now()), { path: "/a.md", write: { op: "write", content: "a" }, memberId: HOME_MEMBER_ID, userId: "u_target", label: "t@x", key: null }, 4096);
+    expect((await send("DELETE", "/admin/accounts/u_target/memory", await bearer(TEAM_ADMIN))).status).toBe(403);
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
+    expect((await send("DELETE", "/admin/accounts/u_target/memory", { cookie: `${COOKIE}=${sid}`, origin: PANEL })).status).toBe(401);
+    expect(await store.readFs(id, "/a.md")).not.toBeNull();
+    expect((await send("DELETE", "/admin/accounts/u_target/memory", await bearer(OPERATOR))).status).toBe(204);
+    expect(await store.readFs(id, "/a.md")).toBeNull();
+    expect((await send("GET", "/admin/accounts/u_target/memory", await bearer(OPERATOR))).status).toBe(405);
+    expect((await send("DELETE", "/admin/accounts/u_%E0%A4%A/memory", await bearer(OPERATOR))).status).toBe(400);
+    expect((await send("DELETE", "/admin/accounts/github%3A4242/memory", await bearer(OPERATOR))).status).toBe(400);
+    const bare = routeWith(panelConfig({ plans: undefined, operators: new Set([OPERATOR.userId]) }));
+    expect((await send("DELETE", "/admin/accounts/u_target/memory", await bearer(OPERATOR), undefined, bare)).status).toBe(501);
   });
 });
 

@@ -5,10 +5,11 @@ import { codeIsLive } from "../room/codes.js";
 import { isPublic, isTopicRoom, capacityOf } from "../room/manifest.js";
 import { newestTaskFirst, taskWithEvent, handOff, decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason } from "../outside.js";
 import { type BlobCharge, type HostAppend, type PurgeSchedule, type SetJoinCode, type HomeAppend, type AppendExtras, type ApprovalWrite, type ConfigWrite, type ConfigWriteResult, type FsAppend, type FsEntry, type FsPage, type FsWrite, type DepartedMembers, type EventBody, type EventWrite, type HostInstructionsSet, type MemberPatch, type AccountBanRequest, type ProposalApproval, type RemovalOutcome, type RemovalRequest, type SeatOutcome, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type DecisionClose, type DecisionOpen, type VoteWrite, type RoomSummary, roomSummaryOf } from "../storage/store.js";
-import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, DEFAULT_HOME_SETTINGS } from "../types.js";
+import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
 import { decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeKeyRecord, FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../files/fs.js";
 import { namespaceOf } from "../files/fs-path.js";
+import { HOME_MEMBER_ID } from "../files/home.js";
 import { electorateOf, voteRefusal, withoutBook, applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../room/decision.js";
 import { asRowWriter, batchEvent, carriedEvent, surfaceBatchPrint, surfaceFactsOf, surfacePrint, applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface/surface.js";
 import { placeSurfaceBatch, placedEvent, placesAmongRows, windowUnderCut, FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../surface/frames.js";
@@ -125,6 +126,18 @@ const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
 /** `ns:<userId>`: the account shares its room notes here (ADR 0047 decision 7). Absent is off. Purged with the room. */
 const NOTES_SHARING_PREFIX = "ns:";
 const notesSharingKey = (userId: string): string => `${NOTES_SHARING_PREFIX}${userId}`;
+/**
+ * `lk:<at>:<nonce>`: one home memory read (ADR 0047 decision 13), `at` zero-padded so a reverse list reads newest
+ * first, the nonce so two reads in one millisecond do not collide. Purged with the room.
+ */
+const LOOKUP_PREFIX = "lk:";
+const lookupKey = (at: number, nonce = crypto.randomUUID().slice(0, 8)): string => `${LOOKUP_PREFIX}${String(at).padStart(14, "0")}:${nonce}`;
+/** `lkn`: how many `lk:` rows the home room holds, so a write trims the log without listing it. Purged with the room. */
+const LOOKUP_COUNT = "lkn";
+/** `keys` deleted in batches of 128, the most one `delete(keys[])` takes. */
+async function deleteKeys(txn: DurableObjectTransaction, keys: string[]): Promise<void> {
+  for (let i = 0; i < keys.length; i += 128) await txn.delete(keys.slice(i, i + 128));
+}
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -3035,8 +3048,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   // ponytail: a list or find reads every `fsm:` index row under the prefix, because the hidden memory ids are
   // filtered before the page is cut. Rows carry no content, so this is metadata only; bounded batches if rooms reach
   // hundreds of thousands of files.
-  async #fsRows(prefix: string): Promise<FsEntry[]> {
-    return [...(await this.ctx.storage.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
+  async #fsRows(prefix: string, from: { list: DurableObjectStorage["list"] } = this.ctx.storage): Promise<FsEntry[]> {
+    return [...(await from.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
   }
 
   /** `BellmanStore.listFs`, for this room. */
@@ -3046,12 +3059,66 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /** `BellmanStore.readHomeSettings` (#530): the `hs` row, or the defaults. Reads the record for nothing, so none is needed. */
   async readHomeSettings(): Promise<HomeSettings> {
-    return (await this.ctx.storage.get<HomeSettings>("hs")) ?? DEFAULT_HOME_SETTINGS;
+    return { ...DEFAULT_HOME_SETTINGS, ...(await this.ctx.storage.get<HomeSettings>("hs")) };
   }
 
   /** `BellmanStore.writeHomeSettings`: the `hs` row replaced. No record, event, outbox intent or alarm: settings alone are not a home room. */
   async writeHomeSettings(settings: HomeSettings): Promise<void> {
     await this.ctx.storage.put("hs", settings);
+  }
+
+  /**
+   * `BellmanStore.readHomeLogged` (ADR 0047 decision 13): the `hs` read, the file read, the `lk:` row and the
+   * retention prune in one transaction, so a hard delete racing the read cannot leave a lookup row in an emptied room.
+   */
+  async readHomeLogged(path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get<HomeSettings>("hs"))?.paused) return { paused: true as const };
+      const row = await txn.get<FsRow>(fsKey(path));
+      const file = row && !row.deleted ? row : null;
+      await this.#logLookup(txn, source, file ? [file.path] : []);
+      return { paused: false as const, file };
+    });
+  }
+
+  /** `BellmanStore.listHomeLogged`: `listFs` newest first, read and logged in one transaction as `readHomeLogged`. */
+  async listHomeLogged(prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get<HomeSettings>("hs"))?.paused) return { paused: true as const };
+      const page = pageFs(await this.#fsRows(prefix, txn), (r) => underPrefix(r.path, prefix), FS_LIST_PAGE, cursor, newestKey);
+      await this.#logLookup(txn, source, page.entries.map((e) => e.path));
+      return { paused: false as const, page };
+    });
+  }
+
+  /**
+   * One `lk:` row, in the read's transaction, then the log bounded (ADR 0047 decision 13): rows past 90 days deleted,
+   * and past `LOOKUP_KEEP + LOOKUP_SLACK` rows (counted in `lkn`) the oldest deleted down to `LOOKUP_KEEP`.
+   */
+  async #logLookup(txn: DurableObjectTransaction, source: LookupSource, paths: string[]): Promise<void> {
+    const at = Date.now();
+    await txn.put(lookupKey(at), { ...source, at, paths } satisfies LookupRow);
+    const expired = [...(await txn.list({ prefix: LOOKUP_PREFIX, end: lookupKey(at - LOOKUP_KEEP_MS, "") })).keys()];
+    await deleteKeys(txn, expired);
+    let count = ((await txn.get<number>(LOOKUP_COUNT)) ?? 0) + 1 - expired.length;
+    if (count > LOOKUP_KEEP + LOOKUP_SLACK) {
+      const oldest = [...(await txn.list({ prefix: LOOKUP_PREFIX, limit: count - LOOKUP_KEEP })).keys()];
+      await deleteKeys(txn, oldest);
+      count -= oldest.length;
+    }
+    await txn.put(LOOKUP_COUNT, count);
+  }
+
+  // ponytail: the log holds at most LOOKUP_KEEP + LOOKUP_SLACK rows (#logLookup trims on write), so this reads at most
+  // LOOKUP_KEEP and deletes at most LOOKUP_SLACK; each row is up to FS_LIST_PAGE paths, about 50 KB at the worst.
+  /** `BellmanStore.homeLookups`: newest first, the rows past `LOOKUP_KEEP` deleted and `lkn` reset to what is kept. */
+  async homeLookups(): Promise<LookupRow[]> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const rows = [...(await txn.list<LookupRow>({ prefix: LOOKUP_PREFIX, reverse: true, limit: LOOKUP_KEEP }))];
+      if (rows.length === LOOKUP_KEEP) await deleteKeys(txn, [...(await txn.list({ prefix: LOOKUP_PREFIX, end: rows[rows.length - 1][0] })).keys()]);
+      await txn.put(LOOKUP_COUNT, rows.length);
+      return rows.map(([, r]) => r);
+    });
   }
 
   /**
@@ -3061,38 +3128,73 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * history deleted. No event, no outbox intent, no alarm: nothing is owed, so nothing is armed.
    */
   async writeHome(home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
-    return this.ctx.storage.transaction<HomeAppend>(async (txn) => {
-      const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
-      if (keyed !== null) {
-        const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
-        if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
-      }
-      if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
-      const read = await this.stored(txn);
-      let s = read, seeded: Record<string, unknown> = {};
-      if (!s) {
-        const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
-        const { events: _events, members: _arriving, ...others } = home;
-        s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
-        seeded = { ...seatRows(seat), cursor: 0 };
-      }
-      const at = Date.now();
-      const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
-      const history = await this.#fsHistory(txn, w.path);
-      const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
-      if (!decided.ok) return decided.result;
-      const { row } = decided;
-      await putRows(txn, {
-        ...seeded,
-        ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
-        [fsKey(w.path)]: row,
-        [fsIndexKey(w.path)]: fsEntryOf(row),
-        ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
-        ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
-      });
-      for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
-      return { outcome: "ok", path: w.path, rev: row.rev };
+    return this.ctx.storage.transaction<HomeAppend>((txn) => this.#writeHomeIn(txn, home, w, ceiling));
+  }
+
+  /** `writeHome`'s body, in the caller's transaction. `home` null: the record must be stored, or `not_found`. */
+  async #writeHomeIn(txn: DurableObjectTransaction, home: NewSession | null, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
+    if (keyed !== null) {
+      const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
+      if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    }
+    if (w.write.op === "write" && (await txn.get<HomeSettings>("hs"))?.paused) return { outcome: "paused" };
+    if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+    const read = await this.stored(txn);
+    let s = read, seeded: Record<string, unknown> = {};
+    if (!s) {
+      if (home === null) return { outcome: "not_found" };
+      const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+      const { events: _events, members: _arriving, ...others } = home;
+      s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
+      seeded = { ...seatRows(seat), cursor: 0 };
+    }
+    const at = Date.now();
+    const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
+    const history = await this.#fsHistory(txn, w.path);
+    const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
+    if (!decided.ok) return decided.result;
+    const { row } = decided;
+    await putRows(txn, {
+      ...seeded,
+      ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
+      [fsKey(w.path)]: row,
+      [fsIndexKey(w.path)]: fsEntryOf(row),
+      ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
+      ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
     });
+    for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
+    return { outcome: "ok", path: w.path, rev: row.rev };
+  }
+
+  /**
+   * `BellmanStore.forgetHomeNote` (ADR 0047 decision 14), in one transaction: `writeHome`'s delete at the current
+   * revision, as the account, then each `lk:` row that returned the path rewritten without it, or deleted when empty.
+   */
+  async forgetHomeNote(path: string): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<FsRow>(fsKey(path));
+      const s = await this.stored(txn);
+      if (!current || current.deleted || !s) return false;
+      const w: FsWrite = { path, write: { op: "delete", baseRev: current.rev }, memberId: HOME_MEMBER_ID, userId: s.creator.userId, label: s.creator.label, key: null };
+      if ((await this.#writeHomeIn(txn, null, w, 0)).outcome !== "ok") return false;
+      let emptied = 0;
+      for (const [key, r] of await txn.list<LookupRow>({ prefix: LOOKUP_PREFIX })) {
+        if (!r.paths.includes(path)) continue;
+        const paths = r.paths.filter((p) => p !== path);
+        if (paths.length > 0) await txn.put(key, { ...r, paths });
+        else { await txn.delete(key); emptied++; }
+      }
+      if (emptied > 0) await txn.put(LOOKUP_COUNT, Math.max(0, ((await txn.get<number>(LOOKUP_COUNT)) ?? 0) - emptied));
+      return true;
+    });
+  }
+
+  /** `BellmanStore.purgeHome` (ADR 0047 decision 14): every row. A home room holds no blobs, registry rows, audit or outbox. */
+  async purgeHome(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    // A home room arms no alarm; deleted all the same, for the reason #purgeIfDue gives.
+    await this.ctx.storage.deleteAlarm();
   }
 
   /** `BellmanStore.findFs`, for this room. */

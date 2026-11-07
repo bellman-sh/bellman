@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEV_KEY, Harness, type Envelope } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { homeRoomId } from "../../src/files/home.js";
 
 let h: Harness;
 let p: PairedSession;
@@ -83,5 +84,32 @@ describe("bellman_memory", () => {
     expect(await peerReads()).toBe(false);
     expect((await p.creator.call("bellman_memory", { op: "unshare" })).text).toContain("session_id is required");
     expect((await p.creator.call("bellman_memory", { op: "unshare", session_id: p.sessionId })).text).toContain("unshare needs member_id");
+  });
+
+  it("while paused: remember, recall and share are refused paused; forget and unshare work; nothing is logged", async () => {
+    await p.creator.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    await h.store.writeHomeSettings(homeRoomId(p.creator.identity.userId), { capture: false, paused: true });
+    for (const args of [{ op: "remember", path: "/b.md", content: "b" }, { op: "recall", path: "/a.md" }, { op: "recall" }, { op: "share", session_id: p.sessionId, member_id: p.creatorMemberId, path: "/a.md", to: "notes" }]) {
+      const r = await p.creator.call("bellman_memory", args);
+      expect([r.isError, r.text], JSON.stringify(args)).toEqual([true, expect.stringContaining("paused")]);
+    }
+    expect((await p.creator.call("bellman_memory", { op: "unshare", session_id: p.sessionId, member_id: p.creatorMemberId })).isError).toBe(false);
+    expect((await p.creator.call("bellman_memory", { op: "forget", path: "/a.md", base_rev: 1 })).isError).toBe(false);
+    expect(await h.store.homeLookups(homeRoomId(p.creator.identity.userId))).toEqual([]);
+  });
+
+  it("logs a bare recall with no seat, and a share with its seat and agent", async () => {
+    await p.creator.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    await p.creator.call("bellman_memory", { op: "recall", path: "/a.md" });
+    await p.creator.call("bellman_memory", { op: "recall", prefix: "/" });
+    await p.creator.call("bellman_memory", { op: "share", session_id: p.sessionId, member_id: p.creatorMemberId, path: "/a.md", to: "notes" });
+    const log = await h.store.homeLookups(homeRoomId(p.creator.identity.userId));
+    expect(log.map((r) => [r.op, r.query, r.paths, r.sessionId, r.memberId])).toEqual([
+      ["share", "/a.md", ["/a.md"], p.sessionId, p.creatorMemberId],
+      ["list", "/", ["/a.md"], null, null],
+      ["read", "/a.md", ["/a.md"], null, null],
+    ]);
+    expect(log[0].agent).toEqual(expect.objectContaining({ client: expect.any(String) }));
+    expect(log[2].agent).toBeNull();
   });
 });

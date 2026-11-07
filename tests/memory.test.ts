@@ -16,6 +16,9 @@ const who = (userId: string, plan: Identity["plan"] = "free"): Identity => ({ us
 const A = who("u_a"), B = who("u_b");
 const put = (store: MemoryStore, actor: Identity, path: string, content: string, baseRev?: number, idempotencyKey?: string) =>
   writeHome(store, actor, { path, write: { op: "write", content, baseRev }, idempotencyKey });
+const bare = { sessionId: null, memberId: null, agent: null };
+const readNote = (store: MemoryStore, actor: Identity, path: string) => readHome(store, actor, path, { ...bare, op: "read", query: path });
+const listNotes = (store: MemoryStore, actor: Identity, prefix: string) => listHome(store, actor, prefix, undefined, { ...bare, op: "list", query: prefix });
 
 describe("the home room's id", () => {
   it("is qh_ and 32 hex characters, the same for one account every time and different for another", () => {
@@ -39,15 +42,15 @@ describe("the home room's id", () => {
 describe("remember, recall and forget", () => {
   it("creates the home room on the first write, reads the note back and lists newest first", async () => {
     const store = new MemoryStore();
-    expect(await listHome(store, A, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
+    expect(await listNotes(store, A, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
     expect(await put(store, A, "/conventions/git.md", "squash")).toEqual({ ok: true, value: { path: "/conventions/git.md", rev: 1, replayed: false } });
     await new Promise((r) => setTimeout(r, 2));
     expect(await put(store, A, "/people/b.md", "likes tea")).toMatchObject({ ok: true, value: { rev: 1 } });
-    const read = await readHome(store, A, "/conventions/git.md");
+    const read = await readNote(store, A, "/conventions/git.md");
     expect(read).toMatchObject({ ok: true, value: { content: "squash", rev: 1, writerMemberId: HOME_MEMBER_ID, writerLabel: "u_a@x" } });
-    const all = await listHome(store, A, "/");
+    const all = await listNotes(store, A, "/");
     expect(all.ok && all.value.entries.map((e) => e.path)).toEqual(["/people/b.md", "/conventions/git.md"]);
-    const some = await listHome(store, A, "/conventions");
+    const some = await listNotes(store, A, "/conventions");
     expect(some.ok && some.value.entries.map((e) => e.path)).toEqual(["/conventions/git.md"]);
   });
 
@@ -58,8 +61,8 @@ describe("remember, recall and forget", () => {
     expect(await put(store, A, "/a.md", "v2", 1)).toMatchObject({ ok: true, value: { rev: 2 } });
     expect(await writeHome(store, A, { path: "/a.md", write: { op: "delete", baseRev: 1 } })).toMatchObject({ ok: false, code: "stale" });
     expect(await writeHome(store, A, { path: "/a.md", write: { op: "delete", baseRev: 2 } })).toMatchObject({ ok: true, value: { rev: 3 } });
-    expect(await readHome(store, A, "/a.md")).toMatchObject({ ok: false, code: "not_found" });
-    expect(await listHome(store, A, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
+    expect(await readNote(store, A, "/a.md")).toMatchObject({ ok: false, code: "not_found" });
+    expect(await listNotes(store, A, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
   });
 
   it("replays a retried key and refuses the same key with other content", async () => {
@@ -110,8 +113,8 @@ describe("a home room is not a room", () => {
     expect(await store.sessionsCreatedBy("u_a", 10)).toEqual([]);
     expect(await store.sessionsJoinedBy("u_a", 10)).toEqual([]);
     expect(await store.eventsAfter(id, 0)).toEqual([]);
-    expect(await readHome(store, B, "/a.md")).toMatchObject({ ok: false, code: "not_found" });
-    expect(await listHome(store, B, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
+    expect(await readNote(store, B, "/a.md")).toMatchObject({ ok: false, code: "not_found" });
+    expect(await listNotes(store, B, "/")).toEqual({ ok: true, value: { entries: [], next: null } });
   });
 });
 
@@ -126,5 +129,14 @@ describe("share to notes", () => {
     expect(shared.ok && shared.value.path).toMatch(/^\/members\/[0-9a-f]{16}\/conventions\/git\.md$/);
     expect(await shareHome(store, A, "qs_share", "m_a", "/missing.md")).toMatchObject({ ok: false, code: "not_found" });
     expect(await shareHome(store, A, "qs_share", "m_b", "/conventions/git.md")).toMatchObject({ ok: false, code: "forbidden" });
+  });
+
+  it("logs no share from a seat that is not the caller's, or from a room that does not exist", async () => {
+    const store = new MemoryStore();
+    await store.createSession(session({ id: "qs_share", members: [member({ memberId: "m_b", userId: "u_b", label: "u_b@x", orgId: null })] }));
+    await put(store, A, "/a.md", "mine");
+    expect(await shareHome(store, A, "qs_share", "m_b", "/a.md")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await shareHome(store, A, "qs_nope", "m_b", "/a.md")).toMatchObject({ ok: false, code: "not_found" });
+    expect(await store.homeLookups(homeRoomId("u_a"))).toEqual([]);
   });
 });

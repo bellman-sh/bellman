@@ -1,4 +1,4 @@
-import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings } from "../types.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource } from "../types.js";
 import { type FsRefusal } from "../files/fs.js";
 import { blobBytesUsed } from "../files/blobs.js";
 import type { Ban, BanScope, CreatorBan } from "../bans.js";
@@ -485,9 +485,10 @@ export type FsEntry = Omit<FsRow, "content">;
 export interface FsPage { entries: FsEntry[]; next: string | null }
 /**
  * What `writeHome` answered: `appendFs`'s outcomes without an event. `forbidden` is a `/apps/` path, which a home
- * room cannot run.
+ * room cannot run. `paused` is a write while the account's human paused home memory (ADR 0047 decision 13); a delete
+ * is never paused.
  */
-export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal;
+export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal | { outcome: "paused" };
 
 /** A governed config write (#414), validated and hashed by the caller; the store adds the revision. */
 export interface ConfigWrite {
@@ -1549,6 +1550,20 @@ export interface BellmanStore {
   readHomeSettings(id: string): Promise<HomeSettings>;
   /** The home room's settings row, replaced. No record, event or index row: the first note still creates the room. */
   writeHomeSettings(id: string, settings: HomeSettings): Promise<void>;
+  /**
+   * `readFs` on a home room that also writes the lookup row, in one transaction; `paused` when the `hs` row says so,
+   * with nothing read or written. Rows older than LOOKUP_KEEP_MS are deleted in the same transaction, and past
+   * LOOKUP_KEEP + LOOKUP_SLACK rows the oldest are deleted down to LOOKUP_KEEP.
+   */
+  readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }>;
+  /** `listFs` with `newest: true` on a home room, logged the same way. */
+  listHomeLogged(id: string, prefix: string, cursor: string | undefined, source: LookupSource): Promise<{ paused: true } | { paused: false; page: FsPage }>;
+  /** The lookup log, newest first, at most LOOKUP_KEEP rows; rows past that are deleted. */
+  homeLookups(id: string): Promise<LookupRow[]>;
+  /** Empties a home room (ADR 0047 decisions 13 and 14): every fs:, fsm:, fsh:, hk:, lk: row, the lkn count, the hs settings row and the record. Idempotent; a home id that was never written is a no-op. Never called on a room id. */
+  purgeHome(id: string): Promise<void>;
+  /** Deletes one home note as `forget` does, at its current revision, and scrubs `path` from every lookup row that returned it (a row left with no paths is deleted). `false` when there is no live note at `path`. */
+  forgetHomeNote(id: string, path: string): Promise<boolean>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */

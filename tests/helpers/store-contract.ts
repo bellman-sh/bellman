@@ -15,8 +15,9 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend } from "../../src/storage/store.js";
+import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend, FsPage } from "../../src/storage/store.js";
 import { type SurfaceWrite, MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface/surface.js";
+import type { HomeSettings, LookupSource } from "../../src/types.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/room/codes.js";
 import { ROOM_MEMBER_CEILING, resolveManifest } from "../../src/room/manifest.js";
 import { newestKey } from "../../src/files/fs.js";
@@ -32,6 +33,7 @@ import type { AuditFacets, AuditPage, AuditQuery, SeqEntry } from "../../src/org
 import { chainHash, NO_ANCHOR } from "../../src/orgs/audit-sink.js";
 import { type AuditEntry, type Identity, type Org, type OrgIdp, type OrgInvite, type PlanGrant, type SavedPreset, type ScimUser, type Session, type SessionEvent, type SurfaceItem, DEFAULT_POLICY } from "../../src/types.js";
 import { INVITE_TTL_MS, MAX_PENDING_INVITES, isUnownedSeat } from "../../src/orgs/orgs.js";
+import { LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../../src/types.js";
 import { scimIntent } from "../../src/orgs/grant-audit.js";
 import { HOST_MEMBER_ID, HOST_USER_ID } from "../../src/room/members.js";
 import { WAKES_PER_HOUR, hostMember } from "../../src/host.js";
@@ -118,6 +120,11 @@ export interface StoreContractHarness {
    * proves a closed secret ballot left no choice anywhere, which `BellmanStore` cannot show.
    */
   roomRows: (sessionId: string) => Promise<[string, unknown][]>;
+  /**
+   * How many lookup rows a home room holds (`lk:` rows in the Durable Objects store), which `BellmanStore` cannot show:
+   * `homeLookups` trims to `LOOKUP_KEEP` as it reads, so only this sees whether a write bounded the log (ADR 0047 decision 13).
+   */
+  lookupRows: (homeId: string) => Promise<number>;
   /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
@@ -5019,16 +5026,31 @@ export function describeStoreContract(
       });
 
       it("keeps the account's settings without a room: defaults until written, and the first note still creates the room", async () => {
-        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
-        await store.writeHomeSettings(id, { capture: true });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        await store.writeHomeSettings(id, { capture: true, paused: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
         expect(await store.readFs(id, "/a.md")).toBeNull();
         expect(await store.listFs(id, "/", {})).toEqual({ entries: [], next: null });
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "hello" }), 1024)).toMatchObject({ outcome: "ok", rev: 1 });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
-        await store.writeHomeSettings(id, { capture: false });
-        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
-        expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
+        await store.writeHomeSettings(id, { capture: false, paused: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false, paused: false });
+      });
+
+      it("reads paused false from a row written before the field existed", async () => {
+        await store.writeHomeSettings(id, { capture: true } as HomeSettings);
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: false });
+        await store.writeHomeSettings(id, { capture: true, paused: true });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: true });
+      });
+
+      it("refuses a write while paused and still deletes", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096)).toEqual({ outcome: "paused" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "delete", baseRev: 1 }), 4096)).toMatchObject({ outcome: "ok", rev: 2 });
+        expect(await store.readFs(id, "/a.md")).toBeNull();
       });
 
       it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {
@@ -5045,6 +5067,99 @@ export function describeStoreContract(
         expect(newest.next).toBeNull();
         expect((await store.listFs(id, "/", { newest: true, cursor: newestKey(newest.entries[0]) })).entries.map((r) => r.path)).toEqual(["/b.md", "/a.md"]);
         expect((await store.listFs(id, "/c", { newest: true })).entries.map((r) => r.path)).toEqual(["/c/d.md"]);
+      });
+
+      it("logs each read in the home room, newest first, with the paths it returned, and nothing when paused", async () => {
+        vi.setSystemTime(1_699_999_999_999);
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        vi.advanceTimersByTime(1); // a newest-first tie breaks by path, so /b.md is written later to list first
+        await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        expect(await store.readHomeLogged(id, "/a.md", bare)).toMatchObject({ paused: false, file: { path: "/a.md", content: "a" } });
+        vi.advanceTimersByTime(1);
+        expect(await store.readHomeLogged(id, "/nope.md", { ...bare, query: "/nope.md" })).toEqual({ paused: false, file: null });
+        vi.advanceTimersByTime(1);
+        const seat: LookupSource = { op: "list", sessionId: "qs_room", memberId: "m_1", agent: { provider: "anthropic", model: "claude", client: "claude-code" }, query: "/" };
+        const listed = await store.listHomeLogged(id, "/", undefined, seat);
+        expect(listed).toMatchObject({ paused: false, page: { next: null } });
+        expect((listed as { page: FsPage }).page.entries.map((e) => e.path)).toEqual(["/b.md", "/a.md"]);
+        const log = await store.homeLookups(id);
+        expect(log.map((r) => [r.op, r.query, r.paths])).toEqual([["list", "/", ["/b.md", "/a.md"]], ["read", "/nope.md", []], ["read", "/a.md", ["/a.md"]]]);
+        expect(log[0]).toMatchObject({ sessionId: "qs_room", memberId: "m_1", agent: { client: "claude-code" }, at: 1_700_000_000_002 });
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.readHomeLogged(id, "/a.md", bare)).toEqual({ paused: true });
+        expect(await store.listHomeLogged(id, "/", undefined, bare)).toEqual({ paused: true });
+        expect((await store.homeLookups(id)).length).toBe(3);
+        expect(await store.homeLookups(homeRoomId("u_other"))).toEqual([]);
+      });
+
+      // Over a thousand reads, each an RPC into the object: under 1 s alone, past the 15 s default when the full worker run contends.
+      const LONG_LOOKUP_CASE = 60_000;
+      it("keeps the newest 1,000 lookup rows and 90 days", async () => {
+        vi.setSystemTime(1_700_000_000_000);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        await store.readHomeLogged(id, "/a.md", bare);
+        vi.advanceTimersByTime(LOOKUP_KEEP_MS + 1);
+        await store.readHomeLogged(id, "/a.md", bare);
+        expect((await store.homeLookups(id)).map((r) => r.at)).toEqual([1_700_000_000_000 + LOOKUP_KEEP_MS + 1]);
+        for (let i = 0; i < LOOKUP_KEEP + 5; i++) { vi.advanceTimersByTime(1); await store.readHomeLogged(id, "/a.md", bare); }
+        const kept = await store.homeLookups(id);
+        expect(kept.length).toBe(LOOKUP_KEEP);
+        expect(kept[0].at).toBe(Date.now());
+        expect(kept.every((r, i) => i === 0 || r.at < kept[i - 1].at)).toBe(true);
+        expect((await store.homeLookups(id)).length).toBe(LOOKUP_KEEP);
+      }, LONG_LOOKUP_CASE);
+
+      it("bounds the lookup log on write, with no dash read to trim it", async () => {
+        vi.setSystemTime(1_700_000_000_000);
+        const bare: LookupSource = { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" };
+        for (let i = 0; i < LOOKUP_KEEP + 150; i++) { vi.advanceTimersByTime(1); await store.readHomeLogged(id, "/a.md", bare); }
+        const held = await harness.lookupRows(id);
+        expect(held).toBeGreaterThanOrEqual(LOOKUP_KEEP);
+        expect(held).toBeLessThanOrEqual(LOOKUP_KEEP + LOOKUP_SLACK);
+        const kept = await store.homeLookups(id);
+        expect(kept.length).toBe(LOOKUP_KEEP);
+        expect(kept[0].at).toBe(Date.now());
+        expect(await harness.lookupRows(id)).toBe(LOOKUP_KEEP);
+      }, LONG_LOOKUP_CASE);
+
+      it("purgeHome empties the home room: notes, history, keys, settings and lookups, and the next write starts clean", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }, "k1"), 4096);
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a2", baseRev: 1 }), 4096);
+        await store.writeHomeSettings(id, { capture: true, paused: false });
+        await store.readHomeLogged(id, "/a.md", { op: "read", sessionId: null, memberId: null, agent: null, query: "/a.md" });
+        await store.purgeHome(id);
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect(await store.listFs(id, "/")).toEqual({ entries: [], next: null });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
+        expect(await store.homeLookups(id)).toEqual([]);
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "again" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
+        await store.purgeHome(homeRoomId("u_never"));
+        await expect(store.purgeHome("qs_a_room")).rejects.toThrow(/not a home room/);
+      });
+
+      it("forgetHomeNote deletes the note with its history and scrubs it from the lookup log", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096);
+        const src = { op: "list" as const, sessionId: null, memberId: null, agent: null, query: "/" };
+        await store.listHomeLogged(id, "/", undefined, src);
+        await store.readHomeLogged(id, "/a.md", { ...src, op: "read", query: "/a.md" });
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(true);
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(false);
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.fsHistory(id, "/a.md")).toEqual([]);
+        expect(await harness.lookupRows(id)).toBe(1);
+        expect((await store.homeLookups(id)).map((r) => [r.op, r.paths])).toEqual([["list", ["/b.md"]]]);
+      });
+
+      it("forgetHomeNote leaves a lookup row that never returned the note, and forgets while paused", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.readHomeLogged(id, "/nope.md", { op: "read", sessionId: null, memberId: null, agent: null, query: "/nope.md" });
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.forgetHomeNote(id, "/a.md")).toBe(true);
+        expect(await store.forgetHomeNote(homeRoomId("u_never"), "/a.md")).toBe(false);
+        expect((await store.homeLookups(id)).map((r) => [r.query, r.paths])).toEqual([["/nope.md", []]]);
       });
     });
 

@@ -22,8 +22,9 @@ operations, and the blob store interface. Runtime-free; `R2BlobStore` is in `src
   their schemas (`parseConfigBody`), and what each reads as when missing or untrustworthy; `decideConfigWrite`,
   `configEvent`. The only reader of `cfg:` rows.
 - `[src/files/memory.ts]` home memory operations (ADR 0047), what `bellman_memory` does: `writeHome`, `readHome`, `listHome`,
-  `shareHome`, `unshareNotes`, `setMemoryCapture`. `[src/files/home.ts:homeRoomId]` where an account's notes live
-  (`HOME_ID_PREFIX`, `isHomeRoomId`, `homeSession`).
+  `shareHome`, `unshareNotes`, `readMemorySettings`, `setMemorySettings`, `forgetNote`, `deleteMemory`, `exportMemory`,
+  `deleteRoomNotes`, `memoryLookups`, `homeTitles`; `[src/files/memory-export.ts:renderExport]` the export document.
+  `[src/files/home.ts:homeRoomId]` where an account's notes live (`HOME_ID_PREFIX`, `isHomeRoomId`, `homeSession`).
 
 ## Invariants
 

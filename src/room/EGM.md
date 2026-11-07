@@ -10,9 +10,9 @@ test programs import these.
 ## Interface
 
 - `[src/room/rooms.ts]` the operations both transports call, each returning `RoomResult<T>` (`succeed`/`refuse` with a
-  `RoomFailure` of `not_found | closed | frozen | forbidden | conflict | invalid | rate_limited`): `gateSeat`,
-  `leaveRoom`, `issueInvite`, `revokeInvite`, `admitSend`, `writeSurface`, `writeSurfaceBatch`,
-  `resolveSurfaceWrite`, `checkProposal`, `evictMember`, `banAsker`, `fileRoomReport`, `namePublicRoom`,
+  `RoomFailure` of `not_found | closed | frozen | forbidden | conflict | invalid | rate_limited | stale | too_large |
+  over_quota | paused`): `gateSeat`, `leaveRoom`, `issueInvite`, `revokeInvite`, `admitSend`, `writeSurface`,
+  `writeSurfaceBatch`, `resolveSurfaceWrite`, `checkProposal`, `evictMember`, `banAsker`, `fileRoomReport`, `namePublicRoom`,
   `liveRooms` (`ROOMS_LIMIT = 50`), `readSurfaceWindow`, `searchSurface`, `searchLog`, and `audit`.
 - `[src/room/rooms.ts:activeMembers]` membership as stored; `[src/room/rooms.ts:seatedMembers]` the presence-derived roster a
   capacity check counts.

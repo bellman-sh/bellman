@@ -1,7 +1,7 @@
 # ADR 0047: Bellman memory: home memory, private room notes, memory search, recall on arrival, room facts
 
-**Date:** 2026-11-04, revised 2026-11-06 after the planner's review of #532 · **Status:** accepted · **Issue:** #525
-(epic #524) · **Amends:** ADR 0046, decisions 7, 10 and 11; ADR 0018, decision 4 · **Spec:**
+**Date:** 2026-11-04, revised 2026-11-06 after the planner's review of #532, revised 2026-11-07 for #531 ·
+**Status:** accepted · **Issue:** #525 (epic #524) · **Amends:** ADR 0046, decisions 7, 10 and 11; ADR 0018, decision 4 · **Spec:**
 `docs/superpowers/specs/2026-11-04-bellman-memory-design.md`
 
 ## Context
@@ -94,25 +94,37 @@ facts, keyword search now, memory on every plan.
     `team`. It is read from the caller's plan on each write, not stamped, so an upgrade applies at once and a downgrade
     keeps the notes but refuses growth. Room notes keep ADR 0046's per-account eighth of the room's ceiling. Facts
     count against the room's quota.
-13. **Controls.** Pause, the lookup log, hard delete of everything and export are dash-session routes under `/me/memory`;
-    an agent can only `forget` a note.
-    - *Pause:* every `bellman_memory` op but `forget` is refused `paused`, and arrival returns no home titles. An agent
-      cannot unpause.
+13. **Controls** (revised 2026-11-07 for #531). Pause, the lookup log, hard delete and export are dash-session routes;
+    an agent can only `forget` or `unshare`. Every route but `GET /me/memory` refuses a bearer 403 and checks the CSRF
+    Origin on writes.
+    - *Pause:* `paused: boolean` in the `hs` row beside `capture`, set by `PUT /me/memory`, whose body carries
+      `capture`, `paused` or both and nothing else (400). No separate pause route. While paused every `bellman_memory`
+      op but `forget` and `unshare` is refused `paused`: `unshare` reads no memory and reduces exposure. Arrival's
+      `recall` block always carries `paused: boolean` and, paused, reads nothing. An agent cannot unpause.
     - *Lookup log:* every agent read of home memory writes an `lk:` row in the home room, in the read's transaction:
-      time, op, room and member it came from, the agent's provider, model and client, the query and the paths returned.
-      The newest 1,000 rows or 90 days are kept. It is shown to the account only, never sent to an org's audit stream.
-    - *Hard delete:* `DELETE /me/memory` purges the home room (every `fs:`, `fsh:`, `lk:` row and the record). The dash
-      also deletes one note with its lookup rows, and the account's own room notes in a room.
-    - *Export:* one Markdown document of home notes and the account's room notes in rooms where it holds a seat, one read
-      per object.
+      time, op, room and member it came from, the agent, the query and the paths returned. The agent, room and member
+      are the seat's when the read names one (`share`, arrival) and null for a bare `recall`, which has no seat. The
+      log keeps the newest 1,000 rows (trimmed on write past about 1,100, and to 1,000 on each dash read) or 90 days;
+      an `lkn` row counts the rows, so a write trims without listing the log. `GET /me/memory/lookups` returns the
+      newest 1,000. It is shown to the account only, never sent to an org's audit stream.
+    - *Hard delete:* `DELETE /me/memory` deletes everything: the whole home room, the `hs` row included, and the
+      capture switch is turned off; a pause stays (written back after the purge), since deleting what agents can read
+      is not a reason to let them read again. `DELETE /me/memory/notes?path=` deletes one note and its history as
+      `forget` does and scrubs the path from every lookup row that returned it, deleting a row left with no paths.
+      `DELETE /rooms/:id/notes` deletes the account's own notes in one room as one `writeFs` delete per file from its
+      first active seat, so each is a send, counted and audited as any room file delete; it stops at the first refusal
+      (with `retry_after` when it is `rate_limited`) and answers what it deleted.
+    - *Export:* `GET /me/memory/export` is one `text/markdown` document: home notes, then the account's room notes per
+      room, each note verbatim under its heading, one read per object. It works while paused and writes no `lk:` row.
     - *Capture switch* (#530): `PUT /me/memory` `{ capture }`, the one `hs` row in the home room, written without a
       record (settings alone are not a home room; the first note still creates it). Off until turned on. `GET /me/memory`
       answers a bearer too: the Claude Code bridge reads it, once a session, when the Stop hook asks through its door
-      whether to run the memory check. The hook reads no transcript and sends nothing; the agent writes with
-      `bellman_memory`.
+      whether to run the memory check; while paused the bridge reports capture off, so the hook asks nothing. The hook
+      reads no transcript and sends nothing; the agent writes with `bellman_memory`.
 14. **Purge** (amends ADR 0046 decision 11). A room's purge deletes its `ns:` rows with `fs:`, `fsh:` and `mi:`. A
-    home room is purged by `DELETE /me/memory` or by the operator's `DELETE /admin/accounts/:userId/memory`, which the
-    account-deletion runbook runs and any later account deletion calls.
+    home room, every row of the home room (`fs:`, `fsm:`, `fsh:`, `hk:`, `lk:`, `lkn`, `hs`) and the record, is purged
+    by `DELETE /me/memory` (which writes a pause back, decision 13) or by the operator's
+    `DELETE /admin/accounts/:userId/memory`, which the account-deletion runbook runs and any later account deletion calls.
 
 ## Consequences
 

@@ -392,7 +392,7 @@ export default {
 
     // The rooms a person sits in, with their seats (#434), and their memory settings (#530): on the room routes' rules
     // and behind the same guard.
-    if (/^\/me\/(rooms|memory)\/?$/.test(url.pathname)) {
+    if (/^\/me\/(rooms|memory)(\/|$)/.test(url.pathname)) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await meRoutes(request, { store, caller: who, panelOrigins: oauth?.panelOrigins ?? [] });

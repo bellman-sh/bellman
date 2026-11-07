@@ -97,6 +97,8 @@ export const STATUS: Record<RoomFailure, number> = {
   not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400, rate_limited: 429,
   // Room file writes (ADR 0046): the wire codes the blob routes already answer for a size and a quota.
   stale: 409, too_large: 413, over_quota: 413,
+  // Home memory paused (ADR 0047 decision 13); no route answers it yet.
+  paused: 409,
 };
 
 // ponytail: five minutes of private caching, not tuned. It is also how long a

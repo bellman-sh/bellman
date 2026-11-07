@@ -7,7 +7,7 @@ export { isPaidPlan } from "./subscription.js";
 /**
  * What Stripe says a person has paid for, kept free of any Workers import so
  * it runs under plain Node in tests. The Durable Object that serves production
- * wraps the same BillingLedger around its own storage (src/oauth/store.ts).
+ * wraps the same BillingLedger around its own storage (src/workerd/auth-do.ts).
  *
  * Stripe is the system of record for subscriptions. This is a cache of the
  * part Bellman needs: which plan each Stripe customer's subscriptions grant,

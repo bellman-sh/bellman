@@ -4,7 +4,7 @@
  */
 import { afterEach, expect, it } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { AuditDO } from "../src/audit-do.js";
+import type { AuditDO } from "../src/workerd/audit-do.js";
 import type { AuditEntry } from "../src/types.js";
 
 afterEach(async () => {

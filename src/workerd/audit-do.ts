@@ -1,11 +1,11 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import type { AuditEntry } from "./types.js";
-import { AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, entryView, recordOf, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord } from "./audit.js";
-import { orgEventEntry, type AuditIntent } from "./grant-audit.js";
-import { DUE_PREFIX, dueKey, dueNames, earliestDue } from "./outbox.js";
-import { SINK_BATCH, SINK_DELAY_MS, SWEEP_BATCH, SWEEP_EVERY_MS, SYSTEM_INTENT, VERIFY_PAGE, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "./audit-sink.js";
-import { randomId } from "./oauth/tokens.js";
+import type { AuditEntry } from "../types.js";
+import { AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, entryView, recordOf, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord } from "../audit.js";
+import { orgEventEntry, type AuditIntent } from "../grant-audit.js";
+import { DUE_PREFIX, dueKey, dueNames, earliestDue } from "../outbox.js";
+import { SINK_BATCH, SINK_DELAY_MS, SWEEP_BATCH, SWEEP_EVERY_MS, SYSTEM_INTENT, VERIFY_PAGE, chainHash, chainWalk, deadDetail, deliverBatch, NO_ANCHOR, newSink, nextSinkState, sinkStatus, sweepPlan, type AuditSettings, type AuditSink, type AuditSinkStatus, type AuditVerification, type ChainAnchor } from "../audit-sink.js";
+import { randomId } from "../oauth/tokens.js";
 
 /** The stream's tables (audit trail spec, D5). `AUTOINCREMENT` never reuses a seq, so a cursor once handed out names one row for good. */
 const AUDIT_SCHEMA = [

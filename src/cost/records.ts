@@ -1,7 +1,7 @@
 /**
  * What the room cost capture records (#473, design section 5), and the store it records into.
  *
- * Runtime-free on purpose: `CostDO` (src/cost-do.ts) imports `cloudflare:workers`, so no vitest test can reach
+ * Runtime-free on purpose: `CostDO` (src/workerd/cost-do.ts) imports `cloudflare:workers`, so no vitest test can reach
  * inside it. The row shapes, the table definitions and the one rule both stores apply (`isTooOld`) live here, and the
  * contract suite in tests/helpers/cost-store-contract.ts runs against `MemoryCostStore` and `CostDO` alike.
  *
@@ -98,7 +98,7 @@ export type MonthRecords = {
 
 /**
  * The capture's storage. Two implementations: `MemoryCostStore` (src/cost/memory.ts) for tests and the Node server,
- * `CostDO` (src/cost-do.ts) in production. A refusal is a returned value, not a throw, so it crosses RPC unchanged.
+ * `CostDO` (src/workerd/cost-do.ts) in production. A refusal is a returned value, not a throw, so it crosses RPC unchanged.
  */
 export interface CostStore {
   /** Inserts the rooms not already recorded; a known room keeps its first record. */

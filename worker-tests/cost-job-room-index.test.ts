@@ -9,10 +9,10 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, createScheduledController } from "cloudflare:test";
-import worker from "../src/worker.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import { costStore } from "../src/cost-do.js";
-import { R2BlobStore } from "../src/blobs-r2.js";
+import worker from "../src/workerd/worker.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import { costStore } from "../src/workerd/cost-do.js";
+import { R2BlobStore } from "../src/workerd/blobs-r2.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
 type WorkerEnv = Parameters<typeof worker.fetch>[1];

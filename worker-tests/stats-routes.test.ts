@@ -8,8 +8,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
-import worker from "../src/worker.js";
-import { DurableObjectStore } from "../src/store-do.js";
+import worker from "../src/workerd/worker.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 
 const ORIGIN = "https://mcp.example.test";
 // The key map's identity (vitest.config.ts) is u_jesse, the id BELLMAN_OPERATORS names below.

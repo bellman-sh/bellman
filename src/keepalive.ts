@@ -9,7 +9,7 @@
  * the socket 1003 — receive-only is enforced there, not assumed (spec D1).
  *
  * So `PING` is a protocol, not a preference. Three programs have to agree on
- * it: the server registering it (`src/session-do.ts`), the client sending it
+ * it: the server registering it (`src/workerd/session-do.ts`), the client sending it
  * (`src/room-socket.ts`), and the fake server the end-to-end tests run against
  * (`tests/helpers/fake-bellman.ts`). Before this module each held its own copy
  * — four with store-do-wiring's assertion — tied together only by comments, and
@@ -22,7 +22,7 @@
  *
  * **This module must stay runtime-free**: no `cloudflare:workers`, directly or
  * transitively. It is imported by the Workers program and the Node one, and
- * `src/store-do.ts` is excluded from the Node build precisely so its types do
+ * `src/workerd/store-do.ts` is excluded from the Node build precisely so its types do
  * not leak. `src/oauth/storage.ts` and `src/public-event.ts` are the same rule
  * (see CLAUDE.md). Keeping it to two string constants is what makes that easy
  * to hold — resist giving it the cadence or the timeouts, which are the

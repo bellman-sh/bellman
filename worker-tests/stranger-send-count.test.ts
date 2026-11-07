@@ -10,8 +10,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { abortAllDurableObjects, env, reset, runInDurableObject } from "cloudflare:test";
 import { sendKeyFor } from "../src/send-limit.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { SessionDO } from "../src/session-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
 import { session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {

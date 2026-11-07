@@ -124,9 +124,9 @@ describe("the projection layer stays importable from both transports", () => {
   it("follows a re-export, not only a plain import", () => {
     // The gap that mattered: `export { x } from "./sdk-thing.js"` pulls the SDK
     // in just as surely, and the old regex saw neither the edge nor the module
-    // behind it. src/worker.ts re-exports, so it is a real example rather than
+    // behind it. src/workerd/worker.ts re-exports, so it is a real example rather than
     // a fixture.
-    const specs = importsOf(resolve(SRC, "worker.ts"));
+    const specs = importsOf(resolve(SRC, "workerd/worker.ts"));
     expect(specs.length).toBeGreaterThan(0);
     expect(importsOf(resolve(SRC, "server.ts"))).toContain("@modelcontextprotocol/sdk/server/mcp.js");
   });

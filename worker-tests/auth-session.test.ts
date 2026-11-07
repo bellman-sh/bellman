@@ -1,5 +1,5 @@
 /**
- * AuthDO's session methods, in real workerd. src/oauth/store.ts imports
+ * AuthDO's session methods, in real workerd. src/workerd/auth-do.ts imports
  * cloudflare:workers, so the Node program cannot load it; the object is reached
  * here the way the Worker reaches it, through a stub.
  *
@@ -22,7 +22,7 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { AuthDO } from "../src/oauth/store.js";
+import type { AuthDO } from "../src/workerd/auth-do.js";
 import {
   SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS, type PanelSession,
 } from "../src/oauth/storage.js";

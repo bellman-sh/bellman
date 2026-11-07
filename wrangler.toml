@@ -1,5 +1,5 @@
 name = "bellman"
-main = "src/worker.ts"
+main = "src/workerd/worker.ts"
 compatibility_date = "2026-09-01"
 
 # src/codes.ts uses randomUUID from node:crypto, and the MCP SDK reaches for a
@@ -29,7 +29,7 @@ pattern = "mcp.bellman.sh"
 custom_domain = true
 
 # One DO per session, a singleton registry, one audit object per org.
-# See the topology comment at the top of src/store-do.ts.
+# See the topology comment at the top of src/workerd/store-do.ts.
 [[durable_objects.bindings]]
 name = "SESSION"
 class_name = "SessionDO"
@@ -47,7 +47,7 @@ name = "AUTH"
 class_name = "AuthDO"
 
 # One per hosted room, keyed by session id: the seat that calls the model
-# (src/host-do.ts). ANTHROPIC_API_KEY is a secret, never a var:
+# (src/workerd/host-do.ts). ANTHROPIC_API_KEY is a secret, never a var:
 #   npx wrangler secret put ANTHROPIC_API_KEY
 # MODEL_URL, unset here, defaults to Anthropic's Messages API.
 # The seat is off until BELLMAN_HOSTED_SEAT, under [vars] below, says on.
@@ -55,7 +55,7 @@ class_name = "AuthDO"
 name = "HOST"
 class_name = "HostDO"
 
-# One object, idFromName("cost"): the room cost capture's records (#473, src/cost-do.ts).
+# One object, idFromName("cost"): the room cost capture's records (#473, src/workerd/cost-do.ts).
 [[durable_objects.bindings]]
 name = "COST"
 class_name = "CostDO"
@@ -93,7 +93,7 @@ new_sqlite_classes = ["AuthDO"]
 tag = "v3"
 new_sqlite_classes = ["HostDO"]
 
-# The room cost capture's one object (#473, src/cost-do.ts). A class a migration adds cannot be undone by
+# The room cost capture's one object (#473, src/workerd/cost-do.ts). A class a migration adds cannot be undone by
 # redeploying a build without it: to stop the capture, remove the cron below, not the class.
 [[migrations]]
 tag = "v4"

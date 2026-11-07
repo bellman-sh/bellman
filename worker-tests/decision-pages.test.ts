@@ -5,8 +5,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, SELF, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { decisionHash, type DecisionDraft } from "../src/decision.js";
-import { DurableObjectStore } from "../src/store-do.js";
-import { DECISION_INDEX_BATCH, type SessionDO } from "../src/session-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import { DECISION_INDEX_BATCH, type SessionDO } from "../src/workerd/session-do.js";
 import type { EventBody } from "../src/types.js";
 import { roomManifest, session } from "../tests/helpers/fixtures.js";
 

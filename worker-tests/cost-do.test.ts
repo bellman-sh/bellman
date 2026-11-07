@@ -1,6 +1,6 @@
 /** The CostStore contract against `CostDO` in real workerd, each case on an object of its own. */
 import { env } from "cloudflare:test";
-import type { CostDO } from "../src/cost-do.js";
+import type { CostDO } from "../src/workerd/cost-do.js";
 import type { CostStore } from "../src/cost/records.js";
 import { describeCostStoreContract } from "../tests/helpers/cost-store-contract.js";
 

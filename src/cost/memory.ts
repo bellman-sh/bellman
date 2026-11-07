@@ -1,4 +1,4 @@
-/** `CostStore` in memory, for tests and the Node server. `CostDO` (src/cost-do.ts) is the production one. */
+/** `CostStore` in memory, for tests and the Node server. `CostDO` (src/workerd/cost-do.ts) is the production one. */
 import {
   isTooOld, previousMonth,
   type BlobRow, type CostStore, type MonthRecords, type PlansDay, type RoomRecord, type RunRecord, type TotalsRecord, type UsageRecord,

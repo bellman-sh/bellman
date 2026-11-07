@@ -16,7 +16,7 @@
  */
 import { it, expect, afterEach, describe } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
-import { type AuthDO } from "../src/oauth/store.js";
+import { type AuthDO } from "../src/workerd/auth-do.js";
 import { CLIENT_CAP, CLIENT_COUNT_KEY, SWEEP_INTERVAL_MS, type RegisteredClient } from "../src/oauth/storage.js";
 
 afterEach(async () => {

@@ -5,9 +5,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
 import { z } from "zod";
-import worker from "../src/worker.js";
+import worker from "../src/workerd/worker.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
-import { DurableObjectStore } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";

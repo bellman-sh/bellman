@@ -1,14 +1,14 @@
 import { it, expect, afterEach, beforeEach, vi } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
-import type { SessionDO } from "../src/session-do.js";
-import type { HostDO } from "../src/host-do.js";
+import { DurableObjectStore } from "../src/workerd/store-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
+import type { HostDO } from "../src/workerd/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
 import type { OutsideTask, SessionEvent } from "../src/types.js";
 import { answerQuestion, askRoom, questionsToAnswer } from "../src/outside.js";
 import type { StoredSession } from "../src/stored-session.js";
-import worker from "../src/worker.js";
+import worker from "../src/workerd/worker.js";
 import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,

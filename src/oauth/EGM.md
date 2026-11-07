@@ -6,8 +6,8 @@ Bellman's OAuth 2.1 authorization server. `routes.ts` is one dispatcher, `handle
 dynamic client registration, PKCE authorize, the GitHub, Google and org-SSO hand-offs, the token endpoint, agent
 registration (auth.md), panel cookie sessions, the sign-in invites page, `/account`, and operator and admin
 routes; it also resolves a caller's plan at sign-in and on refresh. `storage.ts` is the runtime-free
-`AuthStorage` contract with `MemoryAuthStore`; `store.ts` is its Durable Object implementation, `AuthDO`, and the
-only file here that imports `cloudflare:workers`, so it is Workers-only and excluded from the Node build. The rest
+`AuthStorage` contract with `MemoryAuthStore`; its Durable Object implementation, `AuthDO`, is Workers-only and lives
+in [../workerd/EGM.md](../workerd/EGM.md) (`src/workerd/auth-do.ts`). Nothing here imports `cloudflare:workers`. The rest
 are primitives: JWTs and PKCE, sealing, cookies, DNS proof, OIDC, providers, browser origin checks, and the
 pure agent-claim decisions.
 
@@ -51,8 +51,7 @@ Storage:
 - Predicates `sessionDead`, `touchDue`, `hasLapsed`, `purgeDue`; `sweepPage`; `clientCount`; limits
   `REGISTRATIONS_PER_HOUR` 20, `CLIENT_CAP` 10,000, `SESSION_TTL_MS` 7 d, `SESSION_IDLE_MS` 24 h
   [src/oauth/storage.ts:sessionDead]
-- `AuthDO extends DurableObject<BellmanEnv>` implements it; `AuthStore` is a facade over the one instance named
-  `"auth"` and also implements `BillingStorage` [src/oauth/store.ts:AuthStore]
+- `AuthDO` implements it, in workerd ([../workerd/EGM.md](../workerd/EGM.md)) [src/workerd/auth-do.ts:AuthStore]
 
 Primitives:
 
@@ -81,12 +80,10 @@ Primitives:
   URIs must be https or http on loopback [src/oauth/routes.ts:usableRedirect]
 - Codes and refresh tokens are single use (take deletes before the expiry check); refresh tokens rotate, and
   storing one promotes the client out of disposable registration in the same operation
-  [src/oauth/storage.ts:AuthStorage] [src/oauth/store.ts:AuthDO.putRefresh]
+  [src/oauth/storage.ts:AuthStorage] [src/workerd/auth-do.ts:AuthDO.putRefresh]
 - Every read-check-write on the store (registration admission, session touch and re-plan, `spendOnce`, every
   agent method) runs as one operation: synchronous in `MemoryAuthStore`, one transaction in `AuthDO`
-  [src/oauth/store.ts:AuthDO.admitRegistration]
-- `AuthDO` write helpers are `#private`, because a Durable Object answers RPC for every method and TypeScript
-  `private` is erased [src/oauth/store.ts:AuthDO]
+  [src/workerd/auth-do.ts:AuthDO.admitRegistration]
 - A refresh keeps its granted resource and re-resolves the plan from immutable keys only; an override or grant
   then contributes plan, role and org, never `userId` [src/oauth/routes.ts:replanOnRefresh]
 - Operator overrides outrank stored grants; an inactive org downgrades its grant's plan to free
@@ -122,12 +119,7 @@ Primitives:
 
 ## Side Effects
 
-- `AuthDO` storage under `client:`, `reg:`, `code:`, `spent:`, `refresh:`, `sess:`, `agentreg:`,
-  `agentattempt:`, `agentgrant:`, `agentip:` and cursor keys; billing ledger keys through `BillingLedger`
-  [src/oauth/store.ts:AuthDO]
-- Alarm sweep: armed after a transaction, `purgeStale` re-armed in a `finally`; bounded sweeps of 200 keys
-  [src/oauth/store.ts:AuthDO.alarm]
-- RPC to `RegistryDO` (`env.REGISTRY`, `"registry"`) during billing reconcile [src/oauth/store.ts:AuthDO.reconcile]
+- `AuthDO`'s storage, alarm sweep and RPC are in [../workerd/EGM.md](../workerd/EGM.md)
 - Network: provider token and user endpoints (`github.com`, `api.github.com`, `oauth2.googleapis.com`,
   `openidconnect.googleapis.com`), OIDC discovery, token and userinfo, `cloudflare-dns.com`
   [src/oauth/providers.ts:github] [src/oauth/oidc.ts:discover] [src/oauth/dns.ts:txtRecords]
@@ -145,5 +137,5 @@ Primitives:
 - Run: `npm test -- tests/oauth- tests/oidc.test.ts tests/sealed.test.ts tests/dns.test.ts
   tests/agent-auth.test.ts tests/auth-store.test.ts tests/sso-flow.test.ts tests/panel-session.test.ts
   tests/browser-safety.test.ts`
-- Run: `npm run typecheck:worker` (`store.ts`) and `npm run test:worker` (`auth-*`, `agent-auth-race`)
+- Run: `npm run typecheck:worker` (`src/workerd/auth-do.ts`) and `npm run test:worker` (`auth-*`, `agent-auth-race`)
 - Full gate: `npm run verify`

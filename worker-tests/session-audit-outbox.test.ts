@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import type { SessionDO } from "../src/session-do.js";
-import type { AuditDO } from "../src/audit-do.js";
+import type { SessionDO } from "../src/workerd/session-do.js";
+import type { AuditDO } from "../src/workerd/audit-do.js";
 import { outboxKey, OUTBOX_SEQ, dueKey, OUTBOX_HANDLER } from "../src/outbox.js";
 
 // Storage is not isolated between tests in this pool (worker-tests/README.md), and

@@ -267,3 +267,22 @@ describe("POST /rooms/:id/codes", () => {
     expect((await mint(DEV_KEY.outsider, sessionId, { member_id: memberId })).status).toBe(403);
   });
 });
+
+// #531, ADR 0047 decision 14: the account's own room notes in one room, from a dash session alone.
+describe("DELETE /rooms/:id/notes", () => {
+  it("DELETE /rooms/:id/notes removes the account's room notes and no one else's, with the room's events saying so", async () => {
+    const pair = await pairUp(h);
+    await pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/members/me/a.md", content: "a" });
+    await pair.creator.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/members/me/b.md", content: "b" });
+    await pair.joiner.call("bellman_fs", { op: "write", session_id: pair.sessionId, member_id: pair.joinerMemberId, path: "/members/me/p.md", content: "p" });
+    const res = await call(null, `/rooms/${pair.sessionId}/notes`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(res.status).toBe(200);
+    const body = await bodyOf(res) as { deleted: string[]; refused: unknown };
+    expect(body.deleted.map((p) => p.split("/").pop()).sort()).toEqual(["a.md", "b.md"]);
+    expect(body.refused).toBeNull();
+    expect((await pair.creator.call("bellman_fs", { op: "list", session_id: pair.sessionId, member_id: pair.creatorMemberId, prefix: "/members/me/" })).data).toMatchObject({ entries: [] });
+    expect((await pair.joiner.call("bellman_fs", { op: "read", session_id: pair.sessionId, member_id: pair.joinerMemberId, path: "/members/me/p.md" })).isError).toBe(false);
+    expect((await call(DEV_KEY.jesse, `/rooms/${pair.sessionId}/notes`, { method: "DELETE" })).status).toBe(403);
+    expect((await call(null, `/rooms/qs_nope/notes`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL } })).status).toBe(404);
+  });
+});

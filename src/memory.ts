@@ -7,7 +7,7 @@ import { ENTITLEMENTS } from "./auth.js";
 import { namespaceOf, normalizePath } from "./fs-path.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { renderExport, type ExportRoom } from "./memory-export.js";
-import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
+import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomFailure, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
 import { isActiveMember, type BellmanStore, type FsPage, type FsWrite } from "./store.js";
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "./types.js";
@@ -151,6 +151,35 @@ export async function exportMemory(store: BellmanStore, actor: Identity): Promis
     if (notes.length > 0) rooms.push({ sessionId: id, room: session.manifest.room, notes });
   }
   return renderExport({ label: actor.label, at: Date.now(), home, rooms });
+}
+
+/**
+ * Delete the account's own notes (`/members/<memory id>/`) in one room (ADR 0047 decision 14), one room file delete
+ * per note through the seat's own write: its verb, send count and quota apply, and each leaves its `fs` event and
+ * audit entry. Stops at the first refusal and reports it; what was deleted before it stays deleted.
+ */
+export async function deleteRoomNotes(
+  store: BellmanStore, actor: Identity, sessionId: string,
+): Promise<RoomResult<{ deleted: string[]; refused: { path: string; code: RoomFailure } | null }>> {
+  const session = await store.getSession(sessionId);
+  const seat = session?.members.find((m) => m.userId === actor.userId && isActiveMember(m));
+  if (!session || !seat) return refuse("not_found", "no such room, or no seat of yours in it.");
+  const memoryId = await store.memoryIdOf(sessionId, actor.userId);
+  if (memoryId === null) return succeed({ deleted: [], refused: null });
+  const rows: { path: string; rev: number }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await store.listFs(sessionId, `/members/${memoryId}`, { cursor });
+    rows.push(...page.entries.filter((e) => !e.deleted));
+    cursor = page.next ?? undefined;
+  } while (cursor !== undefined);
+  const deleted: string[] = [];
+  for (const row of rows) {
+    const out = await writeFs(store, actor, sessionId, seat.memberId, { path: row.path, write: { op: "delete", baseRev: row.rev } });
+    if (!out.ok) return succeed({ deleted, refused: { path: row.path, code: out.code } });
+    deleted.push(row.path);
+  }
+  return succeed({ deleted, refused: null });
 }
 
 /** One lookup as the dash shows it (ADR 0047 decision 13): the row, with its room named. */

@@ -172,6 +172,10 @@ export function ok(output: Record<string, unknown>, preamble?: string): ToolResu
   return { content: [{ type: "text", text }], structuredContent: output };
 }
 
+/** How long `ok(output, preamble)` renders, in characters: what a reply's ceiling is measured on. */
+export const renderedLength = (output: unknown, preamble?: string): number =>
+  JSON.stringify(output, null, 2).length + (preamble ? preamble.length + 2 : 0);
+
 export function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
 }

@@ -221,11 +221,11 @@ const byCanvas = (rows: SurfaceRow[], at: (r: SurfaceRow) => { x: number; y: num
 const sorted = (all: Ranked[]): Ranked[] => all.sort((a, b) => (after(a.pos, b.pos) ? 1 : after(b.pos, a.pos) ? -1 : 0));
 
 /** The token for the last item of a page: what `readToken` takes back. */
-const tokenOf = (kind: "newest" | "unframed" | "frame" | "region", last: Ranked, extra: { frameKey?: string; rect?: Rect }): string => {
+const tokenOf = (kind: "newest" | "unframed" | "frame" | "region", pos: Pos, extra: { frameKey?: string; rect?: Rect }): string => {
   switch (kind) {
-    case "newest": case "unframed": return b64(JSON.stringify([kind, -(last.pos[0] as number), last.pos[1]]));
-    case "frame": return b64(JSON.stringify(["frame", extra.frameKey, ...last.pos]));
-    case "region": { const r = extra.rect!; return b64(JSON.stringify(["region", r.x, r.y, r.w, r.h, ...last.pos])); }
+    case "newest": case "unframed": return b64(JSON.stringify([kind, -(pos[0] as number), pos[1]]));
+    case "frame": return b64(JSON.stringify(["frame", extra.frameKey, ...pos]));
+    case "region": { const r = extra.rect!; return b64(JSON.stringify(["region", r.x, r.y, r.w, r.h, ...pos])); }
   }
 };
 
@@ -311,10 +311,42 @@ export function readWindow(
     page: {
       window: windowName(window),
       items: [...taken.map((c) => c.row), ...joins],
-      next: more ? tokenOf(window.kind, taken[taken.length - 1], { frameKey, rect: window.kind === "region" ? window : undefined }) : null,
+      next: more ? tokenOf(window.kind, taken[taken.length - 1].pos, { frameKey, rect: window.kind === "region" ? window : undefined }) : null,
       frames: entries,
       ...(slots === undefined ? {} : { slots }),
     },
+  };
+}
+
+/**
+ * `page` cut to its first `keep` ranked items (ADR 0047 decision 9): a reply that cannot carry the whole window hands
+ * back what fits and `next` for the rest. Connectors joining none of the kept items are dropped, a region's slots with
+ * them, and `next` resumes at the last kept item, or, with none kept, just before the first, so the next read starts
+ * where this page did. `keep` at or past the ranked count returns `page` as it is; a one-item `key:` window is never cut.
+ */
+export function cutPage(page: WindowPage, keep: number): WindowPage {
+  const parsed = parseWindow(page.window, "http");
+  if (!parsed.ok || parsed.window.kind === "key") return page;
+  const window = parsed.window;
+  const ranked = page.items.filter((r) => r.kind !== "frame" && r.kind !== "connector");
+  if (keep >= ranked.length) return page;
+  const kept = ranked.slice(0, Math.max(0, keep));
+  const onPage = new Set(kept.map((r) => r.key));
+  const joins = page.items.filter((r) => r.kind === "connector" && r.ends !== null && (onPage.has(r.ends.from) || onPage.has(r.ends.to)));
+  const frameEntry = window.kind === "frame" ? page.frames[window.frame - 1]?.data : undefined;
+  const corner = frameEntry?.placement ?? { x: 0, y: 0 };
+  const at = (r: SurfaceRow) => r.placement ?? page.slots?.[r.key] ?? { x: 0, y: 0 };
+  // The positions `readWindow` ranks by: age for newest and unframed, the canvas from the frame's corner otherwise.
+  const posOf = (r: SurfaceRow): Pos => window.kind === "newest" || window.kind === "unframed"
+    ? [-createdAtOf(r), r.key]
+    : [at(r).y - corner.y, at(r).x - corner.x, r.key];
+  // With nothing kept, the token sits just before the first item: its position with the empty key, which every key is after.
+  const last = kept.length > 0 ? posOf(kept[kept.length - 1]) : [...posOf(ranked[0]).slice(0, -1), ""];
+  const slots = page.slots === undefined ? {} : { slots: Object.fromEntries(Object.entries(page.slots).filter(([k]) => onPage.has(k))) };
+  return {
+    window: page.window, frames: page.frames, items: [...kept, ...joins],
+    next: tokenOf(window.kind, last, { frameKey: frameEntry?.key, rect: window.kind === "region" ? window : undefined }),
+    ...slots,
   };
 }
 

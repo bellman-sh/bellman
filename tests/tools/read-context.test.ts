@@ -193,16 +193,16 @@ describe("the briefs read directly (read_context spec, section 1)", () => {
     expect(envelopes(again.confirmed.data.briefs).map((b) => b.origin.memberId)).toContain(quiet.memberId);
   });
 
-  /** Plan ruling R7: a brief its author keeps is left out before the cut, so it takes none of the places. */
+  /** Plan ruling R7: a brief its author keeps is left out before the cut, so it takes none of the places. The reply has one budget (ADR 0047 decision 9) and the roster rides whole, so what is shown is the first of the granting members, however many fit, and the rest count as omitted. */
   it("fills the places with briefs it can hand, so a kept brief takes none of them, and counts the kept ones as omitted (R7)", async () => {
     const now = Date.now();
     // m_00 was heard from last, and each member after it a second earlier. The five heard from most recently keep their briefs.
-    const members = Array.from({ length: 40 }, (_, i) => member({
+    const members = Array.from({ length: 32 }, (_, i) => member({
       memberId: `m_${String(i).padStart(2, "0")}`,
       userId: `u_member_${i}`,
       roomRole: "peer_b",
       capabilities: i < 5 ? KEEPS : GRANTS,
-      brief: brief({ goal: `member ${i}` }),
+      brief: brief({ goal: `member ${i}`, state: "s", constraints: [], open_questions: [] }),
       joinedAt: now - 100_000,
       lastSeenAt: now - i * 1000,
     }));
@@ -214,9 +214,11 @@ describe("the briefs read directly (read_context spec, section 1)", () => {
     const joined = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
     expect(joined.isError, joined.text).toBe(false);
 
-    expect(envelopes(joined.data.briefs).map((b) => b.origin.memberId))
-      .toEqual(members.slice(5, 5 + BRIEFS_ON_JOIN).map((m) => m.memberId));
-    expect(joined.data.briefs_omitted).toBe(members.length - BRIEFS_ON_JOIN);
+    const shownIds = envelopes(joined.data.briefs).map((b) => b.origin.memberId);
+    expect(shownIds.length).toBeGreaterThan(5);
+    expect(shownIds.length).toBeLessThanOrEqual(BRIEFS_ON_JOIN);
+    expect(shownIds).toEqual(members.slice(5, 5 + shownIds.length).map((m) => m.memberId));
+    expect(joined.data.briefs_omitted).toBe(members.length - shownIds.length);
   });
 
   it("leaves a creator's brief out of bellman_connect's preview, which their own account still reads", async () => {

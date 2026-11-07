@@ -93,7 +93,7 @@ const CONFIG_READS: Listing = {
  */
 const FILE_READS: Listing = {
   "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
-  "src/memory.ts": { calls: 2, serves: "readHome and listHome (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads" },
+  "src/memory.ts": { calls: 3, serves: "readHome, listHome and homeTitles (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads; homeTitles hands bellman_confirm the paths alone" },
   "src/workerd/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
 };
 

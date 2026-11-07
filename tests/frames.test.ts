@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cutPage,
   NEXT_ALONE, NEXT_FRAME_GONE, NEXT_REFUSAL, SURFACE_PAGE, WINDOW_REFUSAL_HTTP, WINDOW_REFUSAL_TOOL,
   frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName,
 } from "../src/frames.js";
@@ -261,5 +262,42 @@ describe("placeSurfaceBatch (surface widget and batch spec, D1)", () => {
       expect(frame.placed.carried.map((w) => [w.key, w.item!.placement])).toEqual([["b", { x: 500, y: 40 }]]);
       expect(frame.moved).toMatchObject([{ key: "b", byMemberId: "m_ada" }]);
     }
+  });
+});
+
+describe("cutPage (ADR 0047 decision 9)", () => {
+  const rows = [
+    row("a", { createdAt: 5_000 }), row("b", { createdAt: 4_000 }), row("c", { createdAt: 3_000 }), row("d", { createdAt: 2_000 }), row("e", { createdAt: 1_000 }),
+    row("ab", { kind: "connector", body: null, ends: { from: "a", to: "b" } }), row("de", { kind: "connector", body: null, ends: { from: "d", to: "e" } }),
+  ];
+
+  it("keeps the first ranked items and the connectors joining them, and next resumes at the last kept", () => {
+    const whole = page(rows, { window: { kind: "newest" } });
+    expect(keys(whole)).toEqual(["a", "b", "c", "d", "e", "ab", "de"]);
+    const cut = cutPage(whole, 2);
+    expect(keys(cut)).toEqual(["a", "b", "ab"]);
+    expect(keys(page(rows, { next: cut.next! }))).toEqual(["c", "d", "e", "de"]);
+  });
+
+  it("cut to nothing, next reads the page from its start; cut at or past the count, the page is unchanged", () => {
+    const whole = page(rows, { window: { kind: "newest" } });
+    const none = cutPage(whole, 0);
+    expect([none.items, none.window]).toEqual([[], "newest"]);
+    expect(keys(page(rows, { next: none.next! }))).toEqual(keys(whole));
+    expect(cutPage(whole, 5)).toBe(whole);
+    expect(cutPage(whole, 9)).toBe(whole);
+  });
+
+  it("cuts a frame's window by canvas order from the frame's corner", () => {
+    const framed = [
+      frame("f", { x: 100, y: 100, w: 1000, h: 1000 }, 1),
+      row("p", at(110, 110)), row("q", at(110, 500)), row("r", at(600, 110)),
+    ];
+    const whole = page(framed);
+    expect([whole.window, keys(whole)]).toEqual(["frame:1", ["p", "r", "q"]]);
+    const cut = cutPage(whole, 1);
+    expect(keys(cut)).toEqual(["p"]);
+    expect(keys(page(framed, { next: cut.next! }))).toEqual(["r", "q"]);
+    expect(keys(page(framed, { next: cutPage(whole, 0).next! }))).toEqual(["p", "r", "q"]);
   });
 });

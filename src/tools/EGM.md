@@ -45,8 +45,11 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
 - `bellman_start` returns `session_id`, `member_id`, `join_code`, `join_url`, `public_url` (public rooms only),
   `plan`, `room`, `share_instructions` [src/tools/start.ts:registerStart]
 - `bellman_connect` returns a `connect_token`, the session summary, `creator_brief` and a surface index with no
-  item contents; `bellman_confirm` takes it and returns `members`, `briefs` (at most `BRIEFS_ON_JOIN` = 25) and
-  `surface` [src/tools/connect.ts:registerConnect] [src/tools/confirm.ts:BRIEFS_ON_JOIN]
+  item contents; `bellman_confirm` takes it and returns `members` (present first), `recall` (the joiner's home-note
+  paths, newest first, at most `RECALL_CHARS`), `briefs` (at most `BRIEFS_ON_JOIN` = 25) and `surface`, the whole
+  reply at most `CONFIRM_REPLY_CHARS` as rendered: the surface is cut first (`next` pages the rest), briefs second;
+  the room, its instructions and the roster are never cut (ADR 0047 decision 9)
+  [src/tools/connect.ts:registerConnect] [src/tools/confirm.ts:CONFIRM_REPLY_CHARS] [src/rooms.ts:readSurfaceWithin]
 - `start`, `connect`, `confirm`, `rooms` and `surface` carry `_meta: APP_UI_META` (see
   [`../ui/EGM.md`](../ui/EGM.md)) [src/tools/start.ts:registerStart]
 - Annotations: `audit`, `rooms`, `surface` read-only; `evict` destructive and not idempotent; `leave` and

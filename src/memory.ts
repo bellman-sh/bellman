@@ -75,6 +75,20 @@ export async function listHome(store: BellmanStore, actor: Identity, prefix: str
   return succeed(await store.listFs(homeRoomId(actor.userId), path.value, { cursor, newest: true }));
 }
 
+/**
+ * The account's home-note paths for arrival (decision 9, #528), newest first: the first page of its home room, in a
+ * call of its own after the seat commits. A failed read is logged and hands back none; it never fails the join.
+ */
+export async function homeTitles(store: BellmanStore, actor: Identity): Promise<string[]> {
+  try {
+    const page = await store.listFs(homeRoomId(actor.userId), "/", { newest: true });
+    return page.entries.map((e) => e.path);
+  } catch (error) {
+    console.error("recall on arrival: the home room could not be read:", error);
+    return [];
+  }
+}
+
 /** The account's memory settings (#530): what `GET /me/memory` returns, and what the bridge reads for the Stop hook. */
 export const readMemorySettings = (store: BellmanStore, actor: Identity): Promise<HomeSettings> =>
   store.readHomeSettings(homeRoomId(actor.userId));

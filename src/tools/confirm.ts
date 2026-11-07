@@ -1,15 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, roomInstructionsField } from "./kit.js";
+import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok, renderedLength, roomInstructionsField } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import { BANNED } from "../bans.js";
+import { homeTitles } from "../memory.js";
 import { forbiddenCapabilityRefusal, joinRefusal } from "../orgs.js";
 import { seesBrief } from "../public-event.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
-import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
-import { STALE_AFTER_MS } from "../presence.js";
+import { FROZEN, announceReclaimed, audit, fullMessage, mostThatFits, readSurfaceWithin } from "../rooms.js";
+import { STALE_AFTER_MS, type Presence } from "../presence.js";
 import { isActiveMember, lastSeen, rosterHasOrgless } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
@@ -19,6 +20,16 @@ import { APP_UI_META } from "../ui/resource.js";
  * (ADR 0018). A room seats thousands, and a joiner's agent reads all it is handed.
  */
 export const BRIEFS_ON_JOIN = 25;
+
+/**
+ * The whole reply's ceiling in characters as `ok` renders it, and `recall`'s own inside it (ADR 0047 decision 9). A
+ * join to a busy room once returned 72,450 characters, 63,274 of them the surface, and the client saved it to a file
+ * instead of reading it.
+ */
+export const CONFIRM_REPLY_CHARS = 24_000;
+export const RECALL_CHARS = 4_000;
+
+const PRESENCE_RANK: Record<Presence, number> = { present: 0, stale: 1, departed: 2 };
 
 export function registerConfirm(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
@@ -34,8 +45,8 @@ Args:
 
 Your seat is the role the previewed code carried, fixed at bellman_connect: revoking the code since does not change it.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (as previewed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, room_instructions? (as in bellman_connect), cursor }
-surface is the front window. bellman_sync carries each later change as a surface event and returns the front window with surface: true; bellman_surface pages with next or reads a frame.
+Returns: { session_id, member_id, members[] (present first, each with room_role), room (as previewed), recall: { home (your home-note paths, newest first; read one with bellman_memory), home_omitted }, briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, room_instructions? (as in bellman_connect), cursor }
+surface is the front window. The whole reply is at most 24,000 characters: surface items are cut first (next pages the rest), briefs second. bellman_sync carries each later change as a surface event and returns the front window with surface: true; bellman_surface pages with next or reads a frame.
 Verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor: bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired": re-run bellman_connect. "your org's policy does not allow rooms with org ..." / "org ...'s policy does not allow members of your org" (policy, either side of the join, checked again here), "your org's policy forbids granting ... to peers".`,
@@ -178,22 +189,29 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
       const shownBriefs = await s.getBriefs(joined.id, readable.map((m) => m.memberId));
       const shown = readable.filter((m) => shownBriefs[m.memberId] !== undefined);
 
-      return ok(
-        {
-          session_id: session.id,
-          member_id: memberId,
-          cursor: joinEvent.cursor,
-          members: joined.members.map((m) => publicMember(m, connected)),
-          room: roomPreview(joined, roomRole, identity.userId),
-          briefs: shown.map((m) => untrusted({ memberId: m.memberId, label: m.label }, shownBriefs[m.memberId])),
-          briefs_omitted: peers.length - shown.length,
-          // Every item, in the writer's envelope (#129): the joiner is a member
-          // now, as `briefs` already treats them.
-          surface: await readSurface(s, joined),
-          ...(await roomInstructionsField(s, joined.id)),
-        },
-        UNTRUSTED_PREAMBLE
-      );
+      // One budget for the whole reply (ADR 0047 decision 9), filled in its order: the handles, the cursor, the room
+      // and the instructions are never cut; recall has its own ceiling inside it; members ride whole, present first;
+      // then briefs and the surface, of which the surface is cut first and briefs second. Surface items and briefs
+      // ride in their writers' envelopes (#129): the joiner is a member now.
+      const fits = (output: Record<string, unknown>) => renderedLength(output, UNTRUSTED_PREAMBLE) <= CONFIRM_REPLY_CHARS;
+      const head: Record<string, unknown> = {
+        session_id: session.id,
+        member_id: memberId,
+        cursor: joinEvent.cursor,
+        room: roomPreview(joined, roomRole, identity.userId),
+        ...(await roomInstructionsField(s, joined.id)),
+      };
+      const titles = await homeTitles(s, identity);
+      const recallOf = (k: number) => ({ home: titles.slice(0, k), home_omitted: titles.length - k });
+      head.recall = mostThatFits(titles.length, recallOf, (r) => renderedLength(r) <= RECALL_CHARS && fits({ ...head, recall: r })).value;
+      head.members = joined.members.map((m) => publicMember(m, connected)).sort((a, b) => PRESENCE_RANK[a.presence] - PRESENCE_RANK[b.presence]);
+      const withBriefs = (k: number) => ({
+        ...head,
+        briefs: shown.slice(0, k).map((m) => untrusted({ memberId: m.memberId, label: m.label }, shownBriefs[m.memberId])),
+        briefs_omitted: peers.length - k,
+      });
+      const surface = await readSurfaceWithin(s, joined, (block) => fits({ ...withBriefs(shown.length), surface: block }));
+      return ok({ ...mostThatFits(shown.length, withBriefs, (o) => fits({ ...o, surface })).value, surface }, UNTRUSTED_PREAMBLE);
     }
   );
 }

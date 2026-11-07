@@ -5,7 +5,8 @@
 import { it, expect, afterEach, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { answerQuestion, askRoom, cancelOutsideTask, OUTSIDE_TASK_TTL_MS, type AskRequest } from "../src/outside.js";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { banAsker } from "../src/rooms.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 

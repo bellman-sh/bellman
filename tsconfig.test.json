@@ -17,6 +17,9 @@
   "exclude": [
     "src/worker.ts",
     "src/store-do.ts",
+    "src/session-do.ts",
+    "src/registry-do.ts",
+    "src/audit-do.ts",
     "src/host-do.ts",
     "src/oauth/store.ts",
     "src/blobs-r2.ts",

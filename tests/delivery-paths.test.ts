@@ -53,14 +53,15 @@ const pinned = (listing: Listing): Record<string, number> =>
 /** Each caller of `publicEvent`, and what it hands out. */
 const PUBLIC_EVENT: Listing = {
   "src/public-event.ts": { calls: 2, serves: "publicEvent's definition, and publicReadEvent's call of it: the public page's shape, which leaves out every brief" },
-  "src/store-do.ts": { calls: 2, serves: "the room socket's frames, on a reconnect's replay and on each append; read as no account, so no memory fs event, and shared, so a granted brief only" },
+  "src/session-do.ts": { calls: 2, serves: "the room socket's frames, on a reconnect's replay and on each append; read as no account, so no memory fs event, and shared, so a granted brief only" },
   "src/tools/sync.ts": { calls: 1, serves: "bellman_sync, read as the caller's account, through eventsFor: briefs and memory fs events by their rules" },
   "src/http/rooms.ts": { calls: 1, serves: "the dash's Log route, read as the caller's account, through eventsFor: briefs and memory fs events by their rules" },
 };
 
 /** Each caller of a store's event read (`eventsAfter`, `waitForEvents`, `recentEvents`, `eventAt`), and what it hands out. */
 const EVENT_READS: Listing = {
-  "src/store-do.ts": { calls: 5, serves: "the store facade: passes each read on and reads for no one. The socket's own reads in this module are under PUBLIC_EVENT. SessionDO.roomSummary (#472): the newest event, of which only its cursor and time leave the object, as the operator's event count and last event time" },
+  "src/store-do.ts": { calls: 4, serves: "the store facade: passes each read on and reads for no one" },
+  "src/session-do.ts": { calls: 1, serves: "SessionDO.roomSummary (#472): the newest event, of which only its cursor and time leave the object, as the operator's event count and last event time. The socket's own reads in this module are under PUBLIC_EVENT" },
   "src/tools/sync.ts": { calls: 3, serves: "bellman_sync's events, read as the caller's account" },
   "src/http/rooms.ts": { calls: 3, serves: "the dash's Log route, as above" },
   "src/http/public.ts": { calls: 3, serves: "the public page, through publicReadEvent; and the public message search's window of the newest 200, which searchMessages reads a message's text from, so a brief_update is counted in searched.events and never matched or handed out" },

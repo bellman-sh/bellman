@@ -419,7 +419,7 @@ and `fetch` accepted the socket onto a closed room where nothing was left to
 close it: the close had already happened ([#133](../../../issues/133)). The
 Worker's check could not be moved and could not be trusted alone; `fetch`
 rechecks `closed` for itself, before the event read and the accept, and refuses
-with 409. One rule asked twice, from `readsClosed` in `store-do.ts`, which is
+with 409. One rule asked twice, from `readsClosed` in `session-do.ts`, which is
 also what the abandonment alarm closes a room by. The Worker's check stays because it is
 what tells 403 from 404 without naming the room to a stranger, and what spares an
 upgrade for a caller who owns nothing here. This is read-and-register again with
@@ -610,7 +610,7 @@ implementations: `MemoryStore` for tests and local development,
 comment, and it runs against both. The root vitest program runs it against
 `MemoryStore`; `worker-tests/` runs the same suite against `DurableObjectStore`
 in real workerd, with real Durable Objects. That second program exists because
-`src/store-do.ts` imports `cloudflare:workers`, which only workerd provides: a
+the object files (`src/session-do.ts` and its siblings) import `cloudflare:workers`, which only workerd provides: a
 root test can load those classes over a stub and a fake storage
 (`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 

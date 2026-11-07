@@ -8,7 +8,8 @@
 import { it, expect, vi, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { readSurface } from "../src/rooms.js";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import type { SurfaceItem, SurfaceRow } from "../src/types.js";
 import { session } from "../tests/helpers/fixtures.js";
 

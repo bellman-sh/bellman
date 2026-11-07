@@ -40,7 +40,8 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
   so the HTTP routes can import it without the MCP SDK; `src/public-event.ts` is
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
-- `src/store-do.ts` — the Durable Objects implementation that serves production.
+- `src/store-do.ts` — `DurableObjectStore`, the production `BellmanStore`: it routes each call to
+  `SessionDO` (`src/session-do.ts`), `RegistryDO` (`src/registry-do.ts`) or `AuditDO` (`src/audit-do.ts`).
 - `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
   `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
 - `src/fs-path.ts` / `src/fs.ts` — room files (ADR 0046), runtime-free: path normalization and namespaces, and the
@@ -106,7 +107,7 @@ or *peers*, where a peer is any other member rather than a counterpart.
   are approved by the receiving *human*. Any change that weakens this needs to
   say so out loud in the PR.
 - **Workers-only files are excluded from the Node build** (`src/worker.ts`,
-  `src/store-do.ts`, `src/oauth/store.ts`, `src/cost-do.ts`). They import `cloudflare:workers`,
+  `src/store-do.ts` and the three object files beside it, `src/oauth/store.ts`, `src/cost-do.ts`). They import `cloudflare:workers`,
   and their types otherwise leak into the Node program. `tsconfig.test.json` keeps its own
   `exclude` list, so a new one goes in both.
 - **Two test programs.** Anything importing `cloudflare:workers` cannot be

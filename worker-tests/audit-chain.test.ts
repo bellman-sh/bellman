@@ -4,7 +4,8 @@
  */
 import { afterEach, expect, it } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type AuditDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { AuditDO } from "../src/audit-do.js";
 
 afterEach(async () => {
   await reset();

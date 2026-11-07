@@ -198,7 +198,7 @@ describe("GET /ws", () => {
   });
 
   // This guards a path that is live. Presence reads the member list on a socket
-  // (SocketAttachment.memberIds in store-do.ts), and a list naming a member keeps
+  // (SocketAttachment.memberIds in session-do.ts), and a list naming a member keeps
   // that member's whole identity out of every seat reclaim for as long as the
   // socket stays open. A forwarded x-bellman-members would be a protection a
   // caller claims for itself, so the Worker must never forward a caller's

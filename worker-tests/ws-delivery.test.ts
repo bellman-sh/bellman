@@ -366,7 +366,7 @@ describe("a creator removes a member who holds a socket", () => {
      * order, so a swapped pair shows as a missing first entry.
      *
      * The readyState literals are 2 and 3 and not WebSocket.CLOSING and CLOSED, for the
-     * reason store-do.ts gives where it defines WS_CLOSING and WS_CLOSED: the program may
+     * reason session-do.ts gives where it defines WS_CLOSING and WS_CLOSED: the program may
      * have either WebSocket global.
      */
     const { id, store, stub } = await roomOf(mine("m_target"));

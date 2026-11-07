@@ -28,7 +28,8 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { session } from "../tests/helpers/fixtures.js";
 
 const ROOM = "qs_append_race";

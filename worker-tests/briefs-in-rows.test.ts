@@ -7,7 +7,8 @@
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { brief, member, swarmSession } from "../tests/helpers/fixtures.js";
 
 /** ADR 0018's ceiling: the room this file stores at the maximum, and could not store with its briefs inline. */

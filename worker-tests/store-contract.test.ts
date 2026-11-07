@@ -8,7 +8,9 @@
 import { afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { R2BlobStore } from "../src/blobs-r2.js";
-import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
+import type { RegistryDO } from "../src/registry-do.js";
 import { describeStoreContract } from "../tests/helpers/store-contract.js";
 
 /**

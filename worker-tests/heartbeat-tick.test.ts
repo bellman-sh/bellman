@@ -8,7 +8,8 @@ import { it, expect, afterEach } from "vitest";
 import {
   env, SELF, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import { hostMember } from "../src/host.js";
 import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";

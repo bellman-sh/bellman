@@ -10,7 +10,8 @@
  */
 import { it, expect, vi, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SessionDO } from "../src/session-do.js";
 import type { HostDO } from "../src/host-do.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { OUTBOX_PREFIX } from "../src/outbox.js";

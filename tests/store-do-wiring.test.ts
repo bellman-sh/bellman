@@ -75,7 +75,9 @@ vi.stubGlobal("Response", class extends NodeResponse {
   }
 });
 
-import * as storeDo from "../src/store-do.js";
+import * as facade from "../src/store-do.js";
+import * as sessionDo from "../src/session-do.js";
+import * as registryDo from "../src/registry-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
@@ -84,6 +86,8 @@ import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { resolveManifest } from "../src/manifest.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
+/** The facade and the two objects it reaches here, as one namespace, as when they were one module. */
+const storeDo = { ...facade, ...sessionDo, ...registryDo };
 type StoreDo = typeof storeDo;
 
 const LEGACY_ID = "qs_legacy";
@@ -416,7 +420,7 @@ async function worldOn(
 }
 
 /**
- * store-do.ts loaded with hydrateStoredSession replaced by the identity function:
+ * The store's modules loaded with hydrateStoredSession replaced by the identity function:
  * what production would run if stored() lost its call. Reloads the module graph so
  * the real, guarded import above is untouched.
  */
@@ -424,7 +428,11 @@ async function loadStoreDoWithoutGuard(): Promise<StoreDo> {
   vi.resetModules();
   vi.doMock("../src/stored-session.js", () => ({ hydrateStoredSession: (raw: unknown) => raw }));
   try {
-    return await import("../src/store-do.js");
+    return {
+      ...(await import("../src/store-do.js")),
+      ...(await import("../src/session-do.js")),
+      ...(await import("../src/registry-do.js")),
+    };
   } finally {
     vi.doUnmock("../src/stored-session.js");
     vi.resetModules();

@@ -13,7 +13,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { type BellmanStore } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { text } from "./helpers/blob-bytes.js";
 import { brief, manifestFixture, member, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
 

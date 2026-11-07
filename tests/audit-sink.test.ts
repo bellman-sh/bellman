@@ -5,7 +5,7 @@ import {
   retentionDaysOf, sinkUrlOf, deliverBatch, NO_ANCHOR, SINK_DEAD_AFTER_MS, type ChainRow, type AuditSink,
 } from "../src/audit-sink.js";
 import { recordOf } from "../src/audit.js";
-import { backoffMs } from "../src/outbox.js";
+import { backoffMs } from "../src/storage/outbox.js";
 import type { AuditEntry } from "../src/types.js";
 
 const entry = (n: number): AuditEntry => ({ at: n, orgId: "org_a", sessionId: "qs_1", actorUserId: "u", action: "x", detail: { n } });

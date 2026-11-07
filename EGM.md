@@ -61,6 +61,8 @@ Three surfaces ship from this repository:
     authorization server; its `AuthDO` is in workerd.
   - scim: [./src/scim/EGM.md](./src/scim/EGM.md) - SCIM 2.0 parsers, resource
     shapes, and the deprovision/reprovision walk over a person's rooms.
+  - storage: [./src/storage/EGM.md](./src/storage/EGM.md) - `BellmanStore`,
+    `MemoryStore`, the shared write rules and storage layout helpers.
   - tools: [./src/tools/EGM.md](./src/tools/EGM.md) - one MCP tool per file
     plus `kit.ts`.
   - workerd: [./src/workerd/EGM.md](./src/workerd/EGM.md) - the Workers entry
@@ -93,12 +95,12 @@ Three surfaces ship from this repository:
 
 - Every `BellmanStore` method returns a Promise, including ones `MemoryStore`
   answers at once, because the Durable Objects port crosses objects by RPC
-  [src/store.ts:BellmanStore].
+  [src/storage/store.ts:BellmanStore].
 - `waitForEvents` reads events and registers its waiter in the same turn, in
   both stores [src/workerd/session-do.ts:SessionDO.waitForEvents],
-  [src/store.ts:MemoryStore.waitForEvents].
+  [src/storage/memory-store.ts:MemoryStore.waitForEvents].
 - No transaction spans two Durable Objects; cross-object writes go through a
-  FIFO outbox written in the mutation's transaction [src/outbox.ts:drain].
+  FIFO outbox written in the mutation's transaction [src/storage/outbox.ts:drain].
 - Peer content is untrusted everywhere: wrapped on the server
   [src/projections.ts:untrusted], escaped by the client
   [src/client/inbox.ts:safeJson], cleaned before display in the mod

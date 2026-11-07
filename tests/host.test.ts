@@ -6,8 +6,8 @@ import {
   callMessages, hostedSeatFor, hostedSeatOn, hostedSeatUsers, HOST_RULES, RULES_OUTRANK, type HostDriver, type HostRecord,
 } from "../src/host.js";
 import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/manifest.js";
-import { decideHostCharge, type HostAppend } from "../src/store.js";
-import { monthKey, type StoredSession } from "../src/stored-session.js";
+import { decideHostCharge, type HostAppend } from "../src/storage/store.js";
+import { monthKey, type StoredSession } from "../src/storage/stored-session.js";
 import { brief, member, roomManifest, session } from "./helpers/fixtures.js";
 import type { Plan, SessionEvent } from "../src/types.js";
 

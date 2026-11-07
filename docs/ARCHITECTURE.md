@@ -259,7 +259,7 @@ whole, because the cut is a seat's and they no longer hold one. The
 list is bounded at 50 rooms and says when it was (`truncated`), because neither
 registry index orders by recency; the newest 50 of a larger set is #49's summary
 index. The admin's list reads the org index wider than it answers, `JOINED_SCAN`
-ids (`src/store.ts`, the bound the monitor's joined history is read with),
+ids (`src/storage/store.ts`, the bound the monitor's joined history is read with),
 because that index holds the org's open rooms among its closed ones in no
 promised order; it keeps the closed rooms of what it finds and lists the newest
 50 by close, and `truncated` says either bound was hit. The scan costs up to that
@@ -605,7 +605,7 @@ canvas alone, cleaned, within what the engine could draw of it (`CANVAS_MAX`).
 
 ## 5. Storage
 
-State lives behind one interface, `BellmanStore` (`src/store.ts`). Two
+State lives behind one interface, `BellmanStore` (`src/storage/store.ts`). Two
 implementations: `MemoryStore` for tests and local development,
 `DurableObjectStore` for production. A conformance suite
 (`tests/helpers/store-contract.ts`) is what makes that a real seam rather than a
@@ -636,7 +636,7 @@ issue if billing ever needs one.
 
 ```mermaid
 flowchart LR
-    BS["BellmanStore<br/>src/store.ts<br/>every method async"]
+    BS["BellmanStore<br/>src/storage/store.ts<br/>every method async"]
     MEM["MemoryStore<br/>tests, npm start"] -.implements.-> BS
     DOS["DurableObjectStore<br/>production facade"] -.implements.-> BS
 
@@ -915,7 +915,7 @@ included, and its member rows, events, audit trail and members' own views keep t
 label. It never joins by code and never holds a socket. ADR 0002 records the decisions.
 
 **Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
-control over the seat, and `hostSeated` (`src/store.ts`) is the one predicate
+control over the seat, and `hostSeated` (`src/storage/store.ts`) is the one predicate
 behind it: once the host has left, `tickPlan` arms and wakes nothing for it,
 neither store queues it a reply wake, `admit` settles a wake already queued with
 no model call, and `decideHostCharge` refuses its write (`removed`), so a wake
@@ -1865,7 +1865,7 @@ three filed bugs, and they were two different problems:
 | Filed as | [#59](../../../issues/59), [#62](../../../issues/62) | [#69](../../../issues/69) |
 | What goes wrong | A mutation commits in one object and the write that must accompany it lands in another. Lose the second and nothing records that it was owed. | Two operations interleave and an older result lands after a newer one. |
 | What fixes it | **Durable delivery.** Persist the intent in the same transaction as the mutation, then deliver it. An alarm retries what did not arrive. | **A lock.** The whole operation runs inside the object whose queue can cover it. |
-| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO`, `SessionDO → RegistryDO`, `SessionDO → AuditDO` and `SessionDO → HostDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
+| Where it lives | `src/storage/outbox.ts`, used `RegistryDO → AuditDO`, `SessionDO → RegistryDO`, `SessionDO → AuditDO` and `SessionDO → HostDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
 
 Neither fixes the other's problem. A durable queue delivers an old write as
 reliably as a new one, and a lock does nothing for a write that was never sent;
@@ -1940,7 +1940,7 @@ of those decisions is the cut. An eviction asks for `cut: true`, and the store
 records the target out at the departure event's own cursor through `markRemoved`
 — the same rule `appendEvent` applies for its `markRemoved` extra, so a cut
 recorded by a removal and one recorded by an append are a single piece of code in
-`src/store.ts` rather than two that can drift ([#113](../../../issues/113)). The
+`src/storage/store.ts` rather than two that can drift ([#113](../../../issues/113)). The
 cut and the event it names commit in the same put, because recorded apart a
 reader can be refused at a cursor no stored event carries, or admitted past one
 already written. A leave asks for `cut: false` and a reclaimed seat for none at
@@ -1966,7 +1966,7 @@ an object nobody charged for costs storage only and `list({ prefix })` finds
 it. Both are this section's window; put-then-charge is the side on which the
 loss is findable, and the sweep at close (#65) is what finds it.
 
-**A lost write: durable delivery.** `src/outbox.ts`:
+**A lost write: durable delivery.** `src/storage/outbox.ts`:
 
 1. **One commit.** `OutboxDriver.enqueue` returns the `ob:` rows for the caller
    to fold into its own `ctx.storage.transaction()`, and arms the alarm from

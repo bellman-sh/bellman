@@ -4,7 +4,7 @@ import { NEED_ROOM, fail, ok, refusal, roomIdOf, type ToolResult } from "./kit.j
 import { UNTRUSTED_PREAMBLE, fsEntry, fsFile, untrusted } from "../projections.js";
 import { listHome, readHome, shareHome, unshareNotes, writeHome } from "../memory.js";
 import type { RoomResult } from "../rooms.js";
-import type { BellmanStore } from "../store.js";
+import type { BellmanStore } from "../storage/store.js";
 import type { Identity } from "../types.js";
 
 const OPS = ["remember", "recall", "forget", "share", "unshare"] as const;

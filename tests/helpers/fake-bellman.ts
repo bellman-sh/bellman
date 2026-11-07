@@ -12,7 +12,7 @@ import { MemoryAuthStore } from "../../src/oauth/storage.js";
 import { signJwt } from "../../src/oauth/tokens.js";
 import { PING, PONG } from "../../src/keepalive.js";
 import { publicEvent } from "../../src/public-event.js";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import type { Identity, SessionEvent } from "../../src/types.js";
 import { ClientFrames, OPCODE, binaryFrame, closeCodeOf, closeFrame, handshake, textFrame } from "./ws-wire.js";
 

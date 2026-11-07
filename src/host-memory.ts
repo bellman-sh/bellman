@@ -9,7 +9,7 @@ import {
   ANTHROPIC_MESSAGES_URL, HOST_MEMBER_ID, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
 } from "./host.js";
-import type { MemoryStore } from "./store.js";
+import type { MemoryStore } from "./storage/memory-store.js";
 import type { Plan } from "./types.js";
 import { keyedPlan } from "./auth.js";
 import { answerQuestion } from "./outside.js";

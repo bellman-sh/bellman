@@ -6,7 +6,7 @@
  * outage does not cost a day of blob levels, and R2 trouble does not cost a day of plans.
  */
 import type { BlobStore } from "../blobs.js";
-import { monthKey } from "../stored-session.js";
+import { monthKey } from "../storage/stored-session.js";
 import { GRAPHQL_URL, parseUsage, usageQuery } from "./graphql.js";
 import { capturePlans, type CapturePlansDeps } from "./plans.js";
 import { mapUsage } from "./usage.js";

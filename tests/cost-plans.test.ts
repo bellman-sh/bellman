@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { capturePlans, MAX_COST_CREATORS } from "../src/cost/plans.js";
-import { MemoryStore, type RoomIndexRow } from "../src/store.js";
+import { type RoomIndexRow } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type PlanGrant } from "../src/types.js";
 
 const DAY = "2026-11-02";

@@ -12,7 +12,7 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
-import type { HostAppend } from "../store.js";
+import type { HostAppend } from "../storage/store.js";
 import { billingSettings, type BillingEnv } from "../billing/config.js";
 import { parseOverrides } from "../oauth/providers.js";
 import { planOf } from "../oauth/routes.js";

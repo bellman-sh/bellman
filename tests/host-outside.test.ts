@@ -3,11 +3,11 @@
  * the hand-off when the seat skips or stays silent, and the seat answering through `answerQuestion`.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { MemoryHost } from "../src/host-memory.js";
 import { HOST_MEMBER_ID, hostMember, type HostWake } from "../src/host.js";
 import { SEAT_OUTSIDE_DAILY_CAP, SEAT_SILENCE_MS, answerQuestion, askRoom, outsideTask, type Caller } from "../src/outside.js";
-import { monthKey } from "../src/stored-session.js";
+import { monthKey } from "../src/storage/stored-session.js";
 import type { OutsideTask } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";

@@ -1,5 +1,5 @@
 import type { Member, RoomManifest, Verb } from "./types.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 
 /**
  * The verbs a role holds — one of the two places `manifest.roles` is indexed;

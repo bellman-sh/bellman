@@ -3,9 +3,10 @@ import {
   clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickBroughtForward, tickPlan, tickStep,
 } from "../src/heartbeat.js";
 import { hostMember } from "../src/host.js";
-import { MemoryStore, NO_SOCKETS } from "../src/store.js";
+import { NO_SOCKETS } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
-import type { StoredSession } from "../src/stored-session.js";
+import type { StoredSession } from "../src/storage/stored-session.js";
 import type { Member } from "../src/types.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");

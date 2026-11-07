@@ -1,8 +1,8 @@
 import { ENTITLEMENTS } from "../auth.js";
 import type { PlanGrant } from "../types.js";
-import type { GrantDelete, GrantWrite } from "../store.js";
+import type { GrantDelete, GrantWrite } from "../storage/store.js";
 import type { AuditIntent } from "../grant-audit.js";
-import { isOrgId } from "../grant-index.js";
+import { isOrgId } from "../storage/grant-index.js";
 import type { BillingStorage } from "./ledger.js";
 
 /**

@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { beatOf, roomPreview, roomSummary } from "../src/projections.js";
 import { reportRow } from "../src/heartbeat.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
-import type { StoredSession } from "../src/stored-session.js";
+import type { StoredSession } from "../src/storage/stored-session.js";
 import type { SessionEvent } from "../src/types.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");

@@ -12,11 +12,9 @@
  * (#473) and the price table (#475); the body leaves them out rather than answering them null.
  */
 import { auditRows, partiesOf } from "../audit.js";
-import { isOrgId, NO_ORG } from "../grant-index.js";
+import { isOrgId, NO_ORG } from "../storage/grant-index.js";
 import { NotReadyError } from "../rpc-error.js";
-import {
-  isPublic, roomIndexKey, roomIndexRow, type BellmanStore, type RoomFilter, type RoomIndexRow, type RoomStatus, type RoomSummary,
-} from "../store.js";
+import { isPublic, roomIndexKey, roomIndexRow, type BellmanStore, type RoomFilter, type RoomIndexRow, type RoomStatus, type RoomSummary } from "../storage/store.js";
 import type { AuditEntry } from "../types.js";
 import { json, problem, type RoomCaller } from "./rooms.js";
 

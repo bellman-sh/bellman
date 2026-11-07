@@ -8,7 +8,7 @@ import { namespaceOf, normalizePath } from "./fs-path.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { findMember, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
-import type { BellmanStore, FsPage, FsWrite } from "./store.js";
+import type { BellmanStore, FsPage, FsWrite } from "./storage/store.js";
 import type { FsRow, HomeSettings, Identity } from "./types.js";
 
 const NO_NOTE = "no such note.";

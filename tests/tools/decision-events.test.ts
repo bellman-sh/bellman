@@ -4,7 +4,7 @@
  * through `bellman_decide` and lists an open one in `outstanding` (#405).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { Harness, envelopes } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { decisionHash, type DecisionDraft } from "../../src/decision.js";

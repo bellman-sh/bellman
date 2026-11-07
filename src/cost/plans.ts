@@ -4,7 +4,7 @@
  */
 import { MAX_GRANTS_COUNTED } from "../http/stats.js";
 import { planOf, type PlanOfDeps } from "../oauth/routes.js";
-import type { BellmanStore, RoomIndexRow } from "../store.js";
+import type { BellmanStore, RoomIndexRow } from "../storage/store.js";
 import type { PlansDay, RoomRecord } from "./records.js";
 
 /** `listRoomsPage`'s window. A short page is the index's end. */

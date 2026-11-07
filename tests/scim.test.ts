@@ -9,7 +9,7 @@ import { MAX_SCIM_BODY_BYTES, SCIM_PAGE_MAX, scimRoutes } from "../src/http/scim
 import { ssoUserId } from "../src/oauth/providers.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import { PATCH_SCHEMA, SCIM_JSON, USER_SCHEMA } from "../src/scim/resource.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Org, PlanGrant } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";

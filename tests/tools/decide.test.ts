@@ -3,7 +3,7 @@
  * vote, and the open decisions a seat's `bellman_sync` lists as `outstanding`.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { Harness, envelopes, type Outcome } from "../helpers/harness.js";
 import { pairUp, secretBallot, type PairedSession } from "../helpers/flows.js";
 import { decisionHash } from "../../src/decision.js";

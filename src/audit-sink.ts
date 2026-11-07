@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { recordOf, type AuditEntryView } from "./audit.js";
 import type { AuditIntent } from "./grant-audit.js";
-import { backoffMs } from "./outbox.js";
+import { backoffMs } from "./storage/outbox.js";
 import type { AuditEntry } from "./types.js";
 
 export const RETENTION_FLOOR_DAYS = 30;

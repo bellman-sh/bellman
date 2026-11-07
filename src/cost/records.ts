@@ -7,7 +7,7 @@
  *
  * Nothing here holds a grant key, a room name, a label or an email: ids, plans, sources and numbers only.
  */
-import { monthKey } from "../stored-session.js";
+import { monthKey } from "../storage/stored-session.js";
 
 /** A day as the capture writes it: `YYYY-MM-DD`, UTC. */
 export const dayKey = (now: number): string => new Date(now).toISOString().slice(0, 10);

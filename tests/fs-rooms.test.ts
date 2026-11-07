@@ -3,7 +3,7 @@
  * reveals a memory file, against a `MemoryStore`. The tool and routes are tested over these in their own files.
  */
 import { describe, expect, it } from "vitest";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { eventsFor, findFsFor, fsHistoryFor, leaveRoom, listFsFor, readFsFor, writeFs, evictMember } from "../src/rooms.js";
 import { SEND_LIMIT } from "../src/send-limit.js";
 import type { Capability, Identity } from "../src/types.js";

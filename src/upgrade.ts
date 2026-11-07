@@ -6,7 +6,7 @@
  * files — `src/workerd/worker.ts`'s `/ws` route and `SessionDO.fetch` in `src/workerd/session-do.ts` —
  * which import `cloudflare:workers` and so cannot be imported by a vitest test. The
  * rule goes in a runtime-free module beside them, as `src/public-event.ts` and
- * `src/stored-session.ts` do, and `tests/upgrade.test.ts` tests it directly.
+ * `src/storage/stored-session.ts` do, and `tests/upgrade.test.ts` tests it directly.
  *
  * Nothing here touches `Request` or `Response`. This module is in the NODE build,
  * whose `lib` is ES2022 with no DOM, so the caller passes the header value in and

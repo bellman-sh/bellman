@@ -6,7 +6,7 @@
  * carries it out.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { MemoryStore } from "../../src/store.js";
+import { MemoryStore } from "../../src/storage/memory-store.js";
 import { jesseActor } from "../helpers/fixtures.js";
 import { Harness } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";

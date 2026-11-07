@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   NO_ORG, allKeysFor, domainKey, grantKey, idpKey, isOrgId, orgIndexKey, orgIndexPrefix, orgKey, scimKeyIndex, scimNameKey,
   scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys,
-} from "../src/grant-index.js";
+} from "../src/storage/grant-index.js";
 import type { PlanGrant } from "../src/types.js";
 
 const grant = (over: Partial<PlanGrant> = {}): PlanGrant => ({

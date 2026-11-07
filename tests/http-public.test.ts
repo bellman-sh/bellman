@@ -14,7 +14,7 @@ import { MAX_EVENTS_READ, roomRoutes, searchTag, type RoomRouteDeps } from "../s
 import { resolveManifest } from "../src/manifest.js";
 import { askRoom } from "../src/outside.js";
 import { storedMember } from "../src/projections.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { EventType, Member, Session } from "../src/types.js";
 import { brief, jesseActor, member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";

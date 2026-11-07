@@ -8,7 +8,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { handleRoutes } from "../src/http/handles.js";
 import { moderationRoutes, routeOrigin, type ModerationDeps } from "../src/http/moderation.js";
 import type { RoomCaller } from "../src/http/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 

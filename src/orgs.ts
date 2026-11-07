@@ -1,4 +1,4 @@
-import { isOrgId } from "./grant-index.js";
+import { isOrgId } from "./storage/grant-index.js";
 import { domainOf } from "./oauth/dns.js";
 import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
 import { DEFAULT_POLICY, type Capability, type Org, type OrgInvite, type OrgPolicy, type PlanGrant, type Role } from "./types.js";

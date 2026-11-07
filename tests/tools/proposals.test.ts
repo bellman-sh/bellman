@@ -66,7 +66,7 @@ describe("how long a proposal stays open (D3)", () => {
       .toEqual([expect.objectContaining({ cursor: asked.data.cursor, mine: true })]);
   });
 
-  // A record written before the stamp existed has none (src/stored-session.ts), so the slice has to say it.
+  // A record written before the stamp existed has none (src/storage/stored-session.ts), so the slice has to say it.
   it("finds it in the slice when the record holds no stamp", async () => {
     const r = await topicRoom(h);
     vi.setSystemTime(Date.now() - 2 * 60 * 60_000);

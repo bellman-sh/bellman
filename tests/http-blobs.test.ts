@@ -13,7 +13,8 @@ import {
 } from "../src/blobs.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
-import { MemoryStore, type BlobCharge } from "../src/store.js";
+import { type BlobCharge } from "../src/storage/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import type { Identity } from "../src/types.js";
 import { PNG, text } from "./helpers/blob-bytes.js";
 import { member, session } from "./helpers/fixtures.js";

@@ -15,7 +15,7 @@
  * directly or transitively.
  */
 import { SEND_KINDS, type AuditEntry, type FsRow, type Identity, type Member, type RoomManifest, type SessionEvent, type SurfaceKind, type SurfaceRow, type Verb } from "./types.js";
-import type { StoredSession } from "./stored-session.js";
+import type { StoredSession } from "./storage/stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
 import { MAX_REPORT_NOTE_CHARS, REPORTS_PER_DAY, REPORT_REASONS, type NewReport, type ReportMailer, type ReportTarget } from "./reports.js";
@@ -23,11 +23,7 @@ import { questionTask } from "./outside.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import { sendKeyFor, sendLimitFor } from "./send-limit.js";
-import {
-  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
-  type BellmanStore, type EventBody, type RemovalRequest,
-  type FsPage, type FsWrite,
-} from "./store.js";
+import { JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember, type BellmanStore, type EventBody, type RemovalRequest, type FsPage, type FsWrite } from "./storage/store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { ROOM_TAIL, cardResult, messageResult, roomSummary, surfaceItem, type CardResult, type MessageResult } from "./projections.js";
 import { MAX_MESSAGE_SCAN, searchCards, searchMessages } from "./search.js";

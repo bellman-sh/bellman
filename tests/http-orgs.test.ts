@@ -12,7 +12,7 @@ import { INVITE_TTL_MS, RESEND_COOLDOWN_MS, policyView } from "../src/orgs.js";
 import { verifyInviteLink, type InviteMailer } from "../src/invite-mail.js";
 import { isSealed, unseal } from "../src/oauth/sealed.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEFAULT_POLICY, type Identity, type Org, type PlanGrant } from "../src/types.js";
 
 const ISSUER = "https://mcp.example.test";

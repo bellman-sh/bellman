@@ -8,7 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import type { Identity, NewSession, RoomManifest } from "./types.js";
-import { monthKey } from "./stored-session.js";
+import { monthKey } from "./storage/stored-session.js";
 
 export const HOME_ID_PREFIX = "qh_";
 

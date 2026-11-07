@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
-import { ROOM_MEMBER_CEILING } from "../../src/store.js";
+import { ROOM_MEMBER_CEILING } from "../../src/storage/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
 import { SURFACE_KINDS } from "../../src/surface.js";

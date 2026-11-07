@@ -1,5 +1,5 @@
 import { expect } from "vitest";
-import type { MemoryStore } from "../../src/store.js";
+import type { MemoryStore } from "../../src/storage/memory-store.js";
 import type { Brief, Session } from "../../src/types.js";
 import { brief, manifestFixture, member, openaiAgent } from "./fixtures.js";
 import { DEV_KEY, type Harness, type Outcome, type Peer } from "./harness.js";

@@ -7,9 +7,9 @@
  * imports `cloudflare:workers`, and the tests that seed a room's storage by hand build its rows
  * here, through the same functions the object writes them with.
  */
-import type { ArrivingMember, Brief, Member } from "./types.js";
+import type { ArrivingMember, Brief, Member } from "../types.js";
 import { creatorOf, isActiveMember, seatInOrder, type Seating } from "./store.js";
-import { orgsOnRoster } from "./retention.js";
+import { orgsOnRoster } from "../retention.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 
 /** The most keys one storage call reads or writes. */

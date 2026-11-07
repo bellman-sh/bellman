@@ -6,12 +6,13 @@
 import { ENTITLEMENTS } from "./auth.js";
 import { namespaceOf, normalizePath } from "./fs-path.js";
 import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
-import { findMember, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
+import { findMember, gateFsRead, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
 import type { BellmanStore, FsPage, FsWrite } from "./store.js";
-import type { FsRow, HomeSettings, Identity } from "./types.js";
+import type { FsRow, HomeSettings, Identity, LookupSource } from "./types.js";
 
 const NO_NOTE = "no such note.";
+const PAUSED = "paused: your human paused home memory in the dash; forget still works.";
 
 /** A home path: normalized, and never under `/apps/`, which a home room cannot run. Every other path is the account's. */
 function homePath(raw: string): RoomResult<string> {
@@ -56,23 +57,28 @@ export async function writeHome(
     case "forbidden": return refuse("forbidden", "/apps/ is reserved for room apps; a home room runs none.");
     case "invalid": return refuse("invalid", `invalid: ${out.detail}.`);
     // A home room is never frozen or closed, and the write creates it: these cannot be answered, and are refused all the same.
+    case "paused": return refuse("paused", PAUSED);
     case "frozen": case "closed": case "not_found": return refuse("not_found", NO_NOTE);
   }
 }
 
-/** One home note, at `rev` or current. */
-export async function readHome(store: BellmanStore, actor: Identity, raw: string, rev?: number): Promise<RoomResult<FsRow>> {
+/** One home note, current, read and logged as `source` (decision 13); refused while paused. */
+export async function readHome(store: BellmanStore, actor: Identity, raw: string, source: LookupSource): Promise<RoomResult<FsRow>> {
   const path = homePath(raw);
   if (!path.ok) return path;
-  const row = await store.readFs(homeRoomId(actor.userId), path.value, rev);
-  return row === null || row.deleted ? refuse("not_found", NO_NOTE) : succeed(row);
+  const out = await store.readHomeLogged(homeRoomId(actor.userId), path.value, source);
+  if (out.paused) return refuse("paused", PAUSED);
+  return out.file === null ? refuse("not_found", NO_NOTE) : succeed(out.file);
 }
 
-/** The account's notes under `prefix`, newest first, a page after `cursor`. */
-export async function listHome(store: BellmanStore, actor: Identity, prefix: string, cursor?: string): Promise<RoomResult<FsPage>> {
+/** The account's notes under `prefix`, newest first, a page after `cursor`, logged as `source`; refused while paused. */
+export async function listHome(
+  store: BellmanStore, actor: Identity, prefix: string, cursor: string | undefined, source: LookupSource,
+): Promise<RoomResult<FsPage>> {
   const path = homePath(prefix);
   if (!path.ok) return path.code === "forbidden" ? succeed({ entries: [], next: null }) : path;
-  return succeed(await store.listFs(homeRoomId(actor.userId), path.value, { cursor, newest: true }));
+  const out = await store.listHomeLogged(homeRoomId(actor.userId), path.value, cursor, source);
+  return out.paused ? refuse("paused", PAUSED) : succeed(out.page);
 }
 
 /**
@@ -121,7 +127,11 @@ export async function unshareNotes(store: BellmanStore, actor: Identity, session
 export async function shareHome(
   store: BellmanStore, actor: Identity, sessionId: string, memberId: string, raw: string,
 ): Promise<RoomResult<{ path: string; rev: number }>> {
-  const note = await readHome(store, actor, raw);
+  // The seat is gated before the read is logged under it, so no stranger's seat or agent lands in the log.
+  const seat = await gateFsRead(store, actor, sessionId, memberId);
+  if (!seat.ok) return seat;
+  const agent = (await store.getBriefs(sessionId, [memberId]))[memberId]?.agent ?? null;
+  const note = await readHome(store, actor, raw, { op: "share", sessionId, memberId, agent, query: raw });
   if (!note.ok) return note;
   const target = `/members/me${note.value.path}`;
   const current = await readFsFor(store, actor, sessionId, memberId, target);

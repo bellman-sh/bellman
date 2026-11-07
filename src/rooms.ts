@@ -65,9 +65,12 @@ import { MAX_OPEN_PROPOSALS, readProposal, sourceRefusal } from "./proposal.js";
  *
  * `"stale"`, `"too_large"` and `"over_quota"` are a room file write's (ADR 0046): a `base_rev` that is not the current
  * revision, a file past 64 KiB, and a room past its file ceiling. The first and last carry `state`.
+ *
+ * `"paused"` is a home memory read or write while the account's human paused it in the dash (ADR 0047 decision 13).
  */
 export type RoomFailure =
-  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited" | "stale" | "too_large" | "over_quota";
+  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited" | "stale" | "too_large" | "over_quota"
+  | "paused";
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not
  * exceptional. Not a ToolResult, because that shape is MCP's and a route has
@@ -2099,7 +2102,7 @@ export async function writeFs(
 }
 
 /** The read gate: the room exists and the handle is the caller's and still in it. Frozen and closed rooms read. */
-async function gateFsRead(store: BellmanStore, actor: Identity, sessionId: string, memberId: string): Promise<RoomResult<StoredSession>> {
+export async function gateFsRead(store: BellmanStore, actor: Identity, sessionId: string, memberId: string): Promise<RoomResult<StoredSession>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
   const me = await findMember(store, session, memberId, actor);

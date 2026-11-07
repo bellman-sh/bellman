@@ -3116,6 +3116,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
         if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
       }
+      if (w.write.op === "write" && (await txn.get<HomeSettings>("hs"))?.paused) return { outcome: "paused" };
       if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
       const read = await this.stored(txn);
       let s = read, seeded: Record<string, unknown> = {};

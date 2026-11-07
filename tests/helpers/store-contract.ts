@@ -5041,6 +5041,14 @@ export function describeStoreContract(
         expect(await store.readHomeSettings(id)).toEqual({ capture: true, paused: true });
       });
 
+      it("refuses a write while paused and still deletes", async () => {
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.writeHomeSettings(id, { capture: false, paused: true });
+        expect(await store.writeHome(id, home(), note("/b.md", { op: "write", content: "b" }), 4096)).toEqual({ outcome: "paused" });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "delete", baseRev: 1 }), 4096)).toMatchObject({ outcome: "ok", rev: 2 });
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+      });
+
       it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "replayed", path: "/a.md", rev: 1 });

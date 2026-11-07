@@ -1379,9 +1379,10 @@ export const homeKey = (memberId: string, key: string): string => `hk:${encodeUR
 
 /**
  * What `writeHome` answered: `appendFs`'s outcomes without an event. `forbidden` is a `/apps/` path, which a home
- * room cannot run.
+ * room cannot run. `paused` is a write while the account's human paused home memory (ADR 0047 decision 13); a delete
+ * is never paused.
  */
-export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal;
+export type HomeAppend = { outcome: "ok" | "replayed"; path: string; rev: number } | FsRefusal | { outcome: "paused" };
 
 /** Whether `path` is `prefix` or under it, as a directory; `/` holds everything. */
 export const underPrefix = (path: string, prefix: string): boolean =>
@@ -4000,6 +4001,7 @@ export class MemoryStore implements BellmanStore {
     const print = fsPrint(w);
     const record = storageKey === null ? undefined : this.homeKeys.get(id)?.get(storageKey);
     if (record) return record.print === print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+    if (w.write.op === "write" && this.homeSettings.get(id)?.paused) return { outcome: "paused" };
     if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
     let s = this.sessions.get(id);
     if (!s) {

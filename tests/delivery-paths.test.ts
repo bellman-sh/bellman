@@ -79,6 +79,7 @@ const BRIEF_READS: Listing = {
   "src/workerd/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
   "src/tools/connect.ts": { calls: 1, serves: "the creator's brief in a preview, when the creator grants read_context or the previewer is the creator's account" },
   "src/tools/confirm.ts": { calls: 1, serves: "the briefs a joiner is handed: peers who grant read_context, and the joiner's account's other handles" },
+  "src/memory.ts": { calls: 1, serves: "shareHome's own seat, after gateFsRead: its agent goes into the caller's own home lookup log (ADR 0047 decision 13)" },
 };
 
 /** Each reader of a governed config row (#414). Everything else goes through getGovernedConfig. */
@@ -93,7 +94,7 @@ const CONFIG_READS: Listing = {
  */
 const FILE_READS: Listing = {
   "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
-  "src/memory.ts": { calls: 3, serves: "readHome, listHome and homeTitles (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads; homeTitles hands bellman_confirm the paths alone" },
+  "src/memory.ts": { calls: 1, serves: "homeTitles (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads; it hands bellman_confirm the paths alone. readHome and listHome read through the store's logged methods" },
   "src/workerd/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
   "src/store.ts": { calls: 2, serves: "MemoryStore's readHomeLogged and listHomeLogged (ADR 0047 decision 13): the home room's read and newest-first list, handed back with no memory rule as readFs and listFs are, and logged" },
 };

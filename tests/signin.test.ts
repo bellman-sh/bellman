@@ -2048,7 +2048,7 @@ describe("signedInAs", () => {
     writeServer(dir, WHO, { tokens: { access_token: "t" }, identity });
 
     expect(signedInAs(WHO, { configDir: dir })).toEqual({
-      source: "oauth", label: "jesse@github", plan: "team", role: "admin", org_id: "org_codenerd",
+      source: "oauth", label: "jesse@github", user_id: "u_jesse", plan: "team", role: "admin", org_id: "org_codenerd",
     });
   });
 
@@ -2056,7 +2056,7 @@ describe("signedInAs", () => {
     writeServer(dir, WHO, { tokens: { access_token: "t" }, identity: { ...identity, orgId: null } });
 
     expect(signedInAs(WHO, { configDir: dir })).toEqual({
-      source: "oauth", label: "jesse@github", plan: "team", role: "admin", org_id: null,
+      source: "oauth", label: "jesse@github", user_id: "u_jesse", plan: "team", role: "admin", org_id: null,
     });
   });
 
@@ -2143,7 +2143,7 @@ describe("signedInAs", () => {
     });
 
     expect(signedInAs(WHO, { configDir: dir })).toEqual({
-      source: "oauth", label: "", plan: "free", role: undefined, org_id: undefined,
+      source: "oauth", label: "", user_id: undefined, plan: "free", role: undefined, org_id: undefined,
     });
   });
 });

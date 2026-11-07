@@ -29,12 +29,10 @@
  * whichever comes first.
  */
 import { it, expect, afterEach } from "vitest";
-import {
-  env, reset, runInDurableObject, abortAllDurableObjects,
-} from "cloudflare:test";
+import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
-import { JOIN_CODE_TTL } from "../src/storage/store.js";
+import { JOIN_CODE_TTL } from "../src/codes.js";
 import { session } from "../tests/helpers/fixtures.js";
 import { editRoom } from "../tests/helpers/rows.js";
 

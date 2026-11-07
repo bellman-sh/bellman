@@ -915,7 +915,7 @@ included, and its member rows, events, audit trail and members' own views keep t
 label. It never joins by code and never holds a socket. ADR 0002 records the decisions.
 
 **Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
-control over the seat, and `hostSeated` (`src/storage/store.ts`) is the one predicate
+control over the seat, and `hostSeated` (`src/members.ts`) is the one predicate
 behind it: once the host has left, `tickPlan` arms and wakes nothing for it,
 neither store queues it a reply wake, `admit` settles a wake already queued with
 no model call, and `decideHostCharge` refuses its write (`removed`), so a wake
@@ -1110,14 +1110,16 @@ server reads only the switch.
 
 ### Secret ballots
 
-A decision kind may be a secret ballot (ADR 0040, decisions 23 to 28). Its votes are written to the log as the
-system with no choice, so nothing that reads events, and nothing that reads storage, ties a vote to a seat. Each
-voting account's choice sits in one `bv:<decision>:<account>` row (a map in `MemoryStore`), which every fold of an
-open secret decision reads as its ballot book and every store read strips before returning. A decision closes in
-one of six ways: a vote settles it, a supersession, an open finding it overdue, the deadline alarm, a removal that
-settles it, or a direct `closeDecision`. Each runs the same erase last in its transaction: the decision's ballot rows
-and the idempotency records their votes used. `votedOn` is how a reader asks whether its own account has voted. The
-operator can read a choice while the decision is open; after close only point-in-time recovery can.
+A decision kind may be a secret ballot (ADR 0040, decisions 23 to 28). A room declares one with `decide.<kind>: {
+rule, ballot: secret }`, which the manifest refuses on `single` and on a kind a role vetoes. Its votes are written
+to the log as the system with no choice, so nothing that reads events, and nothing that reads storage, ties a vote
+to a seat. Each voting account's choice sits in one `bv:<decision>:<account>` row (a map in `MemoryStore`), which
+every fold of an open secret decision reads as its ballot book and every store read strips before returning. A
+decision closes in one of six ways: a vote settles it, a supersession, an open finding it overdue, the deadline
+alarm, a removal that settles it, or a direct `closeDecision`. Each runs the same erase last in its transaction: the
+decision's ballot rows and the idempotency records their votes used. `votedOn` is how a reader asks whether its own
+account has voted. The operator can read a choice while the decision is open; after close only point-in-time
+recovery can.
 
 ### The working surface
 
@@ -2012,7 +2014,7 @@ loss is findable, and the sweep at close (#65) is what finds it.
    same list of conditions `dueFindings` does, so the alarm is armed for a moment
    something is due and for none before it, and a raise puts that key's next time
    a window ahead, so a firing cannot find the same thing due again at once. What
-   it reads is kept at every append by both stores (`noteAppend` in `store.ts`):
+   it reads is kept at every append by both stores (`noteAppend` in `members.ts`):
    each member's last send, the room's last member event and the requests still
    waiting, so no scan of the log has to find them. Of one sender's open requests
    the three oldest are named (`MAX_REQUESTS_PER_SENDER`), so a member cannot fill

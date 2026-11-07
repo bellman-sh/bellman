@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  cutPage,
-  NEXT_ALONE, NEXT_FRAME_GONE, NEXT_REFUSAL, SURFACE_PAGE, WINDOW_REFUSAL_HTTP, WINDOW_REFUSAL_TOOL,
-  frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName,
-} from "../src/frames.js";
+import { cutPage, NEXT_ALONE, NEXT_FRAME_GONE, NEXT_REFUSAL, SURFACE_PAGE, WINDOW_REFUSAL_HTTP, WINDOW_REFUSAL_TOOL, frameEntries, frameNumbers, frameSlot, noSuchFrame, parseWindow, placeSurfaceWrite, readWindow, windowName, placeSurfaceBatch } from "../src/frames.js";
 import type { SurfaceItem, SurfaceRow } from "../src/types.js";
-import { placeSurfaceBatch } from "../src/storage/store.js";
 
 const row = (key: string, over: Partial<SurfaceRow> = {}): SurfaceRow => ({
   key, kind: "text", title: null, body: "b", ends: null, placement: null, blob: null, shape: null,

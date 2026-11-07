@@ -9,6 +9,7 @@
  * half, and the only file that touches a bucket.
  */
 import type { StoredSession } from "./storage/stored-session.js";
+import type { BlobCharge } from "./storage/store.js";
 
 // ponytail: ceilings, not tuned. 25 MB is a quarter of the zone's 100 MB request
 // bound; a cap raised past it is a different route (multipart), not a bigger
@@ -360,4 +361,24 @@ export class MemoryBlobStore implements BlobStore {
     for (const key of keys) this.objects.delete(key);
     return keys.length;
   }
+}
+
+/**
+ * The charge rule (#183, D3), applied by both stores and decided nowhere else: the
+ * order of the refusals, what `used` says on each, and the one comparison that is
+ * the bound. Whether the room reads as closed is the caller's, because that is the
+ * one input the stores compute differently (`closeIfAbandoned` in `MemoryStore`,
+ * `readsClosed` in the room object). Returns the refusal, or the new total for the
+ * caller to write.
+ */
+export function decideBlobCharge(
+  s: Pick<StoredSession, "frozenAt" | "blobBytesCeiling" | "blobBytes">,
+  closed: boolean,
+  bytes: number,
+): BlobCharge {
+  const used = s.blobBytes ?? 0;
+  if (closed) return { ok: false, reason: "closed", used };
+  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used };
+  if (used + bytes > s.blobBytesCeiling) return { ok: false, reason: "over_quota", used };
+  return { ok: true, used: used + bytes };
 }

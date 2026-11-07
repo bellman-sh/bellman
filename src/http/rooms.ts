@@ -18,28 +18,22 @@
  */
 import { createHash } from "node:crypto";
 import { auditRefusal } from "../audit.js";
-import {
-  BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
-  attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
-  sanitizeName, storedType, type BlobRead, type BlobStore,
-} from "../blobs.js";
+import { BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES, attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead, sanitizeName, storedType, type BlobRead, type BlobStore } from "../blobs.js";
 import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
-import { joinUrl } from "../codes.js";
+import { joinUrl, codeIsLive } from "../codes.js";
 import { DECISION_PAGE, MAX_DECISION_PAGE, isSecret } from "../decision.js";
-import { HostInstructionsShape } from "../manifest.js";
+import { HostInstructionsShape, isPublic } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { decisionMembers, decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import {
-  auditEntries, issueInvite, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, isPublic, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface,
-  sessionStatus, writeSurface, writeSurfaceBatch, type RoomFailure, type SurfaceBlock,
-} from "../rooms.js";
+import { auditEntries, issueInvite, cutAtFor, cutFor, eventsFor, findMember, gateSeat, handlesOf, memberLog, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus, writeSurface, writeSurfaceBatch, type RoomFailure, type SurfaceBlock } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { configRoutes } from "./config.js";
 import { notesSharingRoutes } from "./notes-sharing.js";
 import { fileRoutes } from "./files.js";
-import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../storage/store.js";
+import { JOINED_SCAN, type BellmanStore } from "../storage/store.js";
+import { isRemovedMember } from "../members.js";
 import type { StoredSession } from "../storage/stored-session.js";
 import { surfaceCursor } from "../surface.js";
 import type { Identity, Member, SessionEvent } from "../types.js";

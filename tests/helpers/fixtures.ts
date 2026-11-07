@@ -3,7 +3,8 @@ import type { AuditActor } from "../../src/audit.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { monthKey } from "../../src/storage/stored-session.js";
-import { JOIN_CODE_TTL, creatorOf, seatInOrder, type Seating } from "../../src/storage/store.js";
+import { JOIN_CODE_TTL } from "../../src/codes.js";
+import { creatorOf, seatInOrder, type Seating } from "../../src/members.js";
 import { orgsOnRoster } from "../../src/retention.js";
 
 export const anthropicAgent = {

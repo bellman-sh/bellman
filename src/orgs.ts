@@ -1,7 +1,7 @@
 import { isOrgId } from "./storage/grant-index.js";
 import { domainOf } from "./oauth/dns.js";
 import { immutableKeys, parseSsoKey, ssoUserId } from "./oauth/providers.js";
-import { DEFAULT_POLICY, type Capability, type Org, type OrgInvite, type OrgPolicy, type PlanGrant, type Role } from "./types.js";
+import { DEFAULT_POLICY, type Capability, type Org, type OrgInvite, type OrgPolicy, type PlanGrant, type Role, type OrgPatch } from "./types.js";
 
 /**
  * What the org routes share (orgs spec, D6, D7): the rules a body is read by and the shape an org
@@ -269,4 +269,29 @@ export async function joinRefusal(
     if (!admits(theirs, joinerOrgId)) return `org "${id}"'s policy does not allow members of your org in its rooms.`;
   }
   return null;
+}
+
+/** The grant a SCIM user holds while active (SCIM spec, D2): a team member from scim, lapsing never. */
+export const scimGrant = (key: string, orgId: string, now: number): PlanGrant => ({
+  key, plan: "team", role: "member", orgId, source: "scim", grantedAt: now, grantedBy: "scim", expiresAt: null,
+});
+
+/**
+ * A record with the patch applied (orgs spec, D6, D7): a field given as undefined is left as it
+ * was, so a route that spreads an absent body field cannot blank a name. Both stores apply it.
+ */
+export function patchedOrg(previous: Org, patch: OrgPatch): Org {
+  const next: Org = liftOrg(previous);
+  if (patch.name !== undefined) next.name = patch.name;
+  if (patch.seats !== undefined) next.seats = patch.seats;
+  if (patch.requireSso !== undefined) next.requireSso = patch.requireSso;
+  for (const [field, value] of Object.entries(patch.policy ?? {})) {
+    if (value !== undefined) (next.policy as unknown as Record<string, unknown>)[field] = value;
+  }
+  return next;
+}
+
+/** The record a team purchase creates (D4): named by its id until its owner renames it. Both stores write it. */
+export function purchasedOrg(orgId: string, ownerUserId: string, seats: number, now: number): Org {
+  return { orgId, name: orgId, ownerUserId, seats, source: "purchase", active: true, createdAt: now, requireSso: false, domains: [], policy: DEFAULT_POLICY };
 }

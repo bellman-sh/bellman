@@ -8,19 +8,16 @@
  * of the fix: the derived presence reading, and the seat actually coming back.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, lastSeen, presenceOf,
-  presentMembers, staleMembers,
-} from "../src/presence.js";
+import { ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, presenceOf, presentMembers, staleMembers, stampSeen } from "../src/presence.js";
+import { lastSeen, seatVictims } from "../src/members.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/storage/store.js";
+import { ROOM_MEMBER_CEILING, capacityOf } from "../src/manifest.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { hostMember } from "../src/host.js";
 import type { Identity } from "../src/types.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session, brief, manifestFixture } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
-import { brief, manifestFixture } from "./helpers/fixtures.js";
 
 const NOW = 1_800_000_000_000;
 const AGES_AGO = NOW - STALE_AFTER_MS - 1;

@@ -103,6 +103,8 @@ Primitives:
   [src/oauth/routes.ts:panelDestination]
 - Secure cookies are `__Host-` named, HttpOnly, SameSite=Lax, Path=/, Secure, never a Domain; a cookie name seen
   twice reads as absent [src/oauth/cookies.ts:readCookie]
+- The one cookie read and never set here is `bm_ref`, bellman.sh's campaign tag on the whole domain: a slug of 1 to 40
+  `[a-z0-9-]` or absent, an observation and never a source of authority [src/oauth/cookies.ts:readCampaignRef]
 - Sealed values are `v1.<nonce>.<ciphertext>`, AES-256-GCM with an HKDF-SHA256 key; tampering throws
   [src/oauth/sealed.ts:unseal]
 - Domain proof needs TXT `_bellman.<domain>` equal to `bellman-verify=<token>`; a resolver failure throws, never
@@ -125,8 +127,10 @@ Primitives:
   `openidconnect.googleapis.com`), OIDC discovery, token and userinfo, `cloudflare-dns.com`
   [src/oauth/providers.ts:github] [src/oauth/oidc.ts:discover] [src/oauth/dns.ts:txtRecords]
 - Plan store writes with audit intent: grants, SSO member provisioning, orgs, suspensions, reports, handle
-  release; `purgeHome` on `DELETE /admin/accounts/:userId/memory`; `recordSignIn` on each resolution; `moveGrant`
-  of an address grant; `backfillRoomIndex` on `/admin/rooms/backfill` [src/oauth/routes.ts:handleOAuth]
+  release; `purgeHome` on `DELETE /admin/accounts/:userId/memory`; `recordSignIn` on each resolution, with the
+  request's `bm_ref` campaign tag, which only the sign-in that creates the record keeps
+  [src/oauth/cookies.ts:readCampaignRef]; `moveGrant` of an address grant; `backfillRoomIndex` on
+  `/admin/rooms/backfill` [src/oauth/routes.ts:handleOAuth]
 - Cookies: sign-in nonce set on `/auth/signin` and `/invite/:token`, session cookie set on panel sign-in, cleared
   on `/auth/signout` (always 204) [src/oauth/routes.ts:completeSession]
 - 302 redirects to provider authorize URLs and to the Stripe Payment Link [src/oauth/routes.ts:finishUpgrade]

@@ -1,13 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, declineKey, declinesPrefix, domainKey, grantKey, idpKey, inviteKeysFor, keyInvitesPrefix, NO_ORG, orgIndexKey, orgIndexPrefix, orgInvitesPrefix, orgKey, scimKeyIndex, scimNameKey, scimTokenIndex, scimTokenKey, scimUserKey, scimUserPrefix, staleIndexKeys } from "../storage/grant-index.js";
-import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, liftInvite, liftOrg, scimSeatKey, takesUnownedSeat, inviteMailDay, patchedOrg, purchasedOrg, scimGrant } from "../orgs.js";
 import { isBanId, oldestFirst, type CreatorBan } from "../bans.js";
 import type { Suspension } from "../suspension.js";
-import { firstSignInFirst, patchedOrg, purchasedOrg, sameEntry, scimGrant, type ScimCreate, type ScimUpdate } from "../storage/store.js";
-import type { GrantDelete, GrantWrite, HostedSlot, PublicNameEntry } from "../storage/store.js";
+import { firstSignInFirst, type ScimCreate, type ScimUpdate, type GrantDelete, type GrantWrite, type HostedSlot, type PublicNameEntry, type RoomCounts, type RoomFilter, type RoomIndexRow } from "../storage/store.js";
+import { sameEntry } from "../public-names.js";
 import type { AuditEntry, PendingConnect, PlanGrant, SavedPreset, UserRecord, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry } from "../types.js";
-import type { RoomCounts, RoomFilter, RoomIndexRow } from "../storage/store.js";
 import { KEYS_PER_CALL, getRows } from "../storage/member-rows.js";
 import { grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimUserEntry, takenSeatAuditEntries, type AuditIntent } from "../grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "../storage/outbox.js";
@@ -1783,18 +1782,21 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * came to report 2 for one registration (#122): there were no users before
    * this landed, so 0 is the true starting point and there is nothing to seed.
    */
-  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string, ref?: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const seen = await txn.get<UserRecord>(userKey(userId));
       if (!seen) await txn.put(USER_COUNT, ((await txn.get<number>(USER_COUNT)) ?? 0) + 1);
       const login = githubLogin ?? seen?.githubLogin;
       const email = googleEmail ?? seen?.googleEmail;
+      // Set by the insert alone, in the same transaction that decides it is one (BellmanStore.recordSignIn).
+      const tag = seen ? seen.ref : ref;
       await txn.put(userKey(userId), {
         userId,
         firstSeenAt: seen?.firstSeenAt ?? now,
         lastSeenAt: now,
         ...(login === undefined ? {} : { githubLogin: login }),
         ...(email === undefined ? {} : { googleEmail: email }),
+        ...(tag === undefined ? {} : { ref: tag }),
       } satisfies UserRecord);
     });
   }
@@ -1821,6 +1823,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
             userId: r.userId, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt,
             ...(typeof r.githubLogin === "string" ? { githubLogin: r.githubLogin } : {}),
             ...(typeof r.googleEmail === "string" ? { googleEmail: r.googleEmail } : {}),
+            ...(typeof r.ref === "string" ? { ref: r.ref } : {}),
           }]
         : [];
     });

@@ -8,7 +8,8 @@
  *
  * Runtime-free, like public-names.ts: the routes, the host and both test programs import it.
  */
-import { HOST_LABEL, type BellmanStore } from "./storage/store.js";
+import { HOST_LABEL } from "./members.js";
+import type { BellmanStore } from "./storage/store.js";
 
 /**
  * The name for each of these labels in a room: "member N" for a label the room numbered, and

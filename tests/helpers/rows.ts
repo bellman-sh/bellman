@@ -6,7 +6,7 @@
  */
 import type { Member } from "../../src/types.js";
 import { MEMBER_PREFIX, loadPresent, memberKey, putRows, type RowReader } from "../../src/storage/member-rows.js";
-import { isActiveMember } from "../../src/storage/store.js";
+import { isActiveMember } from "../../src/members.js";
 
 /** The slice of Durable Object storage these read and write. */
 export interface RoomStorage extends RowReader {

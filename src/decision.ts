@@ -13,7 +13,10 @@
  */
 import { createHash } from "node:crypto";
 import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, type OutstandingRequest } from "./action-state.js";
-import type { AuditEntry, DecisionRuleName, EventType, SessionEvent } from "./types.js";
+import type { AuditEntry, DecisionRuleName, EventType, SessionEvent, Member, RoomManifest } from "./types.js";
+import { verbsOfRole } from "./roles.js";
+import { isHostMember } from "./members.js";
+import type { VoteWrite } from "./storage/store.js";
 
 /** The four decision event types. Only the server writes them: none is a `bellman_send` kind. */
 export const DECISION_EVENTS = [
@@ -658,4 +661,34 @@ export function decisionPageOf(cursors: readonly number[], ask: DecisionPageAsk)
 export function decisionOwning(e: SessionEvent): number | null {
   if (e.type === "decision_opened") return e.cursor;
   return (DECISION_EVENTS as readonly string[]).includes(e.type) ? decisionOf(e) ?? null : null;
+}
+
+/**
+ * The snapshot a decision on `kind` opened now takes (ADR 0040, decisions 5, 6 and 7): every member present whose role
+ * holds `vote`, each seat's account, and the seats whose role vetoes `kind`. The hosted seat never holds `vote`
+ * (checkHost holds it to exactly `send`), and is left out by name besides.
+ */
+export function electorateOf(manifest: RoomManifest, members: readonly Member[], kind: string): Electorate {
+  const seats = members.filter((m) => m.leftAt === null && !isHostMember(m) && verbsOfRole(manifest, m.roomRole).includes("vote"));
+  const vetoes = (role: string) => (manifest.roles[role]?.veto as readonly string[] | undefined)?.includes(kind) ?? false;
+  return {
+    electorate: seats.map((m) => m.memberId),
+    accounts: Object.fromEntries(seats.map((m) => [m.memberId, m.userId])),
+    ...(Object.keys(manifest.roles).some(vetoes) ? { veto: seats.filter((m) => vetoes(m.roomRole)).map((m) => m.memberId) } : {}),
+  };
+}
+
+/** `applyVote`'s refusal as `castVote` reports it. */
+/** A view as a store hands it out: never with an open secret ballot's book, which holds every account's choice. */
+export function withoutBook(v: DecisionView): DecisionView {
+  const { book: _book, ...rest } = v;
+  return rest;
+}
+
+export function voteRefusal(d: Exclude<VoteDecision, { kind: "record" }>): VoteWrite {
+  if (d.kind === "stale") return { outcome: "stale", hash: d.hash };
+  if (d.kind === "closed") return { outcome: "closed", state: d.state };
+  if (d.kind === "quota") return { outcome: "quota", limit: d.limit };
+  if (d.kind === "advisory_secret") return { outcome: "advisory_secret" };
+  return { outcome: "not_electorate" };
 }

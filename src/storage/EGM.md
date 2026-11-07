@@ -3,7 +3,8 @@
 ## Overview
 
 The storage boundary. `store.ts` is `BellmanStore`, the interface every tool and route writes through, with its
-outcome types and the write rules both implementations apply. `memory-store.ts` is `MemoryStore`, the in-memory
+outcome types and the operator's room index; the write rules both implementations apply live in the domain
+modules of `src/` (`members.ts`, `presence.ts`, ...), which both import. `memory-store.ts` is `MemoryStore`, the in-memory
 implementation the Node server and the tests use. The production implementation, `DurableObjectStore`, is in
 `src/workerd/store-do.ts`. The rest are the storage layout helpers both implementations share: the stored session
 record, per-member rows, idempotency keys, the outbox and the registry's key layout. Everything here is
@@ -44,15 +45,22 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
     object's alarm does the work.
 - `[src/storage/memory-store.ts:MemoryStore]` the in-memory implementation over private Maps, used by tests and the Node server. Adds
   `tick` and `housekeep` (not on the interface), which `index.ts` calls every 60 s with `sweep`.
-- `[src/storage/store.ts]` shared write rules both stores apply: `codeIsLive`, `isPublic`, `seatInOrder`, `seatVictims`,
-  `markRemoved`, `creditReport`, `noteAppend`, `decideBlobCharge`, `decideHostCharge`, `placeSurfaceBatch`,
-  `handOff`, `electorateOf` (a decision's snapshot: the seats holding `vote`, each seat's account, and the veto
-  seats for the kind), `voteRefusal`, `roomIndexRow`, `roomIndexKey`, `roomSummaryOf`; the operator's shapes
-  `RoomIndexRow`, `RoomSummary`, `RoomStatus` (`open | closed | frozen | purge_scheduled`); the outcome unions
-  `SeatOutcome`, `RemovalOutcome`, `EventWrite`, `SurfaceAppend`, `ApprovalWrite`, `DecisionOpen`, `VoteWrite`,
-  `DecisionClose` (`DecisionOpen` and `VoteWrite` carry a `quota` refusal); and the constants `ROOM_MEMBER_CEILING = 5000`, `capacityOf` (2 for `pair`),
-  `JOIN_CODE_TTL` (15 min), `CONNECT_TOKEN_TTL` (10 min), `ABANDONED_AFTER_MS` (90 days), `JOINED_SCAN = 500`,
-  `SWEEP_RPC_BUDGET = 300`, `HOST_MEMBER_ID = "m_host"`, `WAKES_PER_HOUR = 8`.
+- `[src/storage/store.ts]` beside the interface: the operator's room index (`RoomIndexRow`, `roomIndexRow`,
+  `roomIndexKey`, `RoomSummary`, `roomSummaryOf`, `RoomStatus`), the registry's listing order
+  (`firstSignInFirst`), the outcome unions (`SeatOutcome`, `RemovalOutcome`, `EventWrite`, `SurfaceAppend`,
+  `ApprovalWrite`, `DecisionOpen`, `VoteWrite`, `DecisionClose`, ...), and `JOINED_SCAN = 500`,
+  `SWEEP_RPC_BUDGET = 300`.
+- The write rules both stores apply live in the domain modules of `src/`, so both stores import the same
+  functions: member rules in `[src/members.ts]` (`isActiveMember`, `lastSeen`, `seatInOrder`, `seatVictims`,
+  `markRemoved`, `creditReport`, `noteAppend`, `clearSilence`, `asked`, the hosted seat's ids), presence and
+  abandonment in `[src/presence.ts]` (`connectedAmong`, `ABANDONED_AFTER_MS` = 90 days, `isAbandoned`, `stampSeen`),
+  join codes in `[src/codes.ts]` (`codeIsLive`, `JOIN_CODE_TTL` = 15 min, `CONNECT_TOKEN_TTL` = 10 min), capacity in
+  `[src/manifest.ts]` (`isPublic`, `ROOM_MEMBER_CEILING = 5000`, `capacityOf`, 2 for `pair`), surface writes in
+  `[src/surface.ts]` and `[src/frames.ts]` (`placeSurfaceBatch`), decisions in `[src/decision.ts]` (`electorateOf`,
+  `voteRefusal`), files in `[src/fs.ts]` (`decideFsWrite`, `resolveFsPath`), config in `[src/config.ts]`
+  (`decideConfigWrite`), the hosted seat in `[src/host.ts]` (`decideHostCharge`, `WAKES_PER_HOUR = 8`), blobs in
+  `[src/blobs.ts]` (`decideBlobCharge`), outside tasks in `[src/outside.ts]` (`handOff`), and orgs in
+  `[src/orgs.ts]` (`patchedOrg`, `purchasedOrg`, `scimGrant`).
 - The Durable Object implementation (`SessionDO`, `RegistryDO`, `AuditDO`, `DurableObjectStore`) is in
   [../workerd/EGM.md](../workerd/EGM.md): a file the Node program cannot compile lives there, so the second
   `BellmanStore` sits outside this directory.
@@ -73,12 +81,12 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
   between.
 - A seat is claimed in one operation. `[src/workerd/session-do.ts:SessionDO.seatMember]` and `[src/storage/memory-store.ts:MemoryStore.seatMember]`
   refuse in the order not_found, closed, frozen, banned, full (a banned account never learns the room is full),
-  reclaim stale seats only when that frees enough (`[src/storage/store.ts:seatVictims]` returns `null` rather than reaping
+  reclaim stale seats only when that frees enough (`[src/members.ts:seatVictims]` returns `null` rather than reaping
   partly), seat the joiner, and retire temporary codes when the room fills, all in one transaction or one
   synchronous stretch. Permanent codes stay (ADR 0020).
 - A member is removed only by an authorized call: `[src/storage/store.ts:RemovalRequest]` carries `byUserId`, and
   `removeMember` refuses `forbidden` when it is not the creator; `[src/rooms.ts:evictMember]` checks the creator before
-  the target lookup and refuses self-eviction. `[src/storage/store.ts:markRemoved]` writes `leftAt` and `removedAtCursor`
+  the target lookup and refuses self-eviction. `[src/members.ts:markRemoved]` writes `leftAt` and `removedAtCursor`
   together and never moves an existing cut.
 - Appends are single-unit: `[src/workerd/session-do.ts:SessionDO.nextCursor]` reads the cursor inside the caller's transaction so
   two appends cannot take one `e:` key (#120); `appendEventOnce`, `appendSurface(s)`, `approveProposal` and
@@ -94,12 +102,12 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
   (`[src/workerd/session-do.ts:SessionDO.removeMember]`); a removal never passes a decision, and a rejoin restores neither the
   seat nor its vote (`[src/decision.ts:applyVote]`). A `SessionDO` record whose decisions opened before the book existed has no
   book, so those decisions are not voided.
-- A surface batch is all or nothing at consecutive cursors (`[src/storage/store.ts:placeSurfaceBatch]`, decided in memory
+- A surface batch is all or nothing at consecutive cursors (`[src/frames.ts:placeSurfaceBatch]`, decided in memory
   before either store writes); frame writes through `appendEvent` throw `FRAME_WRITE_PATH`.
 - Presence is derived, never stored: `[src/presence.ts:presenceOf]` reads `leftAt`, `lastSeenAt` and live sockets;
   `[src/heartbeat.ts:snapshotOf]` must carry no `present`, `status`, `alive` or `healthy` key. `activeMembers` and
   `seatedMembers` in `[src/rooms.ts]` are two readings and stay separate.
-- `[src/storage/store.ts:isAbandoned]` closes a room only past 90 days of no person seen and only when no active member holds a
+- `[src/presence.ts:isAbandoned]` closes a room only past 90 days of no person seen and only when no active member holds a
   socket; `[src/workerd/session-do.ts:SessionDO.#closeIfAbandoned]` stamps `lastSeenAt` instead when a socket vouches.
 
 ## Verification

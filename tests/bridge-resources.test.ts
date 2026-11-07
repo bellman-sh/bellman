@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type Remote } from "../src/bridge.js";
+import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore } from "../src/store.js";
 import { MemoryBlobStore } from "../src/blobs.js";

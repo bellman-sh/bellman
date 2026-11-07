@@ -42,7 +42,7 @@ describe("the keepalive auto-response, in real workerd", () => {
     );
 
     expect(pair).not.toBeNull();
-    // The same two constants src/room-socket.ts sends and the fake answers, so
+    // The same two constants src/client/room-socket.ts sends and the fake answers, so
     // the client cannot be closed 1003 at its first keepalive by a drift.
     expect(pair!.request).toBe(PING);
     expect(pair!.response).toBe(PONG);

@@ -14,7 +14,7 @@
  */
 import { read, update } from "claude-code";
 import type { Elements, EngineInterface, RenderElement } from "claude-code";
-import { cleanBlock, cleanText } from "../../src/door-protocol.js";
+import { cleanBlock, cleanText } from "../../src/client/door-protocol.js";
 import { approvalKey } from "../../src/mod/gate.js";
 import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, drawingOf, lineOf, memberLine, safeLinks } from "../../src/mod/view.js";
 import type { CanvasItem, KeptEvent, PendingRequest, RoomView, Tab } from "../types";

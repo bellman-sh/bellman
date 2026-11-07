@@ -1,5 +1,5 @@
 /**
- * The bridge's door (src/door.ts): its status, a room's log, the room list, a room's canvas and a decline, on a Unix
+ * The bridge's door (src/client/door.ts): its status, a room's log, the room list, a room's canvas and a decline, on a Unix
  * socket. Each test starts a real door on a socket under a scratch folder and asks it over HTTP, as the mod will. Only
  * the bridge behind it is a stand-in: a `DoorSource` of spies, because what the door reports is the bridge's and what
  * the door does with it is the point here.
@@ -10,8 +10,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, writeF
 import http from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { doorPathFor, doorRoot, startDoor, statusOf, type DoorSource } from "../src/door.js";
-import { drain, enqueue, pendingCount, type PeerEvent } from "../src/inbox.js";
+import { doorPathFor, doorRoot, startDoor, statusOf, type DoorSource } from "../src/client/door.js";
+import { drain, enqueue, pendingCount, type PeerEvent } from "../src/client/inbox.js";
 import { SurfaceKeyShape } from "../src/surface.js";
 
 let root: string;

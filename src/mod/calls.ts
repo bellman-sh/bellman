@@ -1,7 +1,7 @@
 /**
  * The permission checks the mod answers itself. The engine checks a plugin's own `$.mcp.call` as it checks the
  * model's, and in auto mode refuses it unasked, so the mod allows its own call of `bellman_whoami`, the one tool it
- * calls, and nothing else. How that call's result reads is `resultData` (src/result-data.ts).
+ * calls, and nothing else. How that call's result reads is `resultData` (src/client/result-data.ts).
  *
  * Runtime-free on purpose, like `door-protocol.ts`: esbuild bundles it into the mod.
  */

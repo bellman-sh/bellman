@@ -168,7 +168,7 @@ const bridge = createBridge({
 });
 
 /**
- * The door (src/door.ts): how the Claude Code mod in this session reads what only the bridge holds (the inbox's counts,
+ * The door (src/client/door.ts): how the Claude Code mod in this session reads what only the bridge holds (the inbox's counts,
  * a room's log, whether it holds a sign-in) and gets what it cannot ask Claude Code for: the rooms the bridge sits in, a
  * room's canvas, and a decline of an action request, all through the connection the bridge holds. Named for this pid,
  * under BELLMAN_DOOR_ROOT or ~/.claude/bellman/door, and bellman_whoami says where.

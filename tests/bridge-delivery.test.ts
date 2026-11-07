@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
-import { drain, fromEnvelope, renderEvent, type WireEnvelope } from "../src/inbox.js";
+import { createBridge, type Delivery, type Remote } from "../src/client/bridge.js";
+import { drain, fromEnvelope, renderEvent, type WireEnvelope } from "../src/client/inbox.js";
 
 const envelope = (over: Record<string, unknown> = {}): WireEnvelope => ({
   trust: "untrusted",

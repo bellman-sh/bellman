@@ -8,9 +8,9 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { busPath } from "../src/bus.js";
-import { createBridge, type BridgeBus, type Delivery, type Remote } from "../src/bridge.js";
-import { drain, readMemberships, type PeerEvent } from "../src/inbox.js";
+import { busPath } from "../src/client/bus.js";
+import { createBridge, type BridgeBus, type Delivery, type Remote } from "../src/client/bridge.js";
+import { drain, readMemberships, type PeerEvent } from "../src/client/inbox.js";
 import { publicEvent } from "../src/public-event.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";

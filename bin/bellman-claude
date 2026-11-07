@@ -35,7 +35,7 @@ while [ -L "$self" ]; do
 done
 # Warn, never block: this path is only a default, and the MCP entry may point
 # somewhere else on purpose.
-bridge="$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/dist/channel.js"
+bridge="$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/dist/client/channel.js"
 if [ ! -f "$bridge" ]; then
   echo "bellman-claude: no bridge at $bridge — reinstall the package, or run 'npm run build' if you are working from a clone." >&2
 fi

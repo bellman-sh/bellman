@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readServer, writeServer } from "../src/credentials.js";
+import { readServer, writeServer } from "../src/client/credentials.js";
 
 /**
  * writeServer replaces credentials.json rather than truncating it, and the only

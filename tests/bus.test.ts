@@ -11,8 +11,8 @@ import {
   BusUnavailableError, DEFAULT_ACK_TIMEOUT_MS, RoomWindow, SUN_PATH_MAX_BYTES, WINDOW_MAX_BYTES, WINDOW_MAX_EVENTS,
   busPath, busRoot, openBus,
   type Bus, type BusOptions, type Coordinator, type Handlers, type RoomEvent, type Subscription, type SyncFrom,
-} from "../src/bus.js";
-import type { PeerEvent } from "../src/inbox.js";
+} from "../src/client/bus.js";
+import type { PeerEvent } from "../src/client/inbox.js";
 
 // Every test here drives real Unix sockets in a per-test temp directory. Nothing
 // is mocked: the election is a claim about what the OS does with bind, connect
@@ -1824,7 +1824,7 @@ describe("a subscriber gives up on a coordinator that goes quiet mid-life (#142)
 
   it("does not mistake a slow handler of ours for a coordinator that stopped", async () => {
     // The issue's second finding. `readLines` calls socket.pause() and AWAITS the line
-    // handler (src/bus.ts), so while onEvent runs nothing is read — including another
+    // handler (src/client/bus.ts), so while onEvent runs nothing is read — including another
     // subscription's acknowledgement. Measured before the fix: m_b was ended
     // "unresponsive" while the coordinator was healthy and had already acked it.
     const { room, coord, via } = await rig(

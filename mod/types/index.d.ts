@@ -3,12 +3,12 @@
  *
  * Self-contained on purpose: no import, so the copy `npm run test:mod` validates, which holds
  * mod/'s files and nothing of src/, reads it whole. The door's shapes are written out again
- * here and must match src/door-protocol.ts (`DoorEvent`, `DoorSeat`, `DoorWaiting`,
+ * here and must match src/client/door-protocol.ts (`DoorEvent`, `DoorSeat`, `DoorWaiting`,
  * `DoorStatus`, `DoorLog`), which the bridge serves; the kit tests read them back through
  * the door.
  */
 
-/** An event as the door serves it: the bridge's `PeerEvent` (src/inbox.ts). */
+/** An event as the door serves it: the bridge's `PeerEvent` (src/client/inbox.ts). */
 export type DoorEvent = {
   session_id: string;
   /** The member this event was delivered to: the seat's own. */

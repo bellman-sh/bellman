@@ -12,7 +12,7 @@ import { statusDoor } from "./helpers/status-door.js";
  * needs_you. It prints nothing, since what UserPromptSubmit prints joins the prompt, and it never blocks.
  */
 
-const SOURCE = `"${process.execPath}" --import tsx src/status-hook.ts`;
+const SOURCE = `"${process.execPath}" --import tsx src/client/status-hook.ts`;
 
 function runHook(doorRoot: string, input: Record<string, unknown>, command = SOURCE, env: Record<string, string> = {}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {

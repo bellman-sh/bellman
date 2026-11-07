@@ -13,14 +13,14 @@ Three surfaces ship from this repository:
   ([src/server.ts:buildServer]), plain-HTTP routes beside `/mcp`
   (`src/http/`), A2A for outside agents (`src/a2a/`), an OAuth 2.1
   authorization server (`src/oauth/`), Stripe billing (`src/billing/`) and SCIM
-  provisioning (`src/scim/`). Production runs on Cloudflare Workers with five
+  provisioning (`src/scim/`). Production runs on Cloudflare Workers with six
   Durable Object classes ([src/workerd/worker.ts:fetch] re-exports `SessionDO`,
-  `RegistryDO`, `AuditDO`, `AuthDO`, `HostDO`); `npm start` runs the Node
+  `RegistryDO`, `AuditDO`, `AuthDO`, `HostDO`, `CostDO`); `npm start` runs the Node
   entry over `MemoryStore` ([src/index.ts], [src/app.ts:createApp]).
-- **The Claude Code client**: the local bridge ([src/bridge.ts:createBridge]),
+- **The Claude Code client** (`src/client/`): the local bridge ([src/client/bridge.ts:createBridge]),
   shipped as generated bundles in the `bellman` plugin (`plugin/`), its hooks,
   and `bellman-mod` (`mod/`), a hooks module that reads the bridge through a
-  per-bridge Unix-socket door ([src/door.ts:startDoor]).
+  per-bridge Unix-socket door ([src/client/door.ts:startDoor]).
 - **The Claude Desktop bundle** (`extension/`): the same bridge packed as an
   `.mcpb` in queue delivery.
 
@@ -46,12 +46,13 @@ Three surfaces ship from this repository:
 
 - src: [./src/EGM.md](./src/EGM.md) - the server, the storage boundary
   (`BellmanStore`, `MemoryStore`, `DurableObjectStore`), room operations shared
-  by tools and routes, runtime-free rule modules, the hosted seat, blobs, and
-  the local client (bridge, channel, inbox, bus, door, hooks, sign-in, CLI).
+  by tools and routes, runtime-free rule modules, the hosted seat and blobs.
   - a2a: [./src/a2a/EGM.md](./src/a2a/EGM.md) - A2A JSON-RPC (v1.0 and v0.3)
     answered only by public, open rooms; AgentCards.
   - billing: [./src/billing/EGM.md](./src/billing/EGM.md) - signature-verified
     Stripe webhook, serialized ledger, purchase-sourced plan grants.
+  - client: [./src/client/EGM.md](./src/client/EGM.md) - the local client:
+    bridge, channel, inbox, bus, door, hooks, sign-in, credentials, CLI.
   - http: [./src/http/EGM.md](./src/http/EGM.md) - runtime-free HTTP routers:
     rooms, audit, orgs, SCIM, moderation, public reads.
   - mod: [./src/mod/EGM.md](./src/mod/EGM.md) - bellman-mod's pure logic
@@ -63,7 +64,7 @@ Three surfaces ship from this repository:
   - tools: [./src/tools/EGM.md](./src/tools/EGM.md) - one MCP tool per file
     plus `kit.ts`.
   - workerd: [./src/workerd/EGM.md](./src/workerd/EGM.md) - the Workers entry
-    and the seven Durable Object classes; excluded from the Node program.
+    and the six Durable Object classes; excluded from the Node program.
   - ui: [./src/ui/EGM.md](./src/ui/EGM.md) - the one `ui://` resource;
     `assets.ts` is generated and gitignored.
 - ui: [./ui/EGM.md](./ui/EGM.md) - the MCP Apps page as a Vite single-file
@@ -100,7 +101,7 @@ Three surfaces ship from this repository:
   FIFO outbox written in the mutation's transaction [src/outbox.ts:drain].
 - Peer content is untrusted everywhere: wrapped on the server
   [src/projections.ts:untrusted], escaped by the client
-  [src/inbox.ts:safeJson], cleaned before display in the mod
+  [src/client/inbox.ts:safeJson], cleaned before display in the mod
   [src/mod/view.ts:drawingOf], and rendered only as text nodes or in a
   sandboxed iframe on the page [ui/src/artifact.ts:FRAME_SANDBOX].
 - A tool's return states what the call established: `bellman_send`'s
@@ -129,7 +130,7 @@ Three surfaces ship from this repository:
   [src/audit-sink.ts:deliverBatch].
 - Client machine: `~/.config/bellman/credentials.json`, and inbox, bus and door
   sockets under `~/.claude/bellman/`; a loopback sign-in listener on
-  127.0.0.1:51004-51008 [src/signin.ts:connectSignedIn].
+  127.0.0.1:51004-51008 [src/client/signin.ts:connectSignedIn].
 - Operator scripts write Worker secrets through `wrangler secret put`
   [scripts/rotate-key.ts], [scripts/grant-plan.ts].
 

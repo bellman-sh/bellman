@@ -6,7 +6,7 @@
  * the runtime answers a frame that equals the first string EXACTLY — no
  * JavaScript runs and the object is not constructed. Anything else reaches
  * `webSocketMessage`, which closes the socket 1003. So the client in
- * `src/room-socket.ts` has to send that same text, and the fake server in
+ * `src/client/room-socket.ts` has to send that same text, and the fake server in
  * `tests/helpers/fake-bellman.ts` has to answer it, or the end-to-end tests
  * agree with the client while the real server drifts.
  *

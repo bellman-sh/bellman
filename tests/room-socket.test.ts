@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openBus, type BusOptions, type Coordinator, type RoomEvent, type SyncFrom } from "../src/bus.js";
-import type { PeerEvent } from "../src/inbox.js";
+import { openBus, type BusOptions, type Coordinator, type RoomEvent, type SyncFrom } from "../src/client/bus.js";
+import type { PeerEvent } from "../src/client/inbox.js";
 import { publicEvent } from "../src/public-event.js";
 import {
   RoomEnded, backoffDelay, openRoomSocket, roomEventFromFrame, roomSocketUrl,
   type Poll, type PollRequest, type RoomSocket, type RoomSocketOptions, type RoomSocketState, type Why,
   type WebSocketLike,
-} from "../src/room-socket.js";
+} from "../src/client/room-socket.js";
 import { PING } from "../src/keepalive.js";
 import type { Identity, SessionEvent } from "../src/types.js";
 import { fakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
@@ -720,7 +720,7 @@ describe("degrading (D11)", () => {
    *
    * A removed member's /ws upgrade is refused 403, and this runtime reports the
    * same bare handshake `error` for a 403 as for a transient 503 (see the note
-   * at the top of src/room-socket.ts), so the socket arm cannot tell a removal
+   * at the top of src/client/room-socket.ts), so the socket arm cannot tell a removal
    * from an outage and keeps retrying — which is exactly the degraded state
    * this block is about. `closed` does not cover it either: the ROOM is fine and
    * its other members carry on. So the poll says `removed` and the room ends

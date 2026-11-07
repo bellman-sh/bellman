@@ -4,7 +4,7 @@
  *
  *   bellman feature-request [words...]   open the feature-request form on GitHub, the words as its title
  *   bellman update [--check]             install the latest release from npm; --check only reports
- *   bellman doctor                       what Claude Code here runs of Bellman, and the fix for each thing off (src/doctor.ts)
+ *   bellman doctor                       what Claude Code here runs of Bellman, and the fix for each thing off (src/client/doctor.ts)
  *   bellman version | help
  *
  * `run` is the whole command and does nothing by itself. Every side effect (spawning npm, opening a
@@ -77,7 +77,7 @@ export function installKind(
 }
 
 export interface CliDeps {
-  /** The installed version: src/version.ts, which is the package.json this file ships in. */
+  /** The installed version: src/client/version.ts, which is the package.json this file ships in. */
   version: string;
   /** Runs a command to completion and captures its stdout. `status` is null when it could not be started or was killed. */
   exec(command: string, args: string[]): { status: number | null; stdout: string };
@@ -92,7 +92,7 @@ export interface CliDeps {
   packageRoot: string;
   out(line: string): void;
   err(line: string): void;
-  /** What `doctor` reads beyond the above (src/doctor.ts). */
+  /** What `doctor` reads beyond the above (src/client/doctor.ts). */
   doctor: Omit<DoctorDeps, "version" | "exec" | "out">;
 }
 

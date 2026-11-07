@@ -3,7 +3,7 @@
  * cannot import .html, so the built page travels as a string constant in a
  * generated module that every program (tsc, vitest, wrangler) imports alike.
  * The package's version rides along (`PACKAGE_VERSION`), for the same reason: the agent cards name it, and
- * `src/version.ts` reads package.json from disk. Generated and gitignored; `npm run build:ui` is the only writer.
+ * `src/client/version.ts` reads package.json from disk. Generated and gitignored; `npm run build:ui` is the only writer.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 

@@ -1,7 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import type { RoomEvent } from "./bus.js";
-import { PING, PONG } from "./keepalive.js";
+import { PING, PONG } from "../keepalive.js";
 
 /**
  * The upstream half of room delivery: one WebSocket to one room's Durable Object,
@@ -169,7 +169,7 @@ export interface RoomSocketOptions {
    * (ACCESS_TOKEN_TTL_SECONDS) and the first reconnect after that would otherwise carry a token
    * that is already dead. This is not the bus's `credential`, and the two must not be given the same
    * value: the bus hashes its credential into its socket path, so it has to stay the same for as long
-   * as the identity does (`BusOptions.credential` in src/bus.ts), while this one is a secret that
+   * as the identity does (`BusOptions.credential` in src/client/bus.ts), while this one is a secret that
    * rotates. An access token handed to both would give every rotation a new bus path, and the old
    * coordinator would keep serving the old one.
    */

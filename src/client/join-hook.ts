@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Bellman join hook (#435): says, at SessionStart, what came of the join a desktop app asked for with
- * `BELLMAN_JOIN_CODE`. The bridge does the joining (`join` in src/bridge.ts), since it holds the sign-in and the hook
+ * `BELLMAN_JOIN_CODE`. The bridge does the joining (`join` in src/client/bridge.ts), since it holds the sign-in and the hook
  * holds nothing; this reads where that stands through the bridge's door and prints one line, which Claude Code adds to
  * the session's context and shows the person.
  *

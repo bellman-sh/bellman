@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vi } from "vitest";
-import type { DoorJoin } from "../../src/door-protocol.js";
-import { doorOwnerPathFor, linkDoor, startDoor, type DoorSource } from "../../src/door.js";
+import type { DoorJoin } from "../../src/client/door-protocol.js";
+import { doorOwnerPathFor, linkDoor, startDoor, type DoorSource } from "../../src/client/door.js";
 
 /**
  * A door for the hook tests (#432): a real one on a socket, linked for this process's pid the way the bridge links its

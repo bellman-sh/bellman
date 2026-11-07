@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { DoorJoin } from "../src/door-protocol.js";
+import type { DoorJoin } from "../src/client/door-protocol.js";
 import { statusDoor } from "./helpers/status-door.js";
 
 /**
@@ -13,7 +13,7 @@ import { statusDoor } from "./helpers/status-door.js";
  * line, never the code, and always exits 0.
  */
 
-const SOURCE = `"${process.execPath}" --import tsx src/join-hook.ts`;
+const SOURCE = `"${process.execPath}" --import tsx src/client/join-hook.ts`;
 const CODE = "QS-HELPER-SECRET";
 
 function runHook(doorRoot: string, env: Record<string, string | undefined> = { BELLMAN_JOIN_CODE: CODE }, command = SOURCE) {

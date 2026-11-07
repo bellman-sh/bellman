@@ -44,7 +44,7 @@ if [ -n "$from" ]; then
   echo "==> Building $from"
   npm --prefix "$from" install --silent --no-fund --no-audit
   npm --prefix "$from" run build --silent
-  [ -f "$from/dist/channel.js" ] || { echo "error: $from/dist/channel.js missing" >&2; exit 3; }
+  [ -f "$from/dist/client/channel.js" ] || { echo "error: $from/dist/client/channel.js missing" >&2; exit 3; }
   cp -R "$from/dist/." "$stage/server/"
   pkg_json=$from/package.json
   source_desc="local checkout $from"
@@ -57,7 +57,7 @@ else
   tgz=$(ls "$tgz_dir"/*.tgz | head -1)
   [ -n "$tgz" ] || { echo "error: npm pack produced nothing" >&2; exit 3; }
   tar xzf "$tgz" -C "$tgz_dir"
-  [ -f "$tgz_dir/package/dist/channel.js" ] || { echo "error: no dist/channel.js in the package" >&2; exit 3; }
+  [ -f "$tgz_dir/package/dist/client/channel.js" ] || { echo "error: no dist/client/channel.js in the package" >&2; exit 3; }
   cp -R "$tgz_dir/package/dist/." "$stage/server/"
   pkg_json=$tgz_dir/package/package.json
   source_desc="npm $spec"
@@ -81,7 +81,7 @@ node -e '
 
 # The staging package.json carries the package's dependency list, copied whole.
 # It used to pin the SDK alone, on the reading that the bridge reached nothing
-# else — true until src/bridge.ts imported yaml, after which every bundle died
+# else — true until src/client/bridge.ts imported yaml, after which every bundle died
 # at its first import and Claude Desktop said only "Server disconnected"
 # (v0.3.0 shipped that way). Copying costs nothing: the SDK already depends on
 # express and zod, so the only package this adds is yaml.
@@ -101,7 +101,7 @@ npm --prefix "$stage" install --silent --omit=dev --no-fund --no-audit --no-pack
 rm -rf "$stage/.npm"
 
 # And the proof, on the artifact: every package the staged server imports,
-# transitively from server/channel.js, resolves beside it. A list copied from
+# transitively from server/client/channel.js, resolves beside it. A list copied from
 # package.json can still be wrong — a package the code imports but only
 # devDependencies declares — and this is the one step that would notice.
 echo "==> Checking imports"

@@ -66,7 +66,7 @@ The bundle makes four decisions.
 artifact.** The staging `package.json` once pinned `@modelcontextprotocol/sdk`
 alone, on the reading that `dist/channel.js` reached nothing else: express
 serves the standalone server, zod builds its schemas. That stopped being true
-when `src/bridge.ts` began reading `.bellman/room.yaml` through `yaml`, and
+when `src/client/bridge.ts` began reading `.bellman/room.yaml` through `yaml`, and
 nothing noticed — the v0.3.0 bundle died at its first import, and all Claude
 Desktop showed was *Server disconnected*. `build.sh` now copies the package's
 `dependencies` verbatim (the SDK already depends on express and zod, so the
@@ -89,7 +89,7 @@ when a turn starts and `bellman_wait` when it expects a reply. Nothing is lost
 either way.
 
 **3. There is no key to paste.** The bridge signs itself in: with `BELLMAN_KEY`
-unset, `src/channel.ts` opens a browser and caches the credential under
+unset, `src/client/channel.ts` opens a browser and caches the credential under
 `~/.config/bellman/`. The manifest declared a *required*
 `user_config.bellman_key` and fed it to the server's environment for a
 release after that stopped being necessary — an install field collecting a

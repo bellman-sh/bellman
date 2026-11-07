@@ -26,8 +26,8 @@ from a local source of truth under `~/.config/bellman`.
 - `build-mod.ts`: `buildMod(outfile = "mod/hooks/register.mjs")`, entry
   `mod/src/register.tsx`; imported by `build-plugin.ts` and `test-mod.ts`
   [build-mod.ts:buildMod]
-- `build-plugin.ts`: `src/channel.ts`, `src/stop-hook.ts`,
-  `src/status-hook.ts`, `src/join-hook.ts` to `plugin/bridge/*.mjs`, plus
+- `build-plugin.ts`: `src/client/channel.ts`, `src/client/stop-hook.ts`,
+  `src/client/status-hook.ts`, `src/client/join-hook.ts` to `plugin/bridge/*.mjs`, plus
   `THIRD-PARTY-NOTICES.txt`, then `buildMod()` [build-plugin.ts:(top-level CLI)]
 - `wrap-ui.ts`: `ui/dist/index.html` and the package version to
   `src/ui/assets.ts` (`APP_HTML`, `PACKAGE_VERSION`) [wrap-ui.ts:(top-level CLI)]

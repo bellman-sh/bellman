@@ -19,7 +19,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
 import { MAX_BLOB_BYTES } from "../src/blobs.js";
-import { createBridge, readLocalFile, typeFromExtension, type Remote } from "../src/bridge.js";
+import { createBridge, readLocalFile, typeFromExtension, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
 import { PNG } from "./helpers/blob-bytes.js";
 import { fakeBellman, ISSUER, type FakeBellman } from "./helpers/fake-bellman.js";

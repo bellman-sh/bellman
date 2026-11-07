@@ -9,7 +9,7 @@
  */
 import { read, update } from "claude-code";
 import type { Elements, EngineInterface, On } from "claude-code";
-import { cleanText } from "../../src/door-protocol.js";
+import { cleanText } from "../../src/client/door-protocol.js";
 import {
   BELL_COLUMNS,
   BELL_ROWS,

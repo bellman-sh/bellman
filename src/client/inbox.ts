@@ -6,8 +6,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Client-side plumbing shared by the Claude Code bridge (src/channel.ts) and the
- * Stop hook (src/stop-hook.ts).
+ * Client-side plumbing shared by the Claude Code bridge (src/client/channel.ts) and the
+ * Stop hook (src/client/stop-hook.ts).
  *
  * The bridge is a stdio subprocess of Claude Code; the Stop hook is a separate,
  * short-lived process Claude Code runs when a turn ends. In hook-delivery mode

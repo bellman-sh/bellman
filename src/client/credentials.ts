@@ -4,7 +4,7 @@ import {
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
-import type { Identity } from "./types.js";
+import type { Identity } from "../types.js";
 
 /**
  * Where the bridge keeps the credential it signed in with.
@@ -256,7 +256,7 @@ export function tokensUsable(tokens: StoredTokens | undefined, now = Date.now())
  * expired is refused with a 401, which the room socket reads as "this credential is not accepted": it polls the
  * room through the MCP connection and tries the credential again as soon as it has changed
  * (tests/room-socket.test.ts). The MCP transport refreshes an expired token on a 401 of its own and writes the new
- * one to this file (src/signin.ts), so the file is where a fresher token turns up, including one that another
+ * one to this file (src/client/signin.ts), so the file is where a fresher token turns up, including one that another
  * bridge refreshed. That chain is built from those two tested halves and has not been run end to end against a
  * real expiry. Throwing here instead would turn a refusal that is handled at once into a credential that "could
  * not be read", which waits three failures before the room is polled at all.
@@ -270,7 +270,7 @@ export function storedAccessToken(dir: string, serverUrl: string): string | unde
  * Who the stored sign-in is, as the user id in its access token's claim, or undefined when that cannot be said.
  *
  * It is read off the token and not off the `identity` stored beside it, for the reason `withIdentityFromTokens`
- * (src/signin.ts) gives: an identity is a fact about the access token it was decoded from, and carried past a
+ * (src/client/signin.ts) gives: an identity is a fact about the access token it was decoded from, and carried past a
  * change of tokens it names one account while the file signs in as another.
  *
  * THIS IS NOT VERIFIED, as `decodeIdentity` says, and must never gate anything. It names a socket path on this
@@ -458,7 +458,7 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
     };
     // Quitting Claude Code mid-sign-in must not leave a stale lock. The bridge quits
     // through process.exit (its SIGTERM, SIGINT and stdin-close handlers in
-    // src/channel.ts all end there), and Node runs 'exit' listeners on the way out.
+    // src/client/channel.ts all end there), and Node runs 'exit' listeners on the way out.
     // 'exit' only, and deliberately no SIGINT or SIGTERM listener of our own:
     // registering one replaces Node's default of terminating, so Ctrl-C would stop
     // killing the process unless every handler re-raised. Taken off again by

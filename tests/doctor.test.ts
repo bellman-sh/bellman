@@ -1,5 +1,5 @@
 /**
- * `bellman doctor` (src/doctor.ts): every check against a fake machine, and `askDoor` against real sockets.
+ * `bellman doctor` (src/client/doctor.ts): every check against a fake machine, and `askDoor` against real sockets.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -7,9 +7,9 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { run, type CliDeps } from "../src/cli.js";
-import { askDoor, diagnose, doctor, type DoctorDeps, type DoorAnswer, type Finding } from "../src/doctor.js";
-import { startDoor } from "../src/door.js";
+import { run, type CliDeps } from "../src/client/cli.js";
+import { askDoor, diagnose, doctor, type DoctorDeps, type DoorAnswer, type Finding } from "../src/client/doctor.js";
+import { startDoor } from "../src/client/door.js";
 
 const HOME = "/home/me";
 const CWD = "/home/me/app";

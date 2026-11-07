@@ -393,7 +393,7 @@ it("settles a poll that is waiting on the room when it is purged, and does not l
 
 // A socket is the room's future, and a purged room has none. Left alone it stays attached to an empty object until its
 // client gives up on it. The close is the ordinary 1000: nothing in the bridge's client reads a close code as "room gone"
-// (src/room-socket.ts reconnects after any close and learns the room's state from the upgrade's answer or its poll), so the
+// (src/client/room-socket.ts reconnects after any close and learns the room's state from the upgrade's answer or its poll), so the
 // reason is for the developer reading the client's close event.
 it("closes the sockets attached to the room when it is purged", async () => {
   const store = new DurableObjectStore(env as never);

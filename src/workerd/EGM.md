@@ -2,7 +2,7 @@
 
 ## Overview
 
-Everything that runs only inside workerd: the Workers entry and the seven Durable Object classes. A file belongs here
+Everything that runs only inside workerd: the Workers entry and the six Durable Object classes. A file belongs here
 when it imports `cloudflare:workers` or Workers-only types, or a file here, so the Node program cannot compile it:
 `tsconfig.json` and `tsconfig.test.json` exclude this directory, `tsconfig.worker.json` checks it, and no root vitest
 test imports it except over a stubbed `cloudflare:workers` (`tests/store-do-wiring.test.ts`, `tests/worker-ws.test.ts`,

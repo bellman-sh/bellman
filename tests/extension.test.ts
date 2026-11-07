@@ -6,7 +6,7 @@
  * nine tools, and had been missing bellman_whoami since the bridge grew it.
  *
  * What a bundle actually exposes is the server's tools plus the bridge's own, and which
- * of its own depends on BELLMAN_DELIVERY: src/bridge.ts lists bellman_wait only when it
+ * of its own depends on BELLMAN_DELIVERY: src/client/bridge.ts lists bellman_wait only when it
  * queues events, under "hook" or "queue". The manifest hardcodes "queue", so the mode is
  * asserted here too — flipping it to "channel" drops a tool from the real surface, and a
  * names-only check would otherwise go on passing against a list that had quietly become
@@ -19,7 +19,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { deliveryOf, installOf } from "../src/bridge.js";
+import { deliveryOf, installOf } from "../src/client/bridge.js";
 import { listBridge } from "./helpers/tool-lists.js";
 
 interface ExtensionManifest {
@@ -41,7 +41,7 @@ const declared = () => manifest.tools.map((t) => t.name).sort();
 
 /**
  * The bundle as Desktop meets it: the bridge in the delivery manifest.json's mcp_config asks
- * for, read as src/channel.ts reads it — what node server/channel.js launches.
+ * for, read as src/client/channel.ts reads it — what node server/client/channel.js launches.
  */
 const delivery = deliveryOf(manifest.server.mcp_config.env.BELLMAN_DELIVERY);
 const bundle = () => listBridge(delivery);
@@ -67,7 +67,7 @@ describe("the Claude Desktop bundle manifest", () => {
 
   it("launches the bridge in queue delivery, which is the mode that surface assumes", () => {
     expect(delivery).toBe("queue");
-    expect(manifest.server.entry_point).toBe("server/channel.js");
+    expect(manifest.server.entry_point).toBe("server/client/channel.js");
   });
 
   // Desktop takes no channel push and runs no Stop hook, so nothing hands peer events
@@ -96,7 +96,7 @@ describe("the Claude Desktop bundle manifest", () => {
   });
 
   // The bridge signs itself in and caches the credential; BELLMAN_KEY unset is what makes
-  // src/channel.ts take that path. The bundle asked for a key by hand long after it stopped
+  // src/client/channel.ts take that path. The bundle asked for a key by hand long after it stopped
   // needing one, so a required install field collected a secret for nothing.
   it("asks for no key: the bridge signs itself in", () => {
     expect(manifest.user_config).not.toHaveProperty("bellman_key");

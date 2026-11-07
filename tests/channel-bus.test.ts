@@ -5,7 +5,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { busPath } from "../src/bus.js";
+import { busPath } from "../src/client/bus.js";
 import { ignoreResets } from "./helpers/upgrade-socket.js";
 
 /**
@@ -23,7 +23,7 @@ import { ignoreResets } from "./helpers/upgrade-socket.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = join(root, "node_modules", ".bin", "tsx");
-const ENTRY = join(root, "src", "channel.ts");
+const ENTRY = join(root, "src", "client", "channel.ts");
 
 const spawned: ChildProcess[] = [];
 const dirs: string[] = [];

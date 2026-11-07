@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { UNTRUSTED_PREAMBLE } from "../src/projections.js";
-import { resultData, type CallResult } from "../src/result-data.js";
+import { resultData, type CallResult } from "../src/client/result-data.js";
 import { fail, ok } from "../src/tools/kit.js";
 
 /** A server tool's result as `$.mcp.call` hands it to a plugin: `ok`'s text and `isError`, the structured copy dropped. */
@@ -59,7 +59,7 @@ describe("resultData", () => {
 
 describe("where resultData lives", () => {
   it("is beside the door's protocol, so the bridge imports nothing of the mod's", () => {
-    const bridge = readFileSync(new URL("../src/bridge.ts", import.meta.url), "utf8");
+    const bridge = readFileSync(new URL("../src/client/bridge.ts", import.meta.url), "utf8");
     const specifiers = [...bridge.matchAll(/\bfrom\s*["']([^"']+)["']/g)].map((m) => m[1]);
     expect(specifiers).toContain("./result-data.js");
     expect(specifiers.filter((s) => s.startsWith("./mod/"))).toEqual([]);

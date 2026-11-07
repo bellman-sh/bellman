@@ -4,9 +4,9 @@
  *
  * UserPromptSubmit sets it `working`. A Notification sets it `needs_you`: Claude Code is asking the person something,
  * a permission most often. The one Notification it skips is `idle_prompt`, "waiting for your input", which comes after
- * a turn has ended and the Stop hook has set the seat idle already. The Stop hook sets `idle` itself (src/stop-hook.ts).
+ * a turn has ended and the Stop hook has set the seat idle already. The Stop hook sets `idle` itself (src/client/stop-hook.ts).
  *
- * It reaches the bridge through the door (`postSeatStatus` in src/door.ts), and the bridge sends only what changes. It
+ * It reaches the bridge through the door (`postSeatStatus` in src/client/door.ts), and the bridge sends only what changes. It
  * prints nothing, since what a UserPromptSubmit hook prints joins the prompt, and it always exits 0: a status is a
  * courtesy to the room, and a broken one must never hold up the person's prompt.
  */

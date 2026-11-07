@@ -10,13 +10,13 @@ import { join } from "node:path";
 import {
   CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
   signedInAs, SignInCancelled, type Listener, type SignInOptions,
-} from "../src/signin.js";
-import type { Remote } from "../src/bridge.js";
-import { acquireLock, readServer, writeServer } from "../src/credentials.js";
+} from "../src/client/signin.js";
+import type { Remote } from "../src/client/bridge.js";
+import { acquireLock, readServer, writeServer } from "../src/client/credentials.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
-import { VERSION } from "../src/version.js";
+import { VERSION } from "../src/client/version.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
 // the default, so a test can ask a real launcher to fail; the tests that must
@@ -1333,7 +1333,7 @@ describe("connectSignedIn", () => {
       };
     });
     try {
-      const mocked = await import("../src/signin.js");
+      const mocked = await import("../src/client/signin.js");
       const bellman = fakeBellman();
       const calls: URL[] = [];
       const said: string[] = [];
@@ -1512,7 +1512,7 @@ describe("connectSignedIn", () => {
     const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
     const script = join(dir, "exiter.mjs");
     writeFileSync(script, [
-      `import { acquireLock } from ${JSON.stringify(new URL("../src/credentials.ts", import.meta.url).href)};`,
+      `import { acquireLock } from ${JSON.stringify(new URL("../src/client/credentials.ts", import.meta.url).href)};`,
       // Never awaited, exactly as a persist in flight at shutdown is not.
       `void acquireLock(${JSON.stringify(dir)}, { waitMs: 30_000, heartbeatMs: 20 });`,
       `setTimeout(() => process.exit(0), 100);`,
@@ -2113,7 +2113,7 @@ describe("signedInAs", () => {
       return { ...real, homedir: () => "", userInfo: () => ({ ...real.userInfo(), homedir: "" }) };
     });
     try {
-      const mocked = await import("../src/signin.js");
+      const mocked = await import("../src/client/signin.js");
       const logs: string[] = [];
 
       // No configDir: the real credentialsDir() has to run, and throw.

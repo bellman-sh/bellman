@@ -229,7 +229,7 @@ describe("a removed member's bellman_sync on the real object", () => {
      * The cap may be read off the `member_evicted` in the slice, because a wrong cap
      * costs one poll and the next poll, reading a fresh record, reopens the feed.
      * The flag cannot: a client reads it as "stop asking" and marks the handle
-     * departed for the life of the process (`markDeparted` in src/bridge.ts), so a
+     * departed for the life of the process (`markDeparted` in src/client/bridge.ts), so a
      * flag emitted wrongly ends a voluntary leaver's feed for good. Nothing
      * self-heals.
      *

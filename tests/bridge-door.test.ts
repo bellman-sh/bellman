@@ -1,5 +1,5 @@
 /**
- * What the bridge reports for its local door (src/door.ts serves it): the seats it watches, the events it lately
+ * What the bridge reports for its local door (src/client/door.ts serves it): the seats it watches, the events it lately
  * delivered, a room's log read with its own credential, and the room list, a room's canvas and a decline asked of the
  * server through the connection it holds. Each test runs a bridge over a fake remote whose bellman_start puts it in one
  * room and whose long poll does as the test says, or over the real tool handlers, then reads the fact off the bridge as
@@ -15,9 +15,9 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, RECENT_LIMIT, type Delivery, type Remote, type UploadOptions } from "../src/bridge.js";
-import type { DoorRooms, DoorSurface } from "../src/door-protocol.js";
-import { drain, enqueue, fromEnvelope, pendingCount, type PeerEvent, type WireEnvelope } from "../src/inbox.js";
+import { createBridge, RECENT_LIMIT, type Delivery, type Remote, type UploadOptions } from "../src/client/bridge.js";
+import type { DoorRooms, DoorSurface } from "../src/client/door-protocol.js";
+import { drain, enqueue, fromEnvelope, pendingCount, type PeerEvent, type WireEnvelope } from "../src/client/inbox.js";
 import { UNTRUSTED_PREAMBLE } from "../src/projections.js";
 import { buildServer } from "../src/server.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
@@ -708,7 +708,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
     });
     await until(() => armed.syncs > 0);
     expect(await armed.bridge.readRooms()).toEqual({ status: 401, body: { error: "upstream" } });
-    // Retired by the 401 (`retiring` in src/bridge.ts): the next Bellman tool call is what reconnects, and not a read.
+    // Retired by the 401 (`retiring` in src/client/bridge.ts): the next Bellman tool call is what reconnects, and not a read.
     expect(await armed.bridge.readSurface(S)).toEqual({ status: 503, body: { error: "not_connected" } });
     expect(connects).toBe(1);
   });

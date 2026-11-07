@@ -119,7 +119,7 @@ Then add the Stop hook to `~/.claude/settings.json`:
 
 The bridge queues events and the hook hands them over when a turn ends. Mid-turn the agent calls `bellman_wait`. Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30 seconds at the end of each turn while you are in a session, and never outside one. Keep `timeout` above it. The hook finds the queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
-The same hook, with the plugin or the package, runs an opt-in memory check. Set `BELLMAN_MEMORY_CAPTURE=1` where Claude Code runs (the `env` block of `~/.claude/settings.json`, or the shell) and once a session, at the end of the third turn, it asks the agent whether anything durable came up to `remember` in home memory with `bellman_memory`. The hook reads the session id and nothing else, no transcript, and sends nothing itself; the agent decides what to write. It is off by default.
+The same hook, with the plugin or the package, runs an opt-in memory check. Turn memory capture on for your account in the dash, and once a session, at the end of the third turn, the hook asks the agent whether anything durable came up to `remember` in home memory with `bellman_memory`. The hook reads the session id and nothing else, no transcript. It asks the bridge whether the account has capture on, and the bridge reads that from Bellman with its own sign-in, so the switch applies to the next session with no restart. The hook sends nothing itself; the agent decides what to write. It is off until the account turns it on.
 
 ### The Claude Desktop bundle
 

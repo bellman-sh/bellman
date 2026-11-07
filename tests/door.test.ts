@@ -56,6 +56,7 @@ function source(over: Partial<DoorSource> = {}): DoorSource {
     readEvents: vi.fn(async () => ({ status: 200, body: { events: [], cursor: 3 } })),
     readRooms: vi.fn(async () => ({ status: 200, body: { rooms: [] } })),
     readSurface: vi.fn(async () => ({ status: 200, body: { session_id: "qs_room1", room: {}, surface: { cursor: 0, items: [] } } })),
+    readMemory: vi.fn(async () => ({ status: 200, body: { capture: false } })),
     decline: vi.fn(async () => ({ status: 200, body: { cursor: 12 } })),
     setStatus: vi.fn(async () => ({ status: 200, body: { sent: 1 } })),
     writeSurface: vi.fn(async () => ({ status: 200, body: { cursor: 14 } })),
@@ -459,6 +460,23 @@ describe("a seat status", () => {
 });
 
 describe("the rooms, the canvas and a decline", () => {
+  it("serves /memory from readMemory, with the status and body it gave, and to GET alone (#530)", async () => {
+    const readMemory = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: { capture: true } })
+      .mockResolvedValueOnce({ status: 503, body: { error: "no_credential" } });
+    const door = await start("9m.sock", source({ readMemory }));
+
+    const on = await get(door.path, "/memory");
+    expect(on).toMatchObject({ status: 200, type: "application/json" });
+    expect(JSON.parse(on.body)).toEqual({ capture: true });
+    const refused = await get(door.path, "/memory");
+    expect(refused).toMatchObject({ status: 503, type: "application/json" });
+    expect(JSON.parse(refused.body)).toEqual({ error: "no_credential" });
+    expect((await post(door.path, "/memory", { body: '{"capture":true}' })).status).toBe(405);
+    expect(readMemory).toHaveBeenCalledTimes(2);
+  });
+
   it("serves /rooms from readRooms, with the status and body it gave", async () => {
     const rooms = { rooms: [{ session_id: "qs_room1", status: "active" }] };
     const readRooms = vi

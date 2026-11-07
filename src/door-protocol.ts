@@ -109,6 +109,14 @@ export interface DoorSurfaceWritten {
 export const DOOR_SEAT_STATUSES = ["working", "idle", "needs_you"] as const;
 export type DoorSeatStatus = (typeof DOOR_SEAT_STATUSES)[number];
 
+/**
+ * `GET /memory` (#530): the account's memory settings as `GET /me/memory` gave them, read with the bridge's own
+ * credential when the Stop hook asks. `capture` is whether the hook's once-a-session memory check is on.
+ */
+export interface DoorMemory {
+  capture: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Cleaning — a peer controls every string below, and a terminal obeys escapes
 // ---------------------------------------------------------------------------

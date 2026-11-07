@@ -2,9 +2,9 @@ import type {
   AgentInfo, ApprovedBy, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
   RoomManifest, PublicView, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord, OutsideCaller, OutsideTask,
   Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, PresetName, SessionMode,
-  ConfigGovernance, ConfigName, ConfigRow, FsRow,
+  ConfigGovernance, ConfigName, ConfigRow, FsRow, HomeSettings,
 } from "./types.js";
-import { DEFAULT_POLICY } from "./types.js";
+import { DEFAULT_HOME_SETTINGS, DEFAULT_POLICY } from "./types.js";
 import { CONFIG_HISTORY, CONFIG_RESERVE_BYTES } from "./config.js";
 import { FS_FIND_MAX, FS_HISTORY, FS_LIST_PAGE, contentHash, decideFsCharge, memoryCeilingOf, newMemoryId, planWrite, utf8Bytes, type FsPlanInput } from "./fs.js";
 import { OWN_MEMORY, namespaceOf } from "./fs-path.js";
@@ -2535,6 +2535,10 @@ export interface BellmanStore {
    * it; the reads (`readFs`, `listFs`, `fsHistory`) answer it as any room.
    */
   writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend>;
+  /** The home room's settings row (#530), or `DEFAULT_HOME_SETTINGS` when it holds none. Creates nothing. */
+  readHomeSettings(id: string): Promise<HomeSettings>;
+  /** The home room's settings row, replaced. No record, event or index row: the first note still creates the room. */
+  writeHomeSettings(id: string, settings: HomeSettings): Promise<void>;
   /** The account's memory id in this room, or null. Never assigns one. */
   memoryIdOf(sessionId: string, userId: string): Promise<string | null>;
   /** The account a memory id belongs to, or null. */
@@ -2948,6 +2952,8 @@ export class MemoryStore implements BellmanStore {
   private memoryIdRows = new Map<string, Map<string, string>>();
   /** Keyed home writes (ADR 0047), per home room: no event to point at, so the path and revision are kept. */
   private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
+  /** Home settings rows (#530), by home room; a room record is not needed for one. */
+  private homeSettings = new Map<string, HomeSettings>();
   private byJoinCode = new Map<string, string>();
   private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
@@ -3935,6 +3941,14 @@ export class MemoryStore implements BellmanStore {
 
   async listFs(sessionId: string, prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
     return detach(pageFs(this.sortedFiles(sessionId), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined));
+  }
+
+  async readHomeSettings(id: string): Promise<HomeSettings> {
+    return detach(this.homeSettings.get(id) ?? DEFAULT_HOME_SETTINGS);
+  }
+
+  async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
+    this.homeSettings.set(id, detach(settings));
   }
 
   async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {

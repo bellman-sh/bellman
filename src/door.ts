@@ -4,8 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Delivery } from "./bridge.js";
 import {
-  DOOR_SEAT_STATUSES, DOOR_VERSION, type DoorEvent, type DoorJoin, type DoorSeat, type DoorSeatStatus, type DoorStatus,
-  type DoorWaiting,
+  DOOR_SEAT_STATUSES, DOOR_VERSION, type DoorEvent, type DoorJoin, type DoorMemory, type DoorSeat, type DoorSeatStatus,
+  type DoorStatus, type DoorWaiting,
 } from "./door-protocol.js";
 import { parentPid, pendingSummary } from "./inbox.js";
 
@@ -103,15 +103,22 @@ export function postSeatStatus(status: DoorSeatStatus, socketPath = findDoor(), 
  * What the SessionStart hook reads (#435): the door's `/status`, waiting at most `timeoutMs`. Resolves undefined when
  * there is no door, it does not answer, or its answer is not JSON. Never rejects.
  */
-export function readDoorStatus(socketPath: string, timeoutMs = 2_000): Promise<DoorStatus | undefined> {
+export const readDoorStatus = (socketPath: string, timeoutMs = 2_000): Promise<DoorStatus | undefined> =>
+  readDoor<DoorStatus>(socketPath, "/status", timeoutMs);
+
+/** What the Stop hook reads (#530): the door's `/memory`, the account's memory settings. Undefined as `readDoorStatus`. */
+export const readDoorMemory = (socketPath: string, timeoutMs = 2_000): Promise<DoorMemory | undefined> =>
+  readDoor<DoorMemory>(socketPath, "/memory", timeoutMs);
+
+function readDoor<T>(socketPath: string, path: string, timeoutMs: number): Promise<T | undefined> {
   return new Promise((resolve) => {
-    const req = http.request({ socketPath, path: "/status", method: "GET", timeout: timeoutMs }, (res) => {
+    const req = http.request({ socketPath, path, method: "GET", timeout: timeoutMs }, (res) => {
       let text = "";
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => (text += chunk));
       res.on("end", () => {
         try {
-          resolve(res.statusCode === 200 ? (JSON.parse(text) as DoorStatus) : undefined);
+          resolve(res.statusCode === 200 ? (JSON.parse(text) as T) : undefined);
         } catch {
           resolve(undefined);
         }
@@ -154,6 +161,8 @@ export interface DoorSource {
   readRooms(): Promise<{ status: number; body: unknown }>;
   /** A room's canvas, as `bellman_surface` gave it, for a room the bridge holds a seat in. Never rejects. */
   readSurface(sessionId: string): Promise<{ status: number; body: unknown }>;
+  /** The account's memory settings (#530), as `GET /me/memory` gave them, read with the bridge's own credential. Never rejects. */
+  readMemory(): Promise<{ status: number; body: unknown }>;
   /**
    * The first write: answer the action request `refId` with a refusal, as the bridge's seat in the room, and send nothing
    * else. `refId` is a cursor the door has checked. Never rejects.
@@ -239,7 +248,7 @@ function shapeOf(target: string): string {
   if (SURFACE_ITEM.test(path)) return "/rooms/<id>/surface/<key>";
   const room = ROOM_ROUTE.exec(path);
   if (room !== null) return `/rooms/<id>/${room[2]}`;
-  return path === "/status" || path === "/rooms" || path === SEAT_STATUS ? path : "a path it does not serve";
+  return path === "/status" || path === "/rooms" || path === "/memory" || path === SEAT_STATUS ? path : "a path it does not serve";
 }
 
 const NOT_FOUND: Reply = { status: 404, body: { error: "not_found" } };
@@ -275,6 +284,7 @@ async function route(src: DoorSource, req: http.IncomingMessage): Promise<Reply>
   if (req.method !== "GET") return { status: 405, body: { error: "method_not_allowed" } };
   if (path === "/status") return { status: 200, body: statusOf(src) };
   if (path === "/rooms") return src.readRooms();
+  if (path === "/memory") return src.readMemory();
   if (sessionId === undefined) return NOT_FOUND;
   if (leaf === "surface") return src.readSurface(sessionId);
   if (leaf !== "events") return NOT_FOUND;

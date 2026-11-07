@@ -467,6 +467,7 @@ describe("askDoor", () => {
       readEvents: async () => ({ status: 404, body: {} }),
       readRooms: async () => ({ status: 200, body: { rooms: [] } }),
       readSurface: async () => ({ status: 404, body: {} }),
+      readMemory: async () => ({ status: 503, body: { error: "no_credential" } }),
       decline: async () => ({ status: 404, body: {} }),
       writeSurface: async () => ({ status: 404, body: {} }),
       setStatus: async () => ({ status: 200, body: { sent: 0 } }),

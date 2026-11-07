@@ -27,7 +27,7 @@ import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import type {
-  DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
+  DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorMemory, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
   DoorSurfaceWritten,
 } from "./door-protocol.js";
 import {
@@ -1494,12 +1494,23 @@ export function createBridge(opts: BridgeOptions) {
     // The route answers for the bearer and not for a member, so which seat the events are addressed to is only a label.
     const seat = seatIn(sessionId);
     if (!seat) return { status: 404, body: { error: "not_watched" } };
+    const query = after === undefined ? "" : `?after=${after}`;
+    const got = await readOwn<{ events: WireEnvelope[]; cursor: number }>(`/rooms/${encodeURIComponent(sessionId)}/events${query}`);
+    if (!("read" in got)) return got;
+    const member = { session_id: seat.sessionId, member_id: seat.memberId };
+    return { status: 200, body: { events: got.read.events.map((env) => fromEnvelope(member, env)), cursor: got.read.cursor } };
+  }
+
+  /**
+   * One GET of a server route with the bridge's own credential, for the door's reads: the body it answered, or else the
+   * reply the door gives. A 401 is retried once with a refreshed sign-in (see `readEvents`); any other status is
+   * `upstream` with that status, and a throw is `upstream`, 502. Never rejects.
+   */
+  async function readOwn<T>(path: string): Promise<{ read: T } | { status: number; body: { error: string } }> {
     const upload = opts.upload;
     if (!upload) return { status: 503, body: { error: "no_credential" } };
-
     try {
-      const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/events`, upload.serverUrl);
-      if (after !== undefined) target.searchParams.set("after", String(after));
+      const target = new URL(path, upload.serverUrl);
       const get = (bearer: string): Promise<Response> =>
         (upload.fetchImpl ?? fetch)(target, { headers: { authorization: `Bearer ${bearer}` } });
       const bearer = await upload.bearer();
@@ -1519,13 +1530,22 @@ export function createBridge(opts: BridgeOptions) {
         await response.body?.cancel().catch(() => undefined);
         return { status: response.status, body: { error: "upstream" } };
       }
-      const read = (await response.json()) as { events: WireEnvelope[]; cursor: number };
-      const member = { session_id: seat.sessionId, member_id: seat.memberId };
-      const events = read.events.map((env) => fromEnvelope(member, env));
-      return { status: 200, body: { events, cursor: read.cursor } };
+      return { read: (await response.json()) as T };
     } catch {
       return { status: 502, body: { error: "upstream" } };
     }
+  }
+
+  /**
+   * The account's memory settings for the door's `/memory` (#530): `GET /me/memory` with the bridge's own credential,
+   * read when the Stop hook asks, so a switch the person turns in the dash reaches the next session's check with no
+   * restart. Only `capture` is passed on. It never rejects.
+   */
+  async function readMemory(): Promise<{ status: number; body: DoorMemory | { error: string } }> {
+    const got = await readOwn<{ capture?: unknown }>("/me/memory");
+    if (!("read" in got)) return got;
+    if (typeof got.read.capture !== "boolean") return { status: 502, body: { error: "upstream" } };
+    return { status: 200, body: { capture: got.read.capture } };
   }
 
   /**
@@ -1765,6 +1785,8 @@ export function createBridge(opts: BridgeOptions) {
     readRooms,
     /** A room's canvas, for the door's `/rooms/<id>/surface`. */
     readSurface,
+    /** The account's memory settings, for the door's `/memory` (#530): read with this bridge's own credential. */
+    readMemory,
     /** A refusal of an action request, for the door's `/rooms/<id>/decline`: one of the door's writes. */
     decline,
     /** A canvas item written or removed, for the door's `/rooms/<id>/surface/<key>` (#465). */

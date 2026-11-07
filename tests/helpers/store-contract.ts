@@ -5005,6 +5005,19 @@ export function describeStoreContract(
         expect(await store.fsHistory(id, "/a.md")).toEqual([]);
       });
 
+      it("keeps the account's settings without a room: defaults until written, and the first note still creates the room", async () => {
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
+        await store.writeHomeSettings(id, { capture: true });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
+        expect(await store.readFs(id, "/a.md")).toBeNull();
+        expect(await store.listFs(id, "/", {})).toEqual({ entries: [], next: null });
+        expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "hello" }), 1024)).toMatchObject({ outcome: "ok", rev: 1 });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: true });
+        await store.writeHomeSettings(id, { capture: false });
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false });
+        expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false });
+      });
+
       it("replays a retried key with the path and revision, refuses it with other content, and lists newest first by page", async () => {
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "ok", path: "/a.md", rev: 1 });
         expect(await store.writeHome(id, home(), note("/a.md", { op: "write", content: "x" }, "k1"), 4096)).toEqual({ outcome: "replayed", path: "/a.md", rev: 1 });

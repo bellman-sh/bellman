@@ -12,8 +12,9 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy,
-  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow, HomeSettings,
 } from "./types.js";
+import { DEFAULT_HOME_SETTINGS } from "./types.js";
 import { CONFIG_HISTORY } from "./config.js";
 import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "./store.js";
 import { isHomeRoomId } from "./home.js";
@@ -3181,6 +3182,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /** `BellmanStore.listFs`, for this room. */
   async listFs(prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
     return pageFs(await this.#fsRows(prefix), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined);
+  }
+
+  /** `BellmanStore.readHomeSettings` (#530): the `hs` row, or the defaults. Reads the record for nothing, so none is needed. */
+  async readHomeSettings(): Promise<HomeSettings> {
+    return (await this.ctx.storage.get<HomeSettings>("hs")) ?? DEFAULT_HOME_SETTINGS;
+  }
+
+  /** `BellmanStore.writeHomeSettings`: the `hs` row replaced. No record, event, outbox intent or alarm: settings alone are not a home room. */
+  async writeHomeSettings(settings: HomeSettings): Promise<void> {
+    await this.ctx.storage.put("hs", settings);
   }
 
   /**
@@ -7476,6 +7487,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
     return this.session(id).writeHome(home, w, ceiling);
+  }
+
+  async readHomeSettings(id: string): Promise<HomeSettings> {
+    return this.session(id).readHomeSettings();
+  }
+
+  async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
+    return this.session(id).writeHomeSettings(settings);
   }
 
   async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {

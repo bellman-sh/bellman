@@ -222,7 +222,9 @@ change what its host is told to ask (the host reads the manifest on every wake,
 so its next question uses the new text), `PUT /rooms/:id/view` for a public
 room's creator to choose whether its page opens on the canvas or as a page,
 `GET /me/rooms` for the open rooms a person sits in, exactly as `bellman_rooms`
-returns them (`liveRooms` builds both), and `POST /rooms/:id/codes` to mint a
+returns them (`liveRooms` builds both), `GET|PUT /me/memory` for the account's
+memory settings (#530: the capture switch the Stop hook reads through the bridge;
+the PUT takes a dash session only), and `POST /rooms/:id/codes` to mint a
 join code through `issueInvite`, the operation `bellman_invite` calls (#434;
 desktop apps use both, with an OAuth bearer), and
 `GET /audit` and `GET /audit/export` for an org

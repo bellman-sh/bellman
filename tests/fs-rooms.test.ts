@@ -53,7 +53,9 @@ describe("CUJ 1: two members' agents edit one document", () => {
 describe("CUJ 2: a member's agent keeps memory", () => {
   const seats = [seat("m_a", "u_a"), seat("m_b", "u_b", KEEP), seat("m_c", "u_c")];
 
-  it("shows the third seat A's notes and none of B's, on every read path and in the events", async () => {
+  // ADR 0047 decision 7 (#538): room notes are private until the account turns on notes sharing for the room, and no
+  // path can turn it on yet. A granting seat (A's) and a withholding one (B's) read the same to a peer: nothing.
+  it("shows the third seat nothing of A's or B's notes on any read path or in the events, whatever the seats grant", async () => {
     const store = await roomWith("qs_cuj2", seats);
     const a = await writeFs(store, A, "qs_cuj2", "m_a", { path: "/members/me/notes.md", write: { op: "write", content: "a's notes" } });
     const b = await writeFs(store, B, "qs_cuj2", "m_b", { path: "/members/me/notes.md", write: { op: "write", content: "b's notes" } });
@@ -61,23 +63,29 @@ describe("CUJ 2: a member's agent keeps memory", () => {
     const aPath = a.ok ? a.value.path : "", bPath = b.ok ? b.value.path : "";
     expect(aPath).toMatch(/^\/members\/[0-9a-f]{16}\/notes\.md$/);
 
-    expect(await readFsFor(store, C, "qs_cuj2", "m_c", aPath)).toMatchObject({ ok: true, value: { content: "a's notes" } });
-    const hidden = await readFsFor(store, C, "qs_cuj2", "m_c", bPath);
-    expect(hidden).toMatchObject({ ok: false, code: "not_found" });
-    // Not told B's file exists: the refusal for a withheld file is the one for a missing file.
     const missing = await readFsFor(store, C, "qs_cuj2", "m_c", "/members/0123456789abcdef/notes.md");
-    expect(hidden.ok === false && hidden.reason).toBe(missing.ok === false && missing.reason);
-    expect(await fsHistoryFor(store, C, "qs_cuj2", "m_c", bPath)).toMatchObject({ ok: false, code: "not_found" });
+    for (const path of [aPath, bPath]) {
+      const hidden = await readFsFor(store, C, "qs_cuj2", "m_c", path);
+      expect(hidden).toMatchObject({ ok: false, code: "not_found" });
+      // Not told the file exists: the refusal for a withheld file is the one for a missing file.
+      expect(hidden.ok === false && hidden.reason).toBe(missing.ok === false && missing.reason);
+      expect(await fsHistoryFor(store, C, "qs_cuj2", "m_c", path)).toMatchObject({ ok: false, code: "not_found" });
+    }
 
     const list = await listFsFor(store, C, "qs_cuj2", "m_c", "/members");
-    expect(list.ok && list.value.entries.map((r) => r.path)).toEqual([aPath]);
+    expect(list.ok && list.value.entries).toEqual([]);
     const found = await findFsFor(store, C, "qs_cuj2", "m_c", "notes");
-    expect(found.ok && found.value.entries.map((r) => r.path)).toEqual([aPath]);
+    expect(found.ok && found.value.entries).toEqual([]);
     const events = await eventsFor(store, "qs_cuj2", await store.eventsAfter("qs_cuj2", 0), "u_c");
-    expect(events.filter((e) => e.type === "fs").map((e) => (e.payload as { path: string }).path)).toEqual([aPath]);
+    expect(events.filter((e) => e.type === "fs")).toEqual([]);
 
-    // B reads its own.
+    // Each reads its own.
+    expect(await readFsFor(store, A, "qs_cuj2", "m_a", "/members/me/notes.md")).toMatchObject({ ok: true, value: { content: "a's notes" } });
     expect(await readFsFor(store, B, "qs_cuj2", "m_b", "/members/me/notes.md")).toMatchObject({ ok: true, value: { content: "b's notes" } });
+    const own = await listFsFor(store, A, "qs_cuj2", "m_a", "/members");
+    expect(own.ok && own.value.entries.map((r) => r.path)).toEqual([aPath]);
+    const ownEvents = await eventsFor(store, "qs_cuj2", await store.eventsAfter("qs_cuj2", 0), "u_a");
+    expect(ownEvents.filter((e) => e.type === "fs").map((e) => (e.payload as { path: string }).path)).toEqual([aPath]);
     // Nobody but A's seats writes under A's id.
     expect(await writeFs(store, C, "qs_cuj2", "m_c", { path: aPath, write: { op: "write", content: "x", baseRev: 1 } })).toMatchObject({ ok: false, code: "forbidden" });
 
@@ -91,8 +99,8 @@ describe("CUJ 2: a member's agent keeps memory", () => {
     expect((await leaveRoom(store, A, "qs_cuj2_rejoin", "m_a")).ok).toBe(true);
     // A departed seat may not write.
     expect(await writeFs(store, A, "qs_cuj2_rejoin", "m_a", { path: "/members/me/x.md", write: { op: "write", content: "x" } })).toMatchObject({ ok: false, code: "forbidden" });
-    // While A holds no seat, its departed seat granted, so C still reads.
-    expect(await readFsFor(store, C, "qs_cuj2_rejoin", "m_c", a.ok ? a.value.path : "")).toMatchObject({ ok: true });
+    // While A holds no seat, C still reads nothing: the notes are not shared, whatever the departed seat granted.
+    expect(await readFsFor(store, C, "qs_cuj2_rejoin", "m_c", a.ok ? a.value.path : "")).toMatchObject({ ok: false, code: "not_found" });
     await store.addMember("qs_cuj2_rejoin", member(seat("m_a2", "u_a")));
     const again = await readFsFor(store, A, "qs_cuj2_rejoin", "m_a2", "/members/me/notes.md");
     expect(again).toMatchObject({ ok: true, value: { content: "kept", path: a.ok ? a.value.path : "" } });

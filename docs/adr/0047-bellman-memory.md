@@ -46,9 +46,10 @@ facts, keyword search now, memory on every plan.
    granted when it left). `seesMemory` stays the one predicate and gains the switch as an input, on every path ADR 0046
    decision 7 lists. Sharing is turned on only from a dash session (`PUT /rooms/:id/notes-sharing`, cookie and Origin
    checked, a bearer token refused), because turning it on is what exposes notes and an agent reads peer content that
-   can ask for it. Any of the account's seats can turn it off. **The private default ships in #520**, with room notes
-   themselves: `seesMemory` takes `shared` and reads it as false until the `ns:` switch lands, so no room note is ever
-   readable by default and nothing migrates.
+   can ask for it. Any of the account's seats can turn it off. **The private default was meant to ship in #520**, with
+   room notes themselves; #520 shipped without it on 2026-11-07, and #538 closed the gap the same day: `seesMemory`
+   takes `shared` and reads it as false until the `ns:` switch lands, so no room note is readable by a peer and
+   nothing migrates. Notes written in the hours between were readable by peers holding `read_context`.
 8. **Content search over memory paths** (epic decision 5; amends ADR 0046 decision 10). `find`, and `recall` with
    `query`, match file bodies as well as paths on memory paths: everything in a home room, and `/members/**` and
    `/facts/**` in a room. Other paths stay path-name only. Matching is `src/search.ts`'s: every word a substring, a

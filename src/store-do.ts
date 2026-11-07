@@ -12,19 +12,24 @@ import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, Publi
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow, OutsideCaller, OutsideTask, ApprovedBy,
-  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow,
+  Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, DirectoryEntry, ConfigName, ConfigRow, FsRow, HomeSettings,
 } from "./types.js";
+import { DEFAULT_HOME_SETTINGS } from "./types.js";
 import { CONFIG_HISTORY } from "./config.js";
-import { configEvent, decideConfigWrite } from "./store.js";
+import { configEvent, decideConfigWrite, decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeAppend, type HomeKeyRecord } from "./store.js";
+import { isHomeRoomId } from "./home.js";
+import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "./fs.js";
+import { namespaceOf } from "./fs-path.js";
 import type {
-  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
+  AppendExtras, ApprovalWrite, BellmanStore, ConfigWrite, ConfigWriteResult, FsAppend, FsEntry, FsPage, FsWrite, DepartedMembers, EventBody, EventWrite, HostInstructionsSet, MemberPatch,
   AccountBanRequest, ProposalApproval, RemovalOutcome, RemovalRequest, SeatOutcome, SurfaceAppend, SurfaceAuthor, SurfaceBatchAppend, SurfaceFacts,
   DecisionClose, DecisionOpen, VoteWrite, RoomCounts, RoomFilter, RoomIndexRow, RoomSummary,
 } from "./store.js";
-import { electorateOf, voteRefusal } from "./store.js";
+import { electorateOf, voteRefusal, withoutBook } from "./store.js";
 import {
   applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf,
-  decisionOwning, dueToExpire, earliestDeadline, noteDecisions, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage,
+  decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened,
+  type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage,
   type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput,
 } from "./decision.js";
 import { isTopicRoom } from "./manifest.js";
@@ -106,6 +111,16 @@ import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
 const CURSOR_PAD = 12;
 const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0")}`;
+/**
+ * A secret ballot's row for one account (secret ballot spec): its current choice, its vote count and the
+ * idempotency keys its votes used. The only place a secret choice is kept; every close deletes the decision's rows.
+ */
+const ballotKey = (decision: number, account: string) => `bv:${decision}:${account}`;
+const ballotPrefix = (decision: number) => `bv:${decision}:`;
+type BallotRow = { choice: Choice; n: number; iks: string[] };
+/** Ballot rows as a fold reads them: decision → account → choice. */
+const bookOf = (rows: ReadonlyMap<number, ReadonlyMap<string, BallotRow>>): BallotBook =>
+  new Map([...rows].map(([d, r]) => [d, new Map([...r].map(([a, row]) => [a, row.choice]))]));
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
@@ -176,6 +191,21 @@ const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)
 const configKey = (name: ConfigName): string => `cfg:${name}`;
 const configHistoryPrefix = (name: ConfigName): string => `cfgh:${name}:`;
 const configHistoryKey = (name: ConfigName, rev: number): string => `${configHistoryPrefix(name)}${String(rev).padStart(10, "0")}`;
+/**
+ * Room files (ADR 0046): `fs:<path>` the current revision (a tombstone included), `fsh:<path>:<rev>` each kept one,
+ * the revision zero-padded. A path may hold colons, so a history list keeps only keys whose rest after the prefix is
+ * exactly a padded revision: `fsh:/a:` also lists `/a:b`'s rows. `fsm:<path>` is `fs:`'s row without content, for
+ * listings. `mi:<userId>` is an account's memory id and
+ * `mio:<memoryId>` its owner. All purged with the room's storage.
+ */
+const fsKey = (path: string): string => `fs:${path}`;
+/** `fsm:<path>`: the current row without its content, which listings and finds read so they never load file bodies. */
+const fsIndexKey = (path: string): string => `fsm:${path}`;
+const fsHistoryPrefix = (path: string): string => `fsh:${path}:`;
+const fsHistoryKey = (path: string, rev: number): string => `${fsHistoryPrefix(path)}${String(rev).padStart(10, "0")}`;
+const REV_PAD = /^\d{10}$/;
+const memoryIdKey = (userId: string): string => `mi:${userId}`;
+const memoryOwnerKey = (memoryId: string): string => `mio:${memoryId}`;
 /**
  * The operator's index of every room (#471, dash#94): one row a room, the fields of its `RoomIndexRow`, fixed at
  * the create. A close keeps it, the purge deletes it. No org is NULL; `NO_ORG` exists only past the HTTP layer.
@@ -1699,9 +1729,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const book = s.openDecisions ?? {};
       const unclosed = Object.keys(book).map(Number);
       const log = leaving && unclosed.length > 0 ? await this.#logFrom(txn, Math.min(...unclosed)) : [];
+      const ballots = log.length === 0 ? new Map() : bookOf(await this.#ballotRows(txn, unclosed));
       const voiding: SessionEvent[] = log.length === 0
         ? []
-        : removalEvents(decisionsOf(log, at).values(), memberId, req.event).map((b) => ({ ...b, cursor: next++, at }));
+        : removalEvents(decisionsOf(log, at, ballots).values(), memberId, req.event).map((b) => ({ ...b, cursor: next++, at }));
       written.push(...voiding);
 
       // The roster is built AFTER the events, because a cut names the departure's
@@ -1737,9 +1768,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // them: a ban on someone who already left is the eviction's row all the same. Not for
       // `widening`, which is owed on every ask here because the registry cannot be read from
       // this transaction, so a retry of "all" would file the row again.
+      const decided = decisionsOf([...log, ...voiding], at, ballots);
+      const secretRows = voiding.some((e) => e.type === "decision_closed" && isSecret(decided.get((e.payload as { decision: number }).decision)?.payload ?? { rule: "" }))
+        ? await this.#secretTemplate(txn, s, at)
+        : [];
       const intents = [
         ...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : []),
-        ...decisionAudit(req.audit, voiding, decisionsOf([...log, ...voiding], at)),
+        ...decisionAudit(req.audit, voiding, decided, secretRows),
       ].filter((e) => e.orgId).map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
       // The registry's writes, the code's and the ban's, ahead of the audit rows: one enqueue, in order.
@@ -1767,6 +1802,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...(banning ? { [banKey(banning.banId)]: banning, [banUserKey(banning.userId)]: banning.banId } : {}),
         ...rows,
       });
+      // Last, after the put: a secret ballot this removal closed keeps no choice (secret ballot spec, close path 5).
+      await this.#eraseClosed(txn, voiding, decided);
       return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written, queued: queue.length > 0 };
     });
 
@@ -2663,20 +2700,63 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     e: EventBody,
     key: string | null,
   ): Promise<
-    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" } }
-    | { done: null; record: (cursor: number) => Record<string, unknown> }
+    | { done: { outcome: "replayed"; event: SessionEvent } | { outcome: "conflict" }; recorded: SessionEvent | undefined }
+    | { done: null; record: (cursor: number) => Record<string, unknown>; storageKey: string | null }
   > {
-    if (key === null) return { done: null, record: () => ({}) };
+    if (key === null) return { done: null, record: () => ({}), storageKey: null };
     const storageKey = idempotencyKey(e.fromMemberId, key);
     const print = fingerprint(e);
     const found = await txn.get<IdempotencyRecord>(storageKey);
     if (found) {
-      if (found.print !== print) return { done: { outcome: "conflict" } };
       const original = await txn.get<SessionEvent>(eventKey(found.cursor));
+      if (found.print !== print) return { done: { outcome: "conflict" }, recorded: original };
       if (!original) throw new Error(`Idempotency record names missing cursor ${found.cursor}`);
-      return { done: { outcome: "replayed", event: original } };
+      return { done: { outcome: "replayed", event: original }, recorded: original };
     }
-    return { done: null, record: (cursor) => ({ [storageKey]: { cursor, print } satisfies IdempotencyRecord }) };
+    return { done: null, record: (cursor) => ({ [storageKey]: { cursor, print } satisfies IdempotencyRecord }), storageKey };
+  }
+
+  /** The ballot rows of `decisions`, each by account (secret ballot spec). Only an open secret ballot has any. */
+  async #ballotRows(
+    from: DurableObjectTransaction | DurableObjectStorage, decisions: readonly number[],
+  ): Promise<Map<number, Map<string, BallotRow>>> {
+    const out = new Map<number, Map<string, BallotRow>>();
+    for (const d of new Set(decisions)) {
+      const listed = await from.list<BallotRow>({ prefix: ballotPrefix(d) });
+      if (listed.size > 0) out.set(d, new Map([...listed].map(([k, row]) => [k.slice(ballotPrefix(d).length), row])));
+    }
+    return out;
+  }
+
+  /**
+   * Last in a write that closes, after its put: each closed secret ballot's rows and the idempotency records its votes
+   * used, so nothing the put wrote comes back. Answers what it deleted, for the line logged once the write commits.
+   */
+  async #eraseClosed(
+    txn: DurableObjectTransaction, events: readonly SessionEvent[], views: ReadonlyMap<number, DecisionView>,
+  ): Promise<{ decision: number; rows: number; keys: number }[]> {
+    const erased: { decision: number; rows: number; keys: number }[] = [];
+    for (const e of events) {
+      if (e.type !== "decision_closed") continue;
+      const decision = (e.payload as { decision: number }).decision;
+      const v = views.get(decision);
+      if (v === undefined || !isSecret(v.payload)) continue;
+      const rows = await txn.list<BallotRow>({ prefix: ballotPrefix(decision) });
+      const keys = [...rows.values()].flatMap((row) => row.iks);
+      // At most KEYS_PER_CALL keys a delete, as putRows writes: a 5,000-seat ballot holds far more than one call takes.
+      const doomed = [...rows.keys(), ...keys];
+      for (let i = 0; i < doomed.length; i += KEYS_PER_CALL) await txn.delete(doomed.slice(i, i + KEYS_PER_CALL));
+      erased.push({ decision, rows: rows.size, keys: keys.length });
+    }
+    return erased;
+  }
+
+  /** The rows a secret ballot's close is filed under: the system, for every party the room has had, never a voter. */
+  async #secretTemplate(txn: DurableObjectTransaction, s: StoredSession, at: number): Promise<AuditEntry[]> {
+    return auditRows(
+      rosterParties({ members: await this.#everyone(txn) }),
+      { at, sessionId: s.id, action: "decision_closed", roomName: s.manifest.room, detail: {} }, SYSTEM_ACTOR,
+    );
   }
 
   /**
@@ -2702,7 +2782,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     record: Record<string, unknown>,
     audit: readonly AuditEntry[],
     log: readonly SessionEvent[],
-  ): Promise<{ forward: boolean; queued: boolean }> {
+    ballots: BallotBook = new Map(),
+  ): Promise<{ forward: boolean; queued: boolean; erased: { decision: number; rows: number; keys: number }[] }> {
     let kept: StoredSession = s;
     for (const ev of events) {
       const books = noteAppend(kept, ev);
@@ -2715,7 +2796,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const soonest = earliestDeadline(book);
     const before = earliestDeadline(s.openDecisions ?? {});
     const sooner = soonest !== null && (before === null || soonest < before);
-    const rows = decisionAudit(audit, events, decisionsOf([...log, ...events], events[0].at)).filter((e) => e.orgId);
+    const views = decisionsOf([...log, ...events], events[0].at, ballots);
+    const secretClose = events.some((ev) => ev.type === "decision_closed" && isSecret(views.get((ev.payload as { decision: number }).decision)?.payload ?? { rule: "" }));
+    const secretTemplate = secretClose ? await this.#secretTemplate(txn, s, events[0].at) : [];
+    const rows = decisionAudit(audit, events, views, secretTemplate).filter((e) => e.orgId);
     await putRows(txn, {
       ...Object.fromEntries(events.map((ev) => [eventKey(ev.cursor), ev])),
       cursor: events[events.length - 1].cursor,
@@ -2723,11 +2807,20 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       ...asRows(s, { session: kept === s ? undefined : kept }),
       ...(rows.length > 0 ? await this.driver.enqueue(txn, rows.map(auditIntent)) : {}),
     });
-    return { forward: forward || sooner, queued: rows.length > 0 };
+    const erased = await this.#eraseClosed(txn, events, views);
+    return { forward: forward || sooner, queued: rows.length > 0, erased };
   }
 
   /** The wake, the delivery and the re-arm a decision write owes once it has committed, as approveProposal's. */
-  async #afterDecision(events: readonly SessionEvent[], members: readonly Member[], after: { forward: boolean; queued: boolean }): Promise<void> {
+  async #afterDecision(
+    events: readonly SessionEvent[], members: readonly Member[],
+    after: { forward: boolean; queued: boolean; erased?: { decision: number; rows: number; keys: number }[] },
+  ): Promise<void> {
+    // The one line a secret close logs: what it deleted, never a seat or a choice (secret ballot spec, Logging rule).
+    for (const e of after.erased ?? []) {
+      const closed = events.find((ev) => ev.type === "decision_closed" && (ev.payload as { decision: number }).decision === e.decision);
+      console.log(`secret ballot closed: room ${this.ctx.id.name ?? this.ctx.id.toString()} decision ${e.decision} tally ${JSON.stringify((closed?.payload as { tally?: unknown })?.tally)} rows ${e.rows} keys ${e.keys}`);
+    }
     this.#wake(events, members);
     if (after.queued) await this.driver.deliverNow();
     if (after.forward) await this.driver.reArm();
@@ -2735,7 +2828,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /** `BellmanStore.openDecision`: the snapshot, the hash and the append in one transaction, and a supersession's close after it. */
   async openDecision(e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<DecisionOpen> {
-    let after = { forward: false, queued: false };
+    let after: { forward: boolean; queued: boolean; erased?: { decision: number; rows: number; keys: number }[] } = { forward: false, queued: false };
     let members: readonly Member[] = [];
     let written: SessionEvent[] = [];
     const result = await this.ctx.storage.transaction<DecisionOpen>(async (txn) => {
@@ -2756,7 +2849,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const due = dueToExpire(book, at);
       const reads = draft.supersedes === undefined ? due : [...due, draft.supersedes];
       const log = reads.length === 0 ? [] : await this.#logFrom(txn, Math.min(...reads));
-      const views = decisionsOf(log, at);
+      const ballots = bookOf(await this.#ballotRows(txn, reads));
+      const views = decisionsOf(log, at, ballots);
       const old = draft.supersedes === undefined ? undefined : views.get(draft.supersedes);
       if (draft.supersedes !== undefined) {
         const d = decideSupersede(old);
@@ -2772,7 +2866,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         return v === undefined ? [] : [{ ...closingEvent(v, { state: "expired" }), cursor: event.cursor + (superseded ? 2 : 1) + i, at }];
       });
       written = [event, ...(superseded === null ? [] : [superseded]), ...expired];
-      after = await this.#writeDecision(txn, s, written, k.record(event.cursor), audit, log);
+      after = await this.#writeDecision(txn, s, written, k.record(event.cursor), audit, log, ballots);
       return { outcome: "appended", event, superseded };
     });
     if (result.outcome === "appended") await this.#afterDecision(written, members, after);
@@ -2781,30 +2875,53 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /** `BellmanStore.castVote`: `applyVote` decides from the decision read in the transaction that writes the vote. */
   async castVote(e: EventBody, key: string | null, audit: readonly AuditEntry[] = []): Promise<VoteWrite> {
-    let after = { forward: false, queued: false };
+    let after: { forward: boolean; queued: boolean; erased?: { decision: number; rows: number; keys: number }[] } = { forward: false, queued: false };
     let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<VoteWrite>(async (txn) => {
       after = { forward: false, queued: false };
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       members = s.members;
-      const k = await this.#decisionKey(txn, e, key);
-      if (k.done !== null) return k.done;
-      if (s.frozenAt !== null) return { outcome: "frozen" };
       const input = e.payload as VoteInput;
+      const opening = await txn.get<SessionEvent>(eventKey(input.decision));
+      const secret = opening?.type === "decision_opened" && isSecret(opening.payload as DecisionOpened);
+      const k = await this.#decisionKey(txn, e, key);
+      if (k.done !== null) {
+        // A secret ballot gives one answer to any retry of a key its own vote used, so the retry tells nothing apart.
+        if (secret && (k.recorded?.payload as { decision?: number } | undefined)?.decision === input.decision) return { outcome: "recorded" };
+        return k.done;
+      }
+      if (s.frozenAt !== null) return { outcome: "frozen" };
       const at = Date.now();
       const log = await this.#logFrom(txn, input.decision);
-      const view = decisionsOf(log, at).get(input.decision);
+      const rows = await this.#ballotRows(txn, [input.decision]);
+      const view = decisionsOf(log, at, bookOf(rows)).get(input.decision);
       if (view === undefined) return { outcome: "unknown" };
       const vote: DecisionVote = { ...input, capacity: capacityOfVote(input) };
-      const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote);
+      const account = view.payload.accounts[e.fromMemberId];
+      const row = account === undefined ? undefined : rows.get(view.cursor)?.get(account);
+      const d = applyVote(view, { memberId: e.fromMemberId, userId: e.fromUserId }, vote, row?.n ?? 0);
       if (d.kind !== "record") return voteRefusal(d);
-      const event: SessionEvent = { ...e, payload: vote, cursor: await this.nextCursor(txn), at };
+      // A secret vote is logged as the system with no choice; the choice goes into the account's ballot row.
+      const cursor = await this.nextCursor(txn);
+      const event: SessionEvent = secret
+        ? {
+          ...e, fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", cursor, at,
+          payload: {
+            decision: input.decision, hash: input.hash, via: input.via, human_approved: input.human_approved, capacity: vote.capacity, ballot: "secret",
+          } satisfies SecretVote,
+        }
+        : { ...e, payload: vote, cursor, at };
+      const newRow: BallotRow | null = secret
+        ? { choice: vote.choice, n: (row?.n ?? 0) + 1, iks: k.storageKey === null ? row?.iks ?? [] : [...(row?.iks ?? []), k.storageKey] }
+        : null;
+      const ballots = newRow === null ? bookOf(rows) : bookOf(new Map([[view.cursor, new Map([...(rows.get(view.cursor) ?? []), [account!, newRow]])]]));
       // The close carries the tally with this vote counted in it.
       const closed: SessionEvent | null = d.close === null
         ? null
-        : { ...closingEvent(decisionsOf([...log, event], at).get(view.cursor)!, d.close), cursor: event.cursor + 1, at };
-      after = await this.#writeDecision(txn, s, closed === null ? [event] : [event, closed], k.record(event.cursor), audit, log);
+        : { ...closingEvent(decisionsOf([...log, event], at, ballots).get(view.cursor)!, d.close), cursor: event.cursor + 1, at };
+      const record = { ...k.record(event.cursor), ...(newRow === null ? {} : { [ballotKey(view.cursor, account!)]: newRow }) };
+      after = await this.#writeDecision(txn, s, closed === null ? [event] : [event, closed], record, audit, log, ballots);
       return { outcome: "appended", event, closed };
     });
     if (result.outcome === "appended") {
@@ -2844,7 +2961,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s?.openDecisions || !Object.hasOwn(s.openDecisions, String(cursor))) return;
-      const view = decisionsOf(await this.#logFrom(txn, cursor), Date.now()).get(cursor);
+      const view = decisionsOf(await this.#logFrom(txn, cursor), Date.now(), "untallied").get(cursor);
       const { [String(cursor)]: entry, ...rest } = s.openDecisions;
       const book = view === undefined || view.closed !== null
         ? rest
@@ -2857,7 +2974,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async closeDecision(
     decision: number, close: { state: ClosedState; reason?: FailReason }, now: number, audit: readonly AuditEntry[] = [],
   ): Promise<DecisionClose> {
-    let after = { forward: false, queued: false };
+    let after: { forward: boolean; queued: boolean; erased?: { decision: number; rows: number; keys: number }[] } = { forward: false, queued: false };
     let members: readonly Member[] = [];
     const result = await this.ctx.storage.transaction<DecisionClose>(async (txn) => {
       after = { forward: false, queued: false };
@@ -2866,13 +2983,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       members = s.members;
       if (s.frozenAt !== null && close.state !== "expired") return { outcome: "frozen" };
       const log = await this.#logFrom(txn, decision);
-      const view = decisionsOf(log, now).get(decision);
+      const ballots = bookOf(await this.#ballotRows(txn, [decision]));
+      const view = decisionsOf(log, now, ballots).get(decision);
       if (view === undefined) return { outcome: "unknown" };
       const d = decideClose(view, close.state, now);
       if (d.kind === "closed") return { outcome: "closed", state: d.state };
       if (d.kind === "not_due") return { outcome: "not_due" };
       const event: SessionEvent = { ...closingEvent(view, close), cursor: await this.nextCursor(txn), at: Date.now() };
-      after = await this.#writeDecision(txn, s, [event], {}, audit, log);
+      after = await this.#writeDecision(txn, s, [event], {}, audit, log, ballots);
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") await this.#afterDecision([result.event], members, after);
@@ -2880,10 +2998,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /** `BellmanStore.decision`: its own events from the index, read without a transaction, as `decisions` is. */
+  /** `BellmanStore.votedOn`: one read of the account's ballot row in each named decision. */
+  async votedOn(userId: string, decisions: number[]): Promise<number[]> {
+    const rows = await this.ctx.storage.get(decisions.map((d) => ballotKey(d, userId)));
+    return decisions.filter((d) => rows.has(ballotKey(d, userId)));
+  }
+
   async decision(cursor: number, now: number): Promise<DecisionView | null> {
     await this.#indexDecisions();
     const own = await this.ctx.storage.list<SessionEvent>({ prefix: decisionEventPrefix(cursor) });
-    return decisionsOf([...own.values()], now).get(cursor) ?? null;
+    const view = decisionsOf([...own.values()], now, bookOf(await this.#ballotRows(this.ctx.storage, [cursor]))).get(cursor);
+    return view === undefined ? null : withoutBook(view);
   }
 
   /**
@@ -2908,8 +3033,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const own = await storage.list<SessionEvent>({ prefix, ...(ask.upTo === undefined ? {} : { end: `${prefix}${pad(ask.upTo + 1)}` }) });
       events.push(...own.values());
     }
-    const views = decisionsOf(events.sort((a, b) => a.cursor - b.cursor), now);
-    const shown = (cursors: readonly number[]) => cursors.flatMap((c) => views.get(c) ?? []);
+    const ballots = bookOf(await this.#ballotRows(storage, Object.keys(book).map(Number)));
+    const views = decisionsOf(events.sort((a, b) => a.cursor - b.cursor), now, ballots);
+    const shown = (cursors: readonly number[]) => cursors.flatMap((c) => { const v = views.get(c); return v === undefined ? [] : [withoutBook(v)]; });
     return { open: shown(open).filter((v) => v.state === "open"), decisions: shown(page), next };
   }
 
@@ -3008,7 +3134,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * re-arm after the commit, as a decision write's.
    */
   async writeConfig(w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
-    let after = { forward: false, queued: false };
+    let after: { forward: boolean; queued: boolean; erased?: { decision: number; rows: number; keys: number }[] } = { forward: false, queued: false };
     let members: readonly Member[] = [];
     let written: SessionEvent | null = null;
     const result = await this.ctx.storage.transaction<ConfigWriteResult>(async (txn) => {
@@ -3034,6 +3160,171 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       );
       written = e;
       return { ok: true, rev: row.rev };
+    });
+    if (written !== null) await this.#afterDecision([written], members, after);
+    return result;
+  }
+
+  /** `BellmanStore.readFs`, for this room. */
+  async readFs(path: string, rev?: number): Promise<FsRow | null> {
+    if (rev !== undefined) return (await this.ctx.storage.get<FsRow>(fsHistoryKey(path, rev))) ?? null;
+    const row = await this.ctx.storage.get<FsRow>(fsKey(path));
+    return row && !row.deleted ? row : null;
+  }
+
+  // ponytail: a list or find reads every `fsm:` index row under the prefix, because the hidden memory ids are
+  // filtered before the page is cut. Rows carry no content, so this is metadata only; bounded batches if rooms reach
+  // hundreds of thousands of files.
+  async #fsRows(prefix: string): Promise<FsEntry[]> {
+    return [...(await this.ctx.storage.list<FsEntry>({ prefix: fsIndexKey(prefix) })).values()];
+  }
+
+  /** `BellmanStore.listFs`, for this room. */
+  async listFs(prefix: string, opts: { cursor?: string; hide?: readonly string[]; newest?: boolean } = {}): Promise<FsPage> {
+    return pageFs(await this.#fsRows(prefix), (r) => underPrefix(r.path, prefix) && !hiddenMemory(r, opts.hide), FS_LIST_PAGE, opts.cursor, opts.newest ? newestKey : undefined);
+  }
+
+  /** `BellmanStore.readHomeSettings` (#530): the `hs` row, or the defaults. Reads the record for nothing, so none is needed. */
+  async readHomeSettings(): Promise<HomeSettings> {
+    return (await this.ctx.storage.get<HomeSettings>("hs")) ?? DEFAULT_HOME_SETTINGS;
+  }
+
+  /** `BellmanStore.writeHomeSettings`: the `hs` row replaced. No record, event, outbox intent or alarm: settings alone are not a home room. */
+  async writeHomeSettings(settings: HomeSettings): Promise<void> {
+    await this.ctx.storage.put("hs", settings);
+  }
+
+  /**
+   * `BellmanStore.writeHome`, for this home room (ADR 0047), in one transaction: the record created from `home` when
+   * none is stored, the key (`hk:`) checked, `decideFsWrite` with `ceiling` as the room's and no memory rule, then the
+   * file row, its index and history rows, the record's `fsBytes` and the key's record in one put, and the pruned
+   * history deleted. No event, no outbox intent, no alarm: nothing is owed, so nothing is armed.
+   */
+  async writeHome(home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    return this.ctx.storage.transaction<HomeAppend>(async (txn) => {
+      const keyed = w.key === null ? null : { storageKey: homeKey(w.memberId, w.key), print: fsPrint(w) };
+      if (keyed !== null) {
+        const record = await txn.get<HomeKeyRecord>(keyed.storageKey);
+        if (record) return record.print === keyed.print ? { outcome: "replayed", path: record.path, rev: record.rev } : { outcome: "conflict" };
+      }
+      if (namespaceOf(w.path).ns === "app") return { outcome: "forbidden" };
+      const read = await this.stored(txn);
+      let s = read, seeded: Record<string, unknown> = {};
+      if (!s) {
+        const seat = seatInOrder(home.members, { memberSeq: 0, labelSeq: 0 });
+        const { events: _events, members: _arriving, ...others } = home;
+        s = { ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat), memberSeq: seat.memberSeq, labelSeq: seat.labelSeq };
+        seeded = { ...seatRows(seat), cursor: 0 };
+      }
+      const at = Date.now();
+      const current = (await txn.get<FsRow>(fsKey(w.path))) ?? null;
+      const history = await this.#fsHistory(txn, w.path);
+      const decided = decideFsWrite({ ...s, fsBytesCeiling: ceiling }, w, w.path, current, history, at, true);
+      if (!decided.ok) return decided.result;
+      const { row } = decided;
+      await putRows(txn, {
+        ...seeded,
+        ...memberRows(read, { ...s, fsBytes: decided.fsBytes }),
+        [fsKey(w.path)]: row,
+        [fsIndexKey(w.path)]: fsEntryOf(row),
+        ...(row.deleted ? {} : { [fsHistoryKey(w.path, row.rev)]: row }),
+        ...(keyed === null ? {} : { [keyed.storageKey]: { print: keyed.print, path: w.path, rev: row.rev } satisfies HomeKeyRecord }),
+      });
+      for (const rev of decided.dropRevs) await txn.delete(fsHistoryKey(w.path, rev));
+      return { outcome: "ok", path: w.path, rev: row.rev };
+    });
+  }
+
+  /** `BellmanStore.findFs`, for this room. */
+  async findFs(query: string, opts: { cursor?: string; hide?: readonly string[] } = {}): Promise<FsPage> {
+    return pageFs(await this.#fsRows("/"), (r) => pathMatches(r.path, query) && !hiddenMemory(r, opts.hide), FS_FIND_MAX, opts.cursor);
+  }
+
+  /** `BellmanStore.fsHistory`, for this room: newest first. */
+  async fsHistory(path: string): Promise<FsRow[]> {
+    return this.#fsHistory(this.ctx.storage, path);
+  }
+
+  async #fsHistory(from: { list: DurableObjectStorage["list"] }, path: string): Promise<FsRow[]> {
+    const prefix = fsHistoryPrefix(path);
+    const rows = await from.list<FsRow>({ prefix, reverse: true });
+    return [...rows].filter(([k]) => REV_PAD.test(k.slice(prefix.length))).map(([, r]) => r);
+  }
+
+  /** `BellmanStore.memoryIdOf`, for this room. Never writes. */
+  async memoryIdOf(userId: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(memoryIdKey(userId))) ?? null;
+  }
+
+  /** `BellmanStore.memoryIdOwner`, for this room. */
+  async memoryIdOwner(memoryId: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(memoryOwnerKey(memoryId))) ?? null;
+  }
+
+  /** `BellmanStore.memoryIds`, for this room. */
+  async memoryIds(): Promise<Array<{ userId: string; memoryId: string }>> {
+    const rows = await this.ctx.storage.list<string>({ prefix: "mi:" });
+    return [...rows].map(([k, memoryId]) => ({ userId: k.slice("mi:".length), memoryId }));
+  }
+
+  /**
+   * `BellmanStore.appendFs`, for this room, in one transaction: the key before the room checks (as appendSurface),
+   * the path resolved against the `mi:`/`mio:` rows, `decideFsWrite` on the rows read here, then the file row, its
+   * history row, the record's `fsBytes`, the memory id rows on a first memory write, the event, the key's record and
+   * the audit intents in one put, and the pruned or dropped history deleted.
+   */
+  async appendFs(w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
+    let after = { forward: false, queued: false };
+    let members: readonly Member[] = [];
+    let written: SessionEvent | null = null;
+    const result = await this.ctx.storage.transaction<FsAppend>(async (txn) => {
+      after = { forward: false, queued: false };
+      written = null;
+      const s = await this.stored(txn);
+      if (!s) return { outcome: "not_found" };
+      members = s.members;
+      const keyed = w.key === null ? null : { storageKey: idempotencyKey(w.memberId, w.key), print: fsPrint(w) };
+      if (keyed !== null) {
+        const record = await txn.get<IdempotencyRecord>(keyed.storageKey);
+        if (record) {
+          if (record.print !== keyed.print) return { outcome: "conflict" };
+          const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+          if (!original) throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+          return { outcome: "replayed", event: original };
+        }
+      }
+      if (s.closed) return { outcome: "closed" };
+      if (s.frozenAt !== null) return { outcome: "frozen" };
+      const named = namespaceOf(w.path);
+      const namedOwner = named.ns === "memory" && named.memoryId !== null
+        ? (await txn.get<string>(memoryOwnerKey(named.memoryId))) ?? null
+        : null;
+      const writerId = (await txn.get<string>(memoryIdKey(w.userId))) ?? null;
+      const resolved = resolveFsPath(w, writerId, namedOwner, newMemoryId);
+      if (!resolved.ok) return { outcome: "forbidden" };
+      const at = Date.now();
+      const current = (await txn.get<FsRow>(fsKey(resolved.path))) ?? null;
+      const history = await this.#fsHistory(txn, resolved.path);
+      const decided = decideFsWrite(s, w, resolved.path, current, history, at);
+      if (!decided.ok) return decided.result;
+      const { row } = decided;
+      const stamped = audit.map((e) => ({ ...e, detail: { ...e.detail, ...decided.stamp } }));
+      const intents = stamped.filter((e) => e.orgId).map(auditIntent);
+      after.queued = intents.length > 0;
+      const rows = await this.driver.enqueue(txn, intents);
+      const e: SessionEvent = { ...decided.event, cursor: await this.nextCursor(txn), at };
+      const session: StoredSession = { ...s, fsBytes: decided.fsBytes, fsMemoryBytes: decided.fsMemoryBytes };
+      after.forward = await this.#writeEvent(txn, s, e, {
+        session,
+        [fsKey(resolved.path)]: row,
+        [fsIndexKey(resolved.path)]: fsEntryOf(row),
+        ...(row.deleted ? {} : { [fsHistoryKey(resolved.path, row.rev)]: row }),
+        ...(resolved.assign === null ? {} : { [memoryIdKey(w.userId)]: resolved.assign, [memoryOwnerKey(resolved.assign)]: w.userId }),
+        ...(keyed === null ? {} : { [keyed.storageKey]: { cursor: e.cursor, print: keyed.print } satisfies IdempotencyRecord }),
+        ...rows,
+      }, decided.dropRevs.map((rev) => fsHistoryKey(resolved.path, rev)));
+      written = e;
+      return { outcome: "ok", path: resolved.path, rev: row.rev, event: e };
     });
     if (written !== null) await this.#afterDecision([written], members, after);
     return result;
@@ -6645,6 +6936,8 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
+    // A home room (ADR 0047) is not a room: no route, tool or socket reads it as one.
+    if (isHomeRoomId(id)) return undefined;
     return this.session(id).getSession();
   }
 
@@ -7053,6 +7346,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).decisions(ask, now);
   }
 
+  async votedOn(sessionId: string, userId: string, decisions: number[]): Promise<number[]> {
+    return this.session(sessionId).votedOn(userId, decisions);
+  }
+
   async appendSurface(
     sessionId: string,
     e: EventBody,
@@ -7166,6 +7463,50 @@ export class DurableObjectStore implements BellmanStore {
 
   async writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult> {
     return this.session(sessionId).writeConfig(w, audit);
+  }
+
+  async readFs(sessionId: string, path: string, rev?: number): Promise<FsRow | null> {
+    return this.session(sessionId).readFs(path, rev);
+  }
+
+  async listFs(sessionId: string, prefix: string, opts?: { cursor?: string; hide?: readonly string[]; newest?: boolean }): Promise<FsPage> {
+    return this.session(sessionId).listFs(prefix, opts);
+  }
+
+  async fsHistory(sessionId: string, path: string): Promise<FsRow[]> {
+    return this.session(sessionId).fsHistory(path);
+  }
+
+  async findFs(sessionId: string, query: string, opts?: { cursor?: string; hide?: readonly string[] }): Promise<FsPage> {
+    return this.session(sessionId).findFs(query, opts);
+  }
+
+  async appendFs(sessionId: string, w: FsWrite, audit: readonly AuditEntry[]): Promise<FsAppend> {
+    return this.session(sessionId).appendFs(w, audit);
+  }
+
+  async writeHome(id: string, home: NewSession, w: FsWrite, ceiling: number): Promise<HomeAppend> {
+    return this.session(id).writeHome(home, w, ceiling);
+  }
+
+  async readHomeSettings(id: string): Promise<HomeSettings> {
+    return this.session(id).readHomeSettings();
+  }
+
+  async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
+    return this.session(id).writeHomeSettings(settings);
+  }
+
+  async memoryIdOf(sessionId: string, userId: string): Promise<string | null> {
+    return this.session(sessionId).memoryIdOf(userId);
+  }
+
+  async memoryIdOwner(sessionId: string, memoryId: string): Promise<string | null> {
+    return this.session(sessionId).memoryIdOwner(memoryId);
+  }
+
+  async memoryIds(sessionId: string): Promise<Array<{ userId: string; memoryId: string }>> {
+    return this.session(sessionId).memoryIds();
   }
 
   async waitForEvents(

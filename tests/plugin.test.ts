@@ -89,8 +89,8 @@ describe("the plugin's shape", () => {
     expect(installTriggers(PLUGIN)).toEqual([]);
   });
 
-  it("carries both skills", () => {
-    for (const skill of ["canvas", "room-manifest"]) {
+  it("carries every skill", () => {
+    for (const skill of ["canvas", "room-manifest", "memory-import"]) {
       expect(existsSync(join(PLUGIN, "skills", skill, "SKILL.md")), skill).toBe(true);
     }
   });

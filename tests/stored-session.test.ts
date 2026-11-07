@@ -264,6 +264,14 @@ describe("hydrateStoredSession — a record stored before blobs", () => {
     expect(hydrateStoredSession(raw)!.blobBytesCeiling).toBe(ENTITLEMENTS.free.blobBytesPerRoom);
     expect(hydrateStoredSession({ ...raw, blobBytesCeiling: 7 })!.blobBytesCeiling).toBe(7);
   });
+
+  /** Room files (ADR 0046) default as the blob fields do: nothing charged, the free ceiling. */
+  it("reads missing fsBytes and fsBytesCeiling as 0 and the free ceiling, and leaves stamped ones alone", () => {
+    const { events: _events, fsBytesCeiling: _ceiling, ...raw } = session();
+    expect(hydrateStoredSession(raw)!.fsBytes).toBe(0);
+    expect(hydrateStoredSession(raw)!.fsBytesCeiling).toBe(ENTITLEMENTS.free.fsBytesPerRoom);
+    expect(hydrateStoredSession({ ...raw, fsBytes: 3, fsBytesCeiling: 7 })).toMatchObject({ fsBytes: 3, fsBytesCeiling: 7 });
+  });
 });
 
 /** The meter keys its month with this, so a month that rolled in the local zone would rotate the meter at the wrong hour. */

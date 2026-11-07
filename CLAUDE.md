@@ -43,6 +43,9 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
 - `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
   `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
+- `src/fs-path.ts` / `src/fs.ts` — room files (ADR 0046), runtime-free: path normalization and namespaces, and the
+  planning of each write op, the byte charge and the history diff. `src/governed-view.ts` renders `/.bellman/` from
+  governed config; `src/tools/fs.ts` is `bellman_fs` and `src/http/files.ts` the dash routes.
 - `src/cost/` — the room cost capture (#473): a daily job that records raw facts, runtime-free.
   `src/cost-do.ts` is `CostDO`, the object it records into.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.

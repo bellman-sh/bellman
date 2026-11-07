@@ -25,7 +25,7 @@ import {
 } from "../blobs.js";
 import { QUERY_WITH_WINDOW, parseWindow, windowName, type Window } from "../frames.js";
 import { joinUrl } from "../codes.js";
-import { DECISION_PAGE, MAX_DECISION_PAGE } from "../decision.js";
+import { DECISION_PAGE, MAX_DECISION_PAGE, isSecret } from "../decision.js";
 import { HostInstructionsShape } from "../manifest.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { decisionMembers, decisionShown, publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
@@ -37,6 +37,7 @@ import {
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { configRoutes } from "./config.js";
+import { fileRoutes } from "./files.js";
 import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -99,6 +100,8 @@ export const MAX_VIEW_BYTES = 256;
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
   not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400, rate_limited: 429,
+  // Room file writes (ADR 0046): the wire codes the blob routes already answer for a size and a quota.
+  stale: 409, too_large: 413, over_quota: 413,
 };
 
 // ponytail: five minutes of private caching, not tuned. It is also how long a
@@ -257,6 +260,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     }
     const config = await configRoutes(request, url, path, origin, deps);
     if (config) return config;
+    const files = await fileRoutes(request, url, path, origin, deps);
+    if (files) return files;
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);
@@ -1058,7 +1063,13 @@ async function readDecisionsRoute(request: Request, url: URL, sessionId: string,
     limit, ...(rawBefore === null ? {} : { before: Number(rawBefore) }), ...(cut === undefined ? {} : { upTo: cut }),
   }, Date.now());
   const members = await decisionMembers(deps.store, sessionId, session.members, [...page.open, ...page.decisions]);
-  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true);
+  // Whether the reader's own account voted on each open secret ballot: the store's answer, the reader's alone. An
+  // admin reading with no seat in the room reads as nobody, and so does a removed member reading to its cut: a
+  // decision open at the cut may have closed since and erased its rows, so asking would answer a false "no".
+  const reader = mine.length === 0 || cut !== undefined ? null : who.identity.userId;
+  const secretOpen = [...page.open, ...page.decisions].filter((v) => v.state === "open" && isSecret(v.payload)).map((v) => v.cursor);
+  const voted = new Set(reader === null || secretOpen.length === 0 ? [] : await deps.store.votedOn(sessionId, reader, secretOpen));
+  const shown = (v: (typeof page.open)[number]) => decisionShown(v, members, true, reader, reader === null ? null : voted.has(v.cursor));
   const body = JSON.stringify({ open: page.open.map(shown), decisions: page.decisions.map(shown), next: page.next });
   const tag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
   const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag", "cache-control": "no-store", etag: tag };

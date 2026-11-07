@@ -14,6 +14,7 @@ import { moderationRoutes, routeOrigin } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { isHomeRoomId } from "./home.js";
 import { statsRoutes } from "./http/stats.js";
 import { reportMailer } from "./reports.js";
 import { inviteMailer } from "./invite-mail.js";
@@ -387,8 +388,9 @@ export default {
       if (handled) return handled;
     }
 
-    // The rooms a person sits in, with their seats (#434): on the room routes' rules and behind the same guard.
-    if (url.pathname === "/me/rooms" || url.pathname === "/me/rooms/") {
+    // The rooms a person sits in, with their seats (#434), and their memory settings (#530): on the room routes' rules
+    // and behind the same guard.
+    if (/^\/me\/(rooms|memory)\/?$/.test(url.pathname)) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await meRoutes(request, { store, caller: who, panelOrigins: oauth?.panelOrigins ?? [] });
@@ -512,6 +514,8 @@ export default {
 
       const sessionId = url.searchParams.get("session");
       if (!sessionId) return new Response("Missing session", { status: 400 });
+      // A home room (ADR 0047) has no feed: its one member is the account, and nothing in it is an event.
+      if (isHomeRoomId(sessionId)) return new Response("Not found", { status: 404 });
 
       // Number() alone accepts "", "1.5", "1e99" and " 1". A cursor is an
       // index into storage keys; anything else is a bad request, not a

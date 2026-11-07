@@ -78,7 +78,7 @@ Args:
       "artifact"       — code/doc/data ({ name, content })
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
                          It ends in exactly one state: answered, declined (a human said no), or expired (30 minutes with no answer). Until then it is in every member's bellman_sync \`outstanding\`. An answer after the deadline still lands and counts. In a topic room, payload { kind: "surface_proposal", item, base } proposes a card: item is a surface payload or { key, remove: true }, base the surface_cursor you read. A text or diagram item needs an http or https link in its body; a member holds at most 3 open proposals, each lives 7 days. A maintainer's human approves with an action_response of approved: true, which writes the card; if the key changed after base, the approval is refused as stale (error "stale", with the cursor) and nothing is written.
-      "action_response"— answer an action_request: ref_id is the request's cursor, payload { approved: boolean, result?: string }. Answering an open decision is a vote (see bellman_decide): add hash and human_approved; it returns the vote's { cursor, capacity, state }.
+      "action_response"— answer an action_request: ref_id is the request's cursor, payload { approved: boolean, result?: string }. Answering an open decision is a vote (see bellman_decide): add hash and human_approved; it returns the vote's { cursor, capacity, state }, or on a secret ballot { ballot, capacity, state } and no result field.
       "brief_update"   — replace your brief (payload = the full Brief)
       "progress"       — answer the room's heartbeat: { note?, step?, eta_seconds?, status? }, a note or a status or both. status: working, idle or needs_you (waiting on your human); a status without a note does not answer the heartbeat. Does not interrupt peers.
       "outside_answer" — reply to an outside A2A caller's question: ref_id is the outside_question's cursor, payload { text, needs_input? }; needs_input: true asks the caller for more and leaves the task waiting on them. Only the room's voice may: members whose role holds \`answer\` (no built-in preset grants it), or the creator while no role does.
@@ -174,7 +174,7 @@ Errors: a verb your role lacks is refused by name; nothing is delivered. Capabil
         const { approved, hash, human_approved, result } = parsed.data;
         return voteOn(s, session_id, session, me, identity, {
           decision: refAt, hash, choice: approved ? "approve" : "reject", ...(result !== undefined ? { reason: result } : {}), human_approved,
-        }, idempotency_key);
+        }, idempotency_key, "result");
       }
 
       // Authority first: before the payload, before who is listening. A seat that

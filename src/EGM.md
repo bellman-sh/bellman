@@ -47,7 +47,7 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - `[server-card.ts:serverCard]` the static MCP Server Card at `SERVER_CARD_PATH` (`/mcp/server-card`), with
   `SERVER_CARD_CORS`.
 - `[worker.ts:fetch]` the Workers entry. Dispatch order: `/stripe/webhook`; `/rooms[/*]` (moderation routes, then
-  room routes); `/public[/*]`; `/presets`, `/scim/v2`, `/audit`, `/org`, `/me/rooms`, `/account/handle`,
+  room routes); `/public[/*]`; `/presets`, `/scim/v2`, `/audit`, `/org`, `/me/rooms`, `/me/memory`, `/account/handle`,
   `/account/bans`, `/operator/(stats|accounts|rooms|room-counts)` and `/operator/rooms/:id`; `GET /.well-known/agent-card.json`; the server card; OAuth
   routes; `GET /healthz`; `GET /ws`; A2A paths; `POST /mcp`. Anything else is 404.
 - `[worker.ts]` re-exports the Durable Object classes `SessionDO`, `RegistryDO`, `AuditDO` (from `store-do.ts`),
@@ -74,7 +74,8 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
   - the surface: `appendSurface`, `appendSurfaces`, `approveProposal`, `surfaceOf`, `surfaceFacts`,
     `surfaceWindow`, `surfaceNamesBlob`, `sweepBlobs`, `chargeBlobBytes`.
   - decisions (ADR 0040): `openDecision`, `castVote`, `closeDecision` (each taking the caller's `audit` rows),
-    `decision`, and `decisions`, a page of the room's decisions with every open one beside it.
+    `decision`, and `decisions`, a page of the room's decisions with every open one beside it, and `votedOn`, which
+    open secret ballots one account has voted in (the only way to ask, since a secret vote names no seat).
   - outside tasks (A2A): `askOutside`, `answerOutside`, `cancelOutside`, `seatSkipped`, `outsideTask*`.
   - hosted seat: `appendHostEvent`, `hostEventFor`, `renewHostAllowance`, `setHostInstructions`,
     `reserveHostedRoom`, `releaseHostedRoom`.
@@ -105,9 +106,11 @@ from the Node build: they import `cloudflare:workers` or use Workers-only stream
 - `[store-do.ts:SessionDO]` one Durable Object per room: the session record (with `openDecisions`, the book of
   unclosed decisions), the `e:` event log, member rows, `sf:` surface rows, the decision index (`dx:` one row per
   decision, `dv:<decision>:<cursor>` a copy of each of its events, `dx-at` the last cursor indexed, written by a
-  read in batches of `DECISION_INDEX_BATCH` = 1,000 events and never by an append), bans, outside tasks and an
-  outbox; `roomSummary` answers the operator's counts; `fetch` is the `/ws` upgrade; `alarm` multiplexes the
-  handlers `outbox`, `abandoned`, `heartbeat`, `housekeep`, `purge`, `sweep`, `seat` and `expiry` through one
+  read in batches of `DECISION_INDEX_BATCH` = 1,000 events and never by an append), `bv:<decision>:<account>` a
+  secret ballot's row per voting account (its choice, vote count and idempotency keys, deleted by every close),
+  bans, outside tasks and an outbox; `roomSummary` answers the operator's counts; `fetch` is the `/ws` upgrade; `alarm` multiplexes the
+  handlers `outbox`, `abandoned`, `heartbeat`, `housekeep`, `purge`, `sweep`, `seat`, `expiry` and `decision` (the
+  soonest open decision's deadline, plus a millisecond, derived even for a closed room) through one
   `OutboxDriver`. `REPLAY_LIMIT = 1_000`.
 - `[store-do.ts:RegistryDO]` the singleton: join codes `jc:`, public names `pn:`, connect tokens `pc:`, grants
   `gr:`/`go:`, orgs, IdPs, domains, invites, SCIM users and tokens, created/joined/org room indexes

@@ -116,6 +116,7 @@ export function session(seed: SessionSeed = {}): SeededSession {
     orgOnly: false,
     joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
     blobBytesCeiling: ENTITLEMENTS.team.blobBytesPerRoom,
+    fsBytesCeiling: ENTITLEMENTS.team.fsBytesPerRoom,
     hostUnitsPerMonth: 0,
     hostUnits: { month: monthKey(now), used: 0, wakes: [] },
     closedAt: null,

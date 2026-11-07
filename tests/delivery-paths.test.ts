@@ -64,6 +64,7 @@ const EVENT_READS: Listing = {
   "src/tools/sync.ts": { calls: 3, serves: "bellman_sync's events, read as the caller's account" },
   "src/http/rooms.ts": { calls: 3, serves: "the dash's Log route, as above" },
   "src/http/public.ts": { calls: 3, serves: "the public page, through publicReadEvent; and the public message search's window of the newest 200, which searchMessages reads a message's text from, so a brief_update is counted in searched.events and never matched or handed out" },
+  "src/tools/decide.ts": { calls: 1, serves: "voteOn reads the decision's opening event for its rule alone, to refuse an advisory vote or a reason on a secret ballot: hands out no event" },
   "src/tools/send.ts": { calls: 2, serves: "an action_response's checks, on the request and on an earlier answer: hands out no event, only a refusal that names the earlier answerer" },
   "src/rooms.ts": { calls: 6, serves: "liveRooms: bellman_rooms' and GET /me/rooms' last_event (a memory fs event by the memory rule) and outstanding requests, read as the caller's account through eventsFor. fileRoomReport: reads a reported cursor's event for its sender and hands the caller no event, only filed or refused; it applies the read rule first, as the reporter's account, or as the public for a caller with no handle in a public room or removed from it. requestWindow: the log's tail since a moment, which bellman_sync derives outstanding from, and outstanding is action requests' cursors and labels and no brief. restoreVersion: reads a restored cursor's event for its payload and author and hands the caller no event, only a card written again or a refusal that names the event's type; it applies the read rule first, as the restorer's account, so a brief_update its author keeps reads as no event at that cursor. memberLog (two reads, the newest 2,000 or the 2,000 up to a removed member's cut): the window a message search matches, and searchMessages reads a message's text alone, so a brief_update is counted in searched.events and never matched or handed out" },
   "src/outside.ts": { calls: 2, serves: "answerQuestion: reads the cursor a member answers to learn whether it is an outside_question and which task it asks, and hands out no event, only the task or a refusal. questionTask: the same read for a creator's ban or a report, which hands out no event, only the task's origin or a refusal" },
@@ -84,6 +85,22 @@ const CONFIG_READS: Listing = {
   "src/store-do.ts": { calls: 1, serves: "the store facade: passes the read on" },
   "src/config.ts": { calls: 1, serves: "getGovernedConfig, the one reader: a missing, invalid or unapproved row reads as the most restrictive value" },
 };
+
+/**
+ * Each reader of room file rows (ADR 0046). A file under `/members/<id>/` is memory, and reaches a peer only through
+ * `readablePath` (a read or a history) or the `hide` ids (a list or a find), which apply `seesMemory`.
+ */
+const FILE_READS: Listing = {
+  "src/rooms.ts": { calls: 4, serves: "readFsFor and fsHistoryFor after readablePath, listFsFor and findFsFor with hiddenMemoryIds: the memory rule on every one" },
+  "src/memory.ts": { calls: 2, serves: "readHome and listHome (ADR 0047): the caller's own home room, whose id is derived from its account and which no room path reads" },
+  "src/store-do.ts": { calls: 4, serves: "the facade's RPC to the room object, one per method, with the caller's arguments" },
+};
+
+describe("the paths a memory file can leave by (ADR 0046)", () => {
+  it("lists every module that reads a room file row, and how many times", () => {
+    expect(callsIn(/\.(readFs|listFs|fsHistory|findFs)\(/)).toEqual(pinned(FILE_READS));
+  });
+});
 
 describe("the one reader of governed config (#414)", () => {
   it("lists every module that reads a cfg: row, and how many times", () => {

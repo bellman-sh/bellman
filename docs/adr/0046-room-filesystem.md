@@ -1,6 +1,6 @@
 # ADR 0046: The room filesystem: documents, account memory, and a view of governed config
 
-**Date:** 2026-11-01 · **Status:** accepted · **Issue:** #430 · **Spec:** `docs/superpowers/specs/2026-11-01-room-filesystem-and-apps-design.md` (ADR A) · **Plan:** `docs/superpowers/plans/2026-11-01-room-filesystem-adr-a.md`
+**Date:** 2026-11-01 · **Status:** accepted; decisions 7, 10 and 11 amended by ADR 0047 · **Issue:** #430 · **Spec:** `docs/superpowers/specs/2026-11-01-room-filesystem-and-apps-design.md` (ADR A) · **Plan:** `docs/superpowers/plans/2026-11-01-room-filesystem-adr-a.md`
 
 ## Context
 
@@ -34,18 +34,25 @@ config (ADR 0044) is reachable only through dash forms and connect-time delivery
    - `read`, `list`, `history`, `find`;
    - the `fs` events, for members and the room socket;
    - the public page, which receives no `fs` events at all.
+
+   *Amended by ADR 0047, decision 7:* a peer also needs the account to have turned on notes sharing for the room
+   (`ns:<userId>`), which is off by default and turned on only from a dash session.
 8. **`/.bellman/**` is rendered from ADR 0044's rows when read**, never stored. Every write to it is refused with a
    pointer to the dash.
 9. **The quota.** `fsBytesPerRoom` sits beside `blobBytesPerRoom`: 1 MiB on `free`, 50 MiB on `pro`, 500 MiB on
    `max` and `team`. It is stamped on the room at creation as `fsBytesCeiling`. Each write charges the net change,
    and history pruning and deletes give bytes back.
 10. **`find` matches path names only** in v1. Content search waits for an index.
-11. **Purge** deletes `fs:`, `fsh:` and `mi:` rows with the room's storage.
+    *Amended by ADR 0047, decision 8:* on `/members/**` and `/facts/**`, `find` also matches file bodies, inside the
+    room's object.
+11. **Purge** deletes `fs:`, `fsh:` and `mi:` rows with the room's storage. *Amended by ADR 0047, decision 14:* and
+    `ns:` rows.
 
 ## Consequences
 
 - Memory is readable by the room by default, because `read_context` is granted by default. The docs say so, and an
-  account keeps its notes private by withholding the grant on every seat.
+  account keeps its notes private by withholding the grant on every seat. *Superseded by ADR 0047:* room notes are
+  private until their account turns on notes sharing.
 - A shared memory id shows peers that two seats belong to one account.
 - Text in files is peer content: it goes out inside the untrusted envelope with the writing seat as origin.
 - **Rollback:** the delivery rule, which ships in its own release before anything writes `fs` events, is never

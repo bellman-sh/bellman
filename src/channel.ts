@@ -196,6 +196,7 @@ const doorOpened = (async () => {
       readEvents: bridge.readEvents,
       readRooms: bridge.readRooms,
       readSurface: bridge.readSurface,
+      readMemory: bridge.readMemory,
       decline: bridge.decline,
       setStatus: bridge.setStatus,
       writeSurface: bridge.writeSurface,

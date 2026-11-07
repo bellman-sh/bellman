@@ -366,6 +366,36 @@ the repository README at `github.com/NousResearch/hermes-agent`, and
 | Whether a Hermes gateway has joined a Bellman room as an MCP client | **unconfirmed — say nothing.** It connects to remote HTTP MCP servers; nobody has tried it against ours. Issue, not a sentence. |
 | Whether two different people's Hermes agents share a session or a group chat other than over A2A | **unconfirmed — say nothing.** Bot Mode group chats are between Bots that are profiles under one `~/.hermes`; nothing read describes a cross-owner group. |
 
+### Dray
+
+Checked 2026-11-07 against `withdray.com` as published. Its home page and
+`/pricing` serve one Markdown page to agents; the facts below quote it and the
+linked `/help`, `/privacy` (updated 2026-11-06), `/security` (updated
+2026-10-14), `/developers` and the Firefox add-on listing.
+
+| Fact | Source |
+|---|---|
+| In its own words: "Dray shares saved context across ChatGPT, Claude, Gemini, Grok and coding agents such as Claude Code, Codex and Cursor". Footer: "Your context. Across agents." | `withdray.com/` |
+| Capture, web: "The browser extension saves supported ChatGPT, Claude, Gemini and Grok web chats." "You choose which assistants Dray may read." Earlier history can be brought in, and export files imported | `withdray.com/`; `/privacy`; `/help` |
+| Capture, coding: "The CLI saves coding sessions from Claude Code, Codex, Cursor, Grok Build, OpenCode, Antigravity and Kimi Code." It "does not send tool calls, command output, file contents, or the agent's reasoning"; unattended runs (`claude -p`, `codex exec`, CI) are not saved; secrets are replaced on your computer | `withdray.com/`; `/privacy`; `/llms.txt` |
+| What is stored: "Every fact, which assistants it came from and the day Dray learned it." Files are copied to Dray's storage so assistants can retrieve them | Firefox add-on; `/privacy` |
+| Recall: MCP at `https://mcp.withdray.com/mcp`, Streamable HTTP, OAuth with PKCE; tools include `search_memory`, `recall_conversations`, `get_conversation_file`, and `record_memory` with write scope. "Connecting MCP gives an agent access to saved context; it does not start capturing its sessions." Adds itself to ChatGPT (paid plan), Claude, Gemini and Grok as an app or connector | `withdray.com/`; `/developers`; `/help` |
+| Controls: a lookup log ("which assistant, which tool, when"); pausing memory access keeps stored context; account deletion within 30 days, backups within five weeks | Firefox add-on; `/privacy`; `/help`; `/security` |
+| Storage: "Your conversations and memory are stored in the EU" (Amsterdam); "Dray is not end-to-end encrypted"; AI model providers "can process requests outside the EU" | `/security` |
+| Memory is one person's: "nobody else sees it unless an assistant posts it to a chat link." No shared team memory, roles or team audit is described; teams go through a sales form | `/privacy`; `/enterprise` |
+| Link this chat: `/link` in one chat gives a code, `/link` and the code in another joins, in the same assistant or a different one. A private link (the default) admits only your own chats; "On an approval link, a chat from another Dray account waits until you approve it"; "An assistant cannot approve anyone"; on a public link "anyone with the code joins straight away" | `/privacy`; `/help` |
+| A link carries messages, a one-line `Status:` and text files up to 256 KB. "A link gives nobody access to your memory or to your saved chats and files." Not end-to-end encrypted | `/privacy`; `/help` |
+| A link "ends if no other chat joins within 24 hours"; once joined it stays open until closed, or until an end date from 1 hour to 30 days away; "Closing a link is final" | `/privacy`; `/help` |
+| Pricing: no free plan; Pro $9/month or $84/year, Max 5x $29/month, Max 20x $59/month; "Every plan includes every feature"; full refund within 30 days of the first payment | `withdray.com/`; `/compare/memory-tools`; `/help` |
+| Run by Rafael Aslanian, an individual in the United Kingdom; "not affiliated with OpenAI, Anthropic, Google or xAI" | `/privacy`; `/llms.txt` |
+| Supported operating systems for the CLI | **unconfirmed — say nothing.** `/help` and `/about` say macOS and Linux; `/llms.txt` gives a Windows install |
+| How many chats a link holds, and whether a joiner needs a paid Dray plan | **unconfirmed — say nothing** |
+
+**Do not claim** Dray is single-person. Its memory is, but an approval or
+public link lets other people's chats in. The truthful distinction is what is
+shared: a link shares messages and small files, not memory, and has no roles,
+canvas or approvals of actions.
+
 ## Page contract
 
 Eight parts, in this order. The generator emits them all or fails.
@@ -524,6 +554,27 @@ and the claims are not.
   agents; Bellman is where your agents meet agents that are not yours.*
 - **Do not claim** it is single-machine, or that multiplayer is only watching —
   teammates can prompt. See the facts table.
+
+### `/compare/dray`
+
+- **Question:** Why not just use Dray?
+- **Answer:** Dray is memory that follows you between assistants: it saves
+  your web chats and coding sessions and any assistant you connect searches
+  them. Link this chat lets chats post to each other. Bellman starts from the
+  room: several people's agents, a shared canvas, roles, human approval.
+  Bellman's memory (`bellman_memory`) is narrower: notes an agent chooses to
+  write, read by your own seats and no peer.
+- **Decision:** Use Dray for one memory of your own chats across assistants.
+  Use Bellman when agents, yours and other people's, need one place to work.
+- **Axes:** what it is · how memory gets in · who reads it · working with
+  other people · how long the shared space lasts · price to start.
+- **Better at:** automatic capture from four web assistants and seven coding
+  agents; source and day on each fact; search, files included; a lookup log
+  and pause; plain statements on storage and encryption; it lives inside the
+  chat apps people already use. Say that Bellman has no capture, no search
+  over note text, and no lookup log or pause yet.
+- **Tone:** Dray leads on personal memory, and the page says so first.
+- **Do not claim** Dray cannot involve other people. See the facts table.
 
 ### `/compare/` index
 

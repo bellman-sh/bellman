@@ -317,7 +317,7 @@ const QUEUE_WAIT_TOOL: Tool = {
  * because there may be no BELLMAN_KEY at all.
  */
 export type WhoAmI =
-  | { source: "oauth"; label: string; plan: string; role: string; org_id: string | null }
+  | { source: "oauth"; label: string; user_id: string; plan: string; role: string; org_id: string | null }
   | { source: "env"; label: null }
   | { source: "unknown"; label: null };
 
@@ -326,7 +326,7 @@ const WHOAMI_TOOL: Tool = {
   title: "Who this bridge is signed in as",
   description: `The identity peers see when you join a Bellman room, read from the cached sign-in. Local: it never contacts Bellman, so it is safe to call first.
 
-Returns: { source, label, plan, role, org_id, door } when source is "oauth" (signed in, identity readable). For "env" (a BELLMAN_KEY of unknown owner) and "unknown" (no readable sign-in): { source, label: null, door }. door is the local socket this bridge serves to Claude Code's Bellman mod, or null; it is not for you to use.`,
+Returns: { source, label, user_id, plan, role, org_id, door } when source is "oauth" (signed in, identity readable). For "env" (a BELLMAN_KEY of unknown owner) and "unknown" (no readable sign-in): { source, label: null, door }. door is the local socket this bridge serves to Claude Code's Bellman mod, or null; it is not for you to use.`,
   inputSchema: { type: "object", properties: {} },
   annotations: {
     readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
@@ -1270,7 +1270,7 @@ export function createBridge(opts: BridgeOptions) {
     let text: string;
     switch (who.source) {
       case "oauth":
-        text = `Signed in as ${who.label} — ${who.plan} plan, role ${who.role}, org ${who.org_id ?? "none"}.`;
+        text = `Signed in as ${who.label} (${who.user_id}) — ${who.plan} plan, role ${who.role}, org ${who.org_id ?? "none"}.`;
         break;
       case "env":
         text = "Using a BELLMAN_KEY from the environment. This bridge cannot tell whose key it is; the server resolves it on every call.";
@@ -1316,7 +1316,7 @@ export function createBridge(opts: BridgeOptions) {
    * there may be no BELLMAN_KEY at all.
    *
    * Rebuilt field by field rather than passed through, so nothing else the
-   * callback happened to carry — a user id, a token — reaches the tool result.
+   * callback happened to carry — a token, say — reaches the tool result.
    */
   function settle(raw: unknown): WhoAmI {
     const who = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
@@ -1327,15 +1327,16 @@ export function createBridge(opts: BridgeOptions) {
         return { source: "unknown", label: null };
       case "oauth": {
         const label = usableText(who.label);
+        const userId = usableText(who.user_id);
         const plan = usableText(who.plan);
         const role = usableText(who.role);
         // An absent org is no org: a server that leaves null fields out sends an
         // org-less user a claim with no orgId at all.
         const org = who.org_id == null ? null : usableText(who.org_id);
-        if (label !== undefined && plan !== undefined && role !== undefined && org !== undefined) {
-          return { source: "oauth", label, plan, role, org_id: org };
+        if (label !== undefined && userId !== undefined && plan !== undefined && role !== undefined && org !== undefined) {
+          return { source: "oauth", label, user_id: userId, plan, role, org_id: org };
         }
-        const unusable = Object.entries({ label, plan, role, org_id: org })
+        const unusable = Object.entries({ label, user_id: userId, plan, role, org_id: org })
           .filter(([, value]) => value === undefined)
           .map(([field]) => field);
         log(`whoami: the sign-in has no usable ${unusable.join(", ")}; reporting unknown`);

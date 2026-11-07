@@ -796,6 +796,7 @@ export function signedInAs(
   return {
     source: "oauth",
     label: identity.label,
+    user_id: identity.userId,
     plan: identity.plan,
     role: identity.role,
     org_id: identity.orgId,

@@ -2,6 +2,7 @@
  * How a room declares consensus (ADR 0040, #403): the `vote` verb, a role's `veto`, and the `decide` block. Pure:
  * resolveManifest, checkPreset and roomPreview, no store. The electorate a store snapshots is in the store contract.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ManifestError, ManifestShape, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
@@ -240,5 +241,12 @@ describe("the joiner's preview", () => {
       "preset", "mode", "public", "public_name", "your_role", "your_verbs", "heartbeat_seconds", "housekeeping",
       "your_heartbeat_on", "creator_role", "roles", "heartbeat_on", "host", "text",
     ]);
+  });
+});
+
+describe("the manifests guide", () => {
+  it("carries the secret ballot promise word for word", () => {
+    const guide = readFileSync(new URL("../docs-site/src/content/docs/guides/manifests.md", import.meta.url), "utf8");
+    for (const line of SECRET_BALLOT_PROMISE.split("\n")) expect(guide).toContain(line);
   });
 });

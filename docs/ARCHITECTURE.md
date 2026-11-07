@@ -1110,14 +1110,16 @@ server reads only the switch.
 
 ### Secret ballots
 
-A decision kind may be a secret ballot (ADR 0040, decisions 23 to 28). Its votes are written to the log as the
-system with no choice, so nothing that reads events, and nothing that reads storage, ties a vote to a seat. Each
-voting account's choice sits in one `bv:<decision>:<account>` row (a map in `MemoryStore`), which every fold of an
-open secret decision reads as its ballot book and every store read strips before returning. A decision closes in
-one of six ways: a vote settles it, a supersession, an open finding it overdue, the deadline alarm, a removal that
-settles it, or a direct `closeDecision`. Each runs the same erase last in its transaction: the decision's ballot rows
-and the idempotency records their votes used. `votedOn` is how a reader asks whether its own account has voted. The
-operator can read a choice while the decision is open; after close only point-in-time recovery can.
+A decision kind may be a secret ballot (ADR 0040, decisions 23 to 28). A room declares one with `decide.<kind>: {
+rule, ballot: secret }`, which the manifest refuses on `single` and on a kind a role vetoes. Its votes are written
+to the log as the system with no choice, so nothing that reads events, and nothing that reads storage, ties a vote
+to a seat. Each voting account's choice sits in one `bv:<decision>:<account>` row (a map in `MemoryStore`), which
+every fold of an open secret decision reads as its ballot book and every store read strips before returning. A
+decision closes in one of six ways: a vote settles it, a supersession, an open finding it overdue, the deadline
+alarm, a removal that settles it, or a direct `closeDecision`. Each runs the same erase last in its transaction: the
+decision's ballot rows and the idempotency records their votes used. `votedOn` is how a reader asks whether its own
+account has voted. The operator can read a choice while the decision is open; after close only point-in-time
+recovery can.
 
 ### The working surface
 

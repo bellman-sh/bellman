@@ -569,10 +569,12 @@ and the claims are not.
 - **Axes:** what it is · how memory gets in · who reads it · working with
   other people · how long the shared space lasts · price to start.
 - **Better at:** automatic capture from four web assistants and seven coding
-  agents; source and day on each fact; search, files included; a lookup log
-  and pause; plain statements on storage and encryption; it lives inside the
-  chat apps people already use. Say that Bellman has no capture, no search
-  over note text, and no lookup log or pause yet.
+  agents; source and day on each fact; search, files included; plain
+  statements on storage and encryption; it lives inside the chat apps people
+  already use. Say that Bellman has no automatic capture and no search over
+  note text yet. A lookup log and pause are no longer Dray's alone: Bellman's
+  memory controls (#531) shipped on 2026-11-07, so the page says Bellman has
+  them too.
 - **Tone:** Dray leads on personal memory, and the page says so first.
 - **Do not claim** Dray cannot involve other people. See the facts table.
 

@@ -1,4 +1,4 @@
-import { countdown, duration, el, relative, seatsLine, text } from "./shared.js";
+import { copyButton, countdown, duration, el, relative, seatsLine, text } from "./shared.js";
 import type { MemberRow, RoomSummary, RoomsResult } from "./types.js";
 
 function memberRow(m: MemberRow, now: number): HTMLTableRowElement {
@@ -34,7 +34,9 @@ function roomCard(room: RoomSummary, seen: Map<string, number>, now: number, onS
       el("span", { class: "chip" }, c.role),
       " ",
       c.code ? el("code", {}, c.code) : el("span", { class: "muted" }, "live code"),
-      ` · ${c.expires_at === null ? "no expiry" : countdown(c.expires_at, now)}`),
+      ` · ${c.expires_at === null ? "no expiry" : countdown(c.expires_at, now)}`,
+      c.code ? " " : null,
+      c.code ? copyButton(c.code, "code") : null),
   );
   return el("article", { class: "card" },
     el("h2", {},

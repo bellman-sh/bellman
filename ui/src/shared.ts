@@ -21,6 +21,24 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 /**
+ * A Copy button for a join code or link. The host's frame can refuse the clipboard (the resource asks for
+ * `clipboardWrite`, which a host may ignore); then the button says so, and the value stays selectable whole.
+ */
+export function copyButton(value: string, which: string): HTMLButtonElement {
+  const button = el("button", { type: "button", "data-copy": which }, "Copy");
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Select it to copy";
+    }
+    setTimeout(() => { button.textContent = "Copy"; }, 2000);
+  });
+  return button;
+}
+
+/**
  * One call in flight at a time: a call made while one is running shares its
  * promise. The monitor's refresh has a 15 s timer and a Refresh button behind
  * it; two reads at once would be two bellman_rooms calls, and the older answer

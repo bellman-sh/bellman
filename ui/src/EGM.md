@@ -28,9 +28,10 @@ calling tools, and it renders every peer string as text.
   (`read_context` and `receive_messages` on, `request_actions` off), Join and
   Decline; `verdictMessage` builds the text sent to the agent.
 - `[card.ts:renderCard]` the room card for a `StartResult`: join code, countdown,
-  Open buttons for `join_url` and `public_url`.
+  Copy buttons for the code and `join_url`, Open buttons for `join_url` and `public_url`.
 - `[monitor.ts:renderMonitor]` the rooms list: members per room, join codes, a
-  count of events new since the view opened, Refresh and Surface buttons.
+  count of events new since the view opened, a Copy button beside each shown code,
+  Refresh and Surface buttons.
 - `[canvas.ts:createCanvas, Canvas, CanvasDeps, dashRoomUrl, DASH_ORIGIN, httpUrl]`
   the surface canvas: cards, SVG connector lines, zoom, pan and fit, Rooms and
   Refresh controls, and an open-in-dash link to
@@ -40,8 +41,8 @@ calling tools, and it renders every peer string as text.
 - `[artifact.ts:artifactFrame, probeNestedFrames, fromFrame, clampHeight, FRAME_SANDBOX, MIN_FRAME_HEIGHT, MAX_FRAME_HEIGHT, PROBE_TIMEOUT_MS, OPAQUE_ORIGIN, REPORT_HEIGHT]`
   the sandboxed frame for an `html` surface item, and the probe for whether the
   host allows nested frames at all.
-- `[shared.ts:el, text, duration, relative, countdown, seatsLine, coalesce]` the
-  DOM builder and formatting helpers (`coalesce` is exported but unused here).
+- `[shared.ts:el, copyButton, text, duration, relative, countdown, seatsLine, coalesce]` the
+  DOM builder, the Copy button and formatting helpers (`coalesce` is exported but unused here).
 - `[types.ts:ConnectResult, StartResult, RoomsResult, SurfaceResult, SurfaceItemWire, Untrusted, ...]`
   the tool results' wire shapes, typed by hand.
 - `style.css`: the page's styles, imported by `../index.html`.
@@ -102,6 +103,8 @@ calling tools, and it renders every peer string as text.
   with pointer capture, and arrow-key pan set the layer's CSS transform.
 - `[monitor.ts:roomCard]` records the first cursor seen per room in the page's
   `seen` map.
+- `[shared.ts:copyButton]` `navigator.clipboard.writeText` on a click; a refusal
+  relabels the button "Select it to copy", and the label resets after 2 s.
 - No `fetch` or other direct network access, and no model-context update.
 
 ## Verification

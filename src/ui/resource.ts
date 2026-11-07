@@ -25,7 +25,8 @@ export const APP_UI_META = { ui: { resourceUri: APP_RESOURCE_URI } } as const;
  * Register the page. Registering any resource switches the server's `resources`
  * capability on; tests/tools/surface.test.ts pins that this is the only one.
  * `prefersBorder` asks the host to frame the app; the spec recommends saying so
- * because hosts' defaults differ. No `csp`: the page loads nothing external and
+ * because hosts' defaults differ. `clipboardWrite` lets the Copy buttons beside join codes write the
+ * clipboard where the host grants it. No `csp`: the page loads nothing external and
  * reaches data only through the host's `tools/call` (D1).
  */
 export function registerAppResource(server: McpServer): void {
@@ -42,7 +43,7 @@ export function registerAppResource(server: McpServer): void {
         uri: APP_RESOURCE_URI,
         mimeType: APP_MIME_TYPE,
         text: APP_HTML,
-        _meta: { ui: { prefersBorder: true } },
+        _meta: { ui: { prefersBorder: true, permissions: { clipboardWrite: {} } } },
       }],
     }),
   );

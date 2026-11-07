@@ -228,11 +228,17 @@ describe("tool surface", () => {
   it("reads the app as one HTML document that asks the host for a border", async () => {
     const { contents } = await jesse.readResource(APP_RESOURCE_URI);
     expect(contents).toHaveLength(1);
-    const page = contents[0] as { mimeType?: string; text?: string; _meta?: { ui?: { prefersBorder?: boolean } } };
+    const page = contents[0] as {
+      mimeType?: string;
+      text?: string;
+      _meta?: { ui?: { prefersBorder?: boolean; permissions?: Record<string, unknown> } };
+    };
     expect(page.mimeType).toBe(APP_MIME_TYPE);
     expect(typeof page.text).toBe("string");
     expect(/^<!doctype html>/i.test(page.text!.trimStart())).toBe(true);
     expect(page._meta?.ui?.prefersBorder).toBe(true);
+    // The Copy buttons beside join codes need the host to grant the clipboard.
+    expect(page._meta?.ui?.permissions).toEqual({ clipboardWrite: {} });
   });
 
   // The host renders a tool through the resource its _meta names. A tool that

@@ -1577,8 +1577,10 @@ export interface BellmanStore {
    * login can be renamed, so the record holds the latest. Left out, the kept one
    * stays, so a sign-in through another provider does not erase it.
    * `googleEmail`, a Google sign-in's verified email, is kept the same way.
+   * `ref`, the campaign tag the sign-in carried, is kept only by the call that creates the record: a later sign-in's
+   * tag, or its absence, never changes it.
    */
-  recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void>;
+  recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string, ref?: string): Promise<void>;
   /** How many people have ever signed in. */
   countUsers(): Promise<number>;
   /**

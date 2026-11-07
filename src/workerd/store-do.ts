@@ -852,8 +852,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.bylineFor(userId, sessionId);
   }
 
-  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void> {
-    await this.registry.recordSignIn(userId, now, githubLogin, googleEmail);
+  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string, ref?: string): Promise<void> {
+    await this.registry.recordSignIn(userId, now, githubLogin, googleEmail, ref);
   }
 
   async countUsers(): Promise<number> {

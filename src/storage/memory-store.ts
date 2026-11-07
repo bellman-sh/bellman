@@ -1924,14 +1924,16 @@ export class MemoryStore implements BellmanStore {
     this.recordMonth(this.creates, userId);
   }
 
-  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string, ref?: string): Promise<void> {
     const seen = this.users.get(userId);
     const login = githubLogin ?? seen?.githubLogin;
     const email = googleEmail ?? seen?.googleEmail;
+    const tag = seen ? seen.ref : ref;
     this.users.set(userId, {
       userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now,
       ...(login === undefined ? {} : { githubLogin: login }),
       ...(email === undefined ? {} : { googleEmail: email }),
+      ...(tag === undefined ? {} : { ref: tag }),
     });
   }
 

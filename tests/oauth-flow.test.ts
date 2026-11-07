@@ -3,6 +3,7 @@ import { handleOAuth, identityFromAccessToken, replanOnRefresh, resolvePlan, sig
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
+import { readCampaignRef } from "../src/oauth/cookies.js";
 import type { Identity } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
 import { ssoUserId, type ProviderProfile } from "../src/oauth/providers.js";
@@ -764,6 +765,38 @@ describe("turning billing off", () => {
     const second = (await refreshed.json()) as Record<string, string>;
 
     expect((await identityFromAccessToken(second.access_token, config))?.plan).toBe("free");
+  });
+});
+
+// bellman.sh's Worker sets `bm_ref` on the whole domain from an ad's `?ref=`; the callback carries it here (#540).
+describe("the campaign tag", () => {
+  const users = () => (config.plans as MemoryStore).listUsers(10);
+
+  it("keeps the bm_ref cookie the callback carries on the account it creates, and not a later one", async () => {
+    const clientId = await registerClient();
+    /** authorizeThrough's walk, with the browser's cookie on the callback. */
+    const callWithCookie = async (cookie: string) => {
+      const challenge = await sha256Base64url(VERIFIER);
+      const chooser = await call(
+        `/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}` +
+          `&code_challenge=${challenge}&code_challenge_method=S256&state=st-1&resource=${encodeURIComponent(RESOURCE)}`,
+      );
+      const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+      return call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`, { headers: { cookie } });
+    };
+
+    expect((await callWithCookie("theme=dark; bm_ref=rd-film")).status).toBe(302);
+    expect((await users())[0]?.ref).toBe("rd-film");
+
+    await callWithCookie("bm_ref=rd-problem");
+    expect((await users())[0]?.ref, "the first sign-in's tag stands").toBe("rd-film");
+  });
+
+  it("reads a cookie that is not a slug, or sent twice, as no tag", async () => {
+    for (const cookie of ["bm_ref=RD-FILM", "bm_ref=a%3Bb", `bm_ref=${"a".repeat(41)}`, "bm_ref=rd-film; bm_ref=rd-x"]) {
+      expect(readCampaignRef(new Request(ISSUER, { headers: { cookie } })), cookie).toBeUndefined();
+    }
+    expect(readCampaignRef(new Request(ISSUER, { headers: { cookie: "bm_ref=rd-film" } }))).toBe("rd-film");
   });
 });
 

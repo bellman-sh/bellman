@@ -24,6 +24,7 @@ import {
 import {
   clearedSessionCookie, clearedSigninNonce, readSessionCookie, readSigninNonce,
   serializeSessionCookie, serializeSigninNonce,
+  readCampaignRef,
 } from "./cookies.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
@@ -104,6 +105,11 @@ export interface OAuthConfig {
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
+  /**
+   * The request's campaign tag (`readCampaignRef`), which `handleOAuth` sets on its own copy of the config for each
+   * request, so every sign-in path reaches `resolvePlan` with it. Never configured.
+   */
+  campaignRef?: string;
 }
 
 /** The slice of BellmanStore the authorization server needs. */
@@ -237,7 +243,7 @@ async function refuseUnlessSso(plans: PlanStore | undefined, identity: Identity,
  */
 export async function resolvePlan(
   profile: ProviderProfile,
-  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases" | "campaignRef">
 ): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {
   const resolved = await decidePlan(profile, config);
   /**
@@ -257,6 +263,7 @@ export async function resolvePlan(
       resolved.identity.userId, Date.now(),
       profile.provider === "github" ? profile.label : undefined,
       profile.provider === "google" ? profile.email : undefined,
+      config.campaignRef,
     );
   } catch (err) {
     console.error("recording the sign-in failed:", err);
@@ -1247,8 +1254,11 @@ async function answeredAlready(
 
 export async function handleOAuth(
   request: Request,
-  config: OAuthConfig
+  deployment: OAuthConfig
 ): Promise<Response | undefined> {
+  // The callback, the invites page's answer and the panel's sign-in all carry the browser's cookies; only the
+  // sign-in that creates an account keeps the tag (BellmanStore.recordSignIn).
+  const config: OAuthConfig = { ...deployment, campaignRef: readCampaignRef(request) };
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
@@ -2300,6 +2310,7 @@ export async function handleOAuth(
         last_seen_at: new Date(u.lastSeenAt).toISOString(),
         github_login: u.githubLogin ?? null,
         google_email: u.googleEmail ?? null,
+        ref: u.ref ?? null,
       })),
     });
   }

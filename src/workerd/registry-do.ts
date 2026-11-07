@@ -1782,18 +1782,21 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * came to report 2 for one registration (#122): there were no users before
    * this landed, so 0 is the true starting point and there is nothing to seed.
    */
-  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string): Promise<void> {
+  async recordSignIn(userId: string, now: number, githubLogin?: string, googleEmail?: string, ref?: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const seen = await txn.get<UserRecord>(userKey(userId));
       if (!seen) await txn.put(USER_COUNT, ((await txn.get<number>(USER_COUNT)) ?? 0) + 1);
       const login = githubLogin ?? seen?.githubLogin;
       const email = googleEmail ?? seen?.googleEmail;
+      // Set by the insert alone, in the same transaction that decides it is one (BellmanStore.recordSignIn).
+      const tag = seen ? seen.ref : ref;
       await txn.put(userKey(userId), {
         userId,
         firstSeenAt: seen?.firstSeenAt ?? now,
         lastSeenAt: now,
         ...(login === undefined ? {} : { githubLogin: login }),
         ...(email === undefined ? {} : { googleEmail: email }),
+        ...(tag === undefined ? {} : { ref: tag }),
       } satisfies UserRecord);
     });
   }
@@ -1820,6 +1823,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
             userId: r.userId, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt,
             ...(typeof r.githubLogin === "string" ? { githubLogin: r.githubLogin } : {}),
             ...(typeof r.googleEmail === "string" ? { googleEmail: r.googleEmail } : {}),
+            ...(typeof r.ref === "string" ? { ref: r.ref } : {}),
           }]
         : [];
     });

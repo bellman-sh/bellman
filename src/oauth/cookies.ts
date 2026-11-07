@@ -160,6 +160,16 @@ export function readSigninNonce(request: Request, secure: boolean): string | und
 }
 
 /**
+ * The campaign tag bellman.sh's Worker sets as `bm_ref` on the whole domain when a link arrives with `?ref=` (#540):
+ * a slug, or undefined. The site sets it from an ad's query string, so it is checked again here before it reaches the
+ * store; a value that is not a slug reads as absent.
+ */
+export function readCampaignRef(request: Request): string | undefined {
+  const ref = readCookie(request, "bm_ref");
+  return ref !== undefined && /^[a-z0-9-]{1,40}$/.test(ref) ? ref : undefined;
+}
+
+/**
  * One parser for every cookie this server reads.
  *
  * Shared rather than copied because the two things that make it correct are not

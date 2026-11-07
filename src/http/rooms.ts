@@ -37,6 +37,7 @@ import {
 } from "../rooms.js";
 import { checkQuery } from "../search.js";
 import { configRoutes } from "./config.js";
+import { fileRoutes } from "./files.js";
 import { JOINED_SCAN, codeIsLive, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -99,6 +100,8 @@ export const MAX_VIEW_BYTES = 256;
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
   not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400, rate_limited: 429,
+  // Room file writes (ADR 0046): the wire codes the blob routes already answer for a size and a quota.
+  stale: 409, too_large: 413, over_quota: 413,
 };
 
 // ponytail: five minutes of private caching, not tuned. It is also how long a
@@ -257,6 +260,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     }
     const config = await configRoutes(request, url, path, origin, deps);
     if (config) return config;
+    const files = await fileRoutes(request, url, path, origin, deps);
+    if (files) return files;
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);

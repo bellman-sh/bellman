@@ -191,6 +191,7 @@ Errors (nothing is created, no quota spent): "invalid manifest — ..." or a val
         // The room's own byte ceiling (#183), from the plan creating it. Nothing
         // downstream asks a plan again.
         blobBytesCeiling: ent.blobBytesPerRoom,
+        fsBytesCeiling: ent.fsBytesPerRoom,
         // The hosted seat's allowance for this month (hosted seat spec, D2), from the plan
         // creating the room. Each later month's is read from the creator's plan then (I7).
         hostUnitsPerMonth: manifest.host === null ? 0 : ent.hostUnitsPerRoom,

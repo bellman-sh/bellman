@@ -100,6 +100,22 @@ it("purges a closed room when its window has run out, and a second alarm finds n
   expect(await filed("org_codenerd", "qs_window"), "one entry, not two").toHaveLength(1);
 });
 
+it("purges room files, their history and memory ids with the room (ADR 0046)", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_fs_purge"));
+  const by = { memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd", key: null };
+  expect((await store.appendFs("qs_fs_purge", { path: "/plans/a.md", write: { op: "write", content: "x" }, ...by }, [])).outcome).toBe("ok");
+  expect((await store.appendFs("qs_fs_purge", { path: "/members/me/n.md", write: { op: "write", content: "y" }, ...by }, [])).outcome).toBe("ok");
+  const keys = () => runInDurableObject(stubOf("qs_fs_purge"), async (_i: SessionDO, ctx) =>
+    [...(await ctx.storage.list()).keys()].filter((k) => /^(fs|fsh|fsm|mi|mio):/.test(k)));
+  expect(await keys(), "file, history, index and memory id rows before").toHaveLength(8);
+  await store.closeSession("qs_fs_purge");
+  setClock((await store.getSession("qs_fs_purge"))!.closedAt! + WINDOW);
+  expect(await runDurableObjectAlarm(stubOf("qs_fs_purge"))).toBe(true);
+  expect(await keys()).toEqual([]);
+  expect(await rowCount("qs_fs_purge")).toBe(0);
+});
+
 // An alarm that is armed when the purge runs is not the one consumed by running it: an outbox backstop,
 // or a window that was asked past. Called on the instance the alarm is not consumed, so this is the case
 // where something has to leave the object quiet. On this runtime that is `deleteAll()` itself, measured,

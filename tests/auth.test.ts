@@ -147,6 +147,14 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
+  /** Room files and history (ADR 0046): 1 MiB, 50 MiB, and 500 MiB on max and team. */
+  it("sizes the room file quota by plan", () => {
+    expect(ENTITLEMENTS.free.fsBytesPerRoom).toBe(1 * 1024 * 1024);
+    expect(ENTITLEMENTS.pro.fsBytesPerRoom).toBe(50 * 1024 * 1024);
+    expect(ENTITLEMENTS.max.fsBytesPerRoom).toBe(500 * 1024 * 1024);
+    expect(ENTITLEMENTS.team.fsBytesPerRoom).toBe(500 * 1024 * 1024);
+  });
+
   /** How long a closed room is kept (#65, D1): a week, a year, and until someone deletes it. */
   it("keeps a closed room for a window that grows by plan, and for ever on max and team", () => {
     expect(ENTITLEMENTS.free.retainAfterCloseMs).toBe(7 * 24 * 60 * 60 * 1000);
@@ -166,14 +174,14 @@ describe("plan entitlements", () => {
    * (#65) and the hosted seat (#188); landing another facet is a deliberate edit
    * to this line.
    */
-  it("gives max creates, the blob ceiling, the retention window and the hosted seat over pro, and nothing else", () => {
+  it("gives max creates, the blob and file ceilings, the retention window and the hosted seat over pro, and nothing else", () => {
     const {
       monthlyCreates: mc, blobBytesPerRoom: mb, retainAfterCloseMs: mk,
-      hostedRooms: mh, hostUnitsPerRoom: mu, ...maxRest
+      hostedRooms: mh, hostUnitsPerRoom: mu, fsBytesPerRoom: mf, homeMemoryBytes: mm, ...maxRest
     } = ENTITLEMENTS.max;
     const {
       monthlyCreates: pc, blobBytesPerRoom: pb, retainAfterCloseMs: pk,
-      hostedRooms: ph, hostUnitsPerRoom: pu, ...proRest
+      hostedRooms: ph, hostUnitsPerRoom: pu, fsBytesPerRoom: pf, homeMemoryBytes: pm, ...proRest
     } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
     expect([mc, pc]).toEqual([2000, 500]);
@@ -182,6 +190,8 @@ describe("plan entitlements", () => {
     expect(pk).toBe(365 * 24 * 60 * 60 * 1000);
     expect([mh, ph]).toEqual([3, 0]);
     expect([mu, pu]).toEqual([3000, 0]);
+    expect([mf, pf]).toEqual([500 * 1024 * 1024, 50 * 1024 * 1024]);
+    expect([mm, pm]).toEqual([200 * 1024 * 1024, 50 * 1024 * 1024]);
   });
 
   it("gives the hosted seat to max and team only", () => {
@@ -213,7 +223,7 @@ describe("plan entitlements", () => {
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
-   * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
+   * and `fsBytesPerRoom` (ADR 0046) bound what a room stores, and `retainAfterCloseMs` (#65) how long a closed
    * room is kept; `auditRetentionMs` (audit trail spec, D9) how long an org's audit
    * rows are kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
    * hosted rooms a person holds open and what each spends; `publicRooms` whether a
@@ -221,7 +231,7 @@ describe("plan entitlements", () => {
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
+      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "fsBytesPerRoom", "homeMemoryBytes", "retainAfterCloseMs",
       "auditRetentionMs", "hostedRooms", "hostUnitsPerRoom", "publicRooms",
     ].sort();
 

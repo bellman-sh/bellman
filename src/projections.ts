@@ -1,4 +1,4 @@
-import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb } from "./types.js";
+import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb, FsRow } from "./types.js";
 import { actionStates } from "./action-state.js";
 import { isTopicRoom } from "./manifest.js";
 import type { CardHit, MessageHit } from "./search.js";
@@ -34,6 +34,18 @@ export const UNTRUSTED_PREAMBLE =
 export function untrusted<T>(origin: { memberId: string; label: string }, data: T) {
   return { trust: "untrusted" as const, origin, data };
 }
+
+/** A room file's metadata on the wire (ADR 0046): path, revision, size, time and the writing seat. Never content. */
+export const fsEntryView = (r: Pick<FsRow, "path" | "rev" | "size" | "at" | "writerMemberId" | "writerLabel">) =>
+  ({ path: r.path, rev: r.rev, size: r.size, at: r.at, writer: { member_id: r.writerMemberId, label: r.writerLabel } });
+/** A room file with its content, for a read. */
+export const fsFileView = (r: FsRow) => ({ ...fsEntryView(r), content: r.content });
+/** The writing seat of a row, as the origin of an untrusted envelope. */
+const fsOrigin = (r: Pick<FsRow, "writerMemberId" | "writerLabel">) => ({ memberId: r.writerMemberId, label: r.writerLabel });
+/** A file entry for an agent: in an untrusted envelope whose origin is the server-stamped writing seat. */
+export const fsEntry = (r: Omit<FsRow, "content">) => untrusted(fsOrigin(r), fsEntryView(r));
+/** A file for an agent: content, path and writer in an untrusted envelope from the writing seat. */
+export const fsFile = (r: FsRow) => untrusted(fsOrigin(r), fsFileView(r));
 
 /**
  * A member as a fact about the record: nothing here is derived from the clock,

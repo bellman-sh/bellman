@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { meRoutes } from "../src/http/me.js";
+import type { LookupShown } from "../src/memory.js";
 import { MAX_CODE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { joinWith, pairUp, publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
@@ -123,6 +124,28 @@ describe("GET and PUT /me/memory", () => {
     expect(await bodyOf(await dash({ capture: true }))).toEqual({ capture: true, paused: true });
     expect(await bodyOf(await dash({ paused: false, capture: false }))).toEqual({ capture: false, paused: false });
     for (const body of [{ paused: "yes" }, { paused: true, pause: true }]) expect((await dash(body)).status, JSON.stringify(body)).toBe(400);
+  });
+});
+
+describe("GET /me/memory/lookups", () => {
+  it("lists the account's lookup rows newest first with the room's name, to the dash alone", async () => {
+    const pair = await pairUp(h);
+    await pair.creator.call("bellman_memory", { op: "remember", path: "/a.md", content: "a" });
+    await pair.creator.call("bellman_memory", { op: "recall", path: "/a.md" });
+    await pair.creator.call("bellman_memory", { op: "share", session_id: pair.sessionId, member_id: pair.creatorMemberId, path: "/a.md", to: "notes" });
+    const res = await call(null, "/me/memory/lookups", { cookie: DEV_KEY.jesse });
+    expect(res.status).toBe(200);
+    const { lookups } = (await bodyOf(res)) as { lookups: LookupShown[] };
+    expect(lookups.map((l) => [l.op, l.room?.session_id ?? null, l.room?.room ?? null, l.paths])).toEqual([
+      ["share", pair.sessionId, "test-room", ["/a.md"]],
+      ["read", null, null, ["/a.md"]],
+    ]);
+    expect((await call(DEV_KEY.jesse, "/me/memory/lookups")).status).toBe(403);
+    // The joiner's account holds only its own arrival read, none of the creator's.
+    const peer = await call(null, "/me/memory/lookups", { cookie: DEV_KEY.peer });
+    expect(peer.status).toBe(200);
+    expect(((await bodyOf(peer)) as { lookups: LookupShown[] }).lookups.map((l) => [l.op, l.room?.session_id, l.paths])).toEqual([["arrival", pair.sessionId, []]]);
+    expect((await call(null, "/me/memory/lookups", { method: "PUT", cookie: DEV_KEY.jesse, body: {} })).headers.get("allow")).toBe("GET");
   });
 });
 

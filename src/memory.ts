@@ -9,7 +9,7 @@ import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { findMember, gateFsRead, readFsFor, refuse, succeed, waitRefusal, writeFs, type RoomResult } from "./rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "./send-limit.js";
 import type { BellmanStore, FsPage, FsWrite } from "./store.js";
-import type { FsRow, HomeSettings, Identity, LookupSource } from "./types.js";
+import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "./types.js";
 
 const NO_NOTE = "no such note.";
 const PAUSED = "paused: your human paused home memory in the dash; forget still works.";
@@ -106,6 +106,30 @@ export async function setMemorySettings(store: BellmanStore, actor: Identity, pa
   const next = { ...(await store.readHomeSettings(id)), ...patch };
   await store.writeHomeSettings(id, next);
   return next;
+}
+
+/** One lookup as the dash shows it (ADR 0047 decision 13): the row, with its room named. */
+export interface LookupShown {
+  at: number;
+  op: LookupRow["op"];
+  /** The room as the account sees it; null for a bare recall, and `{ session_id, room: null }` for a room since purged. */
+  room: { session_id: string; room: string | null } | null;
+  member_id: string | null;
+  agent: AgentInfo | null;
+  query: string | null;
+  paths: string[];
+}
+
+/** The account's lookup log, newest first, each row's room named by one `getSession` per distinct room in the page. */
+export async function memoryLookups(store: BellmanStore, actor: Identity): Promise<LookupShown[]> {
+  const rows = await store.homeLookups(homeRoomId(actor.userId));
+  const ids = [...new Set(rows.flatMap((r) => (r.sessionId === null ? [] : [r.sessionId])))];
+  const names = new Map(await Promise.all(ids.map(async (id) => [id, (await store.getSession(id))?.manifest.room ?? null] as const)));
+  return rows.map((r) => ({
+    at: r.at, op: r.op,
+    room: r.sessionId === null ? null : { session_id: r.sessionId, room: names.get(r.sessionId) ?? null },
+    member_id: r.memberId, agent: r.agent, query: r.query, paths: r.paths,
+  }));
 }
 
 /**

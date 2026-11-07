@@ -28,18 +28,18 @@
  */
 import { cardResponse, roomCard, roomCard03 } from "../a2a/cards.js";
 import { v03CardTenant } from "../a2a/routes.js";
-import { isBlobId, type BlobStore } from "../blobs.js";
-import { publicRoomUrl } from "../codes.js";
-import { handleFromSegment } from "../handles.js";
-import { publicNames } from "../member-names.js";
+import { isBlobId, type BlobStore } from "../files/blobs.js";
+import { publicRoomUrl } from "../room/codes.js";
+import { handleFromSegment } from "../room/handles.js";
+import { publicNames } from "../room/member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
-import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../public-names.js";
-import { isPublic, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus } from "../rooms.js";
-import { checkQuery } from "../search.js";
+import { PUBLIC_NAME, heldName, holdsName, roomNamed } from "../room/public-names.js";
+import { isPublic, readSurface, readSurfaceWindow, roomLink, searchLog, searchSurface, sessionStatus } from "../room/rooms.js";
+import { checkQuery } from "../surface/search.js";
 import type { BellmanStore } from "../storage/store.js";
 import type { StoredSession } from "../storage/stored-session.js";
-import { surfaceCursor } from "../surface.js";
+import { surfaceCursor } from "../surface/surface.js";
 import {
   AFTER_WITH_QUERY, MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, searchTag, surfaceBody, surfaceTag, windowParams, windowTag,
 } from "./rooms.js";

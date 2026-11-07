@@ -8,9 +8,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
-import { ROOM_MEMBER_CEILING, VERBS } from "../../src/manifest.js";
+import { ROOM_MEMBER_CEILING, VERBS } from "../../src/room/manifest.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
-import { SURFACE_KINDS } from "../../src/surface.js";
+import { SURFACE_KINDS } from "../../src/surface/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
@@ -159,7 +159,7 @@ describe("tool surface", () => {
 
   // A joiner's human decides on the verbs a room declares, and since #2 the
   // server enforces them. Each tool that returns the room block says so. The
-  // decision is denyVerb in src/roles.ts, the call sites are bellman_send and
+  // decision is denyVerb in src/room/roles.ts, the call sites are bellman_send and
   // bellman_invite, and the denial paths are tests/tools/verbs.test.ts.
   it("says on every tool that shows a room's verbs that the server enforces them, and that reading and leaving are never gated", async () => {
     const { tools } = await jesse.listTools();

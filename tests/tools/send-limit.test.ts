@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brief } from "../helpers/fixtures.js";
 import { joinWith, pairUp, publicRoom } from "../helpers/flows.js";
 import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
-import { MAX_PAYLOAD_CHARS } from "../../src/payload.js";
+import { MAX_PAYLOAD_CHARS } from "../../src/room/payload.js";
 
 let h: Harness;
 beforeEach(() => {

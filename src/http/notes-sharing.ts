@@ -12,7 +12,7 @@
  * Runtime-free, as rooms.ts: a web Request in, a Response out.
  */
 import { csrfRefusal } from "../oauth/browser.js";
-import { notesSharersOf } from "../rooms.js";
+import { notesSharersOf } from "../room/rooms.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export const NOTES_SHARING = /^\/rooms\/([^/]+)\/notes-sharing$/;

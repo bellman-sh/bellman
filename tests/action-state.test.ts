@@ -11,7 +11,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, actionStates, isProposalPayload, openProposalsOf, outstandingFor,
-} from "../src/action-state.js";
+} from "../src/room/action-state.js";
 import type { EventType, SessionEvent } from "../src/types.js";
 
 const T0 = 1_700_000_000_000;

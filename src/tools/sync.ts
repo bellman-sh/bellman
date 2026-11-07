@@ -3,16 +3,16 @@ import { z } from "zod";
 import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
 import type { Identity } from "../types.js";
-import { eventsFor, findMember, readSurface, requestWindow, sessionStatus, touchMember } from "../rooms.js";
-import { surfaceCursor } from "../surface.js";
-import { isActiveMember } from "../members.js";
+import { eventsFor, findMember, readSurface, requestWindow, sessionStatus, touchMember } from "../room/rooms.js";
+import { surfaceCursor } from "../surface/surface.js";
+import { isActiveMember } from "../room/members.js";
 import type { BellmanStore } from "../storage/store.js";
 import { publicEvent } from "../public-event.js";
 import { VOICE_NOTE, questionsToAnswer } from "../outside.js";
-import { isTopicRoom } from "../manifest.js";
-import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../action-state.js";
-import { decisionTtlMs, decisionsAwaiting, decisionsOf, isSecret } from "../decision.js";
-import { MAX_REQUESTS_PER_SENDER } from "../housekeeping.js";
+import { isTopicRoom } from "../room/manifest.js";
+import { ACTION_REQUEST_TTL_MS, PROPOSAL_TTL_MS, outstandingFor, requestTtlMs } from "../room/action-state.js";
+import { decisionTtlMs, decisionsAwaiting, decisionsOf, isSecret } from "../room/decision.js";
+import { MAX_REQUESTS_PER_SENDER } from "../room/housekeeping.js";
 
 /**
  * The most events one poll returns (#208), the earliest after the caller's cursor. A member
@@ -338,7 +338,7 @@ removed: true: a creator removed you. You still get the history up to and includ
           // does not grow a field saying nothing is pending.
           //
           // It rides the poll rather than arriving as an event, deliberately.
-          // An `action_request` already interrupts once (src/attention.ts); a
+          // An `action_request` already interrupts once (src/room/attention.ts); a
           // second event re-raising it would interrupt a working member again
           // for something it is not being asked to do now. This is here for
           // when it looks, which is what looking is for.

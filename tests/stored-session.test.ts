@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { hydrateStoredSession, monthKey } from "../src/storage/stored-session.js";
 import { ENTITLEMENTS } from "../src/auth.js";
-import { mustReport } from "../src/roles.js";
+import { mustReport } from "../src/room/roles.js";
 import { roomManifest, session } from "./helpers/fixtures.js";
 
 /** Rows written before join codes carried a role. */

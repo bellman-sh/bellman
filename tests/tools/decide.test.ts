@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/storage/memory-store.js";
 import { DEV_KEY, Harness, envelopes, type Outcome } from "../helpers/harness.js";
 import { pairUp, secretBallot, type PairedSession } from "../helpers/flows.js";
-import { decisionHash } from "../../src/decision.js";
+import { decisionHash } from "../../src/room/decision.js";
 import { SECRET_BALLOT_PROMISE } from "../../src/projections.js";
 import { brief } from "../helpers/fixtures.js";
 

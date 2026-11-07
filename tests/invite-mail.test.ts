@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { INVITE_AUDIENCE, INVITE_FROM, inviteLink, inviteMail, inviteMailer, isMailableAddress, verifyInviteLink } from "../src/invite-mail.js";
+import { INVITE_AUDIENCE, INVITE_FROM, inviteLink, inviteMail, inviteMailer, isMailableAddress, verifyInviteLink } from "../src/orgs/invite-mail.js";
 import { signJwt } from "../src/oauth/tokens.js";
-import { INVITE_TTL_MS } from "../src/orgs.js";
+import { INVITE_TTL_MS } from "../src/orgs/orgs.js";
 import type { Org, OrgInvite } from "../src/types.js";
 
 const org = { orgId: "org_acme", name: "Acme\r\nBcc: x@y" } as Org;

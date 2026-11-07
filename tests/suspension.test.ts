@@ -2,7 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { SUSPENDED, SUSPENSION_CACHE_MS, SuspensionCache } from "../src/suspension.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";

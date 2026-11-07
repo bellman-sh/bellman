@@ -16,7 +16,7 @@ import type { HostDO } from "../src/workerd/host-do.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { OUTBOX_PREFIX } from "../src/storage/outbox.js";
 import { monthKey } from "../src/storage/stored-session.js";
-import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
+import { ABANDONED_AFTER_MS, abandonedAt } from "../src/room/presence.js";
 import { publicEvent } from "../src/public-event.js";
 import type { RoomManifest, Session, SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";

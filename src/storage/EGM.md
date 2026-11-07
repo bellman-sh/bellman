@@ -51,16 +51,16 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
   `ApprovalWrite`, `DecisionOpen`, `VoteWrite`, `DecisionClose`, ...), and `JOINED_SCAN = 500`,
   `SWEEP_RPC_BUDGET = 300`.
 - The write rules both stores apply live in the domain modules of `src/`, so both stores import the same
-  functions: member rules in `[src/members.ts]` (`isActiveMember`, `lastSeen`, `seatInOrder`, `seatVictims`,
+  functions: member rules in `[src/room/members.ts]` (`isActiveMember`, `lastSeen`, `seatInOrder`, `seatVictims`,
   `markRemoved`, `creditReport`, `noteAppend`, `clearSilence`, `asked`, the hosted seat's ids), presence and
-  abandonment in `[src/presence.ts]` (`connectedAmong`, `ABANDONED_AFTER_MS` = 90 days, `isAbandoned`, `stampSeen`),
-  join codes in `[src/codes.ts]` (`codeIsLive`, `JOIN_CODE_TTL` = 15 min, `CONNECT_TOKEN_TTL` = 10 min), capacity in
-  `[src/manifest.ts]` (`isPublic`, `ROOM_MEMBER_CEILING = 5000`, `capacityOf`, 2 for `pair`), surface writes in
-  `[src/surface.ts]` and `[src/frames.ts]` (`placeSurfaceBatch`), decisions in `[src/decision.ts]` (`electorateOf`,
-  `voteRefusal`), files in `[src/fs.ts]` (`decideFsWrite`, `resolveFsPath`), config in `[src/config.ts]`
+  abandonment in `[src/room/presence.ts]` (`connectedAmong`, `ABANDONED_AFTER_MS` = 90 days, `isAbandoned`, `stampSeen`),
+  join codes in `[src/room/codes.ts]` (`codeIsLive`, `JOIN_CODE_TTL` = 15 min, `CONNECT_TOKEN_TTL` = 10 min), capacity in
+  `[src/room/manifest.ts]` (`isPublic`, `ROOM_MEMBER_CEILING = 5000`, `capacityOf`, 2 for `pair`), surface writes in
+  `[src/surface/surface.ts]` and `[src/surface/frames.ts]` (`placeSurfaceBatch`), decisions in `[src/room/decision.ts]` (`electorateOf`,
+  `voteRefusal`), files in `[src/files/fs.ts]` (`decideFsWrite`, `resolveFsPath`), config in `[src/files/config.ts]`
   (`decideConfigWrite`), the hosted seat in `[src/host.ts]` (`decideHostCharge`, `WAKES_PER_HOUR = 8`), blobs in
-  `[src/blobs.ts]` (`decideBlobCharge`), outside tasks in `[src/outside.ts]` (`handOff`), and orgs in
-  `[src/orgs.ts]` (`patchedOrg`, `purchasedOrg`, `scimGrant`).
+  `[src/files/blobs.ts]` (`decideBlobCharge`), outside tasks in `[src/outside.ts]` (`handOff`), and orgs in
+  `[src/orgs/orgs.ts]` (`patchedOrg`, `purchasedOrg`, `scimGrant`).
 - The Durable Object implementation (`SessionDO`, `RegistryDO`, `AuditDO`, `DurableObjectStore`) is in
   [../workerd/EGM.md](../workerd/EGM.md): a file the Node program cannot compile lives there, so the second
   `BellmanStore` sits outside this directory.
@@ -81,12 +81,12 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
   between.
 - A seat is claimed in one operation. `[src/workerd/session-do.ts:SessionDO.seatMember]` and `[src/storage/memory-store.ts:MemoryStore.seatMember]`
   refuse in the order not_found, closed, frozen, banned, full (a banned account never learns the room is full),
-  reclaim stale seats only when that frees enough (`[src/members.ts:seatVictims]` returns `null` rather than reaping
+  reclaim stale seats only when that frees enough (`[src/room/members.ts:seatVictims]` returns `null` rather than reaping
   partly), seat the joiner, and retire temporary codes when the room fills, all in one transaction or one
   synchronous stretch. Permanent codes stay (ADR 0020).
 - A member is removed only by an authorized call: `[src/storage/store.ts:RemovalRequest]` carries `byUserId`, and
-  `removeMember` refuses `forbidden` when it is not the creator; `[src/rooms.ts:evictMember]` checks the creator before
-  the target lookup and refuses self-eviction. `[src/members.ts:markRemoved]` writes `leftAt` and `removedAtCursor`
+  `removeMember` refuses `forbidden` when it is not the creator; `[src/room/rooms.ts:evictMember]` checks the creator before
+  the target lookup and refuses self-eviction. `[src/room/members.ts:markRemoved]` writes `leftAt` and `removedAtCursor`
   together and never moves an existing cut.
 - Appends are single-unit: `[src/workerd/session-do.ts:SessionDO.nextCursor]` reads the cursor inside the caller's transaction so
   two appends cannot take one `e:` key (#120); `appendEventOnce`, `appendSurface(s)`, `approveProposal` and
@@ -98,16 +98,16 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
   that transaction, so no vote lands after a closing event. `[src/workerd/session-do.ts:SessionDO.#writeDecision]` keeps the
   `openDecisions` book and queues each event's org rows (`decisionAudit`) through the outbox in the same put.
 - A removal that records a member out also voids that seat's votes on every unclosed decision and writes the close
-  that leaves due (`[src/decision.ts:removalEvents]`), after the departure and in the same transaction
+  that leaves due (`[src/room/decision.ts:removalEvents]`), after the departure and in the same transaction
   (`[src/workerd/session-do.ts:SessionDO.removeMember]`); a removal never passes a decision, and a rejoin restores neither the
-  seat nor its vote (`[src/decision.ts:applyVote]`). A `SessionDO` record whose decisions opened before the book existed has no
+  seat nor its vote (`[src/room/decision.ts:applyVote]`). A `SessionDO` record whose decisions opened before the book existed has no
   book, so those decisions are not voided.
-- A surface batch is all or nothing at consecutive cursors (`[src/frames.ts:placeSurfaceBatch]`, decided in memory
+- A surface batch is all or nothing at consecutive cursors (`[src/surface/frames.ts:placeSurfaceBatch]`, decided in memory
   before either store writes); frame writes through `appendEvent` throw `FRAME_WRITE_PATH`.
-- Presence is derived, never stored: `[src/presence.ts:presenceOf]` reads `leftAt`, `lastSeenAt` and live sockets;
-  `[src/heartbeat.ts:snapshotOf]` must carry no `present`, `status`, `alive` or `healthy` key. `activeMembers` and
-  `seatedMembers` in `[src/rooms.ts]` are two readings and stay separate.
-- `[src/presence.ts:isAbandoned]` closes a room only past 90 days of no person seen and only when no active member holds a
+- Presence is derived, never stored: `[src/room/presence.ts:presenceOf]` reads `leftAt`, `lastSeenAt` and live sockets;
+  `[src/room/heartbeat.ts:snapshotOf]` must carry no `present`, `status`, `alive` or `healthy` key. `activeMembers` and
+  `seatedMembers` in `[src/room/rooms.ts]` are two readings and stay separate.
+- `[src/room/presence.ts:isAbandoned]` closes a room only past 90 days of no person seen and only when no active member holds a
   socket; `[src/workerd/session-do.ts:SessionDO.#closeIfAbandoned]` stamps `lastSeenAt` instead when a socket vouches.
 
 ## Verification

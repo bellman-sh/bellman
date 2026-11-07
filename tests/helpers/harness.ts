@@ -12,7 +12,7 @@ import { resolveIdentity, type UpgradeLinks } from "../../src/auth.js";
 import { buildServer } from "../../src/server.js";
 import { type BellmanStore } from "../../src/storage/store.js";
 import { MemoryStore } from "../../src/storage/memory-store.js";
-import { MemoryBlobStore, type BlobStore } from "../../src/blobs.js";
+import { MemoryBlobStore, type BlobStore } from "../../src/files/blobs.js";
 import type { ReportMailer } from "../../src/reports.js";
 import type { Identity } from "../../src/types.js";
 

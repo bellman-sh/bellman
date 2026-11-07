@@ -8,7 +8,7 @@ import worker from "../src/workerd/worker.js";
 import { a2aRoutes } from "../src/a2a/routes.js";
 import { answerQuestion } from "../src/outside.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
-import { banAsker } from "../src/rooms.js";
+import { banAsker } from "../src/room/rooms.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { Identity } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";

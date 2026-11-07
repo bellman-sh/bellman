@@ -14,7 +14,7 @@ import { busCredentials, readServer } from "../src/client/credentials.js";
 import type { PeerEvent } from "../src/client/inbox.js";
 import { identityFromAccessToken, unauthorizedHeaders } from "../src/oauth/routes.js";
 import { buildServer } from "../src/server.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { connectSignedIn } from "../src/client/signin.js";
 import { type BellmanStore } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";

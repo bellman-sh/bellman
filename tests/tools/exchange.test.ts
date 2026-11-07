@@ -12,8 +12,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
-import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
-import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
+import { MAX_PAYLOAD_DEPTH } from "../../src/room/payload.js";
+import { ACTION_REQUEST_TTL_MS } from "../../src/room/action-state.js";
 import { SYNC_PAGE } from "../../src/tools/sync.js";
 
 let h: Harness;

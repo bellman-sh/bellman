@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkHandle } from "../src/handles.js";
+import { checkHandle } from "../src/room/handles.js";
 
 describe("checkHandle", () => {
   it("trims and lowercases what it is given", () => {

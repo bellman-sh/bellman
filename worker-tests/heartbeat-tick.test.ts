@@ -11,7 +11,7 @@ import {
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import { hostMember } from "../src/host.js";
-import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
+import { ABANDONED_AFTER_MS, abandonedAt } from "../src/room/presence.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 import { editRoom, roomIn } from "../tests/helpers/rows.js";
 

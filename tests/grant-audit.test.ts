@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { purchaseGrant } from "../src/billing/grants.js";
 import {
   grantAuditEntries, orgAuditEntries, orgEventEntry, revokeAuditEntries, scimIntent, scimUserEntry, type AuditIntent,
-} from "../src/grant-audit.js";
+} from "../src/orgs/grant-audit.js";
 import { DEFAULT_POLICY, type Org, type PlanGrant } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;

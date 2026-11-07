@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { HOST_MEMBER_ID, HOST_USER_ID, isHostMember, isReplyToHost } from "../src/members.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, isHostMember, isReplyToHost } from "../src/room/members.js";
 import { HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT, WAKES_PER_HOUR, hostMember, unitsFor, hostWakeIntent, emptyHostState, decide, questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake, callMessages, hostedSeatFor, hostedSeatOn, hostedSeatUsers, HOST_RULES, RULES_OUTRANK, type HostDriver, type HostRecord, decideHostCharge } from "../src/host.js";
-import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/manifest.js";
+import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/room/manifest.js";
 import type { HostAppend } from "../src/storage/store.js";
 import { monthKey, type StoredSession } from "../src/storage/stored-session.js";
 import { brief, member, roomManifest, session } from "./helpers/fixtures.js";

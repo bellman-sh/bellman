@@ -11,11 +11,11 @@
  * checked, because the rule is about the projection layer and not about the
  * file that happened to need it first.
  *
- * `src/rooms.ts` is the third root. It holds the operations both transports
+ * `src/room/rooms.ts` is the third root. It holds the operations both transports
  * call, so its docblock makes the same promise, and neither of the other two
  * roots reaches it: a clean walk from them said nothing about it.
  *
- * `src/blobs.ts` is the fourth root (#183): the blob seam both the routes and
+ * `src/files/blobs.ts` is the fourth root (#183): the blob seam both the routes and
  * the tool handlers import, with `blobs-r2.ts` the Workers half it must never
  * reach.
  *
@@ -103,12 +103,12 @@ describe("the projection layer stays importable from both transports", () => {
   it.each([
     ["projections.ts", resolve(SRC, "projections.ts")],
     ["public-event.ts", resolve(SRC, "public-event.ts")],
-    ["rooms.ts", resolve(SRC, "rooms.ts")],
-    ["blobs.ts", resolve(SRC, "blobs.ts")],
+    ["rooms.ts", resolve(SRC, "room/rooms.ts")],
+    ["blobs.ts", resolve(SRC, "files/blobs.ts")],
     ["http/rooms.ts", resolve(SRC, "http/rooms.ts")],
     ["http/public.ts", resolve(SRC, "http/public.ts")],
-    ["search.ts", resolve(SRC, "search.ts")],
-    ["frames.ts", resolve(SRC, "frames.ts")],
+    ["search.ts", resolve(SRC, "surface/search.ts")],
+    ["frames.ts", resolve(SRC, "surface/frames.ts")],
   ])("%s pulls in no runtime, transitively", (_name, entry) => {
     expect(offenders(entry)).toEqual([]);
   });
@@ -118,7 +118,7 @@ describe("the projection layer stays importable from both transports", () => {
     // file and stopped — or read nothing at all.
     const graph = reachable(resolve(SRC, "projections.ts"));
     expect(graph.size).toBeGreaterThan(1);
-    expect([...graph.keys()].map((f) => relative(SRC, f))).toContain("roles.ts");
+    expect([...graph.keys()].map((f) => relative(SRC, f))).toContain("room/roles.ts");
   });
 
   it("follows a re-export, not only a plain import", () => {
@@ -137,12 +137,12 @@ describe("the projection layer stays importable from both transports", () => {
     // proving nothing.
     reachable(resolve(SRC, "projections.ts"));
     reachable(resolve(SRC, "public-event.ts"));
-    reachable(resolve(SRC, "rooms.ts"));
-    reachable(resolve(SRC, "blobs.ts"));
+    reachable(resolve(SRC, "room/rooms.ts"));
+    reachable(resolve(SRC, "files/blobs.ts"));
     reachable(resolve(SRC, "http/rooms.ts"));
     reachable(resolve(SRC, "http/public.ts"));
-    reachable(resolve(SRC, "search.ts"));
-    reachable(resolve(SRC, "frames.ts"));
+    reachable(resolve(SRC, "surface/search.ts"));
+    reachable(resolve(SRC, "surface/frames.ts"));
     expect(unresolved).toEqual([]);
   });
 

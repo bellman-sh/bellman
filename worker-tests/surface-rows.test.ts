@@ -7,7 +7,7 @@
  */
 import { it, expect, vi, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { readSurface } from "../src/rooms.js";
+import { readSurface } from "../src/room/rooms.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { SurfaceItem, SurfaceRow } from "../src/types.js";

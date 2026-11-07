@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/storage/memory-store.js";
-import { abandonedAt } from "../../src/presence.js";
+import { abandonedAt } from "../../src/room/presence.js";
 import { Harness, envelopes } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 

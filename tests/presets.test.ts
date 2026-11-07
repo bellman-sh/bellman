@@ -3,8 +3,8 @@
  * as the manifest bellman_start resolves (D6). Pure: no store.
  */
 import { describe, expect, it } from "vitest";
-import { asManifest, checkPreset } from "../src/presets.js";
-import { builtinPresets, resolveManifest, SOCIAL_HOST_INSTRUCTIONS } from "../src/manifest.js";
+import { asManifest, checkPreset } from "../src/room/presets.js";
+import { builtinPresets, resolveManifest, SOCIAL_HOST_INSTRUCTIONS } from "../src/room/manifest.js";
 import type { SavedPreset } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");

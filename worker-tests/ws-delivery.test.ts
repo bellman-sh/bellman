@@ -26,7 +26,7 @@ import {
   env, SELF, reset, abortAllDurableObjects, evictAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
-import { evictMember } from "../src/rooms.js";
+import { evictMember } from "../src/room/rooms.js";
 import type { Identity, Member, Session } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
@@ -254,7 +254,7 @@ const say = (store: DurableObjectStore, id: string, text: string) =>
     fromLabel: "boss@elsewhere", payload: { text }, refId: null,
   });
 
-/** What evictMember appends (src/rooms.ts), shape for shape. */
+/** What evictMember appends (src/room/rooms.ts), shape for shape. */
 const removal = (memberId: string) => ({
   type: "member_evicted" as const,
   fromMemberId: "system", fromUserId: "u_boss", fromLabel: "boss@elsewhere",

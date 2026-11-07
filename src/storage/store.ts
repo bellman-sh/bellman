@@ -1,23 +1,23 @@
 import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings } from "../types.js";
-import { type FsRefusal } from "../fs.js";
-import { blobBytesUsed } from "../blobs.js";
+import { type FsRefusal } from "../files/fs.js";
+import { blobBytesUsed } from "../files/blobs.js";
 import type { Ban, BanScope, CreatorBan } from "../bans.js";
 import { type IdempotencyRecord } from "./idempotency.js";
 import { type StoredSession } from "./stored-session.js";
-import type { AuditIntent } from "../grant-audit.js";
-import type { AuditSettings, AuditSinkStatus, AuditVerification } from "../audit-sink.js";
-import { type SurfaceWrite } from "../surface.js";
-import { type Window, type WindowPage } from "../frames.js";
-import { type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionState, type DecisionView, type FailReason } from "../decision.js";
+import type { AuditIntent } from "../orgs/grant-audit.js";
+import type { AuditSettings, AuditSinkStatus, AuditVerification } from "../orgs/audit-sink.js";
+import { type SurfaceWrite } from "../surface/surface.js";
+import { type Window, type WindowPage } from "../surface/frames.js";
+import { type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionState, type DecisionView, type FailReason } from "../room/decision.js";
 import { type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult } from "../outside.js";
-import type { SendAdmission } from "../send-limit.js";
+import type { SendAdmission } from "../room/send-limit.js";
 import type { Suspension } from "../suspension.js";
 import type { FiledReport, NewReport, Report } from "../reports.js";
-import { type AuditActor, type AuditFacets, type AuditPage, type AuditQuery } from "../audit.js";
-import { capacityOf, isPublic } from "../manifest.js";
-import { NO_SOCKETS, isActiveMember } from "../members.js";
-import { isAbandoned } from "../presence.js";
-export type { AuditIntent } from "../grant-audit.js";
+import { type AuditActor, type AuditFacets, type AuditPage, type AuditQuery } from "../orgs/audit.js";
+import { capacityOf, isPublic } from "../room/manifest.js";
+import { NO_SOCKETS, isActiveMember } from "../room/members.js";
+import { isAbandoned } from "../room/presence.js";
+export type { AuditIntent } from "../orgs/grant-audit.js";
 
 /** Fields of a Member that may change after it is created. */
 export type MemberPatch = Partial<
@@ -1501,7 +1501,7 @@ export interface BellmanStore {
   setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet>;
 
   /**
-   * Governed config (#414). Read `getGovernedConfig` (src/config.ts), never these rows: it is the one reader, and it
+   * Governed config (#414). Read `getGovernedConfig` (src/files/config.ts), never these rows: it is the one reader, and it
    * reads a missing, invalid or unapproved row as the most restrictive value.
    */
   getConfigRow(sessionId: string, name: ConfigName): Promise<ConfigRow | null>;
@@ -1516,7 +1516,7 @@ export interface BellmanStore {
   writeConfig(sessionId: string, w: ConfigWrite, audit: readonly AuditEntry[]): Promise<ConfigWriteResult>;
 
   /**
-   * Room files (ADR 0046). Reads apply no memory rule: `src/rooms.ts` does, and passes the memory ids a reader may
+   * Room files (ADR 0046). Reads apply no memory rule: `src/room/rooms.ts` does, and passes the memory ids a reader may
    * not see as `hide`, so listing and finding filter before they page or cap. `readFs` without `rev` returns null
    * for a deleted file.
    */

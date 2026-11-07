@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONFIG_NAMES, CONFIG_RESERVE_BYTES, bodyBytes, bodyHash, getGovernedConfig, isNarrowing, parseConfigBody, restrictive,
   truncateForDelivery,
-} from "../src/config.js";
+} from "../src/files/config.js";
 import { type BellmanStore } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { ConfigRow } from "../src/types.js";

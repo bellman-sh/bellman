@@ -3,8 +3,8 @@ import { z } from "zod";
 import { RoomRefShape, fail, ok, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
-import { nameFree, publicNameRefusal } from "../public-names.js";
-import { namePublicRoom } from "../rooms.js";
+import { nameFree, publicNameRefusal } from "../room/public-names.js";
+import { namePublicRoom } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 
 export function registerPublicName(server: McpServer, identity: Identity, s: BellmanStore): void {

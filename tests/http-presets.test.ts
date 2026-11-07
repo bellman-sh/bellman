@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MAX_PRESET_BYTES, presetRoutes, type PresetRouteDeps } from "../src/http/presets.js";
 import type { RoomCaller } from "../src/http/rooms.js";
-import { MAX_PRESETS } from "../src/presets.js";
+import { MAX_PRESETS } from "../src/room/presets.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { DEV_KEY } from "./helpers/harness.js";
 

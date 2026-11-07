@@ -4,7 +4,7 @@
  * The route is tests/http-public.test.ts; the store methods are the store contract's.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PUBLIC_NAME, PUBLIC_NAME_LEASE_MS, claimName, heldName, holdsName, nameFree, publicNameRefusal, roomNamed } from "../src/public-names.js";
+import { PUBLIC_NAME, PUBLIC_NAME_LEASE_MS, claimName, heldName, holdsName, nameFree, publicNameRefusal, roomNamed } from "../src/room/public-names.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { BellmanStore } from "../src/storage/store.js";
 import { roomPreview } from "../src/projections.js";

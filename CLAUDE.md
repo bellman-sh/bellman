@@ -41,16 +41,20 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
   the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/storage/` — the storage boundary: `store.ts` is `BellmanStore` and `memory-store.ts` is `MemoryStore`; the
   rest are the layout helpers both stores share (the stored session, member rows, idempotency keys, the outbox,
-  the registry's key layout). The write rules both stores apply live in the domain modules (`src/members.ts`,
-  `src/presence.ts`, ...), so both import the same functions.
+  the registry's key layout). The write rules both stores apply live in the domain modules (`src/room/members.ts`,
+  `src/room/presence.ts`, ...), so both import the same functions.
 - `src/workerd/` — everything that runs only in workerd: the Workers entry (`worker.ts`) and the six Durable
   Object classes. `store-do.ts` is `DurableObjectStore`, the production `BellmanStore`, which routes each call to
   `SessionDO` (`session-do.ts`), `RegistryDO` (`registry-do.ts`) or `AuditDO` (`audit-do.ts`); `AuthDO`, `HostDO`
   and `CostDO` are `auth-do.ts`, `host-do.ts` and `cost-do.ts`.
-- `src/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
+- `src/room/` — the room's rules, runtime-free: the operations both transports call (`rooms.ts`), the roster
+  rules both stores apply (`members.ts`), manifests, roles, codes, presence, the heartbeat and decisions.
+  `src/surface/` is the working surface's rules, `src/orgs/` orgs and audit, and `src/files/` room files, governed
+  config, home memory and blobs.
+- `src/files/config.ts` — governed room config (ADR 0044): the closed set of names, their schemas, and
   `getGovernedConfig`, the only reader of `cfg:` rows. `src/http/config.ts` is its dash-session-only write route.
-- `src/fs-path.ts` / `src/fs.ts` — room files (ADR 0046), runtime-free: path normalization and namespaces, and the
-  planning of each write op, the byte charge and the history diff. `src/governed-view.ts` renders `/.bellman/` from
+- `src/files/fs-path.ts` / `src/files/fs.ts` — room files (ADR 0046), runtime-free: path normalization and namespaces, and the
+  planning of each write op, the byte charge and the history diff. `src/files/governed-view.ts` renders `/.bellman/` from
   governed config; `src/tools/fs.ts` is `bellman_fs` and `src/http/files.ts` the dash routes.
 - `src/cost/` — the room cost capture (#473): a daily job that records raw facts, runtime-free.
   `src/workerd/cost-do.ts` is `CostDO`, the object it records into.

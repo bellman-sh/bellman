@@ -19,8 +19,8 @@
  * the role (an org on the identity for `GET /org`; `auditRefusal`'s three for everything else), then
  * `404 no_org` for an org with no record, and only then the body.
  */
-import { auditRefusal } from "../audit.js";
-import { inviteLink, isMailableAddress, type InviteMailer } from "../invite-mail.js";
+import { auditRefusal } from "../orgs/audit.js";
+import { inviteLink, isMailableAddress, type InviteMailer } from "../orgs/invite-mail.js";
 import { grantKeyForUser } from "../billing/grants.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { domainVerified, isDomain, newDomainToken, verificationRecord } from "../oauth/dns.js";
@@ -28,7 +28,7 @@ import { discover } from "../oauth/oidc.js";
 import { isStableIdentityKey, parseSsoKey } from "../oauth/providers.js";
 import { seal } from "../oauth/sealed.js";
 import { randomId, sha256Base64url } from "../oauth/tokens.js";
-import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, inviteMailBudget, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs.js";
+import { INVITE_TTL_MS, MAX_ORG_NAME_CHARS, inviteMailBudget, RESEND_COOLDOWN_MS, MAX_PENDING_INVITES, inviteLive, isUnownedSeat, orgView, ownsByForm, parseOrgName, parsePolicyPatch, userIdForKey } from "../orgs/orgs.js";
 import type { AuditIntent } from "../storage/store.js";
 import type { Org, OrgIdp, OrgInvite, PlanGrant, Role } from "../types.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";

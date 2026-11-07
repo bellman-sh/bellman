@@ -16,8 +16,8 @@
  * is what makes an agent write memory unasked, and an agent reads peer content that can ask for it.
  */
 import { allowedOrigin, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { readMemorySettings, setMemoryCapture } from "../memory.js";
-import { liveRooms } from "../rooms.js";
+import { readMemorySettings, setMemoryCapture } from "../files/memory.js";
+import { liveRooms } from "../room/rooms.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type MeRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;

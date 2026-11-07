@@ -4,8 +4,8 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ManifestError, ManifestShape, resolveManifest } from "../src/manifest.js";
-import { asManifest, checkPreset } from "../src/presets.js";
+import { ManifestError, ManifestShape, resolveManifest } from "../src/room/manifest.js";
+import { asManifest, checkPreset } from "../src/room/presets.js";
 import { SECRET_BALLOT_PROMISE, roomPreview } from "../src/projections.js";
 import type { StoredSession } from "../src/storage/stored-session.js";
 import { member, session } from "./helpers/fixtures.js";

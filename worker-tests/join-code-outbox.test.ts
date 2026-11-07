@@ -24,8 +24,8 @@ import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { RegistryDO } from "../src/workerd/registry-do.js";
 import { OUTBOX_GRACE_MS, OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow } from "../src/storage/outbox.js";
-import { JOIN_CODE_TTL } from "../src/codes.js";
-import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import { JOIN_CODE_TTL } from "../src/room/codes.js";
+import { ABANDONED_AFTER_MS } from "../src/room/presence.js";
 // The shared fixture, not a hand-rolled literal: hydrateStoredSession returns
 // undefined for a session whose manifest has no roles object, so a `manifest: null`
 // fixture reads as GONE and every assertion below would fail against correct code.

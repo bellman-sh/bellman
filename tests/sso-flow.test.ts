@@ -11,7 +11,7 @@ import { MemoryAuthStore, SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { ssoUserId } from "../src/oauth/providers.js";
 import { seal } from "../src/oauth/sealed.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
-import { scimIntent } from "../src/grant-audit.js";
+import { scimIntent } from "../src/orgs/grant-audit.js";
 import type { Identity, Org, PlanGrant, ScimUser } from "../src/types.js";
 import { DEFAULT_POLICY } from "../src/types.js";
 

@@ -1,7 +1,7 @@
 import { createApp } from "./app.js";
-import { MemoryBlobStore } from "./blobs.js";
-import { tickStep } from "./heartbeat.js";
-import { clearedKeys, dueFindings } from "./housekeeping.js";
+import { MemoryBlobStore } from "./files/blobs.js";
+import { tickStep } from "./room/heartbeat.js";
+import { clearedKeys, dueFindings } from "./room/housekeeping.js";
 import { MemoryHost, nodeModel } from "./host-memory.js";
 import { hostedSeatOn } from "./host.js";
 import { MemoryStore } from "./storage/memory-store.js";

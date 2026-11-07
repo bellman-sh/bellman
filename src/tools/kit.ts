@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { SEAT_STATUSES, SEND_KINDS, type SendKind, type SessionEvent, type Verb } from "../types.js";
-import { FROZEN } from "../rooms.js";
-import { MAX_PAYLOAD_CHARS } from "../payload.js";
+import { FROZEN } from "../room/rooms.js";
+import { MAX_PAYLOAD_CHARS } from "../room/payload.js";
 import type { AppendExtras, BellmanStore } from "../storage/store.js";
-import { getGovernedConfig, truncateForDelivery } from "../config.js";
+import { getGovernedConfig, truncateForDelivery } from "../files/config.js";
 import { untrusted } from "../projections.js";
 
 // What every tool file shares: the MCP result shape, the zod shapes a tool's
@@ -15,7 +15,7 @@ export const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call
 
 /**
  * The kinds bellman_send accepts. The tool's `type` enum is built from this list, which lives in src/types.ts beside
- * `EventType` so that `src/rooms.ts` can read the same list (a report's message target) without importing a tool.
+ * `EventType` so that `src/room/rooms.ts` can read the same list (a report's message target) without importing a tool.
  */
 export { SEND_KINDS, type SendKind };
 
@@ -106,7 +106,7 @@ export const CapabilitiesShape = z
  * An answer to an `action_request`. `approved` is a REQUIRED boolean, and that
  * is the whole point of the shape: the field was unvalidated, so a client could
  * send `{ approved: "false" }` and have a human's refusal read as an approval
- * on the way back out (see `verdictOf` in src/action-state.ts). `result` is the
+ * on the way back out (see `verdictOf` in src/room/action-state.ts). `result` is the
  * sentence the requester is shown.
  *
  * Not strict, unlike `ProgressShape` below: an `action_response` payload is also

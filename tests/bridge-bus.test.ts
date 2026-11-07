@@ -13,7 +13,7 @@ import { createBridge, type BridgeBus, type Delivery, type Remote } from "../src
 import { drain, readMemberships, type PeerEvent } from "../src/client/inbox.js";
 import { publicEvent } from "../src/public-event.js";
 import { buildServer } from "../src/server.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { fakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";

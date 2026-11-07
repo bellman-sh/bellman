@@ -43,7 +43,7 @@ export interface Member {
   leftAt: number | null;
   /**
    * When this member was last heard from — any call it made, not a heartbeat.
-   * `src/presence.ts` reads it to tell a member that went quiet from one that
+   * `src/room/presence.ts` reads it to tell a member that went quiet from one that
    * left, which is what keeps a dead session from holding its seat forever.
    * Absent on rows stored before the field existed; read it through
    * `lastSeen`, which lifts those to `joinedAt`.
@@ -134,7 +134,7 @@ export type EventType =
   | "outside_answer"
   /** The room-visible line for an outside task's cancel, expiry or room-closed: `{taskId, text}`. Never sent by a member. */
   | "outside_notice"
-  /** A decision's opening, a vote on it, its close, and a removed voter's votes voided (ADR 0040). Payloads in `src/decision.ts`. */
+  /** A decision's opening, a vote on it, its close, and a removed voter's votes voided (ADR 0040). Payloads in `src/room/decision.ts`. */
   | "decision_opened"
   | "decision_vote"
   | "decision_closed"
@@ -955,7 +955,7 @@ export interface SurfaceRow extends SurfaceItem {
 
 /**
  * Governed room config (#414): room settings a human with `govern` changes in a dash session, inside the manifest
- * it never writes. `src/config.ts` holds the closed set of names, and `getGovernedConfig` is their only reader.
+ * it never writes. `src/files/config.ts` holds the closed set of names, and `getGovernedConfig` is their only reader.
  */
 export type ConfigName = "room_instructions";
 

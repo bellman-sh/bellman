@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
-import { resolveManifest, ROOM_MEMBER_CEILING } from "../src/manifest.js";
-import { HOST_USER_ID } from "../src/members.js";
+import { resolveManifest, ROOM_MEMBER_CEILING } from "../src/room/manifest.js";
+import { HOST_USER_ID } from "../src/room/members.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
-import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
+import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/room/rooms.js";
 import type { ArrivingMember, Identity, Member } from "../src/types.js";
 
 /**
- * The operations in src/rooms.ts, driven directly. The authority rules are the
+ * The operations in src/room/rooms.ts, driven directly. The authority rules are the
  * reason this file exists: through the MCP harness they are visible only as a
  * refusal sentence, and here they are the subject.
  */

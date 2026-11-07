@@ -12,7 +12,7 @@ import { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { text } from "./helpers/blob-bytes.js";

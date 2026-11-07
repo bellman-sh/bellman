@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
   joinUrl, JOIN_URL_BASE,
-} from "../src/codes.js";
-import { MAX_ROLE_KEY_LENGTH } from "../src/manifest.js";
+} from "../src/room/codes.js";
+import { MAX_ROLE_KEY_LENGTH } from "../src/room/manifest.js";
 
 describe("join codes", () => {
   /** Codes get read aloud and retyped, so the ambiguous glyphs are excluded. */

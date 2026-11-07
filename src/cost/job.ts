@@ -5,7 +5,7 @@
  * Each half stands alone: a failure is recorded in that half's status and the others still run, so a registry
  * outage does not cost a day of blob levels, and R2 trouble does not cost a day of plans.
  */
-import type { BlobStore } from "../blobs.js";
+import type { BlobStore } from "../files/blobs.js";
 import { monthKey } from "../storage/stored-session.js";
 import { GRAPHQL_URL, parseUsage, usageQuery } from "./graphql.js";
 import { capturePlans, type CapturePlansDeps } from "./plans.js";

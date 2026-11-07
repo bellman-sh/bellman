@@ -31,7 +31,7 @@ import { DurableObjectStore } from "../src/workerd/store-do.js";
 import { AuthStore } from "../src/workerd/auth-do.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
-import { blobBytesUsed } from "../src/blobs.js";
+import { blobBytesUsed } from "../src/files/blobs.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 import { stream, text } from "../tests/helpers/blob-bytes.js";
 

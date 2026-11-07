@@ -1,6 +1,6 @@
 /** Room file paths (ADR 0046): one normal form, refused before any authorization runs. */
 import { describe, expect, it } from "vitest";
-import { MAX_PATH_CHARS, MAX_PATH_SEGMENTS, namespaceOf, normalizePath } from "../src/fs-path.js";
+import { MAX_PATH_CHARS, MAX_PATH_SEGMENTS, namespaceOf, normalizePath } from "../src/files/fs-path.js";
 
 const ok = (raw: string) => {
   const r = normalizePath(raw);

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
 import { DEV_KEY, Harness } from "../helpers/harness.js";
-import { joinUrl } from "../../src/codes.js";
+import { joinUrl } from "../../src/room/codes.js";
 
 let h: Harness;
 

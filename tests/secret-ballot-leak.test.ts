@@ -5,11 +5,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
-import { decisionHash, type DecisionDraft } from "../src/decision.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
+import { decisionHash, type DecisionDraft } from "../src/room/decision.js";
 import { publicRoutes } from "../src/http/public.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
-import { liveRooms } from "../src/rooms.js";
+import { liveRooms } from "../src/room/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import type { RoomManifest } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";

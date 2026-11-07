@@ -3,10 +3,10 @@ import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
-import { joinUrl } from "../codes.js";
+import { joinUrl } from "../room/codes.js";
 import type { Identity } from "../types.js";
-import { MAX_ROLE_KEY_LENGTH } from "../manifest.js";
-import { issueInvite, revokeInvite } from "../rooms.js";
+import { MAX_ROLE_KEY_LENGTH } from "../room/manifest.js";
+import { issueInvite, revokeInvite } from "../room/rooms.js";
 import type { BellmanStore } from "../storage/store.js";
 
 export function registerInvite(server: McpServer, identity: Identity, s: BellmanStore): void {

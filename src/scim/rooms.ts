@@ -4,9 +4,9 @@
  * is the decision, the rooms are its consequence, and both walks are idempotent, so a pass cut short is
  * finished by the next deactivation of the same user.
  */
-import { audit, evictionRequest } from "../rooms.js";
+import { audit, evictionRequest } from "../room/rooms.js";
 import { JOINED_SCAN, type BellmanStore } from "../storage/store.js";
-import { isActiveMember } from "../members.js";
+import { isActiveMember } from "../room/members.js";
 import type { Identity } from "../types.js";
 
 /**

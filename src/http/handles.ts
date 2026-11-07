@@ -4,7 +4,7 @@
  * same preflight, the CSRF check on every write a cookie makes, and the bound on a write's body. Here,
  * not in the OAuth router that serves `/account`, because that router has no store (plan ruling R1).
  */
-import { checkHandle } from "../handles.js";
+import { checkHandle } from "../room/handles.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 

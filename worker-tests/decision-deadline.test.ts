@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, runInDurableObject } from "cloudflare:test";
-import { MIN_DECISION_TTL_MS, type DecisionDraft } from "../src/decision.js";
+import { MIN_DECISION_TTL_MS, type DecisionDraft } from "../src/room/decision.js";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { SessionDO } from "../src/workerd/session-do.js";
 import type { EventBody, SessionEvent } from "../src/types.js";

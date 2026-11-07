@@ -1,35 +1,35 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
-import { codeIsLive } from "../codes.js";
-import { isPublic, isTopicRoom, capacityOf } from "../manifest.js";
+import { codeIsLive } from "../room/codes.js";
+import { isPublic, isTopicRoom, capacityOf } from "../room/manifest.js";
 import { newestTaskFirst, taskWithEvent, handOff, decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason } from "../outside.js";
 import { type BlobCharge, type HostAppend, type PurgeSchedule, type SetJoinCode, type HomeAppend, type AppendExtras, type ApprovalWrite, type ConfigWrite, type ConfigWriteResult, type FsAppend, type FsEntry, type FsPage, type FsWrite, type DepartedMembers, type EventBody, type EventWrite, type HostInstructionsSet, type MemberPatch, type AccountBanRequest, type ProposalApproval, type RemovalOutcome, type RemovalRequest, type SeatOutcome, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type DecisionClose, type DecisionOpen, type VoteWrite, type RoomSummary, roomSummaryOf } from "../storage/store.js";
 import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, DEFAULT_HOME_SETTINGS } from "../types.js";
-import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../config.js";
-import { decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeKeyRecord, FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../fs.js";
-import { namespaceOf } from "../fs-path.js";
-import { electorateOf, voteRefusal, withoutBook, applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../decision.js";
-import { asRowWriter, batchEvent, carriedEvent, surfaceBatchPrint, surfaceFactsOf, surfacePrint, applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface.js";
-import { placeSurfaceBatch, placedEvent, placesAmongRows, windowUnderCut, FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../frames.js";
-import { ABANDONED_AFTER_MS, abandonedAt, connectedAmong, isAbandoned, stampSeen } from "../presence.js";
-import { HOST_MEMBER_ID, creatorOf, creditReport, departures, hostSeated, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims, clearSilence } from "../members.js";
-import { decideBlobCharge } from "../blobs.js";
+import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
+import { decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeKeyRecord, FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../files/fs.js";
+import { namespaceOf } from "../files/fs-path.js";
+import { electorateOf, voteRefusal, withoutBook, applyVote, capacityOfVote, closingEvent, decideClose, decideOpenQuota, decideSupersede, decisionAudit, decisionsOf, decisionOwning, dueToExpire, earliestDeadline, isSecret, noteDecisions, type BallotBook, type Choice, type DecisionOpened, type SecretVote, openedPayload, decisionPageOf, removalEvents, type ClosedState, type DecisionPage, type DecisionPageAsk, type DecisionDraft, type DecisionView, type DecisionVote, type FailReason, type VoteInput } from "../room/decision.js";
+import { asRowWriter, batchEvent, carriedEvent, surfaceBatchPrint, surfaceFactsOf, surfacePrint, applySurfaceWrite, needsPlacement, withPlacement, type SurfaceWrite } from "../surface/surface.js";
+import { placeSurfaceBatch, placedEvent, placesAmongRows, windowUnderCut, FRAME_WRITE_PATH, isFrameWrite, placeSurfaceWrite, type Placed, type Window, type WindowPage } from "../surface/frames.js";
+import { ABANDONED_AFTER_MS, abandonedAt, connectedAmong, isAbandoned, stampSeen } from "../room/presence.js";
+import { HOST_MEMBER_ID, creatorOf, creditReport, departures, hostSeated, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims, clearSilence } from "../room/members.js";
+import { decideBlobCharge } from "../files/blobs.js";
 import { decideHostCharge, hostSentEntries, hostWakeIntent, type HostWake } from "../host.js";
 import { BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows, putRows, seatRows, seated, userOfKey, userPrefix, USER_PREFIX, type RowReader } from "../storage/member-rows.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "../storage/idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "../storage/stored-session.js";
 import { publicEvent, readableEvent, readableEvents } from "../public-event.js";
 import { PING, PONG } from "../keepalive.js";
-import { SYSTEM_ACTOR, auditRows, type AuditActor } from "../audit.js";
+import { SYSTEM_ACTOR, auditRows, type AuditActor } from "../orgs/audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "../storage/outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
-import { PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects } from "../retention.js";
-import { nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "../heartbeat.js";
-import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../housekeeping.js";
+import { PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects } from "../room/retention.js";
+import { nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "../room/heartbeat.js";
+import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../room/housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "../upgrade.js";
-import { decideApproval } from "../proposal.js";
-import { admitAt, isStrangerKey, type SendAdmission } from "../send-limit.js";
+import { decideApproval } from "../surface/proposal.js";
+import { admitAt, isStrangerKey, type SendAdmission } from "../room/send-limit.js";
 import type { BellmanEnv } from "./store-do.js";
 
 const CURSOR_PAD = 12;
@@ -848,7 +848,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Which members this user owns here, and whether the room is closed.
    *
    * The authorization check for a /ws upgrade. Deliberately mirrors
-   * findMember (src/rooms.ts), leftAt and all: bellman_sync serves a
+   * findMember (src/room/rooms.ts), leftAt and all: bellman_sync serves a
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *
@@ -1184,7 +1184,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reading the live list is the whole design — and the member falls back to
    * `lastSeenAt`. For a member fed by this socket or by the local bus that field
    * has not moved since it joined, because nothing it does runs `touchMember`
-   * (src/rooms.ts): `bellman_sync` and `bellman_send` run it, and so does
+   * (src/room/rooms.ts): `bellman_sync` and `bellman_send` run it, and so does
    * `gateSeat`, for an invite, a revoke or a surface write. So it read stale the
    * moment its socket dropped, with its window already spent, and the next
    * contested `bellman_confirm` took its seat.
@@ -1202,7 +1202,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * at upgrade, and a member that joined the room later is served by the same
    * socket without being named in it — the reason that function exists.
    *
-   * Closed and frozen rooms are skipped, `touchMember`'s rule (src/rooms.ts). A
+   * Closed and frozen rooms are skipped, `touchMember`'s rule (src/room/rooms.ts). A
    * closed room's record is over, and a freeze is meant to cost nobody their
    * place so nobody needs defending during one.
    *

@@ -2,7 +2,7 @@ name = "bellman"
 main = "src/workerd/worker.ts"
 compatibility_date = "2026-09-01"
 
-# src/codes.ts uses randomUUID from node:crypto, and the MCP SDK reaches for a
+# src/room/codes.ts uses randomUUID from node:crypto, and the MCP SDK reaches for a
 # few node builtins. nodejs_compat covers both.
 compatibility_flags = ["nodejs_compat"]
 

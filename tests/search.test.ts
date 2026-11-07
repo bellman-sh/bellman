@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_RESULTS, checkQuery, cutAtWord, queryWords, searchCards, searchMessages } from "../src/search.js";
+import { MAX_RESULTS, checkQuery, cutAtWord, queryWords, searchCards, searchMessages } from "../src/surface/search.js";
 import type { SessionEvent, SurfaceRow } from "../src/types.js";
 
 const row = (key: string, over: Partial<SurfaceRow> = {}): SurfaceRow => ({

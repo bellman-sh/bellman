@@ -4,8 +4,8 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
-import { DECISION_PAGE, decisionHash, type DecisionDraft } from "../src/decision.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
+import { DECISION_PAGE, decisionHash, type DecisionDraft } from "../src/room/decision.js";
 import { roomRoutes, type RoomCaller } from "../src/http/rooms.js";
 import { decisionShown } from "../src/projections.js";
 import { MemoryStore } from "../src/storage/memory-store.js";

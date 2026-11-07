@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/app.js";
 import { resolveIdentity } from "../src/auth.js";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore } from "../src/files/blobs.js";
 import { roomRoutes } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { MemoryHost, nodeModel } from "../src/host-memory.js";

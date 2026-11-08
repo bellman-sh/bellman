@@ -28,6 +28,9 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
 | `registerReport(server, identity, s, mail)` | `bellman_report` | [src/tools/report.ts:registerReport] |
 | `registerDecide` | `bellman_decide` | [src/tools/decide.ts:registerDecide] |
 
+- `bellman_send` takes `to` (1 to 20 seat names, `message` and `artifact` only, resolved by `resolveAddressees` into the
+  event's `toMemberIds`, ADR 0048); `bellman_start` and `bellman_confirm` return the caller's `name`
+  [src/tools/send.ts:registerSend]
 - `bellman_send` returns `{room_members, cursor, count?, replayed?, applied?, note?}`; an `outside_answer`
   returns `{task_id, state, cursor}` [src/tools/send.ts:registerSend]
 - `bellman_sync` takes `since_cursor`, `wait_seconds` (0..`MAX_WAIT_SECONDS` = 25), `surface`; returns

@@ -71,6 +71,7 @@ Args:
                          { items: [...] } writes up to 100 items or removals in one call: all land or none, as one send; each key once, no restores; a refusal names items[i].
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Flatten rather than nest.
   - ref_id: the cursor of the event you answer. Required for action_response. A room's host answers only replies carrying its question's cursor.
+  - to: optional, message and artifact only: up to 20 seat names ("coder-2"). Wakes only those seats; not private, every member can read it.
   - idempotency_key: optional. Retrying with the SAME key returns the original result without delivering again; use it when you cannot tell whether a call landed. Use a fresh key per new message; reusing one for different content is an error.
 
 Returns: { room_members, cursor, count?, replayed?, applied? }

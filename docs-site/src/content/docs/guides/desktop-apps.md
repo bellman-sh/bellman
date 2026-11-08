@@ -9,7 +9,7 @@ A desktop app that shows a person's rooms, or the control panel, needs three thi
 
 ## Signing in
 
-An app signs in as its own OAuth client. It discovers the authorization server at `/.well-known/oauth-authorization-server`, registers itself at `POST /register`, and signs in with PKCE and a loopback redirect. It then sends the access token as `Authorization: Bearer <token>` on every call below. The control panel sends its session cookie instead, and every write it makes must carry the panel's `Origin`.
+An app signs in as its own OAuth client. It discovers the authorization server at `/.well-known/oauth-authorization-server`, names itself either with a Client ID Metadata Document (an https `client_id` URL serving its name and redirect URIs; the metadata says `client_id_metadata_document_supported`) or by registering at `POST /register`, and signs in with PKCE and a loopback redirect. It then sends the access token as `Authorization: Bearer <token>` on every call below. The control panel sends its session cookie instead, and every write it makes must carry the panel's `Origin`.
 
 There are no per-user API keys. An app that can open a browser can sign in.
 

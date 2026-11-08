@@ -6,7 +6,9 @@ import { homeRoomId } from "../files/home.js";
 import type { BellmanStore } from "../storage/store.js";
 import type { StoredSession } from "../storage/stored-session.js";
 import type { Identity, RepoRoom } from "../types.js";
+import { CONNECT_TOKEN_TTL, generateConnectToken } from "./codes.js";
 import { isPublic } from "./manifest.js";
+import { audit } from "./rooms.js";
 
 /** `scp`-style `user@host:path`, which `URL` does not parse. */
 const SCP = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/;
@@ -100,4 +102,30 @@ export async function unbindRepoRoom(store: BellmanStore, actor: Identity, raw: 
   await store.writeRepoRooms(home, kept);
   if (!kept.some((r) => r.sessionId === gone.sessionId)) await store.setKeptOpen(gone.sessionId, false);
   return { ok: true, value: { removed: true } };
+}
+
+/**
+ * A connect token for the account's binding of `remote`, written as `bellman_connect` writes one, with
+ * `via: "binding"`; the bridge redeems it with `bellman_confirm`, which runs every seating check (bans, org policy,
+ * capacity, frozen). The binding is re-checked against the room as it is now, since it may have closed.
+ */
+export async function connectFromBinding(
+  store: BellmanStore,
+  actor: Identity,
+  raw: string,
+): Promise<RepoRoomResult<{ connectToken: string; sessionId: string; role: string }>> {
+  const remote = normalizeRemote(raw);
+  if (!remote) return no(400, "invalid_request", "remote must be a git remote URL with an owner and a repo");
+  const binding = (await store.readRepoRooms(homeRoomId(actor.userId))).find((r) => r.remote === remote);
+  if (!binding) return no(404, "no_binding", "this repo has no default room");
+  const session = await store.getSession(binding.sessionId);
+  const refused = bindRefusal(session, actor, binding.role);
+  if (refused || !session) return refused ?? no(404, "not_found", "no open room has that id");
+  const token = generateConnectToken();
+  const now = Date.now();
+  await store.putPendingConnect({
+    token, sessionId: session.id, userId: actor.userId, roomRole: binding.role, via: "binding", createdAt: now, expiresAt: now + CONNECT_TOKEN_TTL,
+  });
+  await audit(store, session, actor, "connect_previewed", { via: "binding" }, [], []);
+  return { ok: true, value: { connectToken: token, sessionId: session.id, role: binding.role } };
 }

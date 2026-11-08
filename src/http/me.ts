@@ -32,7 +32,7 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../o
 import { deleteMemory, exportMemory, forgetNote, memoryLookups, readMemorySettings, setMemorySettings } from "../files/memory.js";
 import { liveRooms } from "../room/rooms.js";
 import type { HomeSettings, RepoRoom } from "../types.js";
-import { bindRepoRoom, listRepoRooms, unbindRepoRoom } from "../room/repo-room.js";
+import { bindRepoRoom, connectFromBinding, listRepoRooms, unbindRepoRoom } from "../room/repo-room.js";
 import { json, methodNotAllowed, problem, type RoomCaller, type RoomRouteDeps } from "./rooms.js";
 
 export type MeRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
@@ -43,6 +43,7 @@ const LOOKUPS = "/me/memory/lookups";
 const NOTES = "/me/memory/notes";
 const EXPORT = "/me/memory/export";
 const REPO_ROOMS = "/me/repo-rooms";
+const REPO_CONNECT = "/me/repo-rooms/connect";
 
 /** The body as a settings patch: a non-empty object whose every key is `capture` or `paused`, each a boolean; else `null`. */
 function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
@@ -55,16 +56,26 @@ function memoryPatch(raw: unknown): Partial<HomeSettings> | null {
 /** `undefined` for any other path, so the server carries on. */
 export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Response | undefined> {
   const path = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS && path !== NOTES && path !== EXPORT && path !== REPO_ROOMS) return undefined;
+  if (path !== ROOMS && path !== MEMORY && path !== LOOKUPS && path !== NOTES && path !== EXPORT && path !== REPO_ROOMS && path !== REPO_CONNECT) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   if (request.method === "OPTIONS") return preflightResponse(origin);
-  const allowed = path === MEMORY || path === REPO_ROOMS ? "GET, PUT, DELETE" : path === NOTES ? "DELETE" : "GET";
+  const allowed = path === MEMORY || path === REPO_ROOMS ? "GET, PUT, DELETE" : path === NOTES ? "DELETE" : path === REPO_CONNECT ? "POST" : "GET";
   if (!allowed.split(", ").includes(request.method)) return methodNotAllowed(allowed, origin);
   try {
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
     if (path === ROOMS) return json(200, { rooms: await liveRooms(deps.store, who.identity) }, origin);
     if (path === REPO_ROOMS) return await repoRooms(request, deps, who, origin);
+    if (path === REPO_CONNECT) {
+      // A bearer may: this is the bridge at launch, reading its own account's binding. It seats nobody; the token it
+      // returns goes through bellman_confirm.
+      const raw = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      if (typeof raw?.remote !== "string") return problem(400, "invalid_request", 'send {"remote": string}', origin);
+      const out = await connectFromBinding(deps.store, who.identity, raw.remote);
+      return out.ok
+        ? json(200, { connect_token: out.value.connectToken, session_id: out.value.sessionId, role: out.value.role }, origin)
+        : problem(out.status, out.code, out.reason, origin);
+    }
     if (path === LOOKUPS) {
       if (who.via !== "cookie") return problem(403, "dash_session_required", "the lookup log is read by the person signed in to the dash", origin);
       return json(200, { lookups: await memoryLookups(deps.store, who.identity) }, origin);

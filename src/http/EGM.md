@@ -68,6 +68,10 @@ Account, org and operator routes:
   remote and marks the room kept open; `DELETE ?remote=` (204 | 404) removes it and clears the flag once no binding
   names the room. Writes are dash-session only and CSRF-checked [src/http/me.ts:repoRooms]
   [src/room/repo-room.ts:bindRepoRoom] [src/room/repo-room.ts:unbindRepoRoom]
+- `POST /me/repo-rooms/connect {remote}` (bearer allowed: the bridge at launch) re-checks the caller's binding against
+  the room now and writes a pending connect with `via: "binding"`, audited `connect_previewed`: 200 `{connect_token,
+  session_id, role}` | 404 `no_binding` or `not_found` | the bind refusals. It seats nobody; `bellman_confirm`
+  redeems the token and runs every seating check [src/room/repo-room.ts:connectFromBinding]
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB
   [src/http/presets.ts:presetRoutes]
 - `statsRoutes`: `GET /operator/stats` (`PlatformStats {accounts, free, paid, paidCapped}`),

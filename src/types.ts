@@ -98,7 +98,7 @@ export interface Member {
    * Given at confirm from the pending connect, which took it at the preview, and never changed after. Absent
    * on rows stored before the field existed, which read as not a stranger.
    */
-  via?: "permanent";
+  via?: "permanent" | "binding";
 }
 
 /**
@@ -407,7 +407,7 @@ export interface PendingConnect {
    * absent for every other seat. Captured here for `roomRole`'s reason, because bellman_confirm receives only
    * the token, and copied onto the member it seats as `Member.via`.
    */
-  via?: "permanent";
+  via?: "permanent" | "binding";
   createdAt: number;
   expiresAt: number;
 }

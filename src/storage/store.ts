@@ -977,6 +977,8 @@ export interface BellmanStore {
    * this call close it" would answer false there, and leave the rows for good.
    */
   closeSessionIfEmpty(sessionId: string): Promise<boolean>;
+  /** Set or clear `Session.keptOpen`. A no-op for an unknown or closed room. */
+  setKeptOpen(sessionId: string, kept: boolean): Promise<void>;
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**

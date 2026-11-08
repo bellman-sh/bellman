@@ -365,6 +365,10 @@ export class DurableObjectStore implements BellmanStore {
     await this.clearJoinCodes(sessionId);
   }
 
+  async setKeptOpen(sessionId: string, kept: boolean): Promise<void> {
+    return this.session(sessionId).setKeptOpen(kept);
+  }
+
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
     // The decision is SessionDO's, made in one transaction. What follows it is
     // cleanup in a second object, with no transaction spanning the two (the gap

@@ -707,6 +707,13 @@ export class MemoryStore implements BellmanStore {
     await this.sweepAfterClose(sessionId);
   }
 
+  async setKeptOpen(sessionId: string, kept: boolean): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.closed) return;
+    if (kept) s.keptOpen = true;
+    else delete s.keptOpen;
+  }
+
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
@@ -716,7 +723,7 @@ export class MemoryStore implements BellmanStore {
     // writes. The Durable Objects store gets it from a transaction instead. The
     // sweep that follows is after the close, so it is outside that rule.
     if (s.closed) return true;
-    if (s.members.some(isActivePerson)) return false;
+    if (s.keptOpen || s.members.some(isActivePerson)) return false;
     this.closeNow(s);
     await this.sweepAfterClose(sessionId);
     return true;

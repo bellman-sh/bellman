@@ -1877,6 +1877,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * it clears them once this returns true, and the retry of a close that died in
    * between finds them still listed and finishes the job.
    */
+  /** `BellmanStore.setKeptOpen`: the record's `keptOpen`, set or removed, in one transaction. No event, no audit. */
+  async setKeptOpen(kept: boolean): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.closed || (s.keptOpen === true) === kept) return;
+      const { keptOpen: _was, ...rest } = s;
+      await putRows(txn, memberRows(s, kept ? { ...rest, keptOpen: true } : rest));
+    });
+  }
+
   async closeSessionIfEmpty(): Promise<boolean> {
     let released = false;
     let events: SessionEvent[] = [];
@@ -1886,7 +1896,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
-      if (s.members.some(isActivePerson)) return false;
+      if (s.keptOpen || s.members.some(isActivePerson)) return false;
       members = s.members;
       // A hosted room's slot goes back with the close, in its transaction (I7).
       const intents = hostedReleaseIntents(s);

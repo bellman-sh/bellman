@@ -1351,6 +1351,31 @@ export function describeStoreContract(
      * a room that was already closed answers true. That is what lets a retry of
      * a close that died partway finish the work, instead of reading as a no-op.
      */
+    it("closeSessionIfEmpty leaves a kept room open, until setKeptOpen(false)", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      await store.createSession(s);
+      await store.setKeptOpen(s.id, true);
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+      expect((await store.getSession(s.id))?.keptOpen).toBe(true);
+      await store.setKeptOpen(s.id, false);
+      expect((await store.getSession(s.id))?.keptOpen).toBeUndefined();
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSession still closes a kept room, and setKeptOpen is a no-op on a closed or unknown one", async () => {
+      const s = session({ members: [member()] });
+      await store.createSession(s);
+      await store.setKeptOpen(s.id, true);
+      await store.closeSession(s.id);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+      await store.setKeptOpen(s.id, false);
+      expect((await store.getSession(s.id))?.keptOpen).toBe(true);
+      await store.setKeptOpen("qs_unknown", true);
+      expect(await store.getSession("qs_unknown")).toBeUndefined();
+    });
+
     it("closeSessionIfEmpty closes a room nobody is in, and reports that it did", async () => {
       const s = session({ members: [member({ leftAt: Date.now() })] });
       (await store.createSession(s));

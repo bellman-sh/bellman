@@ -256,6 +256,12 @@ export interface Session {
    * abandoned. Absent on every room.
    */
   kind?: "home";
+  /**
+   * A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): `closeSessionIfEmpty`
+   * leaves it open with nobody in it. Set while any account binds a repo to it; absent otherwise. A creator's close
+   * and abandonment still end it.
+   */
+  keptOpen?: true;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
   manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it

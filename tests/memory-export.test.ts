@@ -11,4 +11,10 @@ describe("renderExport", () => {
     expect(renderExport({ label: "j", at: 0, home: [], rooms: [{ sessionId: "qs_x", room: "a\n## Home memory", notes: [row("/members/mid/n.md", "x")] }] })).toContain("\n### a ## Home memory (qs_x)\n");
     expect(renderExport({ label: "j", at: 0, home: [], rooms: [] })).toContain("_No home notes._\n\n## Room notes\n\n_No room notes._\n");
   });
+
+  it("says the room list was cut, under the room notes heading, only when it was", () => {
+    const cut = renderExport({ label: "j", at: 0, home: [], rooms: [], cutAt: 500 });
+    expect(cut).toContain("## Room notes\n\n_The room list was read up to 500 rooms, open and closed, so notes in a room past that are not in this export._\n\n_No room notes._\n");
+    expect(renderExport({ label: "j", at: 0, home: [], rooms: [] })).not.toContain("not in this export");
+  });
 });

@@ -604,12 +604,14 @@ export const ROOMS_LIMIT = 50;
  */
 export const WINDOW_LIMIT = 1024;
 
-/** The rooms `identity` created or joined, before closed ones and left seats are dropped: the set `liveRooms` and the memory export both walk. */
-export async function roomIdsOf(s: BellmanStore, identity: Identity): Promise<Set<string>> {
-  return new Set([
-    ...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)),
-    ...(await s.sessionsJoinedBy(identity.userId, JOINED_SCAN)),
-  ]);
+/**
+ * The rooms `identity` created or joined, before closed ones and left seats are dropped: the set `liveRooms` and the
+ * memory export both walk. `cut` is true when the joined index came back full (`JOINED_SCAN` ids), so rooms past it
+ * may be missing; a full index read is the only sign, so exactly `JOINED_SCAN` rooms also counts as cut.
+ */
+export async function roomIdsOf(s: BellmanStore, identity: Identity): Promise<{ ids: Set<string>; cut: boolean }> {
+  const joined = await s.sessionsJoinedBy(identity.userId, JOINED_SCAN);
+  return { ids: new Set([...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)), ...joined]), cut: joined.length >= JOINED_SCAN };
 }
 
 /**
@@ -618,7 +620,7 @@ export async function roomIdsOf(s: BellmanStore, identity: Identity): Promise<Se
  * caller left or was removed from, are not listed.
  */
 export async function liveRooms(s: BellmanStore, identity: Identity): Promise<ReturnType<typeof roomSummary>[]> {
-  const ids = await roomIdsOf(s, identity);
+  const { ids } = await roomIdsOf(s, identity);
   const now = Date.now();
   const rooms: ReturnType<typeof roomSummary>[] = [];
   for (const id of ids) {

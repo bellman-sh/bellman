@@ -9,7 +9,7 @@ import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { renderExport, type ExportRoom } from "./memory-export.js";
 import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomFailure, type RoomResult } from "../room/rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "../room/send-limit.js";
-import type { BellmanStore, FsPage, FsWrite } from "../storage/store.js";
+import { JOINED_SCAN, type BellmanStore, type FsPage, type FsWrite } from "../storage/store.js";
 import { isActiveMember } from "../room/members.js";
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "../types.js";
 
@@ -149,12 +149,13 @@ async function readAll(store: BellmanStore, roomId: string, prefix: string): Pro
  * (`/members/<memory id>/`) in each open room it holds an active seat in. Reads the store directly, so the lookup
  * log is untouched and a paused account can still take its notes out.
  */
-// ponytail: every room from roomIdsOf (rooms past JOINED_SCAN are left out), about four RPCs per room plus one per
-// note, unbatched; a heavy account can meet the Workers subrequest cap. Page the export if one does.
+// ponytail: every room from roomIdsOf (rooms past JOINED_SCAN are left out, and the document says so), about four RPCs
+// per room plus one per note, unbatched; a heavy account can meet the Workers subrequest cap. Page the export if one does.
 export async function exportMemory(store: BellmanStore, actor: Identity): Promise<string> {
   const home = await readAll(store, homeRoomId(actor.userId), "/");
   const rooms: ExportRoom[] = [];
-  for (const id of await roomIdsOf(store, actor)) {
+  const { ids, cut } = await roomIdsOf(store, actor);
+  for (const id of ids) {
     const session = await store.getSession(id);
     if (!session || session.closed || !session.members.some((m) => m.userId === actor.userId && isActiveMember(m))) continue;
     const memoryId = await store.memoryIdOf(id, actor.userId);
@@ -162,7 +163,7 @@ export async function exportMemory(store: BellmanStore, actor: Identity): Promis
     const notes = await readAll(store, id, `/members/${memoryId}`);
     if (notes.length > 0) rooms.push({ sessionId: id, room: session.manifest.room, notes });
   }
-  return renderExport({ label: actor.label, at: Date.now(), home, rooms });
+  return renderExport({ label: actor.label, at: Date.now(), home, rooms, ...(cut ? { cutAt: JOINED_SCAN } : {}) });
 }
 
 /**

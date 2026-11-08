@@ -115,6 +115,11 @@ export function renderEvent(e: PeerEvent): string {
   return lines.join("\n");
 }
 
+/** One event on one line, for the monitor: the same words as `renderEvent`, its line breaks as spaces. */
+export function renderLine(e: PeerEvent): string {
+  return renderEvent(e).split("\n").join(" ");
+}
+
 export function renderBatch(events: PeerEvent[]): string {
   const header = events.length === 1
     ? "Bellman: 1 peer event arrived."
@@ -230,6 +235,32 @@ export function drain(dir: string): PeerEvent[] {
       // events would be neither delivered nor redeliverable — the tidy-up
       // destroying the thing it was tidying up after.
       try { rmSync(claimed, { force: true }); } catch { /* leave it; it is already claimed */ }
+    }
+  }
+  return out;
+}
+
+/**
+ * The monitor's drain (src/client/monitor.ts): take every queued event that interrupts, once, as `drain` does, and leave
+ * the ambient ones. Those wait for the end of the turn, as they always have, where the Stop hook or bellman_wait hands
+ * them over: a progress note every few minutes is worth reading, not worth breaking into a turn for.
+ */
+export function drainInterrupting(dir: string): PeerEvent[] {
+  const out: PeerEvent[] = [];
+  for (const name of queuedNames(dir)) {
+    try {
+      if ((JSON.parse(readFileSync(join(dir, name), "utf8")) as PeerEvent).ambient === true) continue;
+    } catch {
+      continue; // claimed by another reader since the listing, or unreadable: `drain` deals with it
+    }
+    const claimed = claim(dir, name);
+    if (!claimed) continue;
+    try {
+      out.push(JSON.parse(readFileSync(claimed, "utf8")) as PeerEvent);
+    } catch {
+      // A corrupt entry is dropped rather than left to wedge the queue, as in `drain`.
+    } finally {
+      try { rmSync(claimed, { force: true }); } catch { /* already claimed; leave it */ }
     }
   }
   return out;

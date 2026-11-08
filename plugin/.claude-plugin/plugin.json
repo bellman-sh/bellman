@@ -8,5 +8,20 @@
   "homepage": "https://bellman.sh",
   "repository": "https://github.com/bellman-sh/bellman.git",
   "license": "MIT",
-  "keywords": ["mcp", "agents", "collaboration", "bellman", "room-manifest"]
+  "keywords": [
+    "mcp",
+    "agents",
+    "collaboration",
+    "bellman",
+    "room-manifest"
+  ],
+  "experimental": {
+    "monitors": [
+      {
+        "name": "bellman-events",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bridge/monitor.mjs\"",
+        "description": "Peer events from your Bellman rooms, as they arrive"
+      }
+    ]
+  }
 }

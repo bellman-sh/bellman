@@ -78,10 +78,28 @@ describe("the plugin's shape", () => {
     });
   });
 
-  it("runs only files that exist under plugin/", () => {
-    const files = [...referenced(".mcp.json"), ...referenced("hooks/hooks.json")];
+  /**
+   * The monitor replaces channel pushes, which MCP 2026-07-28 cannot carry: Claude Code runs it for the whole session
+   * and what it prints reaches Claude. Through node and the plugin root, like every other entry, and declared where
+   * Claude Code reads monitors from: `experimental.monitors` in plugin.json.
+   */
+  it("declares one monitor, run with node from the plugin's bundle", () => {
+    expect(json("plugin/.claude-plugin/plugin.json").experimental).toEqual({
+      monitors: [{
+        name: "bellman-events",
+        command: 'node "${CLAUDE_PLUGIN_ROOT}/bridge/monitor.mjs"',
+        description: "Peer events from your Bellman rooms, as they arrive",
+      }],
+    });
+  });
 
-    expect(files).toEqual(["bridge/channel.mjs", "bridge/join-hook.mjs", "bridge/stop-hook.mjs", "bridge/status-hook.mjs", "bridge/status-hook.mjs"]);
+  it("runs only files that exist under plugin/", () => {
+    const files = [...referenced(".mcp.json"), ...referenced("hooks/hooks.json"), ...referenced(".claude-plugin/plugin.json")];
+
+    expect(files).toEqual([
+      "bridge/channel.mjs", "bridge/join-hook.mjs", "bridge/stop-hook.mjs", "bridge/status-hook.mjs", "bridge/status-hook.mjs",
+      "bridge/monitor.mjs",
+    ]);
     for (const file of files) expect(existsSync(join(PLUGIN, file)), file).toBe(true);
   });
 

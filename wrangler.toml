@@ -138,6 +138,11 @@ BELLMAN_HOSTED_SEAT = "off"
 # seat (max or team). A var like the switch, so who gets the seat is a reviewed commit.
 BELLMAN_HOSTED_SEAT_USERS = "u_github_8698"
 
+# OpenAI's plugin portal verifies that we own mcp.bellman.sh by fetching this token from
+# /.well-known/openai-apps-challenge (src/http/openai-challenge.ts, chatgpt/README.md). The
+# portal shows the token; it is public, so it is a var, not a secret. Empty serves a 404.
+OPENAI_APPS_CHALLENGE = ""
+
 # Where the control panel is served from. Comma-separated; bare origins, no
 # trailing slash — the Origin header carries neither, and parsePanelOrigins
 # normalises an entry that does rather than letting it match nothing.

@@ -73,6 +73,9 @@ read `EGM.md`, `src/EGM.md` and `src/oauth/EGM.md`, and no other.
 - `src/mod/` — the mod's runtime-free logic, vitest-tested and bundled in.
 - `src/index.ts` + `src/app.ts` — the Node entry; the Workers one is `src/workerd/worker.ts`.
 - `extension/` — the Claude Desktop `.mcpb` bundle: its manifest, and the script that packs it.
+- `chatgpt/` — the package OpenAI's plugin directory takes: `plugin.json`, `mcp.json` naming the hosted server,
+  icons, and `build.sh`. No code; `chatgpt/README.md` is the submission runbook, and
+  `tests/chatgpt-plugin.test.ts` holds it to the portal's limits and listing rules.
 - `plugin/` — the Claude Code plugin: the bridge in hook delivery (`.mcp.json`), the Stop and
   status hooks (`hooks/hooks.json`), the two skills, and `bridge/`, the bundles those run.
   `.claude-plugin/marketplace.json` at the root lists it.

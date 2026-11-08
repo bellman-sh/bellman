@@ -55,8 +55,9 @@ Keep the listing text factual. Prices and comparisons belong on bellman.sh.
    Review details**:
    - **Reviewer credentials:** a dedicated test account. It must work without MFA,
      email or SMS codes, or magic links. Bellman signs in only through GitHub or
-     Google, so that means a GitHub or Google account with two-factor
-     authentication off that a reviewer can use from a new device.
+     Google, so until #360 (operator-created email and password accounts for
+     directory reviewers) ships, that means a GitHub or Google account with
+     two-factor authentication off that a reviewer can use from a new device.
    - **The demo video:** a public URL walking through the five positive cases.
      Put it in `review.demo_recording_url` and upload again, or enter it there.
    - **Countries:** choose them here, or add `publication.countries`.

@@ -2290,6 +2290,34 @@ export function describeStoreContract(
       expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
     });
 
+    // Seat names spec: an addressed event carries `toMemberIds`, and every path that reads events hands it back.
+    it("persists toMemberIds on an appended event and reads it back on eventsAfter, eventAt and waitForEvents", async () => {
+      const s = session();
+      (await store.createSession(s));
+      const appended = await store.appendEvent(s.id, keyed({ toMemberIds: ["m_two", "m_three"] }));
+      expect(appended?.toMemberIds).toEqual(["m_two", "m_three"]);
+      expect((await store.eventsAfter(s.id, 0))[0]?.toMemberIds).toEqual(["m_two", "m_three"]);
+      expect((await store.eventAt(s.id, appended!.cursor))?.toMemberIds).toEqual(["m_two", "m_three"]);
+      expect((await store.waitForEvents(s.id, 0, 0))[0]?.toMemberIds).toEqual(["m_two", "m_three"]);
+    });
+
+    it("reads an event appended without toMemberIds back without the field", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEvent(s.id, keyed()));
+      expect((await store.eventsAfter(s.id, 0))[0]).not.toHaveProperty("toMemberIds");
+    });
+
+    it("treats a different toMemberIds under the same key as conflict, and the same one as a replay", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed({ toMemberIds: ["m_two"] }), "send-0001"));
+      expect((await store.appendEventOnce(s.id, keyed({ toMemberIds: ["m_two"] }), "send-0001")).outcome).toBe("replayed");
+      expect((await store.appendEventOnce(s.id, keyed({ toMemberIds: ["m_three"] }), "send-0001")).outcome).toBe("conflict");
+      expect((await store.appendEventOnce(s.id, keyed(), "send-0001")).outcome, "addressed then unaddressed").toBe("conflict");
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
     /** Object key order is not different content. */
     it("treats a reordered payload as the same send", async () => {
       const s = session();

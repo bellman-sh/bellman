@@ -9,6 +9,11 @@ test programs import these.
 
 ## Interface
 
+- `[src/room/repo-room.ts]` a repo's default room: `bindRepoRoom` (creator only, never a public room, any manifest
+  role; marks the room kept open and clears the flag on a room it replaced once nothing names it), `unbindRepoRoom`,
+  `listRepoRooms`, `connectFromBinding` (a pending connect with `via: "binding"`), each a `RepoRoomResult` with the
+  HTTP status. `[src/room/remote.ts:normalizeRemote]` the key, `host/owner/repo` lower-cased; it imports nothing, since
+  the bridge bundles it.
 - `[src/room/rooms.ts]` the operations both transports call, each returning `RoomResult<T>` (`succeed`/`refuse` with a
   `RoomFailure` of `not_found | closed | frozen | forbidden | conflict | invalid | rate_limited | stale | too_large |
   over_quota | paused`): `gateSeat`, `leaveRoom`, `issueInvite`, `revokeInvite`, `admitSend`, `writeSurface`,

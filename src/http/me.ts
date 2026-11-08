@@ -67,8 +67,9 @@ export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Res
     if (path === ROOMS) return json(200, { rooms: await liveRooms(deps.store, who.identity) }, origin);
     if (path === REPO_ROOMS) return await repoRooms(request, deps, who, origin);
     if (path === REPO_CONNECT) {
-      // A bearer may: this is the bridge at launch, reading its own account's binding. It seats nobody; the token it
-      // returns goes through bellman_confirm.
+      // The bridge at launch, with its bearer, and only that: a cookie POST could come from any same-site page. It seats
+      // nobody; the token it returns goes through bellman_confirm.
+      if (who.via === "cookie") return problem(403, "bearer_required", "a connect token from a repo's default room is for the bridge, with its bearer token", origin);
       const raw = (await request.json().catch(() => null)) as Record<string, unknown> | null;
       if (typeof raw?.remote !== "string") return problem(400, "invalid_request", 'send {"remote": string}', origin);
       const out = await connectFromBinding(deps.store, who.identity, raw.remote);

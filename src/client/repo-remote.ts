@@ -11,11 +11,12 @@ export type Run = (cmd: string, args: string[], cwd: string) => string;
 const run: Run = (cmd, args, cwd) =>
   execFileSync(cmd, args, { cwd, timeout: 2_000, stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" });
 
-/** `git remote get-url origin`, else the `origin` line of `jj git remote list`; null when neither gives a remote. */
+/** `git remote get-url origin`, else the `origin` line of `jj --ignore-working-copy git remote list`; null when neither gives a remote. */
 export function remoteOf(cwd: string, exec: Run = run): string | null {
   const tries: Array<[string, string[], (out: string) => string | undefined]> = [
     ["git", ["remote", "get-url", "origin"], (out) => out.trim()],
-    ["jj", ["git", "remote", "list"], (out) => /^origin\s+(\S+)/m.exec(out)?.[1]],
+    // No snapshot: a stale workspace refuses one, and a fresh one would write an operation at every launch.
+    ["jj", ["--ignore-working-copy", "git", "remote", "list"], (out) => /^origin\s+(\S+)/m.exec(out)?.[1]],
   ];
   for (const [cmd, args, pick] of tries) {
     try {

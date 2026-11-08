@@ -126,7 +126,7 @@ async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } 
   };
   const posted: string[] = [];
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) =>
-    (posted.push(String(input)), await meRoutes(new Request(input, init), { store: h.store, caller, panelOrigins: [] })) ?? new Response(null, { status: 404 })) as typeof fetch;
+    (posted.push(`${init?.method ?? "GET"} ${String(input)}`), await meRoutes(new Request(input, init), { store: h.store, caller, panelOrigins: [] })) ?? new Response(null, { status: 404 })) as typeof fetch;
   const bridge = createBridge({
     delivery: "channel", remote, pollWaitSeconds: 1, log: (line) => logged.push(line),
     upload: { serverUrl: "https://mcp.example.test", bearer: () => key, fetchImpl }, leaveTimeoutMs: 200,
@@ -168,7 +168,8 @@ describe("the bridge's join from the repo's default room", () => {
     expect(posted).toEqual([]);
     await client.listTools();
     expect(await pending).toBeUndefined();
-    expect(posted).toEqual(["https://mcp.example.test/me/repo-rooms/connect"]);
+    // Unbound: the account's own list is read, and the remote never leaves the machine.
+    expect(posted).toEqual(["GET https://mcp.example.test/me/repo-rooms"]);
   });
 
   it("says nothing and seats no one when the repo has no binding", async () => {
@@ -204,6 +205,12 @@ describe("the bridge leaving its bound seats", () => {
     await bridge.close();
     expect((await h.store.getMember(sessionId, bound.member_id))?.leftAt).toEqual(expect.any(Number));
     expect((await h.store.getMember(sessionId, coded.member_id))?.leftAt ?? null).toBeNull();
+  });
+
+  it("closes without trying when it never connected", async () => {
+    const { bridge } = await bridgeWithRoutes(DEV_KEY.jesse, { list: false });
+    await bridge.close();
+    expect(bridge.watching()).toEqual([]);
   });
 
   it("does not hold close past its bound when the leave never answers", async () => {

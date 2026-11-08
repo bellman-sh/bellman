@@ -37,8 +37,9 @@ into the mod.
   (`working` / `needs_you`), `[src/client/join-hook.ts]` (prints `[src/client/door-protocol.ts:joinLine]`; without
   `BELLMAN_JOIN_CODE`, only for a join `from: "repo"`).
 - The join at launch, `[src/client/repo-remote.ts:launchJoin]`: `BELLMAN_JOIN_CODE` wins (`[src/client/bridge.ts:join]`);
-  else the cwd's `origin` (`[src/client/repo-remote.ts:remoteOf]`, git then `jj git remote list`, normalized by
-  `[src/room/remote.ts:normalizeRemote]`) goes to `POST /me/repo-rooms/connect` and the token to `bellman_confirm`
+  else the cwd's `origin` (`[src/client/repo-remote.ts:remoteOf]`, git then `jj --ignore-working-copy git remote list`, normalized by
+  `[src/room/remote.ts:normalizeRemote]`), when `GET /me/repo-rooms` lists it (so an unbound remote never leaves the
+  machine), goes to `POST /me/repo-rooms/connect` and the token to `bellman_confirm`
   (`[src/client/bridge.ts:joinBound]`), only after the first tools/list, so the handshake stays local. No binding, no
   credential or a server without the route says nothing; any other outcome is `joined` with `from: "repo"`, and in
   channel delivery the bridge pushes `joinLine` once the client has initialized. Seats taken this way are kept in

@@ -80,8 +80,19 @@ describe("Bellman join hook", () => {
     expect(run.code).toBe(0);
     expect(run.stdout).toBe(
       'Bellman joined room qs_room from this repo\'s default room as "helper" (member_id m_seat), which may: send. ' +
-        "Peer events arrive as usual; call bellman_rooms to read the room. This seat leaves the room when the session ends.\n",
+        "Peer events arrive as usual; call bellman_rooms to read the room. This seat leaves the room when this session exits normally.\n",
     );
+  });
+
+  it("without a code and without a door, returns at once and says nothing", async () => {
+    const empty = mkdtempSync(join(tmpdir(), "jh-"));
+    try {
+      const at = Date.now();
+      expect(await runHook(empty, {})).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(Date.now() - at).toBeLessThan(3_000);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
   });
 
   it("prints nothing without a code", async () => {

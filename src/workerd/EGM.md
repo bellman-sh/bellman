@@ -103,7 +103,9 @@ No transaction spans two Durable Objects; cross-object writes go through the out
 
 - Durable Object storage. `SessionDO`: `session`, `cursor`, `e:<cursor>`, `sf:<key>`, member rows (`mb:`, `mu:`,
   `lb:`, `bf:`), `ik:` idempotency records, `bn:`/`bu:` bans, `sn:` stranger send counts, `ot:`/`oc:`/`ov`
-  outside tasks, the decision index `dx:`/`dv:`/`dx-at`, outbox `ob:`/`ob_seq`/`due:`. `RegistryDO`: the
+  outside tasks, the decision index `dx:`/`dv:`/`dx-at`, outbox `ob:`/`ob_seq`/`due:`. A home room also holds `hs`
+  (settings) and `rr` (a repo's default rooms); `purgeHome` deletes every row but `rr`
+  `[src/workerd/session-do.ts:SessionDO.purgeHome]`. `RegistryDO`: the
   prefixes listed under Interface plus its own outbox, and SQL `rooms` (the room index). `AuditDO`: SQL `entries` and `delivered`, KV `sink`, `settings`, `chain_anchor`, `due:sink`,
   `due:sweep`. `HostDO`: `state` and `pending`. Each of the four object types runs on a single alarm.
 - Cross-object RPC: `SessionDO` to `RegistryDO` (`putJoinCode`, `dropJoinCode`, `releaseHostedRoom`,

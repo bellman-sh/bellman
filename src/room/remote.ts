@@ -9,8 +9,8 @@ const NORMALIZED = /^([^\s/:@]+\.[^\s/:@]+)\/(.+)$/;
 const SCP = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/;
 
 /**
- * A git remote as `host/owner/repo`: the host lower-cased and without a user or port, the path as given without
- * `.git` or a trailing slash. Null for anything that is not an ssh, scp-style or http(s) remote with at least two
+ * A git remote as `host/owner/repo`, lower-cased: the host without a user or port, the path without `.git` or a
+ * trailing slash. Null for anything that is not an ssh, scp-style or http(s) remote with at least two
  * path segments, so a local path or a bare host never binds.
  */
 export function normalizeRemote(raw: string): string | null {
@@ -34,5 +34,6 @@ export function normalizeRemote(raw: string): string | null {
   }
   const segments = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/").filter(Boolean);
   if (!host || segments.length < 2) return null;
-  return [host.toLowerCase(), ...segments].join("/");
+  // Lower-cased whole: GitHub and GitLab match owner and repo without case, so a link copied from the browser binds.
+  return [host, ...segments].join("/").toLowerCase();
 }

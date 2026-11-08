@@ -262,6 +262,6 @@ export function joinLine(join: DoorJoin | undefined): string {
     `Bellman joined room ${cleanText(join.session_id, 80)} from ${source} as "${cleanText(join.role, 64)}" ` +
     `(member_id ${cleanText(join.member_id, 80)}), which may: ${verbs}. Peer events arrive as usual; call bellman_rooms ` +
     "to read the room." +
-    (repo ? " This seat leaves the room when the session ends." : "")
+    (repo ? " This seat leaves the room when this session exits normally." : "")
   );
 }

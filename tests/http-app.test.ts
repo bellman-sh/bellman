@@ -386,6 +386,16 @@ describe("/me/repo-rooms", () => {
     expect(await bodyOf(await call(DEV_KEY.peer, "/me/repo-rooms"))).toEqual({ repo_rooms: [] });
   });
 
+  it("lets the room it replaced close once no binding names it", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const a = await startRoom(jesse, SWARM);
+    const b = await startRoom(jesse, SWARM);
+    expect((await bind({ remote: REMOTE, session_id: a.sessionId, role: "helper" })).status).toBe(200);
+    expect((await bind({ remote: REMOTE, session_id: b.sessionId, role: "helper" })).status).toBe(200);
+    expect((await h.store.getSession(a.sessionId))?.keptOpen).toBeUndefined();
+    expect((await h.store.getSession(b.sessionId))?.keptOpen).toBe(true);
+  });
+
   it("refuses a bearer write, a room someone else created, a public room, a closed room, a role the room lacks and a remote that is not one", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const mine = await startRoom(jesse, SWARM);
@@ -457,6 +467,8 @@ describe("POST /me/repo-rooms/connect", () => {
     const bad = await call(DEV_KEY.jesse, "/me/repo-rooms/connect", { method: "POST", body: {} });
     expect([bad.status, (await bodyOf(bad)).error]).toEqual([400, "invalid_request"]);
     expect((await call(DEV_KEY.jesse, "/me/repo-rooms/connect")).headers.get("allow")).toBe("POST");
+    const cookie = await call(null, "/me/repo-rooms/connect", { method: "POST", body: { remote: REMOTE }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect([cookie.status, (await bodyOf(cookie)).error]).toEqual([403, "bearer_required"]);
   });
 
   it("seats again in a bound room after its last member left", async () => {

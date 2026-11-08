@@ -1773,8 +1773,8 @@ export function createBridge(opts: BridgeOptions) {
 
   /**
    * Join the repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): once the first
-   * tools/list has connected (the handshake makes no call to Bellman), ask the server for a connect token from the
-   * account's binding of `remote`, then confirm as a code join does. Only a binding the server confirms becomes a
+   * tools/list has connected (the handshake makes no call to Bellman), read the account's bindings, and only when
+   * `remote` is among them ask the server for a connect token from it, then confirm as a code join does. Only a binding the server confirms becomes a
    * join: no binding, no credential, or a server without the route is logged and leaves `joined` undefined, since the
    * person asked for nothing in this session. The seat is recorded so `close()` leaves it, and in channel delivery the
    * outcome is pushed into the session. It never rejects.
@@ -1782,6 +1782,13 @@ export function createBridge(opts: BridgeOptions) {
   async function joinBound(remoteUrl: string, project: string): Promise<DoorJoin | undefined> {
     await listedOnce;
     const refuse = refuser("repo");
+    // The account's own bindings first, so a remote it has not bound never leaves the machine.
+    const mine = await readOwn<{ repo_rooms?: Array<{ remote?: unknown }> }>("/me/repo-rooms");
+    if (!("read" in mine)) {
+      log(`repo default rooms not read: ${mine.status} ${mine.code ?? ""}`.trim());
+      return undefined;
+    }
+    if (!(mine.read.repo_rooms ?? []).some((r) => r.remote === remoteUrl)) return undefined;
     const got = await readOwn<{ connect_token?: unknown }>("/me/repo-rooms/connect", { remote: remoteUrl });
     let outcome: DoorJoin | undefined;
     if ("read" in got) {

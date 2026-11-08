@@ -28,8 +28,10 @@ describe("remoteOf", () => {
   });
 
   it("falls back to jj's origin when git has none", () => {
-    const exec: Run = (cmd) => {
+    const exec: Run = (cmd, args) => {
       if (cmd === "git") throw new Error("not a git repository");
+      // Never a snapshot: a stale workspace refuses one, and a fresh one writes an operation nobody asked for.
+      if (args[0] !== "--ignore-working-copy") throw new Error("would snapshot the working copy");
       return "upstream https://github.com/other/fork.git\norigin https://github.com/bellman-sh/bellman.git\n";
     };
     expect(remoteOf("/nowhere", exec)).toBe("github.com/bellman-sh/bellman");

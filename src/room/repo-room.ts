@@ -52,9 +52,15 @@ export async function bindRepoRoom(
   if (refused) return refused;
   const home = homeRoomId(actor.userId);
   const row: RepoRoom = { remote, sessionId: input.sessionId, role: input.role, createdAt: Date.now() };
-  const others = (await store.readRepoRooms(home)).filter((r) => r.remote !== remote);
+  const rows = await store.readRepoRooms(home);
+  const replaced = rows.find((r) => r.remote === remote);
+  const others = rows.filter((r) => r !== replaced);
   await store.writeRepoRooms(home, [...others, row]);
   await store.setKeptOpen(input.sessionId, true);
+  // The room this remote named before may close again, once no other binding names it.
+  if (replaced && replaced.sessionId !== input.sessionId && !others.some((r) => r.sessionId === replaced.sessionId)) {
+    await store.setKeptOpen(replaced.sessionId, false);
+  }
   return { ok: true, value: row };
 }
 

@@ -30,6 +30,8 @@ export { joinLine };
 async function main(): Promise<void> {
   // With no code the bridge may still join from the repo's default room; the hook asks and says nothing when it did not.
   const code = Boolean(process.env.BELLMAN_JOIN_CODE?.trim());
+  // Without a code, a door not there now is no bridge to wait for: SessionStart is not held up looking for one.
+  if (!code && findDoor() === undefined) return;
   const started = Date.now();
   const deadline = started + WAIT_MS;
   let door: string | undefined;

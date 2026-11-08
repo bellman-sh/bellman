@@ -9,6 +9,7 @@ describe("normalizeRemote", () => {
       "ssh://git@github.com/bellman-sh/bellman.git",
       "https://GitHub.com/bellman-sh/bellman.git/",
       "git@GitHub.com:bellman-sh/bellman.git",
+      "https://github.com/Bellman-sh/Bellman",
     ]) {
       expect(normalizeRemote(raw), raw).toBe("github.com/bellman-sh/bellman");
     }
@@ -16,7 +17,7 @@ describe("normalizeRemote", () => {
 
   it("takes its own output back unchanged, so a normalized remote can be sent again", () => {
     expect(normalizeRemote("github.com/bellman-sh/bellman")).toBe("github.com/bellman-sh/bellman");
-    expect(normalizeRemote("GitHub.com/group/sub/repo")).toBe("github.com/group/sub/repo");
+    expect(normalizeRemote("GitHub.com/Group/sub/repo")).toBe("github.com/group/sub/repo");
     expect(normalizeRemote("localhost/a/b")).toBeNull();
   });
 

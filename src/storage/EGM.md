@@ -15,7 +15,10 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
 - `[src/storage/store.ts:BellmanStore]` the interface every store implements; every method returns a Promise. Method families,
   each named by its real methods:
   - rooms: `createSession`, `getSession` (record and members, never events), `closeSessionIfEmpty`,
-    `freezeSession`, `schedulePurge`, `unpublishSession`, `setPublicName`, `setPublicView`.
+    `freezeSession`, `schedulePurge`, `unpublishSession`, `setPublicName`, `setPublicView`, `setKeptOpen`
+    (`Session.keptOpen`: `closeSessionIfEmpty` leaves the room open).
+  - a repo's default rooms: `readRepoRooms`, `writeRepoRooms`, the home room's `rr` row, which `purgeHome` and
+    `writeHomeSettings` keep.
   - join codes and connect tokens: `getSessionByJoinCode`, `setJoinCode`, `consumeJoinCode`, `clearJoinCodes`,
     `putPendingConnect`, `takePendingConnect`.
   - membership: `seatMember` (the production join), `addMember` (tests), `removeMember`, `updateMember`,

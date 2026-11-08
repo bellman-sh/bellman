@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   ActionResponseShape, BriefShape, DecisionAnswerShape, OutsideAnswerShape, ProgressShape, SEND_KINDS, isReport, SEND_VERB, appendOrFrozen, fail, ok, refusal,

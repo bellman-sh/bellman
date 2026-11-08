@@ -3,26 +3,19 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join, parse, sep } from "node:path";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/client";
 import {
-  StreamableHTTPClientTransport, StreamableHTTPError,
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+  StreamableHTTPClientTransport, SdkHttpError,
+} from "@modelcontextprotocol/client";
+import { ResourceNotFoundError, Server } from "@modelcontextprotocol/server";
 import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-  ReadResourceRequestSchema,
   type CallToolResult,
   type ListResourcesResult,
   type ListResourceTemplatesResult,
   type ReadResourceResult,
   type Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/client";
 import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "../files/blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
@@ -110,8 +103,6 @@ const START_NOTE =
   ".bellman/room.yaml, read from the directory this session was started in, as the manifest (the same " +
   "object, written as YAML). A manifest you pass wins over the file. With no such file and no manifest " +
   "the call fails, so pass one.";
-/** The code MCP reserves for a resource that does not exist; the SDK's ErrorCode enum has no name for it. */
-const RESOURCE_NOT_FOUND = -32002 as ErrorCode;
 const ROOM_DIR = ".bellman";
 const ROOM_FILE = join(ROOM_DIR, "room.yaml");
 /**
@@ -174,11 +165,11 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
  *
  *   - UnauthorizedError — a 401 the SDK's own auth() could not recover from.
  *     On the signed-in path that means the refresh token is dead too.
- *   - StreamableHTTPError with code 401 — either no authProvider at all (the
+ *   - SdkHttpError with code 401 — either no authProvider at all (the
  *     BELLMAN_KEY path, where a 401 is a revoked key) or the SDK's circuit
  *     breaker firing on a 401 that arrived straight after a successful refresh.
  *
- * NOT a 403. The SDK raises StreamableHTTPError(403) when up-scoping fails, and
+ * NOT a 403. The SDK raises SdkHttpError(403) when up-scoping fails, and
  * Bellman also answers 403 for an entitlement a plan does not carry. Neither is
  * fixed by signing in again, and treating it as unauthorized would open a
  * browser at a user whose credential was never the problem.
@@ -189,7 +180,7 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
  */
 export function unauthorized(err: unknown): boolean {
   if (err instanceof UnauthorizedError) return true;
-  return err instanceof StreamableHTTPError && err.code === 401;
+  return err instanceof SdkHttpError && err.status === 401;
 }
 
 export interface BridgeOptions {
@@ -823,7 +814,7 @@ export function createBridge(opts: BridgeOptions) {
     }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler("tools/list", async () => {
     const { tools } = await (await remote()).listTools();
     // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
     const listed = tools.map(advertised);
@@ -838,7 +829,7 @@ export function createBridge(opts: BridgeOptions) {
    * the connection (#28, spec D13). Nothing is cached or rewritten: the remote
    * is the one copy of the page, as it is of every tool.
    */
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  server.setRequestHandler("resources/list", async () => {
     const r = await remote();
     return r.listResources ? r.listResources() : { resources: [] };
   });
@@ -846,20 +837,20 @@ export function createBridge(opts: BridgeOptions) {
   // A host that sees `resources` enumerates templates too. Claude Desktop does,
   // and "Method not found" there is what the bundle would show for a server
   // that simply has none.
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+  server.setRequestHandler("resources/templates/list", async () => {
     const r = await remote();
     return r.listResourceTemplates ? r.listResourceTemplates() : { resourceTemplates: [] };
   });
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  server.setRequestHandler("resources/read", async (request) => {
     const r = await remote();
     if (!r.readResource) {
-      throw new McpError(RESOURCE_NOT_FOUND, `resource not found: ${request.params.uri}`);
+      throw new ResourceNotFoundError(request.params.uri);
     }
     return r.readResource({ uri: request.params.uri });
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler("tools/call", async (request) => {
     const { name } = request.params;
     // `let`, not `const`: the bellman_start branch below reassigns it to add the manifest.
     let args = (request.params.arguments ?? {}) as Record<string, unknown>;

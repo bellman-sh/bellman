@@ -34,8 +34,8 @@ and never `src/`. Read and edit the sources; never the bundles.
   `serverInfo.version` [scripts/build-plugin.ts:define.BELLMAN_BUNDLE_VERSION]
   [tests/plugin.test.ts:reports package.json's version]
 - Notices are keyed `name@version` and sorted by code point, so the output is
-  deterministic; they must include `@modelcontextprotocol/sdk@`, `fast-uri@`,
-  `yaml@` and `zod@` [scripts/build-plugin.ts:notices]
+  deterministic; they must include the MCP SDK (`@modelcontextprotocol/sdk@` and its `fast-uri@` in bundles built
+  before #571, the v2 `@modelcontextprotocol/core@`, `client@` and `server@` after), `yaml@` and `zod@` [scripts/build-plugin.ts:notices]
   [tests/plugin.test.ts:carries Bellman's license and the notices of every package it bundles]
 - Every file `.mcp.json` and `hooks.json` name exists here
   [tests/plugin.test.ts:runs only files that exist under plugin/]

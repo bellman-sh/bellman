@@ -3,10 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { SdkHttpError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult, Notification } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { busPath } from "../src/client/bus.js";
 import { createBridge, type BridgeBus, type Delivery, type Remote } from "../src/client/bridge.js";
@@ -729,7 +729,7 @@ describe("shutdown", () => {
       return {
         ...real,
         callTool: async (params): Promise<CallToolResult> => {
-          if (phase === "retired") throw new StreamableHTTPError(401, "Unauthorized");
+          if (phase === "retired") throw new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "Unauthorized", { status: 401 });
           return real.callTool(params);
         },
       };

@@ -98,9 +98,13 @@ describe("the plugin's shape", () => {
   it("carries Bellman's license and the notices of every package it bundles", () => {
     expect(existsSync(join(PLUGIN, "LICENSE"))).toBe(true);
     const notices = readFileSync(join(PLUGIN, "bridge", "THIRD-PARTY-NOTICES.txt"), "utf8");
-    for (const pkg of ["@modelcontextprotocol/sdk@", "fast-uri@", "yaml@", "zod@"]) {
+    for (const pkg of ["yaml@", "zod@"]) {
       expect(notices, pkg).toContain(pkg);
     }
+    // The MCP SDK: v1's one package, which brought fast-uri in through ajv, or, once a release rebuilds the
+    // bundles, v2's split packages, which bring neither.
+    if (notices.includes("@modelcontextprotocol/sdk@")) expect(notices).toContain("fast-uri@");
+    else expect(notices).toMatch(/@modelcontextprotocol\/(core|client|server)@/);
   });
 });
 

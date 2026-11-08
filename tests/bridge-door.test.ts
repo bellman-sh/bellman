@@ -9,11 +9,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/client";
+import { SdkHttpError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, RECENT_LIMIT, type Delivery, type Remote, type UploadOptions } from "../src/client/bridge.js";
 import type { DoorRooms, DoorSurface } from "../src/client/door-protocol.js";
@@ -700,7 +700,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
 
   it.each([
     ["an UnauthorizedError", () => new UnauthorizedError()],
-    ["a 401 from the transport", () => new StreamableHTTPError(401, "unauthorized")],
+    ["a 401 from the transport", () => new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "unauthorized", { status: 401 })],
   ])("reports %s as it came, and the connection it retired stays retired", async (_what, error) => {
     let connects = 0;
     const armed = await armedBridge({

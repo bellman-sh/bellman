@@ -9,8 +9,8 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Server } from "node:http";
 import { AddressInfo } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";

@@ -6,8 +6,8 @@
  * and all — without binding a port. The HTTP layer gets its own integration
  * test; everything else runs here.
  */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { resolveIdentity, type UpgradeLinks } from "../../src/auth.js";
 import { buildServer } from "../../src/server.js";
 import { type BellmanStore } from "../../src/storage/store.js";

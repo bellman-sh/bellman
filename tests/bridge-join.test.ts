@@ -4,9 +4,9 @@
  * words, and the code is in nothing the bridge reports or logs.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";

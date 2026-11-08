@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";

@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { serveMcp } from "../mcp-endpoint.js";
 import { resolveIdentity } from "../auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "../a2a/cards.js";
@@ -39,10 +39,11 @@ import { OPENAI_CHALLENGE_PATH, openaiChallengeResponse } from "../http/openai-c
  * Cloudflare Workers entry point.
  *
  * The routing mirrors src/app.ts deliberately — same two endpoints, same
- * stateless-per-request transport, same identity binding. What differs is only
- * the runtime seam: Workers speaks Request/Response, so this uses the SDK's
- * WebStandardStreamableHTTPServerTransport directly, where the Node path uses
- * StreamableHTTPServerTransport (itself a thin wrapper around this same class).
+ * per-request server, same identity binding. What differs is only the runtime
+ * seam: Workers speaks Request/Response, so this calls `serveMcp` (src/mcp-endpoint.ts)
+ * directly, where the Node path wraps it with `toNodeHandler`. It serves both
+ * protocol eras: a 2026-07-28 request carries its own version and client in
+ * `_meta`, and a 2025-era one is answered statelessly, in JSON, as before.
  *
  * Durable Object classes must be exported from the entry module for the
  * runtime to bind them.
@@ -616,17 +617,13 @@ export default {
       if (await suspended(identity.userId)) {
         return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
       }
-      const server = buildServer(identity, store, blobs, {
+      const features = {
         hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS),
         mailReport,
         upgrade: oauth?.paymentLinks ? { origin: oauth.issuer, paymentLinks: oauth.paymentLinks } : undefined,
-      });
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-      });
-      await server.connect(transport);
-      return await transport.handleRequest(request);
+      };
+      // Bound to this caller, as before: the factory runs per request, never shared across identities.
+      return await serveMcp(request, () => buildServer(identity, store, blobs, features));
     } catch (err) {
       console.error("MCP request failed:", err);
       return Response.json(

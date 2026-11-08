@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import type { Identity } from "./types.js";
 import type { BellmanStore } from "./storage/store.js";
 import type { BlobStore } from "./files/blobs.js";

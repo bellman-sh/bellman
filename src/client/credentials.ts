@@ -23,10 +23,16 @@ export interface StoredTokens {
   refresh_token?: string;
   /** Absolute epoch milliseconds, computed on save from the SDK's expires_in. */
   expires_at?: number;
+  /**
+   * The authorization server that issued these (MCP 2026-07-28, SEP-2352), as the SDK stamped it. Kept verbatim
+   * so the SDK can refuse a token another server issued; absent on a credential written before it existed.
+   */
+  issuer?: string;
 }
 
 export interface ServerCredential {
-  client?: { client_id: string };
+  /** The registered client, and the issuer that registered it when the SDK stamped one (SEP-2352). */
+  client?: { client_id: string; issuer?: string };
   tokens?: StoredTokens;
   /**
    * The access token's `bellman` claim, stored verbatim so there is no second

@@ -1,4 +1,4 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
   BusUnavailableError, openBus,
   type Bus, type BusOptions, type Coordinator, type Subscription, type SyncFrom,

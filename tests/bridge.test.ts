@@ -5,13 +5,13 @@ import fs from "node:fs/promises";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import os, { tmpdir } from "node:os";
 import path, { join } from "node:path";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, type CallToolResult, type Notification, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/client";
+import { SdkHttpError } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import { Server } from "@modelcontextprotocol/server";
+import { SdkErrorCode, type CallToolResult, type JsonSchemaType, type Notification, type Tool } from "@modelcontextprotocol/client";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
 import { resolveIdentity } from "../src/auth.js";
 import {
   createBridge, deliveryOf, installOf, loadRoomManifest,
@@ -1180,15 +1180,15 @@ describe("a connection Bellman stops accepting", () => {
     { what: "an UnauthorizedError the SDK could not recover from",
       make: () => new UnauthorizedError(), retires: true },
     { what: "a 401 with no auth provider, so a revoked BELLMAN_KEY",
-      make: () => new StreamableHTTPError(401, "Error POSTing to endpoint: unauthorized"), retires: true },
+      make: () => new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "Error POSTing to endpoint: unauthorized", { status: 401 }), retires: true },
     { what: "a 401 that arrived straight after a successful refresh",
-      make: () => new StreamableHTTPError(401, "Server returned 401 after successful authentication"), retires: true },
+      make: () => new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "Server returned 401 after successful authentication", { status: 401 }), retires: true },
     // A 403 is an entitlement, not a credential: signing in again fixes nothing
     // and costs the user a browser tab.
     { what: "a 403 after up-scoping",
-      make: () => new StreamableHTTPError(403, "Server returned 403 after trying upscoping"), retires: false },
+      make: () => new SdkHttpError(SdkErrorCode.ClientHttpForbidden, "Server returned 403 after trying upscoping", { status: 403 }), retires: false },
     { what: "a 500",
-      make: () => new StreamableHTTPError(500, "Error POSTing to endpoint: boom"), retires: false },
+      make: () => new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, "Error POSTing to endpoint: boom", { status: 500 }), retires: false },
     { what: "a socket hang-up", make: () => new Error("socket hang up"), retires: false },
   ];
 
@@ -2009,7 +2009,7 @@ describe("bellman_start with a room.yaml", () => {
     const b = await open(DEV_KEY.peer);
     const args = { brief: brief(), capabilities: caps };
     // What such a host does before it sends anything: check the arguments against the schema it was shown.
-    const accepts = (tool: Tool) => new AjvJsonSchemaValidator().getValidator(tool.inputSchema)(args).valid;
+    const accepts = (tool: Tool) => new AjvJsonSchemaValidator().getValidator(tool.inputSchema as JsonSchemaType)(args).valid;
 
     // The server's own listing would have stopped this call where it stood; the bridge's does not.
     expect(accepts(startOf(await servedTools(DEV_KEY.jesse)))).toBe(false);
@@ -2071,7 +2071,8 @@ describe("bellman_start with a room.yaml", () => {
     const res = await a.call("bellman_start", { brief: brief(), capabilities: caps });
 
     expect(res.isError).toBe(true);
-    expect(res.text).toContain("expected object, received undefined at manifest");
+    // The server's own validation error, as the SDK words it: the field and what it wanted.
+    expect(res.text).toMatch(/manifest: .*expected object, received undefined/);
     expect(said()).toBe("");
   });
 
@@ -2120,8 +2121,8 @@ describe("bellman_start with a room.yaml", () => {
     // The SDK gives a handler a parsed copy of every request, so through a client an in-place write would
     // be invisible. Capture the raw handler and call it with an object this test still holds.
     const handlers = new Map<unknown, (request: unknown, extra: unknown) => Promise<unknown>>();
-    vi.spyOn(Server.prototype, "setRequestHandler").mockImplementation((schema: unknown, handler: unknown) => {
-      handlers.set(schema, handler as (request: unknown, extra: unknown) => Promise<unknown>);
+    vi.spyOn(Server.prototype, "setRequestHandler").mockImplementation((method: unknown, handler: unknown) => {
+      handlers.set(method, handler as (request: unknown, extra: unknown) => Promise<unknown>);
     });
     const sent: Record<string, unknown>[] = [];
     const bridge = createBridge({
@@ -2137,7 +2138,7 @@ describe("bellman_start with a room.yaml", () => {
     });
 
     const handed = { brief: brief(), capabilities: caps };
-    await handlers.get(CallToolRequestSchema)!(
+    await handlers.get("tools/call")!(
       { method: "tools/call", params: { name: "bellman_start", arguments: handed } },
       {},
     );

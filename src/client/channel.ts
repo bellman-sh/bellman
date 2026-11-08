@@ -60,7 +60,7 @@
  */
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";

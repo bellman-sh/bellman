@@ -8,7 +8,7 @@
  * what an agent is shown: the title, the description, the input schema and the annotations.
  */
 import { fileURLToPath } from "node:url";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import { listHookBridgeTools, listServerTools } from "../tests/helpers/tool-lists.js";
 
 /** Absolute path of docs-site/src/content/docs/, so the script and the test agree from any working directory. */

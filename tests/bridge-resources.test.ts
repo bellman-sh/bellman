@@ -9,9 +9,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
@@ -83,8 +83,9 @@ describe("the bridge and UI resources", () => {
     const { host } = await bridged(async () => bare);
     expect(await host.listResources()).toEqual({ resources: [] });
     expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
-    // -32002 is the code MCP reserves for a resource that does not exist.
-    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32002 });
+    // A missing resource is -32602, Invalid Params: MCP 2026-07-28 requires it, and the SDK sends it on every era.
+    // Clients still accept the -32002 earlier servers sent.
+    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32602 });
   });
 
   it("arms no watcher from a bellman_rooms result", async () => {

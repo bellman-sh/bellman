@@ -1,7 +1,8 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import express, { type Express, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { serveMcp } from "./mcp-endpoint.js";
 import { a2aRoutes } from "./a2a/routes.js";
 import { resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./files/blobs.js";
@@ -136,9 +137,9 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   });
 
   /**
-   * Stateless streamable HTTP: a fresh transport + identity-bound McpServer per
-   * request. Session state lives in the store, not the transport — the same
-   * shape a Durable Objects port needs, where each Bellman session becomes one DO.
+   * One identity-bound McpServer per request, through `serveMcp` (src/mcp-endpoint.ts), which answers a
+   * 2026-07-28 request from its own `_meta` and a 2025-era one statelessly, in JSON. Session state lives in
+   * the store, not the transport — the same shape a Durable Objects port needs.
    */
   app.post("/mcp", async (req, res) => {
     const identity = resolveIdentity(req.header("authorization"));
@@ -155,17 +156,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
       return;
     }
     try {
-      const server = buildServer(identity, store, blobs, { ...features, mailReport });
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-      });
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      const factory = () => buildServer(identity, store, blobs, { ...features, mailReport });
+      await toNodeHandler({ fetch: (request) => serveMcp(request, factory) })(req, res, req.body);
     } catch (err) {
       console.error("MCP request failed:", err);
       if (!res.headersSent) {

@@ -104,7 +104,7 @@ describe("the bridge's join from BELLMAN_JOIN_CODE", () => {
 });
 
 /** A bridge signed in as `key`, whose own-credential HTTP calls reach the real `/me` routes, every notification kept. */
-async function bridgeWithRoutes(key: string, { list = true } = {}) {
+async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } = {}) {
   const identity = resolveIdentity(`Bearer ${key}`)!;
   const logged: string[] = [];
   const notified: Array<{ method: string; params?: Record<string, unknown> }> = [];
@@ -115,7 +115,8 @@ async function bridgeWithRoutes(key: string, { list = true } = {}) {
     await Promise.all([server.connect(serverSide), upstream.connect(clientSide)]);
     return {
       listTools: () => upstream.listTools(),
-      callTool: (params) => upstream.callTool(params) as Promise<CallToolResult>,
+      callTool: (params) =>
+        hangLeave && params.name === "bellman_leave" ? new Promise<CallToolResult>(() => {}) : (upstream.callTool(params) as Promise<CallToolResult>),
       close: () => upstream.close(),
     };
   };
@@ -128,7 +129,7 @@ async function bridgeWithRoutes(key: string, { list = true } = {}) {
     (posted.push(String(input)), await meRoutes(new Request(input, init), { store: h.store, caller, panelOrigins: [] })) ?? new Response(null, { status: 404 })) as typeof fetch;
   const bridge = createBridge({
     delivery: "channel", remote, pollWaitSeconds: 1, log: (line) => logged.push(line),
-    upload: { serverUrl: "https://mcp.example.test", bearer: () => key, fetchImpl },
+    upload: { serverUrl: "https://mcp.example.test", bearer: () => key, fetchImpl }, leaveTimeoutMs: 200,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-code", version: "0.0.1" });
@@ -188,5 +189,30 @@ describe("the bridge's join from the repo's default room", () => {
       state: "refused", from: "repo",
       reason: "the room it names is closed, public, or no longer takes that role. Change it in the dash",
     });
+  });
+});
+
+describe("the bridge leaving its bound seats", () => {
+  it("leaves the seat it took from the repo's default room on close, and keeps the one joined from a code", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const { sessionId, started } = await startRoom(jesse, SWARM);
+    const { bridge, identity } = await bridgeWithRoutes(DEV_KEY.jesse);
+    await bindRepoRoom(h.store, identity, { remote: REMOTE, sessionId, role: "helper" });
+    const bound = (await bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+    const coded = (await bridge.join(String(started.data.join_code), "bellman")) as { member_id: string };
+    expect(bridge.watching().length).toBe(2);
+    await bridge.close();
+    expect((await h.store.getMember(sessionId, bound.member_id))?.leftAt).toEqual(expect.any(Number));
+    expect((await h.store.getMember(sessionId, coded.member_id))?.leftAt ?? null).toBeNull();
+  });
+
+  it("does not hold close past its bound when the leave never answers", async () => {
+    const { sessionId } = await startRoom(await h.connect(DEV_KEY.jesse), SWARM);
+    const { bridge, identity } = await bridgeWithRoutes(DEV_KEY.jesse, { hangLeave: true });
+    await bindRepoRoom(h.store, identity, { remote: REMOTE, sessionId, role: "helper" });
+    await bridge.joinBound(REMOTE, "bellman");
+    const at = Date.now();
+    await bridge.close();
+    expect(Date.now() - at).toBeLessThan(2_000);
   });
 });

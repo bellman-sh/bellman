@@ -203,6 +203,8 @@ export interface BridgeOptions {
   inboxDir?: string;
   /** How long each watcher long-poll holds, in seconds. */
   pollWaitSeconds?: number;
+  /** How long `close()` waits for its bound seats' leaves, in all. Three seconds; tests set it shorter. */
+  leaveTimeoutMs?: number;
   /** Who this bridge signed in as. Absent means a static BELLMAN_KEY. */
   whoami?: () => WhoAmI;
   /**
@@ -1810,7 +1812,36 @@ export function createBridge(opts: BridgeOptions) {
     }
   }
 
+  /**
+   * Leave the seats taken from the repo's default room, through the connection held (never `remote()`, which could
+   * open a browser at shutdown), in parallel and for at most `leaveTimeoutMs` in all. Best effort: a session killed
+   * outright never gets here, and its seat stays until it is reclaimed or removed. A seat left is no longer watched,
+   * so it is not persisted for a resume.
+   */
+  async function leaveBoundSeats(): Promise<void> {
+    const connection = live;
+    const seats = [...boundSeats].flatMap((id) => watches.get(id) ?? []);
+    if (!connection || seats.length === 0) return;
+    const leaving = Promise.all(seats.map(async (w) => {
+      try {
+        const out = await connection.callTool({ name: "bellman_leave", arguments: { session_id: w.sessionId, member_id: w.memberId } });
+        if (out.isError) log(`leaving ${w.memberId} at shutdown was refused`);
+        else {
+          w.active = false;
+          watches.delete(w.memberId);
+          boundSeats.delete(w.memberId);
+        }
+      } catch (err) {
+        log(`leaving ${w.memberId} at shutdown failed: ${(err as Error).message}`);
+      }
+    }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([leaving, new Promise<void>((resolve) => (timer = setTimeout(resolve, opts.leaveTimeoutMs ?? 3_000)))]);
+    clearTimeout(timer);
+  }
+
   async function close(): Promise<void> {
+    if (!closed) await leaveBoundSeats();
     closed = true;
     for (const w of watches.values()) w.active = false;
     watches.clear();

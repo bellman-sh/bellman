@@ -42,7 +42,8 @@ into the mod.
   (`[src/client/bridge.ts:joinBound]`), only after the first tools/list, so the handshake stays local. No binding, no
   credential or a server without the route says nothing; any other outcome is `joined` with `from: "repo"`, and in
   channel delivery the bridge pushes `joinLine` once the client has initialized. Seats taken this way are kept in
-  `boundSeats`.
+  `boundSeats`, and `close()` leaves them (`bellman_leave` through the held connection, at most `leaveTimeoutMs`, 3 s,
+  in all) before anything else shuts; a seat joined by hand or from a code stays.
 - `[src/client/signin.ts:connectSignedIn]` browser OAuth with PKCE on a loopback callback (`CALLBACK_PORTS` 51004-51008);
   `[src/client/signin.ts:signedInAs]`. `[src/client/credentials.ts]` the credential file (`readServer`, `writeServer`,
   `acquireLock`, `busCredentials`).

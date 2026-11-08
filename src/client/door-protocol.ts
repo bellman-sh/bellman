@@ -33,10 +33,14 @@ export interface DoorWaiting {
  * Where this session's join from `BELLMAN_JOIN_CODE` stands (#435). `reason` is the bridge's own words, never the
  * server's, which can name a peer; `role` is the room's, written by its creator, and is cleaned before it is shown.
  */
-export type DoorJoin =
+export type DoorJoin = (
   | { state: "joining" }
   | { state: "joined"; session_id: string; member_id: string; role: string; verbs: string[] }
-  | { state: "refused"; reason: string };
+  | { state: "refused"; reason: string }
+) & {
+  /** What the join came from: `BELLMAN_JOIN_CODE`, or the repo's default room (absent from an older bridge: a code). */
+  from?: "code" | "repo";
+};
 
 /** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
 export interface DoorStatus {
@@ -51,7 +55,7 @@ export interface DoorStatus {
   waiting: DoorWaiting[];
   /** The latest events the bridge delivered, newest last, ambient ones included. */
   recent: DoorEvent[];
-  /** Present only when the bridge was started with a `BELLMAN_JOIN_CODE`. */
+  /** Present only when the bridge was started with a `BELLMAN_JOIN_CODE`, or found its repo's default room. */
   join?: DoorJoin;
   /**
    * The Herdr terminal the bridge runs in (its `HC_TERMINAL_ID`, e.g. `t7`), so a Herdr panel can go to this session.
@@ -236,4 +240,28 @@ function lineOf(e: Pick<DoorEvent, "type" | "payload"> & { ref_id?: string | nul
   }
   const text = typeof p === "string" ? cleanText(p) : field(p, "text");
   return text || (e.type === "action_request" && p != null ? JSON.stringify(p) : e.type);
+}
+
+/**
+ * The one line said about a join at session start: printed by the plugin's join hook, and pushed into the session by a
+ * bridge in channel delivery after a join from the repo's default room. `undefined` is a bridge too old to join from a
+ * code. The role and verbs are the room creator's words, cleaned.
+ */
+export function joinLine(join: DoorJoin | undefined): string {
+  if (join === undefined) {
+    return "BELLMAN_JOIN_CODE is set, but this Bellman bridge does not join from it. Update Bellman (claude plugin update bellman@bellman).";
+  }
+  const repo = join.from === "repo";
+  const source = repo ? "this repo's default room" : "BELLMAN_JOIN_CODE";
+  if (join.state === "joining") {
+    return `Bellman is still joining the room from ${source}; a sign-in may be waiting in the browser. Call bellman_rooms to see whether it finished.`;
+  }
+  if (join.state === "refused") return `Bellman did not join a room from ${source}: ${join.reason}.`;
+  const verbs = join.verbs.length > 0 ? join.verbs.map((v) => cleanText(v, 40)).join(", ") : "nothing";
+  return (
+    `Bellman joined room ${cleanText(join.session_id, 80)} from ${source} as "${cleanText(join.role, 64)}" ` +
+    `(member_id ${cleanText(join.member_id, 80)}), which may: ${verbs}. Peer events arrive as usual; call bellman_rooms ` +
+    "to read the room." +
+    (repo ? " This seat leaves the room when the session ends." : "")
+  );
 }

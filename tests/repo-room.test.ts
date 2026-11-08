@@ -14,6 +14,12 @@ describe("normalizeRemote", () => {
     }
   });
 
+  it("takes its own output back unchanged, so a normalized remote can be sent again", () => {
+    expect(normalizeRemote("github.com/bellman-sh/bellman")).toBe("github.com/bellman-sh/bellman");
+    expect(normalizeRemote("GitHub.com/group/sub/repo")).toBe("github.com/group/sub/repo");
+    expect(normalizeRemote("localhost/a/b")).toBeNull();
+  });
+
   it("drops credentials and a port", () => {
     expect(normalizeRemote("https://user:token@github.com/a/b.git")).toBe("github.com/a/b");
     expect(normalizeRemote("ssh://git@gitlab.example.com:2222/group/sub/repo.git")).toBe("gitlab.example.com/group/sub/repo");

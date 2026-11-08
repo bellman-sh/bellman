@@ -30,6 +30,7 @@ import type {
   DoorDeclined, DoorEvent, DoorJoin, DoorLog, DoorMemory, DoorRooms, DoorSeat, DoorSeatStatus, DoorStatusSet, DoorSurface,
   DoorSurfaceWritten,
 } from "./door-protocol.js";
+import { joinLine } from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -822,9 +823,17 @@ export function createBridge(opts: BridgeOptions) {
       instructions: { channel: CHANNEL_INSTRUCTIONS, hook: HOOK_INSTRUCTIONS, queue: QUEUE_INSTRUCTIONS }[delivery],
     }
   );
+  /** Resolved once the client has initialized: a notification sent before then is not read. */
+  let markInitialized: () => void = () => {};
+  const initialized = new Promise<void>((resolve) => (markInitialized = resolve));
+  server.oninitialized = () => markInitialized();
 
+  /** Resolved by the first tools/list that reached Bellman: the bound join waits for it, so the handshake stays local. */
+  let markListed: () => void = () => {};
+  const listedOnce = new Promise<void>((resolve) => (markListed = resolve));
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { tools } = await (await remote()).listTools();
+    markListed();
     // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
     const listed = tools.map(advertised);
     const waitTool = delivery === "queue" ? QUEUE_WAIT_TOOL : WAIT_TOOL;
@@ -1507,13 +1516,16 @@ export function createBridge(opts: BridgeOptions) {
    * reply the door gives. A 401 is retried once with a refreshed sign-in (see `readEvents`); any other status is
    * `upstream` with that status, and a throw is `upstream`, 502. Never rejects.
    */
-  async function readOwn<T>(path: string): Promise<{ read: T } | { status: number; body: { error: string } }> {
+  async function readOwn<T>(path: string, post?: unknown): Promise<{ read: T } | { status: number; body: { error: string }; code?: string }> {
     const upload = opts.upload;
     if (!upload) return { status: 503, body: { error: "no_credential" } };
     try {
       const target = new URL(path, upload.serverUrl);
+      // A POST carries a JSON body; the read and the 401 retry below are the same either way.
       const get = (bearer: string): Promise<Response> =>
-        (upload.fetchImpl ?? fetch)(target, { headers: { authorization: `Bearer ${bearer}` } });
+        (upload.fetchImpl ?? fetch)(target, post === undefined
+          ? { headers: { authorization: `Bearer ${bearer}` } }
+          : { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify(post) });
       const bearer = await upload.bearer();
       let response = await get(bearer);
       if (response.status === 401) {
@@ -1528,8 +1540,10 @@ export function createBridge(opts: BridgeOptions) {
         }
       }
       if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        return { status: response.status, body: { error: "upstream" } };
+        // The refusal's code, a fixed token the server chose, never its reason, which can name a peer.
+        const said = (await response.json().catch(() => null)) as { error?: unknown } | null;
+        const code = typeof said?.error === "string" && /^[a-z_]{1,40}$/.test(said.error) ? said.error : undefined;
+        return { status: response.status, body: { error: "upstream" }, ...(code ? { code } : {}) };
       }
       return { read: (await response.json()) as T };
     } catch {
@@ -1679,8 +1693,10 @@ export function createBridge(opts: BridgeOptions) {
     return failed && sent === 0 ? failed : { status: 200, body: { sent } };
   }
 
-  /** Where the join from `BELLMAN_JOIN_CODE` stands, for the door; undefined when the bridge was given no code. */
+  /** Where the join at launch stands, for the door: from `BELLMAN_JOIN_CODE` or the repo's default room; undefined with neither. */
   let joined: DoorJoin | undefined;
+  /** The seats taken from the repo's default room: `close()` leaves them, and only them. */
+  const boundSeats = new Set<string>();
 
   /**
    * Join the room `code` opens, as a session a desktop app started does (#435): preview it, refuse a public room, and
@@ -1692,11 +1708,8 @@ export function createBridge(opts: BridgeOptions) {
    * passed on, since a refusal can name a peer. It never rejects.
    */
   async function join(code: string, project: string): Promise<DoorJoin> {
-    joined = { state: "joining" };
-    const refuse = (reason: string, said?: string): DoorJoin => {
-      if (said) log(`join refused: ${said}`);
-      return (joined = { state: "refused", reason });
-    };
+    joined = { state: "joining", from: "code" };
+    const refuse = refuser("code");
     let connected: Remote;
     try {
       connected = await remote();
@@ -1717,28 +1730,83 @@ export function createBridge(opts: BridgeOptions) {
       if (room?.public !== false) {
         return refuse("the room is public, and a session never joins a public room on its own. Join it with bellman_connect if you mean to");
       }
-      const args = {
-        connect_token: shown?.connect_token,
-        brief: {
-          goal: `Joined from the ${project} project`,
-          state: "Just started; nothing done in this room yet",
-          agent: { provider: "anthropic", model: "claude", client: "claude-code" },
-        },
-      };
-      const confirmed = await connected.callTool({ name: "bellman_confirm", arguments: args });
-      if (confirmed.isError) return refuse("the room refused the join after its preview; ask for a fresh code", textOf(confirmed));
-      observe("bellman_confirm", args, confirmed);
-      const out = resultData(confirmed);
-      const seat = out?.room as { your_role?: unknown; your_verbs?: unknown } | undefined;
-      return (joined = {
-        state: "joined",
-        session_id: String(out?.session_id ?? ""),
-        member_id: String(out?.member_id ?? ""),
-        role: String(seat?.your_role ?? ""),
-        verbs: Array.isArray(seat?.your_verbs) ? seat.your_verbs.map(String) : [],
-      });
+      return await confirmJoin(connected, shown?.connect_token, project, "code", "the room refused the join after its preview; ask for a fresh code");
     } catch (err) {
       return refuse("Bellman did not answer the join", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** A refusal said in the bridge's words, recorded as where the join stands; the server's words go to the log only. */
+  function refuser(from: "code" | "repo") {
+    return (reason: string, said?: string): DoorJoin => {
+      if (said) log(`join refused: ${said}`);
+      return (joined = { state: "refused", reason, from });
+    };
+  }
+
+  /** `bellman_confirm` with `token`, and the seat it gives, armed as a manual join's is. */
+  async function confirmJoin(connected: Remote, token: unknown, project: string, from: "code" | "repo", refusedReason: string): Promise<DoorJoin> {
+    const args = {
+      connect_token: token,
+      brief: {
+        goal: `Joined from the ${project} project`,
+        state: "Just started; nothing done in this room yet",
+        agent: { provider: "anthropic", model: "claude", client: "claude-code" },
+      },
+    };
+    const confirmed = await connected.callTool({ name: "bellman_confirm", arguments: args });
+    if (confirmed.isError) return refuser(from)(refusedReason, textOf(confirmed));
+    observe("bellman_confirm", args, confirmed);
+    const out = resultData(confirmed);
+    const seat = out?.room as { your_role?: unknown; your_verbs?: unknown } | undefined;
+    return (joined = {
+      state: "joined",
+      session_id: String(out?.session_id ?? ""),
+      member_id: String(out?.member_id ?? ""),
+      role: String(seat?.your_role ?? ""),
+      verbs: Array.isArray(seat?.your_verbs) ? seat.your_verbs.map(String) : [],
+      from,
+    });
+  }
+
+  /**
+   * Join the repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): once the first
+   * tools/list has connected (the handshake makes no call to Bellman), ask the server for a connect token from the
+   * account's binding of `remote`, then confirm as a code join does. Only a binding the server confirms becomes a
+   * join: no binding, no credential, or a server without the route is logged and leaves `joined` undefined, since the
+   * person asked for nothing in this session. The seat is recorded so `close()` leaves it, and in channel delivery the
+   * outcome is pushed into the session. It never rejects.
+   */
+  async function joinBound(remoteUrl: string, project: string): Promise<DoorJoin | undefined> {
+    await listedOnce;
+    const refuse = refuser("repo");
+    const got = await readOwn<{ connect_token?: unknown }>("/me/repo-rooms/connect", { remote: remoteUrl });
+    let outcome: DoorJoin | undefined;
+    if ("read" in got) {
+      joined = { state: "joining", from: "repo" };
+      try {
+        outcome = await confirmJoin(await remote(), got.read.connect_token, project, "repo", "the room refused the join; it may be full or frozen");
+      } catch (err) {
+        outcome = refuse("Bellman did not answer the join", err instanceof Error ? err.message : String(err));
+      }
+    } else if (got.code === "not_found" || got.code === "not_creator" || got.code === "public_room" || got.code === "unknown_role") {
+      outcome = refuse("the room it names is closed, public, or no longer takes that role. Change it in the dash", `${got.status} ${got.code}`);
+    } else {
+      if (got.code !== "no_binding") log(`repo default room not read: ${got.status} ${got.code ?? ""}`.trim());
+      return undefined;
+    }
+    if (outcome.state === "joined") boundSeats.add(outcome.member_id);
+    if (delivery === "channel") void announce(outcome);
+    return outcome;
+  }
+
+  /** The join's one line, pushed into the session once it has initialized. A failure is logged. */
+  async function announce(outcome: DoorJoin): Promise<void> {
+    await initialized;
+    try {
+      await server.notification({ method: "notifications/claude/channel", params: { content: joinLine(outcome), meta: { type: "bellman_join" } } });
+    } catch (err) {
+      log(`join announcement failed: ${(err as Error).message}`);
     }
   }
 
@@ -1796,6 +1864,8 @@ export function createBridge(opts: BridgeOptions) {
     setStatus,
     /** Join from `BELLMAN_JOIN_CODE` (#435), and where that stands, for the door's `/status`. */
     join,
+    /** Join the repo's default room from the cwd's git remote. */
+    joinBound,
     joinState: (): DoorJoin | undefined => joined,
   };
 }

@@ -20,7 +20,7 @@ import { nonceFor, oidcAuthorizeUrl, oidcExchange } from "./oidc.js";
 import { unseal } from "./sealed.js";
 import {
   SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
-  type AuthStorage, type PanelSession, type SettledAnswer,
+  type AuthStorage, type PanelSession, type RegisteredClient, type SettledAnswer,
 } from "./storage.js";
 import {
   clearedSessionCookie, clearedSigninNonce, readSessionCookie, readSigninNonce,
@@ -28,6 +28,7 @@ import {
   readCampaignRef,
 } from "./cookies.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
+import { type CimdCache, isCimdClientId, resolveCimdClient } from "./cimd.js";
 import {
   AGENT_CODE_TTL_MS, AGENT_POLL_INTERVAL_MS, AGENT_REGISTRATION_TTL_MS, ASSERTION_AUDIENCE, CLAIM_GRANT,
   JWT_BEARER_GRANT,
@@ -106,6 +107,8 @@ export interface OAuthConfig {
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
+  /** Where fetched Client ID Metadata Documents are kept (`cimd.ts`). Absent uses the isolate's shared cache. */
+  cimdCache?: CimdCache;
   /**
    * The request's campaign tag (`readCampaignRef`), which `handleOAuth` sets on its own copy of the config for each
    * request, so every sign-in path reaches `resolvePlan` with it. Never configured.
@@ -699,6 +702,22 @@ function usableRedirect(uri: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * What the sign-in page adds for a Client ID Metadata Document client, whose name is its own claim: the site that
+ * published it, and where sign-in returns (MCP 2026-07-28 asks that the redirect host be shown). A redirect to this
+ * computer gets a warning, since any program here can claim one.
+ */
+function metadataDocumentNotice(clientId: string, redirectUri: string): string {
+  const publisher = new URL(clientId).hostname;
+  const target = new URL(redirectUri);
+  const local = isLoopback(target);
+  return (
+    ` Published by <strong>${escape(publisher)}</strong>; signing in returns you to ` +
+    `<strong>${escape(local ? "an application on this computer" : target.hostname)}</strong>.` +
+    (local ? ` Continue only if you just started connecting Bellman from an application here.` : "")
+  );
 }
 
 const isLoopback = (url: URL) => url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
@@ -1316,6 +1335,8 @@ export async function handleOAuth(
       code_challenge_methods_supported: ["S256"],
       // RFC 9207: every authorization response carries `iss` (clientRedirect).
       authorization_response_iss_parameter_supported: true,
+      // A client_id may be an https URL serving its own metadata (cimd.ts); /register stays for older clients.
+      client_id_metadata_document_supported: true,
       token_endpoint_auth_methods_supported: ["none"],
       scopes_supported: [SCOPE],
       service_documentation: "https://github.com/bellman-sh/bellman",
@@ -1459,7 +1480,22 @@ export async function handleOAuth(
 
     // Until the client and its redirect_uri are known good, errors are shown
     // here rather than redirected: sending them onward is an open redirect.
-    const client = clientId ? await config.store.getClient(clientId) : undefined;
+    // A client_id that is an https URL is a Client ID Metadata Document (cimd.ts); any other is a registration.
+    const metadataDocument = isCimdClientId(clientId);
+    let client: RegisteredClient | undefined;
+    if (metadataDocument) {
+      const found = await resolveCimdClient(clientId, {
+        fetchImpl: config.fetchImpl ?? fetch,
+        usable: usableRedirect,
+        cache: config.cimdCache,
+      });
+      if ("error" in found) {
+        return html(`<h1>Client not recognised</h1><p>Bellman could not use this application's metadata: ${escape(found.error)}.</p>`, 400);
+      }
+      client = found.client;
+    } else {
+      client = clientId ? await config.store.getClient(clientId) : undefined;
+    }
     if (!client) {
       return html(`<h1>Unknown client</h1><p>This application is not registered with Bellman.</p>`, 400);
     }
@@ -1510,7 +1546,8 @@ export async function handleOAuth(
     }
     return html(signInBody(
       "Connect to Bellman",
-      `<strong>${escape(client.client_name ?? "An application")}</strong> wants to join and create Bellman sessions as you.`,
+      `<strong>${escape(client.client_name ?? "An application")}</strong> wants to join and create Bellman sessions as you.` +
+        (metadataDocument ? metadataDocumentNotice(clientId, redirectUri) : ""),
       stateToken, available, true,
     ));
   }

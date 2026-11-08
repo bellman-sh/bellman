@@ -3,7 +3,7 @@
 ## Overview
 
 Bellman's OAuth 2.1 authorization server. `routes.ts` is one dispatcher, `handleOAuth`, for discovery metadata,
-dynamic client registration, PKCE authorize, the GitHub, Google and org-SSO hand-offs, the token endpoint, agent
+dynamic client registration and Client ID Metadata Document clients, PKCE authorize, the GitHub, Google and org-SSO hand-offs, the token endpoint, agent
 registration (auth.md), panel cookie sessions, the sign-in invites page, `/account`, and operator and admin
 routes; it also resolves a caller's plan at sign-in and on refresh. `storage.ts` is the runtime-free
 `AuthStorage` contract with `MemoryAuthStore`; its Durable Object implementation, `AuthDO`, is Workers-only and lives
@@ -67,6 +67,8 @@ Primitives:
 - `discover`, `oidcAuthorizeUrl`, `oidcExchange`, `nonceFor` [src/oauth/oidc.ts:oidcExchange]
 - `Provider`, `PROVIDERS` (`github`, `google`), SSO key helpers, `identityKeys`, `immutableKeys`, `identityFor`,
   `parseOverrides` (`BELLMAN_USERS`) [src/oauth/providers.ts:PROVIDERS]
+- Client ID Metadata Documents: `isCimdClientId`, `resolveCimdClient`, `validateCimdDocument`, `cimdTtl`,
+  `CimdCache` (`sharedCimdCache` per isolate, or `OAuthConfig.cimdCache`) [src/oauth/cimd.ts:resolveCimdClient]
 - `allowedOrigin`, `corsHeaders`, `preflightResponse`, `csrfRefusal`, `parsePanelOrigins`
   (`BELLMAN_PANEL_ORIGINS`) [src/oauth/browser.ts:csrfRefusal]
 - Agent records and pure verdicts `decidePoll`, `decideApprove`, `decideReissue`; `CLAIM_GRANT`,
@@ -79,6 +81,13 @@ Primitives:
 - PKCE accepts S256 only, verifier 43-128 characters [src/oauth/tokens.ts:verifyPkce]
 - `/authorize` shows errors as HTML until `client_id` and an exactly registered `redirect_uri` are known; redirect
   URIs must be https or http on loopback [src/oauth/routes.ts:usableRedirect]
+- A `client_id` that is an https URL on a public DNS name, with a path and no port, credentials, query, fragment or dot
+  segment, is a Client ID Metadata Document; any other is a registration. The document is fetched with no redirects
+  followed, 5 s, 5 KiB and a JSON type; it must name itself as `client_id`, carry `client_name` and usable
+  `redirect_uris`, and be a public client. A good one is cached for its `max-age` clamped to 5 min..24 h; a failure is
+  never cached; a host may cause 20 fetches a minute. A failure shows an error page and never redirects; the sign-in page
+  names the document's host and the return host, and warns on a loopback return [src/oauth/cimd.ts:isCimdClientId]
+  [src/oauth/routes.ts:metadataDocumentNotice]
 - Every authorization response to a client's redirect URI, a code or an error, carries `iss` (RFC 9207), and the
   metadata says so with `authorization_response_iss_parameter_supported`; a redirect that is not one (to Stripe)
   carries none [src/oauth/routes.ts:clientRedirect]
@@ -126,7 +135,8 @@ Primitives:
 ## Side Effects
 
 - `AuthDO`'s storage, alarm sweep and RPC are in [../workerd/EGM.md](../workerd/EGM.md)
-- Network: provider token and user endpoints (`github.com`, `api.github.com`, `oauth2.googleapis.com`,
+- Network: a Client ID Metadata Document's URL, on `/authorize` when the document is not cached
+  [src/oauth/cimd.ts:resolveCimdClient]; provider token and user endpoints (`github.com`, `api.github.com`, `oauth2.googleapis.com`,
   `openidconnect.googleapis.com`), OIDC discovery, token and userinfo, `cloudflare-dns.com`
   [src/oauth/providers.ts:github] [src/oauth/oidc.ts:discover] [src/oauth/dns.ts:txtRecords]
 - Plan store writes with audit intent: grants, SSO member provisioning, orgs, suspensions, reports, handle

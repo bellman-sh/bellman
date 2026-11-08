@@ -362,3 +362,61 @@ describe("DELETE /rooms/:id/notes", () => {
     expect(deletes.map((e) => [(e.payload as { op: string }).op, (e.payload as { path: string }).path])).toEqual(body.deleted.map((p) => ["delete", p]));
   });
 });
+
+// A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): bound and unbound by the
+// person signed in to the dash, listed with a bearer too, and only for a room the account created.
+describe("/me/repo-rooms", () => {
+  const REMOTE = "git@github.com:bellman-sh/bellman.git";
+  const bind = (body: unknown, over: CallOptions = {}) =>
+    call(null, "/me/repo-rooms", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
+  const unbind = (remote: string, over: CallOptions = {}) =>
+    call(null, `/me/repo-rooms?remote=${encodeURIComponent(remote)}`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
+
+  it("binds from the dash, lists for the bearer, and replaces a binding given in another remote form", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const a = await startRoom(jesse, SWARM);
+    const b = await startRoom(jesse, SWARM);
+    const res = await bind({ remote: REMOTE, session_id: a.sessionId, role: "helper" });
+    expect([res.status, await bodyOf(res)]).toEqual([200, { remote: "github.com/bellman-sh/bellman", session_id: a.sessionId, role: "helper", created_at: expect.any(Number) }]);
+    expect((await bind({ remote: "https://github.com/bellman-sh/bellman", session_id: b.sessionId, role: "lead" })).status).toBe(200);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/repo-rooms"))).toEqual({
+      repo_rooms: [{ remote: "github.com/bellman-sh/bellman", session_id: b.sessionId, role: "lead", created_at: expect.any(Number) }],
+    });
+    expect(await bodyOf(await call(DEV_KEY.peer, "/me/repo-rooms"))).toEqual({ repo_rooms: [] });
+  });
+
+  it("refuses a bearer write, a room someone else created, a public room, a closed room, a role the room lacks and a remote that is not one", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const mine = await startRoom(jesse, SWARM);
+    const peer = await h.connect(DEV_KEY.peer);
+    const theirs = await startRoom(peer);
+    const pub = await publicRoom(h);
+    const closed = await startRoom(jesse, SWARM);
+    await h.store.closeSession(closed.sessionId);
+    const code = async (res: Response) => [res.status, (await bodyOf(res)).error];
+    expect(await code(await call(DEV_KEY.jesse, "/me/repo-rooms", { method: "PUT", body: { remote: REMOTE, session_id: mine.sessionId, role: "helper" } }))).toEqual([403, "dash_session_required"]);
+    expect(await code(await call(DEV_KEY.jesse, `/me/repo-rooms?remote=${REMOTE}`, { method: "DELETE" }))).toEqual([403, "dash_session_required"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: mine.sessionId, role: "helper" }, { headers: {} }))).toEqual([403, expect.any(String)]);
+    expect(await code(await bind({ remote: REMOTE, session_id: theirs.sessionId, role: "helper" }))).toEqual([403, "not_creator"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: pub.sessionId, role: "helper" }))).toEqual([409, "public_room"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: closed.sessionId, role: "helper" }))).toEqual([404, "not_found"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: mine.sessionId, role: "nobody" }))).toEqual([400, "unknown_role"]);
+    expect(await code(await bind({ remote: "/tmp/repo", session_id: mine.sessionId, role: "helper" }))).toEqual([400, "invalid_request"]);
+    expect(await code(await bind({ remote: REMOTE }))).toEqual([400, "invalid_request"]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/repo-rooms"))).toEqual({ repo_rooms: [] });
+  });
+
+  it("keeps a bound room open when it empties, and lets it close once unbound", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const kept = await startRoom(jesse, SWARM);
+    expect((await bind({ remote: REMOTE, session_id: kept.sessionId, role: "helper" })).status).toBe(200);
+    expect((await jesse.call("bellman_leave", { session_id: kept.sessionId, member_id: kept.memberId })).isError).toBe(false);
+    expect((await h.store.getSession(kept.sessionId))?.closed).toBe(false);
+    expect((await unbind("https://github.com/bellman-sh/bellman")).status).toBe(204);
+    expect((await unbind(REMOTE)).status).toBe(404);
+    expect((await h.store.getSession(kept.sessionId))?.keptOpen).toBeUndefined();
+    const other = await startRoom(jesse, SWARM);
+    expect((await jesse.call("bellman_leave", { session_id: other.sessionId, member_id: other.memberId })).isError).toBe(false);
+    expect((await h.store.getSession(other.sessionId))?.closed).toBe(true);
+  });
+});

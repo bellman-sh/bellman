@@ -90,6 +90,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   app.use("/scim/v2", serve((request) => scimRoutes(request, { store })));
   app.use("/me/rooms", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/me/memory", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
+  app.use("/me/repo-rooms", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [], publicPageOrigins: [] }))));
   // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of

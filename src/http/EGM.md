@@ -58,7 +58,8 @@ Account, org and operator routes:
   written back, capture stays off); `DELETE /me/memory/notes?path=`
   (204 | 404 `not_found` | 400 `invalid_request`, the note, its history and the path in every lookup row);
   `GET /me/memory/export` (200 `text/markdown`, an attachment `bellman-memory-YYYY-MM-DD.md`, works while paused, logs
-  no lookup) [src/http/me.ts:meRoutes]
+  no lookup, and says under "Room notes" when the joined index came back full at `JOINED_SCAN`, so rooms past it were
+  not read) [src/http/me.ts:meRoutes] [src/files/memory.ts:exportMemory]
 - Every account memory route but `GET /me/memory` is dash-session only: a bearer gets 403 `dash_session_required`
   and a write is CSRF-checked [src/http/me.ts:meRoutes]
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB

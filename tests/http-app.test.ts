@@ -11,6 +11,7 @@ import { meRoutes } from "../src/http/me.js";
 import type { LookupShown } from "../src/files/memory.js";
 import { MAX_CODE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { SEND_LIMIT } from "../src/room/send-limit.js";
+import { JOINED_SCAN } from "../src/storage/store.js";
 import { joinWith, pairUp, publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 
@@ -186,6 +187,17 @@ describe("GET /me/memory/export", () => {
     expect(md).toContain("open note");
     expect(md).not.toContain("left note");
     expect(md).not.toContain("closed note");
+  });
+
+  it("says the room list was cut when the joined index came back full, and not otherwise", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const open = await startRoom(jesse, SWARM);
+    await jesse.call("bellman_fs", { op: "write", session_id: open.sessionId, member_id: open.memberId, path: "/members/me/o.md", content: "open note" });
+    expect(await exported()).not.toContain("not in this export");
+    vi.spyOn(h.store, "sessionsJoinedBy").mockResolvedValue([open.sessionId, ...Array.from({ length: JOINED_SCAN - 1 }, (_, i) => `qs_gone_${i}`)]);
+    const md = await exported();
+    expect(md).toContain(`read up to ${JOINED_SCAN} rooms, open and closed, so notes in a room past that are not in this export`);
+    expect(md).toContain("open note");
   });
 
   it("works while paused and writes no lookup row", async () => {

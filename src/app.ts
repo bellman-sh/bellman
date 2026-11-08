@@ -142,7 +142,8 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
    * shape a Durable Objects port needs, where each Bellman session becomes one DO.
    */
   app.post("/mcp", async (req, res) => {
-    // No credential at all may still list the tools; a bad one is a 401, as the Worker answers it.
+    // No credential at all may still list the tools; a bad one is a 401, as the Worker answers it. express.json
+    // caps the body, and one message is one listing.
     const identity = resolveIdentity(req.header("authorization"))
       ?? (!req.header("authorization") && isAnonymousRequest(req.body) ? ANONYMOUS : null);
     if (!identity) {

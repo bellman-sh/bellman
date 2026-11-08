@@ -175,10 +175,11 @@ describe("HTTP surface", () => {
     expect((await anonymous({ jsonrpc: "2.0", id: 2, method: "ping" })).status).toBe(200);
   });
 
-  it("rejects every other /mcp method with no bearer key, alone or batched with a listing", async () => {
+  it("rejects every other /mcp method with no bearer key, or any batch", async () => {
     const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } };
     const init = { jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
-    for (const body of [call, init, [{ jsonrpc: "2.0", id: 1, method: "tools/list" }, call], []]) {
+    const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    for (const body of [call, init, [list, call], [list, list], []]) {
       const res = await anonymous(body);
       expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 401]);
       const err = await res.json() as { error: { message: string } };

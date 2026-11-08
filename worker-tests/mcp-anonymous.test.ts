@@ -23,10 +23,11 @@ describe("/mcp with no credential", () => {
     expect(result.tools.map((t) => t.name)).toContain("bellman_start");
   });
 
-  it("answers initialize, a tool call and a batch holding one with the 401 that points at discovery", async () => {
+  it("answers initialize, a tool call, any batch and an oversized body with the 401 that points at discovery", async () => {
     const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } };
     const init = { jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
-    for (const body of [init, call, [list, call]]) {
+    const oversized = { ...list, params: { pad: "x".repeat(5000) } };
+    for (const body of [init, call, [list, call], [list, list], oversized]) {
       const res = await post(body);
       expect([res.status, res.headers.get("www-authenticate")?.startsWith("Bearer resource_metadata=")]).toEqual([401, true]);
     }

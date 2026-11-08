@@ -246,10 +246,15 @@ export function keyedPlan(userId: string, keysJson?: string | null): Plan | null
  */
 const ANONYMOUS_METHODS = new Set(["tools/list", "ping"]);
 
-/** True when a JSON-RPC body, one message or a batch, calls only methods anyone may call. */
+/** The largest body /mcp reads with no credential. A `tools/list` request is well under it. */
+export const ANONYMOUS_BODY_LIMIT = 4096;
+
+/**
+ * True when a JSON-RPC body is one message calling a method anyone may call. A batch is refused, so one request
+ * cannot buy many tool listings.
+ */
 export function isAnonymousRequest(body: unknown): boolean {
-  const messages = Array.isArray(body) ? body : [body];
-  return messages.length > 0 && messages.every((m) => ANONYMOUS_METHODS.has((m as { method?: unknown } | null)?.method as string));
+  return ANONYMOUS_METHODS.has((body as { method?: unknown } | null)?.method as string);
 }
 
 /** Whom /mcp builds its server for on an anonymous request. Only `tools/list` and `ping` reach it, so no tool runs as it. */

@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { ANONYMOUS, isAnonymousRequest, resolveIdentity } from "../auth.js";
+import { ANONYMOUS, ANONYMOUS_BODY_LIMIT, isAnonymousRequest, resolveIdentity } from "../auth.js";
+import { readCapped } from "../read-capped.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "../a2a/cards.js";
 import { SERVER_CARD_CORS, SERVER_CARD_PATH, serverCard } from "../server-card.js";
@@ -228,6 +229,21 @@ async function resolveCaller(
     : null;
   if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
   return identity;
+}
+
+/**
+ * True when a request with no credential at all asks only for what anyone may read (`isAnonymousRequest`). A bad
+ * credential is never anonymous, so an expired token is a 401 and gets refreshed. At most `ANONYMOUS_BODY_LIMIT`
+ * bytes are read, so a signed-out caller cannot make the Worker buffer or parse more.
+ */
+async function anonymousListing(request: Request): Promise<boolean> {
+  if (request.headers.has("authorization")) return false;
+  const text = await readCapped(request.clone(), ANONYMOUS_BODY_LIMIT);
+  try {
+    return text !== null && isAnonymousRequest(JSON.parse(text));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -607,10 +623,7 @@ export default {
     const blocked = unconfigured(env, oauth);
     if (blocked) return blocked;
 
-    // No credential at all may still list the tools; a bad one is a 401, so an expired token is refreshed.
-    const identity = await resolveCaller(request, env, oauth, "/mcp")
-      ?? (!request.headers.has("authorization") && isAnonymousRequest(await request.clone().json().catch(() => null))
-        ? ANONYMOUS : null);
+    const identity = await resolveCaller(request, env, oauth, "/mcp") ?? (await anonymousListing(request) ? ANONYMOUS : null);
     if (!identity) return unauthorized(oauth);
 
     try {

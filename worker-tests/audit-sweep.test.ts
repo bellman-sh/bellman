@@ -2,7 +2,7 @@
  * Retention inside a real AuditDO (ADR 0035, D2): setting a window arms the object's own alarm,
  * the alarm runs the sweep and re-dates itself a day ahead, and clearing the window disarms it.
  */
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore } from "../src/workerd/store-do.js";
 import type { AuditDO } from "../src/workerd/audit-do.js";
@@ -20,6 +20,14 @@ const alarm = () => runInDurableObject(stub(), (_i: AuditDO, ctx) => ctx.storage
 const dueSweep = () => runInDurableObject(stub(), (_i: AuditDO, ctx) => ctx.storage.kv.get<number>("due:sweep") ?? null);
 
 /**
+ * The sweep has run and re-dated itself a day past `setAt`. When the pool's own firing of the alarm has
+ * already taken it, `runDurableObjectAlarm` finds none and returns before that run ends, and a read
+ * straight after it still finds the sweep due at `setAt`: wait for the re-date, as alarms.test.ts does.
+ */
+const sweepRan = (setAt: number) =>
+  vi.waitFor(async () => expect(await dueSweep()).toBeGreaterThanOrEqual(setAt + SWEEP_EVERY_MS), { timeout: 3_000 });
+
+/**
  * The harness fires a due alarm on its own, so the sweep armed for "now" may have run before the
  * test looks: `runDurableObjectAlarm` fires it if it has not, and the assertions are on what the
  * sweep leaves, whichever of the two ran it.
@@ -31,8 +39,8 @@ it("sweeps when the window is set, re-dates the sweep a day ahead, and disarms w
   const setAt = Date.now();
   await s.setAuditRetention("org_a", 30, by);
   await runDurableObjectAlarm(stub());
+  await sweepRan(setAt);
   const due = (await dueSweep())!;
-  expect(due).toBeGreaterThanOrEqual(setAt + SWEEP_EVERY_MS);
   expect(await alarm()).toBe(due);
   const rows = await s.auditForOrg("org_a", 10);
   expect(rows.map((r) => r.action)).toEqual(["sent_message", "audit_retention_set", "audit_swept"]);
@@ -52,5 +60,5 @@ it("a sweep that fails part way leaves the next one armed a day ahead", async ()
   const setAt = Date.now();
   await s.setAuditRetention("org_a", 30, by);
   await runDurableObjectAlarm(stub()).catch(() => undefined);
-  expect(await dueSweep()).toBeGreaterThanOrEqual(setAt + SWEEP_EVERY_MS);
+  await sweepRan(setAt);
 });

@@ -214,6 +214,9 @@ export interface LookupShown {
 }
 
 /** The account's lookup log, newest first, each row's room named by one `getSession` per distinct room in the page. */
+// ponytail: the log holds at most LOOKUP_KEEP (1,000) rows, so this is at most 1,000 getSession reads, unbatched; an
+// account whose log names close to 1,000 distinct rooms in LOOKUP_KEEP_MS meets the Workers subrequest cap and the
+// route answers 500. Name the newest rooms only, and say which were not read (the dash shows `room: null` as deleted).
 export async function memoryLookups(store: BellmanStore, actor: Identity): Promise<LookupShown[]> {
   const rows = await store.homeLookups(homeRoomId(actor.userId));
   const ids = [...new Set(rows.flatMap((r) => (r.sessionId === null ? [] : [r.sessionId])))];

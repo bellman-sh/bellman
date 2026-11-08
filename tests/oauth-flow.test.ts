@@ -129,6 +129,12 @@ describe("discovery", () => {
     });
   });
 
+  it("says every authorization response carries iss (RFC 9207)", async () => {
+    const body = (await (await call("/.well-known/oauth-authorization-server")).json()) as Record<string, unknown>;
+
+    expect(body.authorization_response_iss_parameter_supported).toBe(true);
+  });
+
   it("leaves unrelated paths alone so the MCP endpoint still works", async () => {
     expect(await handleOAuth(new Request(`${ISSUER}/mcp`, { method: "POST" }), config)).toBeUndefined();
     expect(await handleOAuth(new Request(`${ISSUER}/healthz`), config)).toBeUndefined();
@@ -1594,5 +1600,57 @@ describe("signedInPlan", () => {
     expect(await signedInPlan("u_google_77", { plans, honourPurchases: false })).toBe("free");
     expect(await signedInPlan("u_google_77", { plans })).toBe("max");
     expect(await signedInPlan("u_jesse", { plans })).toBeNull();
+  });
+});
+
+/**
+ * RFC 9207, which MCP 2026-07-28 asks authorization servers for: every authorization response to a client names
+ * the issuer in `iss`, a code and an error alike, so a client talking to several authorization servers can tell
+ * which one answered before it redeems anything. A redirect that is not an authorization response (the upgrade's,
+ * to Stripe) carries none.
+ */
+describe("the iss parameter on authorization responses", () => {
+  it("rides with the code", async () => {
+    const { target, code } = await authorizeThrough("github", await registerClient());
+
+    expect(code).not.toBe("");
+    expect(target.searchParams.get("iss")).toBe(ISSUER);
+    expect(target.searchParams.get("state")).toBe("st-1");
+  });
+
+  it("rides with an error /authorize sends back", async () => {
+    const clientId = await registerClient();
+    const res = await call(
+      `/authorize?response_type=token&client_id=${clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}&state=st-2`
+    );
+    const target = new URL(res.headers.get("location")!);
+
+    expect(target.searchParams.get("error")).toBe("unsupported_response_type");
+    expect(target.searchParams.get("iss")).toBe(ISSUER);
+  });
+
+  it("rides with a provider's refusal", async () => {
+    const clientId = await registerClient();
+    const challenge = await sha256Base64url(VERIFIER);
+    const chooser = await call(
+      `/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}` +
+        `&code_challenge=${challenge}&code_challenge_method=S256&state=st-3&resource=${encodeURIComponent(RESOURCE)}`
+    );
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+    const res = await call(`/callback/github?error=access_denied&state=${encodeURIComponent(req)}`);
+    const target = new URL(res.headers.get("location")!);
+
+    expect(target.searchParams.get("error")).toBe("access_denied");
+    expect(target.searchParams.get("iss")).toBe(ISSUER);
+  });
+
+  it("stays off a redirect that is not an authorization response", async () => {
+    const chooser = await call("/upgrade/pro_monthly");
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+    const callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+    const target = new URL(callback.headers.get("location")!);
+
+    expect(target.host).toBe("buy.stripe.com");
+    expect(target.searchParams.get("iss")).toBeNull();
   });
 });

@@ -79,6 +79,9 @@ Primitives:
 - PKCE accepts S256 only, verifier 43-128 characters [src/oauth/tokens.ts:verifyPkce]
 - `/authorize` shows errors as HTML until `client_id` and an exactly registered `redirect_uri` are known; redirect
   URIs must be https or http on loopback [src/oauth/routes.ts:usableRedirect]
+- Every authorization response to a client's redirect URI, a code or an error, carries `iss` (RFC 9207), and the
+  metadata says so with `authorization_response_iss_parameter_supported`; a redirect that is not one (to Stripe)
+  carries none [src/oauth/routes.ts:clientRedirect]
 - Codes and refresh tokens are single use (take deletes before the expiry check); refresh tokens rotate, and
   storing one promotes the client out of disposable registration in the same operation
   [src/oauth/storage.ts:AuthStorage] [src/workerd/auth-do.ts:AuthDO.putRefresh]

@@ -827,14 +827,25 @@ async function finishAuthorize(
   try {
     profile = await exchange();
   } catch (err) {
-    return refuseAuthorize(pending, err, via);
+    return refuseAuthorize(pending, err, via, config.issuer);
   }
   return (await invitesHeld(profile, via, { authorize: pending }, config)) ?? completeAuthorize(profile, pending, config, via);
 }
 
+/**
+ * Where an authorization response goes: the client's registered redirect URI, carrying `iss` (RFC 9207, MCP
+ * 2026-07-28) so the client can check which authorization server answered before it redeems a code, and a mix-up
+ * between servers fails there. Every response to a client goes through this, a code or an error alike.
+ */
+export function clientRedirect(redirectUri: string, issuer: string): URL {
+  const target = new URL(redirectUri);
+  target.searchParams.set("iss", issuer);
+  return target;
+}
+
 /** The client's refusal, as `finishAuthorize` describes it: `access_denied`, in words a person can act on. */
-function refuseAuthorize(pending: AuthorizeRequest, err: unknown, via: string): Response {
-  const target = new URL(pending.redirect_uri);
+function refuseAuthorize(pending: AuthorizeRequest, err: unknown, via: string, issuer: string): Response {
+  const target = clientRedirect(pending.redirect_uri, issuer);
   if (pending.state) target.searchParams.set("state", pending.state);
   let description = `${via} sign-in failed`;
   if (err instanceof SsoRequired) description = `${err.message}: start again and enter your work email`;
@@ -856,10 +867,10 @@ async function completeAuthorize(profile: ProviderProfile, pending: AuthorizeReq
     planSource = resolved.source;
     keys = resolved.keys;
   } catch (err) {
-    return refuseAuthorize(pending, err, via);
+    return refuseAuthorize(pending, err, via, config.issuer);
   }
 
-  const target = new URL(pending.redirect_uri);
+  const target = clientRedirect(pending.redirect_uri, config.issuer);
   if (pending.state) target.searchParams.set("state", pending.state);
   const authCode = randomId();
   await config.store.putCode(authCode, {
@@ -1303,6 +1314,8 @@ export async function handleOAuth(
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token", JWT_BEARER_GRANT, CLAIM_GRANT],
       code_challenge_methods_supported: ["S256"],
+      // RFC 9207: every authorization response carries `iss` (clientRedirect).
+      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ["none"],
       scopes_supported: [SCOPE],
       service_documentation: "https://github.com/bellman-sh/bellman",
@@ -1458,7 +1471,7 @@ export async function handleOAuth(
     }
 
     const back = (error: string, description: string) => {
-      const target = new URL(redirectUri);
+      const target = clientRedirect(redirectUri, config.issuer);
       target.searchParams.set("error", error);
       target.searchParams.set("error_description", description);
       const state = q.get("state");
@@ -1883,7 +1896,7 @@ export async function handleOAuth(
     const pending = state.claims.bellman as unknown as AuthorizeRequest;
     const upstreamError = url.searchParams.get("error");
     if (upstreamError || !code) {
-      const target = new URL(pending.redirect_uri);
+      const target = clientRedirect(pending.redirect_uri, config.issuer);
       if (pending.state) target.searchParams.set("state", pending.state);
       target.searchParams.set("error", "access_denied");
       target.searchParams.set("error_description", upstreamError ?? "no authorization code returned");

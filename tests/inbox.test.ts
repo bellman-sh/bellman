@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   discardThrough, drain, enqueue, findInbox, inboxDirFor, pendingCount, pendingSummary, readMemberships,
-  renderBatch, renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent,
+  renderBatch, renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent, drainWaking, wakes,
 } from "../src/client/inbox.js";
 
 function event(over: Partial<PeerEvent> = {}): PeerEvent {
@@ -284,5 +284,40 @@ describe("process ancestry", () => {
 
     expect(existsSync(deadDir)).toBe(false);
     expect(existsSync(liveDir)).toBe(true);
+  });
+});
+
+describe("addressed events (seat names spec)", () => {
+  const away = (over: Partial<PeerEvent> = {}) => event({ to: [{ member_id: "m_other", name: "coder-3" }], ...over });
+  const mine = (over: Partial<PeerEvent> = {}) => event({ to: [{ member_id: "m_mine", name: "coder-2" }], ...over });
+
+  it("wakes for an unaddressed event and one addressed to this member, not for one addressed to others", () => {
+    expect(wakes(event())).toBe(true);
+    expect(wakes(mine())).toBe(true);
+    expect(wakes(away())).toBe(false);
+  });
+
+  it("drainWaking leaves a queue of addressed-away events in place, and takes the whole queue once one wakes", () => {
+    enqueue(dir, away({ cursor: 1 }));
+    expect(drainWaking(dir)).toEqual([]);
+    expect(pendingCount(dir)).toBe(1);
+    enqueue(dir, event({ cursor: 2 }));
+    expect(drainWaking(dir).map((e) => e.cursor)).toEqual([1, 2]);
+    expect(pendingCount(dir)).toBe(0);
+  });
+
+  it("names the sender's seat and the addressees, marking this member", () => {
+    const text = renderEvent(event({ from_name: "lead-1", to: [{ member_id: "m_mine", name: "coder-2" }, { member_id: "m_x", name: "coder-5" }] }));
+    expect(text.split("\n")[0]).toContain('from "peer@codenerd" (lead-1)');
+    expect(text).toContain("addressed to: coder-2 (you), coder-5");
+    expect(renderEvent(event())).not.toContain("addressed to");
+  });
+});
+
+describe("pendingSummary, addressed (seat names spec)", () => {
+  it("counts an event addressed to other seats as not interrupting, so the mod does not wake for it", () => {
+    enqueue(dir, event({ cursor: 1, to: [{ member_id: "m_other", name: "coder-3" }] }));
+    enqueue(dir, event({ cursor: 2, to: [{ member_id: "m_mine", name: "coder-2" }] }));
+    expect(pendingSummary(dir)).toEqual([{ member_id: "m_mine", interrupting: 1, ambient: 1 }]);
   });
 });

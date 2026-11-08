@@ -1241,3 +1241,13 @@ describe("close()", () => {
     expect(requests[0].signal.aborted).toBe(true);
   });
 });
+
+describe("roomEventFromFrame, addressed (seat names spec)", () => {
+  it("carries the sender's seat name and the addressees", () => {
+    const e = roomEventFromFrame("qs_1", {
+      cursor: 3, type: "message", from: { member_id: "m_a", label: "a@x", name: "lead-1" }, payload: {}, ref_id: null,
+      at: "2026-11-08T00:00:00.000Z", to: [{ member_id: "m_b", name: "coder-2" }, { name: "no id" }],
+    });
+    expect(e).toMatchObject({ from_name: "lead-1", to: [{ member_id: "m_b", name: "coder-2" }] });
+  });
+});

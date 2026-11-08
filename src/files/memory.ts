@@ -9,7 +9,7 @@ import { HOME_MEMBER_ID, homeRoomId, homeSession } from "./home.js";
 import { renderExport, type ExportRoom } from "./memory-export.js";
 import { findMember, gateFsRead, readFsFor, refuse, roomIdsOf, succeed, waitRefusal, writeFs, type RoomFailure, type RoomResult } from "../room/rooms.js";
 import { SEND_LIMIT, STRANGER_KEY_PREFIX } from "../room/send-limit.js";
-import type { BellmanStore, FsPage, FsWrite } from "../storage/store.js";
+import { JOINED_SCAN, type BellmanStore, type FsPage, type FsWrite } from "../storage/store.js";
 import { isActiveMember } from "../room/members.js";
 import type { AgentInfo, FsRow, HomeSettings, Identity, LookupRow, LookupSource } from "../types.js";
 
@@ -87,6 +87,8 @@ export async function listHome(
  * The account's home-note paths for arrival (decision 9, #528), newest first: the first page of its home room, in a
  * call of its own after the seat commits, logged as `source` (decision 13). `paused` says the account holds the notes
  * back (nothing read, nothing logged). A failed read is logged and hands back none; it never fails the join.
+ * The row logs the whole page, read and logged in one transaction; `bellman_confirm` may show fewer of them under its
+ * reply budget, so an arrival row is an upper bound on what the agent saw, never less than it.
  */
 export async function homeTitles(store: BellmanStore, actor: Identity, source: LookupSource): Promise<{ titles: string[]; paused: boolean }> {
   try {
@@ -149,12 +151,13 @@ async function readAll(store: BellmanStore, roomId: string, prefix: string): Pro
  * (`/members/<memory id>/`) in each open room it holds an active seat in. Reads the store directly, so the lookup
  * log is untouched and a paused account can still take its notes out.
  */
-// ponytail: every room from roomIdsOf (rooms past JOINED_SCAN are left out), about four RPCs per room plus one per
-// note, unbatched; a heavy account can meet the Workers subrequest cap. Page the export if one does.
+// ponytail: every room from roomIdsOf (rooms past JOINED_SCAN are left out, and the document says so), about four RPCs
+// per room plus one per note, unbatched; a heavy account can meet the Workers subrequest cap. Page the export if one does.
 export async function exportMemory(store: BellmanStore, actor: Identity): Promise<string> {
   const home = await readAll(store, homeRoomId(actor.userId), "/");
   const rooms: ExportRoom[] = [];
-  for (const id of await roomIdsOf(store, actor)) {
+  const { ids, cut } = await roomIdsOf(store, actor);
+  for (const id of ids) {
     const session = await store.getSession(id);
     if (!session || session.closed || !session.members.some((m) => m.userId === actor.userId && isActiveMember(m))) continue;
     const memoryId = await store.memoryIdOf(id, actor.userId);
@@ -162,7 +165,7 @@ export async function exportMemory(store: BellmanStore, actor: Identity): Promis
     const notes = await readAll(store, id, `/members/${memoryId}`);
     if (notes.length > 0) rooms.push({ sessionId: id, room: session.manifest.room, notes });
   }
-  return renderExport({ label: actor.label, at: Date.now(), home, rooms });
+  return renderExport({ label: actor.label, at: Date.now(), home, rooms, ...(cut ? { cutAt: JOINED_SCAN } : {}) });
 }
 
 /**
@@ -211,6 +214,9 @@ export interface LookupShown {
 }
 
 /** The account's lookup log, newest first, each row's room named by one `getSession` per distinct room in the page. */
+// ponytail: the log holds at most LOOKUP_KEEP (1,000) rows, so this is at most 1,000 getSession reads, unbatched; an
+// account whose log names close to 1,000 distinct rooms in LOOKUP_KEEP_MS meets the Workers subrequest cap and the
+// route answers 500. Name the newest rooms only, and say which were not read (the dash shows `room: null` as deleted).
 export async function memoryLookups(store: BellmanStore, actor: Identity): Promise<LookupShown[]> {
   const rows = await store.homeLookups(homeRoomId(actor.userId));
   const ids = [...new Set(rows.flatMap((r) => (r.sessionId === null ? [] : [r.sessionId])))];

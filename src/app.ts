@@ -4,7 +4,7 @@ import express, { type Express, type Request as ExpressRequest, type Response as
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { serveMcp } from "./mcp-endpoint.js";
 import { a2aRoutes } from "./a2a/routes.js";
-import { resolveIdentity } from "./auth.js";
+import { ANONYMOUS, isAnonymousRequest, resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./files/blobs.js";
 import { handleRoutes } from "./http/handles.js";
 import { meRoutes } from "./http/me.js";
@@ -91,6 +91,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   app.use("/scim/v2", serve((request) => scimRoutes(request, { store })));
   app.use("/me/rooms", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/me/memory", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
+  app.use("/me/repo-rooms", serve(gated((request) => meRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [], publicPageOrigins: [] }))));
   // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of
@@ -142,7 +143,10 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
    * the store, not the transport — the same shape a Durable Objects port needs.
    */
   app.post("/mcp", async (req, res) => {
-    const identity = resolveIdentity(req.header("authorization"));
+    // No credential at all may still list the tools; a bad one is a 401, as the Worker answers it. express.json
+    // caps the body, and one message is one listing.
+    const identity = resolveIdentity(req.header("authorization"))
+      ?? (!req.header("authorization") && isAnonymousRequest(req.body) ? ANONYMOUS : null);
     if (!identity) {
       res.status(401).json({
         jsonrpc: "2.0",
@@ -151,7 +155,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
       });
       return;
     }
-    if (await store.isSuspended(identity.userId)) {
+    if (identity !== ANONYMOUS && await store.isSuspended(identity.userId)) {
       res.status(403).json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null });
       return;
     }

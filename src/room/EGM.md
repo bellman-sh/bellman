@@ -9,11 +9,19 @@ test programs import these.
 
 ## Interface
 
+- `[src/room/repo-room.ts]` a repo's default room: `bindRepoRoom` (creator only, never a public room, any manifest
+  role; marks the room kept open and clears the flag on a room it replaced once nothing names it), `unbindRepoRoom`,
+  `listRepoRooms`, `connectFromBinding` (a pending connect with `via: "binding"`), each a `RepoRoomResult` with the
+  HTTP status. `[src/room/remote.ts:normalizeRemote]` the key, `host/owner/repo` lower-cased; it imports nothing, since
+  the bridge bundles it.
 - `[src/room/rooms.ts]` the operations both transports call, each returning `RoomResult<T>` (`succeed`/`refuse` with a
   `RoomFailure` of `not_found | closed | frozen | forbidden | conflict | invalid | rate_limited | stale | too_large |
   over_quota | paused`): `gateSeat`, `leaveRoom`, `issueInvite`, `revokeInvite`, `admitSend`, `writeSurface`,
   `writeSurfaceBatch`, `resolveSurfaceWrite`, `checkProposal`, `evictMember`, `banAsker`, `fileRoomReport`, `namePublicRoom`,
   `liveRooms` (`ROOMS_LIMIT = 50`), `readSurfaceWindow`, `searchSurface`, `searchLog`, and `audit`.
+- `[src/room/answer.ts:answerAction]` answering an `action_request`, for `bellman_send` and the dash's answer route alike:
+  the verb, the request, the first-answer check, `ActionResponseShape`, a topic room's approval, the minute's count, the
+  append and the audit row. A decision's answer is a vote and goes to `voteOn` before it.
 - `[src/room/rooms.ts:activeMembers]` membership as stored; `[src/room/rooms.ts:seatedMembers]` the presence-derived roster a
   capacity check counts.
 - `[src/room/attention.ts:ATTENTION]` every `EventType` as `interrupt` or `ambient`; `[src/room/presence.ts:presenceOf]`

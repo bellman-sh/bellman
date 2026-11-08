@@ -98,7 +98,7 @@ export interface Member {
    * Given at confirm from the pending connect, which took it at the preview, and never changed after. Absent
    * on rows stored before the field existed, which read as not a stranger.
    */
-  via?: "permanent";
+  via?: "permanent" | "binding";
 }
 
 /**
@@ -256,6 +256,12 @@ export interface Session {
    * abandoned. Absent on every room.
    */
   kind?: "home";
+  /**
+   * A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): `closeSessionIfEmpty`
+   * leaves it open with nobody in it. Set while any account binds a repo to it; absent otherwise. A creator's close
+   * and abandonment still end it.
+   */
+  keptOpen?: true;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
   // could disagree.
   manifest: RoomManifest; // immutable after createSession, bar host.instructions (setHostInstructions) — the store has no other way to change it
@@ -401,7 +407,7 @@ export interface PendingConnect {
    * absent for every other seat. Captured here for `roomRole`'s reason, because bellman_confirm receives only
    * the token, and copied onto the member it seats as `Member.via`.
    */
-  via?: "permanent";
+  via?: "permanent" | "binding";
   createdAt: number;
   expiresAt: number;
 }
@@ -1010,6 +1016,19 @@ export interface HomeSettings {
   paused: boolean;
 }
 export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false, paused: false };
+
+/**
+ * A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): a session of this account
+ * started in `remote` joins `sessionId` as `role` at launch. The `rr` row of the account's home room; only the dash
+ * writes it, and only for a room the account created.
+ */
+export interface RepoRoom {
+  /** `normalizeRemote`'s `host/owner/repo`. At most one row per remote. */
+  remote: string;
+  sessionId: string;
+  role: string;
+  createdAt: number;
+}
 
 /** One agent read of home memory (ADR 0047 decision 13): an `lk:` row in the home room, shown to the account only. */
 export interface LookupRow {

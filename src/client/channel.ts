@@ -64,7 +64,9 @@ import { basename } from "node:path";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
+import { herdrTerminalOf } from "./door-protocol.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
+import { launchJoin } from "./repo-remote.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
 const key = process.env.BELLMAN_KEY;
@@ -201,6 +203,7 @@ const doorOpened = (async () => {
       setStatus: bridge.setStatus,
       writeSurface: bridge.writeSurface,
       join: bridge.joinState,
+      herdrTerminal: herdrTerminalOf(process.env.HC_TERMINAL_ID),
     }, log);
     door = opened;
     doorPath = opened.path;
@@ -244,12 +247,11 @@ process.on("SIGINT", shutdown);
 process.stdin.on("close", shutdown);
 
 /**
- * The join a desktop app asked for (#435). Started before the door is awaited, so the door never answers the
+ * The join a desktop app asked for (#435), or else the repo's default room. Started before the door is awaited, so the door never answers the
  * SessionStart hook without it: `join` marks itself joining before its first await. Not awaited: a sign-in it may
  * wait on must not hold up Claude Code's handshake, and the door reports where it stands.
  */
-const joinCode = process.env.BELLMAN_JOIN_CODE?.trim();
-if (joinCode) void bridge.join(joinCode, basename(process.cwd()));
+launchJoin(bridge, process.env.BELLMAN_JOIN_CODE?.trim(), process.cwd(), basename(process.cwd()));
 
 // Before the transport connects, so that the first bellman_whoami already names the door.
 await doorOpened;

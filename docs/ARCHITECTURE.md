@@ -541,7 +541,7 @@ seven routes:
 
 | Route | Answers |
 |---|---|
-| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken) and the latest events it delivered |
+| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken), the latest events it delivered, and, when it runs inside Herdr, its terminal address (`herdr_terminal`, from `HC_TERMINAL_ID`) |
 | `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
 | `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
 | `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
@@ -1651,6 +1651,13 @@ loud:
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
+- **In the dash, the person answers it directly.** `POST
+  /rooms/<id>/requests/<cursor>/answer` takes a signed-in dash session alone,
+  Origin checked, and refuses a bearer (`dash_session_required`), so no agent
+  token reaches it; it answers as one of the person's own seats, through
+  `answerAction`, the operation `bellman_send` runs, so the verb and the
+  first-answer rule are the same on both paths (`src/http/answer.ts`). The page
+  shows the request's payload as the peer content it is.
 - **In the terminal, the mod holds that line against the agent.** Until the
   mod, "approved by the receiving human" was an instruction to the model
   (`HOOK_INSTRUCTIONS`, `QUEUE_INSTRUCTIONS`), and the model could send the

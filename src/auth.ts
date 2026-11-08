@@ -239,3 +239,23 @@ export function keyedPlan(userId: string, keysJson?: string | null): Plan | null
   }
   return best;
 }
+
+/**
+ * The methods /mcp answers with no Authorization header. Every caller gets the same tool list, so a directory or
+ * scanner may read it signed out. `initialize` is not one: its 401 is what starts a client's sign-in.
+ */
+const ANONYMOUS_METHODS = new Set(["tools/list", "ping"]);
+
+/** The largest body /mcp reads with no credential. A `tools/list` request is well under it. */
+export const ANONYMOUS_BODY_LIMIT = 4096;
+
+/**
+ * True when a JSON-RPC body is one message calling a method anyone may call. A batch is refused, so one request
+ * cannot buy many tool listings.
+ */
+export function isAnonymousRequest(body: unknown): boolean {
+  return ANONYMOUS_METHODS.has((body as { method?: unknown } | null)?.method as string);
+}
+
+/** Whom /mcp builds its server for on an anonymous request. Only `tools/list` and `ping` reach it, so no tool runs as it. */
+export const ANONYMOUS: Identity = { userId: "anonymous", orgId: null, plan: "free", role: "member", label: "anonymous" };

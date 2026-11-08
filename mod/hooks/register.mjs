@@ -5,7 +5,7 @@ var isOwnCall = (tool, origin) => OWN_TOOL.test(tool) && origin?.plugin === "bel
 // mod/src/doors.ts
 import { read as read2, update } from "claude-code";
 
-// src/door-protocol.ts
+// src/client/door-protocol.ts
 var CSI = /\u{1b}\[[0-?]*[ -/]*[@-~]/gu;
 var OSC = /\u{1b}\][^\u{7}\u{1b}]*(?:\u{7}|\u{1b}\\)/gu;
 var TEXT_CONTROLS = /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}\u{61c}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}\u{2066}-\u{2069}\u{feff}]/gu;
@@ -67,11 +67,11 @@ function lineOf(e) {
   return text || (e.type === "action_request" && p != null ? JSON.stringify(p) : e.type);
 }
 
-// src/action-state.ts
+// src/room/action-state.ts
 var ACTION_REQUEST_TTL_MS = 30 * 6e4;
 var PROPOSAL_TTL_MS = 7 * 24 * 60 * 6e4;
 
-// src/payload.ts
+// src/room/payload.ts
 var MAX_PAYLOAD_CHARS = 2e4;
 var MAX_PAYLOAD_DEPTH = 64;
 
@@ -263,7 +263,7 @@ function safeLinks(markdown) {
   return markdown.replace(/\[([^[\]]*)\]\(([^)]*)\)/g, (whole, label, inner) => WEB_TARGET.test(inner) ? whole : label).replace(/\]\((?!\s*<?https?:)[^)]*\)/gi, "]").replace(/<([a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>/gi, (whole, target) => WEB.test(target) ? whole : target).replace(/^((?:[ \t]*(?:>|[-+*](?=[ \t])|\d{1,9}[.)](?=[ \t])))*[ \t]*\[(?:\\[\s\S]|[^[\]\\])+\]):(?![ \t]*<?https?:)/gim, "$1\\:");
 }
 
-// src/result-data.ts
+// src/client/result-data.ts
 function resultData(result) {
   if (result.isError) return null;
   const data = result.structuredContent ?? parsed(result.content.find((block) => block.type === "text")?.text);

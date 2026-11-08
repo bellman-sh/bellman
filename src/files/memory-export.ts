@@ -19,11 +19,15 @@ function note(heading: string, r: FsRow): string {
   return `${heading} ${r.path}\n\nRevision ${r.rev} · ${new Date(r.at).toISOString()}\n\n${r.content}\n\n---\n`;
 }
 
-/** The one Markdown document `GET /me/memory/export` returns. Note content is verbatim; headings carry the path, revision and time. */
-export function renderExport(input: { label: string; at: number; home: FsRow[]; rooms: ExportRoom[] }): string {
+/**
+ * The one Markdown document `GET /me/memory/export` returns. Note content is verbatim; headings carry the path, revision
+ * and time. `cutAt`, when set, is the room-list bound the read stopped at, said under the room notes heading.
+ */
+export function renderExport(input: { label: string; at: number; home: FsRow[]; rooms: ExportRoom[]; cutAt?: number }): string {
   let md = `# Bellman memory export\n\nAccount: ${input.label}\nExported: ${new Date(input.at).toISOString()}\n\n## Home memory\n\n`;
   md += input.home.length === 0 ? "_No home notes._\n\n" : [...input.home].sort(byPath).map((r) => note("###", r)).join("\n") + "\n";
   md += "## Room notes\n\n";
+  if (input.cutAt !== undefined) md += `_The room list was read up to ${input.cutAt} rooms, open and closed, so notes in a room past that are not in this export._\n\n`;
   md += input.rooms.length === 0 ? "_No room notes._\n" : input.rooms.map((room) => `### ${oneLine(room.room)} (${room.sessionId})\n\n${[...room.notes].sort(byPath).map((r) => note("####", r)).join("\n")}`).join("\n");
   return md;
 }

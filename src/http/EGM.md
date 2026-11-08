@@ -50,6 +50,11 @@ Account, org and operator routes:
   `{path, code}`, with `retry_after` seconds when `code` is `rate_limited`, or null), 404 without a seat. Each delete
   spends one of the seat's sends, so a folder past the minute's limit stops at `rate_limited`
   [src/http/notes-sharing.ts:notesSharingRoutes]
+- `answerRoutes`: `POST /rooms/:id/requests/:cursor/answer?member_id=` `{approved, result?}` answers an action request
+  as one of the caller's seats through `answerAction`, the operation `bellman_send type: "action_response"` runs; dash
+  session only (403 `dash_session_required` to a bearer, the CSRF check), only `approved` and `result` reach the event,
+  404 for a seat that is not the caller's, 400 for a decision (voted on, never answered), and the operation's refusals
+  through `STATUS`; 200 `{cursor, room_members, applied?}` [src/http/answer.ts:answerRoutes]
 - `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
   (`{capture, paused}`) to a bearer or a cookie, `PUT /me/memory` `{capture?, paused?}` (at least one, no other key,
   else 400) merges into it [src/http/me.ts:meRoutes]
@@ -58,9 +63,20 @@ Account, org and operator routes:
   written back, capture stays off); `DELETE /me/memory/notes?path=`
   (204 | 404 `not_found` | 400 `invalid_request`, the note, its history and the path in every lookup row);
   `GET /me/memory/export` (200 `text/markdown`, an attachment `bellman-memory-YYYY-MM-DD.md`, works while paused, logs
-  no lookup) [src/http/me.ts:meRoutes]
-- Every account memory route but `GET /me/memory` is dash-session only: a bearer gets 403 (`dash_session_required`,
-  or `forbidden` on `PUT /me/memory`) and a write is CSRF-checked [src/http/me.ts:meRoutes]
+  no lookup, and says under "Room notes" when the joined index came back full at `JOINED_SCAN`, so rooms past it were
+  not read) [src/http/me.ts:meRoutes] [src/files/memory.ts:exportMemory]
+- Every account memory route but `GET /me/memory` is dash-session only: a bearer gets 403 `dash_session_required`
+  and a write is CSRF-checked [src/http/me.ts:meRoutes]
+- A repo's default rooms, `/me/repo-rooms`: `GET` (bearer or dash) `{repo_rooms: [{remote, session_id, role,
+  created_at}]}`; `PUT {remote, session_id, role}` (200 the row | 400 `invalid_request` or `unknown_role` | 403
+  `not_creator` | 404 `not_found` (unknown or closed) | 409 `public_room`) replaces the binding of that normalized
+  remote and marks the room kept open; `DELETE ?remote=` (204 | 404) removes it and clears the flag once no binding
+  names the room. Writes are dash-session only and CSRF-checked [src/http/me.ts:repoRooms]
+  [src/room/repo-room.ts:bindRepoRoom] [src/room/repo-room.ts:unbindRepoRoom]
+- `POST /me/repo-rooms/connect {remote}` (bearer only, the bridge at launch; a cookie gets 403 `bearer_required`) re-checks the caller's binding against
+  the room now and writes a pending connect with `via: "binding"`, audited `connect_previewed`: 200 `{connect_token,
+  session_id, role}` | 404 `no_binding` or `not_found` | the bind refusals. It seats nobody; `bellman_confirm`
+  redeems the token and runs every seating check [src/room/repo-room.ts:connectFromBinding]
 - `presetRoutes`: `GET /presets` (`{builtin, mine}`), `PUT|DELETE /presets/:name`; `MAX_PRESET_BYTES` 32 KB
   [src/http/presets.ts:presetRoutes]
 - `statsRoutes`: `GET /operator/stats` (`PlatformStats {accounts, free, paid, paidCapped}`),

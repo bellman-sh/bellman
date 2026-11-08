@@ -11,8 +11,10 @@ import { meRoutes } from "../src/http/me.js";
 import type { LookupShown } from "../src/files/memory.js";
 import { MAX_CODE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { SEND_LIMIT } from "../src/room/send-limit.js";
+import { JOINED_SCAN } from "../src/storage/store.js";
 import { joinWith, pairUp, publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
+import { brief } from "./helpers/fixtures.js";
 
 const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";
@@ -111,7 +113,8 @@ describe("GET and PUT /me/memory", () => {
   });
 
   it("refuses the write with a bearer, without the panel's Origin, with any other body, and anonymously", async () => {
-    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "PUT", body: { capture: true } })).status).toBe(403);
+    const bearer = await call(DEV_KEY.jesse, "/me/memory", { method: "PUT", body: { capture: true } });
+    expect([bearer.status, (await bodyOf(bearer)).error]).toEqual([403, "dash_session_required"]);
     expect((await dash({ capture: true }, { headers: {} })).status).toBe(403);
     for (const body of [{ capture: "yes" }, { capture: true, pause: true }, {}, [true], null]) {
       expect((await dash(body)).status, JSON.stringify(body)).toBe(400);
@@ -187,15 +190,29 @@ describe("GET /me/memory/export", () => {
     expect(md).not.toContain("closed note");
   });
 
-  it("works while paused and writes no lookup row", async () => {
+  it("says the room list was cut when the joined index came back full, and not otherwise", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const open = await startRoom(jesse, SWARM);
+    await jesse.call("bellman_fs", { op: "write", session_id: open.sessionId, member_id: open.memberId, path: "/members/me/o.md", content: "open note" });
+    expect(await exported()).not.toContain("not in this export");
+    vi.spyOn(h.store, "sessionsJoinedBy").mockResolvedValue([open.sessionId, ...Array.from({ length: JOINED_SCAN - 1 }, (_, i) => `qs_gone_${i}`)]);
+    const md = await exported();
+    expect(md).toContain(`read up to ${JOINED_SCAN} rooms, open and closed, so notes in a room past that are not in this export`);
+    expect(md).toContain("open note");
+  });
+
+  // The count is taken unpaused: a paused account's logged reads write no row, so a paused export could not add one.
+  it("writes no lookup row, and works while paused", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "home note" });
     await jesse.call("bellman_memory", { op: "recall", path: "/a.md" });
     const home = homeRoomId(resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!.userId);
     const before = (await h.store.homeLookups(home)).length;
-    await call(null, "/me/memory", { method: "PUT", body: { paused: true }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(before, "the recall logged a row, so the log is live").toBeGreaterThan(0);
     expect(await exported()).toContain("home note");
     expect((await h.store.homeLookups(home)).length).toBe(before);
+    await call(null, "/me/memory", { method: "PUT", body: { paused: true }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(await exported()).toContain("home note");
   });
 });
 
@@ -344,5 +361,123 @@ describe("DELETE /rooms/:id/notes", () => {
     expect(await h.store.readFs(pair.sessionId, paths[SEND_LIMIT])).not.toBeNull();
     const deletes = (await h.store.eventsAfter(pair.sessionId, cursor)).filter((e) => e.type === "fs");
     expect(deletes.map((e) => [(e.payload as { op: string }).op, (e.payload as { path: string }).path])).toEqual(body.deleted.map((p) => ["delete", p]));
+  });
+});
+
+// A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): bound and unbound by the
+// person signed in to the dash, listed with a bearer too, and only for a room the account created.
+describe("/me/repo-rooms", () => {
+  const REMOTE = "git@github.com:bellman-sh/bellman.git";
+  const bind = (body: unknown, over: CallOptions = {}) =>
+    call(null, "/me/repo-rooms", { method: "PUT", body, cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
+  const unbind = (remote: string, over: CallOptions = {}) =>
+    call(null, `/me/repo-rooms?remote=${encodeURIComponent(remote)}`, { method: "DELETE", cookie: DEV_KEY.jesse, headers: { origin: PANEL }, ...over });
+
+  it("binds from the dash, lists for the bearer, and replaces a binding given in another remote form", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const a = await startRoom(jesse, SWARM);
+    const b = await startRoom(jesse, SWARM);
+    const res = await bind({ remote: REMOTE, session_id: a.sessionId, role: "helper" });
+    expect([res.status, await bodyOf(res)]).toEqual([200, { remote: "github.com/bellman-sh/bellman", session_id: a.sessionId, role: "helper", created_at: expect.any(Number) }]);
+    expect((await bind({ remote: "https://github.com/bellman-sh/bellman", session_id: b.sessionId, role: "lead" })).status).toBe(200);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/repo-rooms"))).toEqual({
+      repo_rooms: [{ remote: "github.com/bellman-sh/bellman", session_id: b.sessionId, role: "lead", created_at: expect.any(Number) }],
+    });
+    expect(await bodyOf(await call(DEV_KEY.peer, "/me/repo-rooms"))).toEqual({ repo_rooms: [] });
+  });
+
+  it("lets the room it replaced close once no binding names it", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const a = await startRoom(jesse, SWARM);
+    const b = await startRoom(jesse, SWARM);
+    expect((await bind({ remote: REMOTE, session_id: a.sessionId, role: "helper" })).status).toBe(200);
+    expect((await bind({ remote: REMOTE, session_id: b.sessionId, role: "helper" })).status).toBe(200);
+    expect((await h.store.getSession(a.sessionId))?.keptOpen).toBeUndefined();
+    expect((await h.store.getSession(b.sessionId))?.keptOpen).toBe(true);
+  });
+
+  it("refuses a bearer write, a room someone else created, a public room, a closed room, a role the room lacks and a remote that is not one", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const mine = await startRoom(jesse, SWARM);
+    const peer = await h.connect(DEV_KEY.peer);
+    const theirs = await startRoom(peer);
+    const pub = await publicRoom(h);
+    const closed = await startRoom(jesse, SWARM);
+    await h.store.closeSession(closed.sessionId);
+    const code = async (res: Response) => [res.status, (await bodyOf(res)).error];
+    expect(await code(await call(DEV_KEY.jesse, "/me/repo-rooms", { method: "PUT", body: { remote: REMOTE, session_id: mine.sessionId, role: "helper" } }))).toEqual([403, "dash_session_required"]);
+    expect(await code(await call(DEV_KEY.jesse, `/me/repo-rooms?remote=${REMOTE}`, { method: "DELETE" }))).toEqual([403, "dash_session_required"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: mine.sessionId, role: "helper" }, { headers: {} }))).toEqual([403, expect.any(String)]);
+    expect(await code(await bind({ remote: REMOTE, session_id: theirs.sessionId, role: "helper" }))).toEqual([403, "not_creator"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: pub.sessionId, role: "helper" }))).toEqual([409, "public_room"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: closed.sessionId, role: "helper" }))).toEqual([404, "not_found"]);
+    expect(await code(await bind({ remote: REMOTE, session_id: mine.sessionId, role: "nobody" }))).toEqual([400, "unknown_role"]);
+    expect(await code(await bind({ remote: "/tmp/repo", session_id: mine.sessionId, role: "helper" }))).toEqual([400, "invalid_request"]);
+    expect(await code(await bind({ remote: REMOTE }))).toEqual([400, "invalid_request"]);
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/me/repo-rooms"))).toEqual({ repo_rooms: [] });
+  });
+
+  it("keeps a bound room open when it empties, and lets it close once unbound", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const kept = await startRoom(jesse, SWARM);
+    expect((await bind({ remote: REMOTE, session_id: kept.sessionId, role: "helper" })).status).toBe(200);
+    expect((await jesse.call("bellman_leave", { session_id: kept.sessionId, member_id: kept.memberId })).isError).toBe(false);
+    expect((await h.store.getSession(kept.sessionId))?.closed).toBe(false);
+    expect((await unbind("https://github.com/bellman-sh/bellman")).status).toBe(204);
+    expect((await unbind(REMOTE)).status).toBe(404);
+    expect((await h.store.getSession(kept.sessionId))?.keptOpen).toBeUndefined();
+    const other = await startRoom(jesse, SWARM);
+    expect((await jesse.call("bellman_leave", { session_id: other.sessionId, member_id: other.memberId })).isError).toBe(false);
+    expect((await h.store.getSession(other.sessionId))?.closed).toBe(true);
+  });
+});
+
+describe("POST /me/repo-rooms/connect", () => {
+  const REMOTE = "git@github.com:bellman-sh/bellman.git";
+  const bind = (sessionId: string) =>
+    call(null, "/me/repo-rooms", { method: "PUT", body: { remote: REMOTE, session_id: sessionId, role: "helper" }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+  const connect = (remote = "https://github.com/bellman-sh/bellman") => call(DEV_KEY.jesse, "/me/repo-rooms/connect", { method: "POST", body: { remote } });
+
+  it("gives the bearer a connect token that bellman_confirm redeems into a new seat each time, marked as a binding's", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const room = await startRoom(jesse, SWARM);
+    expect((await bind(room.sessionId)).status).toBe(200);
+    const seats: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const res = await connect();
+      const body = await bodyOf(res);
+      expect([res.status, body.session_id, body.role]).toEqual([200, room.sessionId, "helper"]);
+      const confirmed = await jesse.call("bellman_confirm", { connect_token: body.connect_token, brief: brief() });
+      expect(confirmed.isError, confirmed.text).toBe(false);
+      seats.push(String(confirmed.data.member_id));
+    }
+    expect(new Set(seats).size).toBe(2);
+    const members = (await h.store.getSession(room.sessionId))!.members.filter((m) => seats.includes(m.memberId));
+    expect(members.map((m) => [m.roomRole, m.via])).toEqual([["helper", "binding"], ["helper", "binding"]]);
+  });
+
+  it("answers 404 no_binding for a remote with none, and refuses a room that has since closed", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    expect([(await connect()).status, (await bodyOf(await connect())).error]).toEqual([404, "no_binding"]);
+    const room = await startRoom(jesse, SWARM);
+    expect((await bind(room.sessionId)).status).toBe(200);
+    await h.store.closeSession(room.sessionId);
+    const res = await connect();
+    expect([res.status, (await bodyOf(res)).error]).toEqual([404, "not_found"]);
+    const bad = await call(DEV_KEY.jesse, "/me/repo-rooms/connect", { method: "POST", body: {} });
+    expect([bad.status, (await bodyOf(bad)).error]).toEqual([400, "invalid_request"]);
+    expect((await call(DEV_KEY.jesse, "/me/repo-rooms/connect")).headers.get("allow")).toBe("POST");
+    const cookie = await call(null, "/me/repo-rooms/connect", { method: "POST", body: { remote: REMOTE }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect([cookie.status, (await bodyOf(cookie)).error]).toEqual([403, "bearer_required"]);
+  });
+
+  it("seats again in a bound room after its last member left", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const room = await startRoom(jesse, SWARM);
+    expect((await bind(room.sessionId)).status).toBe(200);
+    expect((await jesse.call("bellman_leave", { session_id: room.sessionId, member_id: room.memberId })).isError).toBe(false);
+    const body = await bodyOf(await connect());
+    const confirmed = await jesse.call("bellman_confirm", { connect_token: body.connect_token, brief: brief() });
+    expect(confirmed.isError, confirmed.text).toBe(false);
   });
 });

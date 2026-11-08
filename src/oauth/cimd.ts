@@ -12,6 +12,7 @@
  * which cannot reach a private network, so a name that resolves to one fails there too.
  */
 import type { RegisteredClient } from "./storage.js";
+import { readCapped } from "../read-capped.js";
 
 /** The longest document we read. Real ones are a few hundred bytes. */
 export const CIMD_MAX_BYTES = 5 * 1024;
@@ -101,33 +102,6 @@ export function cimdTtl(cacheControl: string | null): number {
   const match = /(?:^|,)\s*max-age\s*=\s*(\d+)/i.exec(cacheControl ?? "");
   const ms = match ? Number(match[1]) * 1000 : 0;
   return Math.min(CIMD_TTL_CEILING_MS, Math.max(CIMD_TTL_FLOOR_MS, ms));
-}
-
-/** Read at most `limit` bytes of a body; null when it is longer. */
-async function readCapped(res: Response, limit: number): Promise<string | null> {
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > limit) return null;
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    bytes.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
 }
 
 /**

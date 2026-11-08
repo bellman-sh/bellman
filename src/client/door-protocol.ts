@@ -53,6 +53,18 @@ export interface DoorStatus {
   recent: DoorEvent[];
   /** Present only when the bridge was started with a `BELLMAN_JOIN_CODE`. */
   join?: DoorJoin;
+  /**
+   * The Herdr terminal the bridge runs in (its `HC_TERMINAL_ID`, e.g. `t7`), so a Herdr panel can go to this session.
+   * Present only when the bridge runs inside one.
+   */
+  herdr_terminal?: string;
+}
+
+const TERMINAL_ADDRESS = /^[A-Za-z0-9_-][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)?$/;
+
+/** A Herdr terminal address as `HC_TERMINAL_ID` gives it (`t7`, `vps/t7`), or undefined for anything else. */
+export function herdrTerminalOf(value: string | undefined): string | undefined {
+  return value !== undefined && value.length <= 64 && TERMINAL_ADDRESS.test(value) ? value : undefined;
 }
 
 /** `GET /rooms/<session_id>/events`: a page of the room's log, and the cursor to pass as `?after=` for what is new. */

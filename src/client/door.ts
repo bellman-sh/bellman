@@ -177,6 +177,8 @@ export interface DoorSource {
   writeSurface(sessionId: string, payload: Record<string, unknown>): Promise<{ status: number; body: unknown }>;
   /** Where the join from `BELLMAN_JOIN_CODE` stands (#435); undefined, or absent, when the bridge was given none. */
   join?(): DoorJoin | undefined;
+  /** The Herdr terminal the bridge runs in (`DoorStatus.herdr_terminal`); absent outside Herdr. */
+  herdrTerminal?: string;
 }
 
 /**
@@ -196,6 +198,7 @@ export function statusOf(src: DoorSource): DoorStatus {
     waiting: src.delivery !== "channel" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
     recent: src.recent(),
     ...(join ? { join } : {}),
+    ...(src.herdrTerminal ? { herdr_terminal: src.herdrTerminal } : {}),
   };
 }
 

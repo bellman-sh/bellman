@@ -542,7 +542,7 @@ seven routes:
 
 | Route | Answers |
 |---|---|
-| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox) and the latest events it delivered |
+| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox), the latest events it delivered, and, when it runs inside Herdr, its terminal address (`herdr_terminal`, from `HC_TERMINAL_ID`) |
 | `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
 | `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
 | `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |

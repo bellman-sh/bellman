@@ -1,3 +1,4 @@
+import { seatName } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -231,6 +232,7 @@ Errors (nothing is created, no quota spent): "invalid manifest — ..." or a val
       // the brief beside it, and the creator and orgs the store took from them (ADR 0018, ADR 0019).
       const room = await s.getSession(session.id);
       if (!room) throw new Error(`room ${session.id} was created and cannot be read back`);
+      const creatorRow = room.members.find((m) => m.memberId === memberId);
       await audit(s, room, identity, "session_created", {
         mode: manifest.mode, org_only: orgOnly, preset: manifest.preset, hosted: manifest.host !== null,
       });
@@ -238,6 +240,8 @@ Errors (nothing is created, no quota spent): "invalid manifest — ..." or a val
       return ok({
         session_id: session.id,
         member_id: memberId,
+        // The creator's seat name (seat names spec), from the row the store numbered.
+        ...(creatorRow ? { name: seatName(creatorRow) } : {}),
         join_code: defaultCode.code,
         // The same code, as a link: clickable in chat, and it tells the person
         // who opens it what to say to their agent. The page is rendered from

@@ -1,3 +1,4 @@
+import { seatName } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -151,6 +152,8 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
       // and the retiring of a filled room's codes, were decided inside seatMember,
       // against the sockets then.
       const connected = await s.connectedMembers(joined.id);
+      const seat = joined.members.find((m) => m.memberId === memberId);
+      if (!seat) return fail("session no longer exists.");
 
       const joinEvent = await appendOrFrozen(s, session.id, {
         type: "member_joined",
@@ -162,7 +165,8 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
         // "present" would still read as present hours after the member was
         // reaped. Presence is derived, never stored (ARCHITECTURE.md rule 7),
         // so it belongs on live roster responses only.
-        payload: { member: storedMember({ ...member, agent: member.brief.agent }), brief },
+        // The seated row, which has the `seq` the seat's name is made from; the arriving `member` has none yet.
+        payload: { member: storedMember({ ...seat, agent: member.brief.agent }), brief },
         refId: null,
       });
       // The roster after the seat, not the one read before it: a member this seat displaced
@@ -196,6 +200,7 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
       const head: Record<string, unknown> = {
         session_id: session.id,
         member_id: memberId,
+        name: seatName(seat),
         cursor: joinEvent.cursor,
         room: roomPreview(joined, roomRole, identity.userId),
         ...(await roomInstructionsField(s, joined.id)),

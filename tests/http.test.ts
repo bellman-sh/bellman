@@ -159,15 +159,31 @@ describe("HTTP surface", () => {
     await expect(res.json()).resolves.toMatchObject({ ok: true, service: "bellman" });
   });
 
-  it("rejects /mcp with no bearer key", async () => {
-    const res = await fetch(`${base}/mcp`, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    });
-    expect(res.status).toBe(401);
-    const body = await res.json() as { error: { message: string } };
-    expect(body.error.message).toContain("Unauthorized");
+  const anonymous = (body: unknown) => fetch(`${base}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify(body),
+  });
+
+  it("lists the tools with no bearer key, the same list a signed-in caller gets", async () => {
+    const res = await anonymous({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(res.status).toBe(200);
+    const { result } = await res.json() as { result: { tools: unknown[] } };
+    const client = await mcpClient("qk_dev_jesse");
+    expect(result.tools).toEqual((await client.listTools()).tools);
+    await client.close();
+    expect((await anonymous({ jsonrpc: "2.0", id: 2, method: "ping" })).status).toBe(200);
+  });
+
+  it("rejects every other /mcp method with no bearer key, alone or batched with a listing", async () => {
+    const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } };
+    const init = { jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
+    for (const body of [call, init, [{ jsonrpc: "2.0", id: 1, method: "tools/list" }, call], []]) {
+      const res = await anonymous(body);
+      expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 401]);
+      const err = await res.json() as { error: { message: string } };
+      expect(err.error.message).toContain("Unauthorized");
+    }
   });
 
   it("rejects /mcp with an unknown bearer key", async () => {

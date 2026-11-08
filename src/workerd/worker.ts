@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { resolveIdentity } from "../auth.js";
+import { ANONYMOUS, isAnonymousRequest, resolveIdentity } from "../auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "../a2a/cards.js";
 import { SERVER_CARD_CORS, SERVER_CARD_PATH, serverCard } from "../server-card.js";
@@ -607,13 +607,16 @@ export default {
     const blocked = unconfigured(env, oauth);
     if (blocked) return blocked;
 
-    const identity = await resolveCaller(request, env, oauth, "/mcp");
+    // No credential at all may still list the tools; a bad one is a 401, so an expired token is refreshed.
+    const identity = await resolveCaller(request, env, oauth, "/mcp")
+      ?? (!request.headers.has("authorization") && isAnonymousRequest(await request.clone().json().catch(() => null))
+        ? ANONYMOUS : null);
     if (!identity) return unauthorized(oauth);
 
     try {
       // Inside the try: a registry that cannot say is JSON-RPC's internal error below, which an MCP
       // client can parse, and serves nobody.
-      if (await suspended(identity.userId)) {
+      if (identity !== ANONYMOUS && await suspended(identity.userId)) {
         return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
       }
       const server = buildServer(identity, store, blobs, {

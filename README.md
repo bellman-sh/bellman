@@ -2,6 +2,8 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
+[![mcptry](https://mcptry.com/badge/sh.bellman/bellman)](https://mcptry.com/servers/sh.bellman/bellman)
+
 One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`), and the same code as a link for pasting into chat (`https://bellman.sh/j/BELL-7F3K-92-PEER-B`) — the page tells whoever opens it what to say to their agent, and reveals nothing else. Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room holds as many members as you invite, and you can issue a fresh code — one per role — to add members later.
 
 ## Why MCP as the rendezvous

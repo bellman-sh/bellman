@@ -5,7 +5,7 @@ import { codeIsLive } from "../room/codes.js";
 import { isPublic, isTopicRoom, capacityOf } from "../room/manifest.js";
 import { newestTaskFirst, taskWithEvent, handOff, decideAnswer, decideAsk, decideCancel, endings, handedOverNotice, nextLapse, type AnswerRequest, type AnswerResult, type AskOutcome, type AskRequest, type CancelRequest, type CancelResult, type EndReason } from "../outside.js";
 import { type BlobCharge, type HostAppend, type PurgeSchedule, type SetJoinCode, type HomeAppend, type AppendExtras, type ApprovalWrite, type ConfigWrite, type ConfigWriteResult, type FsAppend, type FsEntry, type FsPage, type FsWrite, type DepartedMembers, type EventBody, type EventWrite, type HostInstructionsSet, type MemberPatch, type AccountBanRequest, type ProposalApproval, type RemovalOutcome, type RemovalRequest, type SeatOutcome, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type DecisionClose, type DecisionOpen, type VoteWrite, type RoomSummary, roomSummaryOf } from "../storage/store.js";
-import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
+import { type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PublicView, type SessionEvent, type SurfaceRow, type OutsideCaller, type OutsideTask, type ApprovedBy, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type RepoRoom, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
 import { decideFsWrite, fsEntryOf, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix, type HomeKeyRecord, FS_FIND_MAX, FS_LIST_PAGE, newMemoryId } from "../files/fs.js";
 import { namespaceOf } from "../files/fs-path.js";
@@ -3067,6 +3067,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.put("hs", settings);
   }
 
+  /** `BellmanStore.readRepoRooms`: the `rr` row, or none. */
+  async readRepoRooms(): Promise<RepoRoom[]> {
+    return (await this.ctx.storage.get<RepoRoom[]>("rr")) ?? [];
+  }
+
+  /** `BellmanStore.writeRepoRooms`: the `rr` row replaced. Like `hs`, no record, event, outbox intent or alarm. */
+  async writeRepoRooms(rows: RepoRoom[]): Promise<void> {
+    await this.ctx.storage.put("rr", rows);
+  }
+
   /**
    * `BellmanStore.readHomeLogged` (ADR 0047 decision 13): the `hs` read, the file read, the `lk:` row and the
    * retention prune in one transaction, so a hard delete racing the read cannot leave a lookup row in an emptied room.
@@ -3192,7 +3202,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /** `BellmanStore.purgeHome` (ADR 0047 decision 14): every row. A home room holds no blobs, registry rows, audit or outbox. */
   async purgeHome(): Promise<void> {
+    // Every row but `rr`: repo default rooms are not memory, so deleting all memory keeps them.
+    const repoRooms = await this.ctx.storage.get<RepoRoom[]>("rr");
     await this.ctx.storage.deleteAll();
+    if (repoRooms) await this.ctx.storage.put("rr", repoRooms);
     // A home room arms no alarm; deleted all the same, for the reason #purgeIfDue gives.
     await this.ctx.storage.deleteAlarm();
   }

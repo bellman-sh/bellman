@@ -1011,6 +1011,19 @@ export interface HomeSettings {
 }
 export const DEFAULT_HOME_SETTINGS: HomeSettings = { capture: false, paused: false };
 
+/**
+ * A repo's default room (docs/superpowers/specs/2026-11-08-repo-default-room-design.md): a session of this account
+ * started in `remote` joins `sessionId` as `role` at launch. The `rr` row of the account's home room; only the dash
+ * writes it, and only for a room the account created.
+ */
+export interface RepoRoom {
+  /** `normalizeRemote`'s `host/owner/repo`. At most one row per remote. */
+  remote: string;
+  sessionId: string;
+  role: string;
+  createdAt: number;
+}
+
 /** One agent read of home memory (ADR 0047 decision 13): an `lk:` row in the home room, shown to the account only. */
 export interface LookupRow {
   at: number;

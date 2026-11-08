@@ -1,4 +1,4 @@
-import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource } from "../types.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type RoomCreator, type PublicView, type Session, type SessionEvent, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type PresetName, type SessionMode, type ConfigGovernance, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type RepoRoom, type LookupRow, type LookupSource } from "../types.js";
 import { type FsRefusal } from "../files/fs.js";
 import { blobBytesUsed } from "../files/blobs.js";
 import type { Ban, BanScope, CreatorBan } from "../bans.js";
@@ -1550,6 +1550,10 @@ export interface BellmanStore {
   readHomeSettings(id: string): Promise<HomeSettings>;
   /** The home room's settings row, replaced. No record, event or index row: the first note still creates the room. */
   writeHomeSettings(id: string, settings: HomeSettings): Promise<void>;
+  /** The home room's repo default rooms (`rr`), or none. Creates nothing. Kept through `writeHomeSettings` and `purgeHome`: they are not memory. */
+  readRepoRooms(id: string): Promise<RepoRoom[]>;
+  /** The home room's `rr` row, replaced. No record, event or index row. */
+  writeRepoRooms(id: string, rows: RepoRoom[]): Promise<void>;
   /**
    * `readFs` on a home room that also writes the lookup row, in one transaction; `paused` when the `hs` row says so,
    * with nothing read or written. Rows older than LOOKUP_KEEP_MS are deleted in the same transaction, and past

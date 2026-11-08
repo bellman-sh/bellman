@@ -4,7 +4,7 @@ import type { Ban, CreatorBan } from "../bans.js";
 import type { Suspension } from "../suspension.js";
 import { SWEEP_RPC_BUDGET, type ScimCreate, type ScimUpdate, type BlobCharge, type GrantDelete, type GrantWrite, type HostAppend, type HostedSlot, type PublicNameEntry, type PurgeSchedule, type SetJoinCode, type HomeAppend, type AppendExtras, type ApprovalWrite, type BellmanStore, type ConfigWrite, type ConfigWriteResult, type FsAppend, type FsPage, type FsWrite, type DepartedMembers, type EventBody, type EventWrite, type HostInstructionsSet, type MemberPatch, type AccountBanRequest, type ProposalApproval, type RemovalOutcome, type RemovalRequest, type SeatOutcome, type SurfaceAppend, type SurfaceAuthor, type SurfaceBatchAppend, type SurfaceFacts, type DecisionClose, type DecisionOpen, type VoteWrite, type RoomCounts, type RoomFilter, type RoomIndexRow, type RoomSummary, roomIndexRow } from "../storage/store.js";
 import { codeIsLive } from "../room/codes.js";
-import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings, LookupRow, LookupSource } from "../types.js";
+import type { ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, PublicView, SavedPreset, UserRecord, SessionEvent, SurfaceRow, OutsideTask, ApprovedBy, Org, OrgIdp, OrgInvite, OrgPatch, ScimToken, ScimUser, ScimUserPatch, ConfigName, ConfigRow, FsRow, HomeSettings, RepoRoom, LookupRow, LookupSource } from "../types.js";
 import { isHomeRoomId } from "../files/home.js";
 import type { ClosedState, DecisionPage, DecisionPageAsk, DecisionView, FailReason } from "../room/decision.js";
 import type { HostDO } from "./host-do.js";
@@ -741,6 +741,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
     return this.session(id).writeHomeSettings(settings);
+  }
+
+  async readRepoRooms(id: string): Promise<RepoRoom[]> {
+    return this.session(id).readRepoRooms();
+  }
+
+  async writeRepoRooms(id: string, rows: RepoRoom[]): Promise<void> {
+    return this.session(id).writeRepoRooms(rows);
   }
 
   async readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {

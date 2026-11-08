@@ -200,15 +200,18 @@ describe("GET /me/memory/export", () => {
     expect(md).toContain("open note");
   });
 
-  it("works while paused and writes no lookup row", async () => {
+  // The count is taken unpaused: a paused account's logged reads write no row, so a paused export could not add one.
+  it("writes no lookup row, and works while paused", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     await jesse.call("bellman_memory", { op: "remember", path: "/a.md", content: "home note" });
     await jesse.call("bellman_memory", { op: "recall", path: "/a.md" });
     const home = homeRoomId(resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!.userId);
     const before = (await h.store.homeLookups(home)).length;
-    await call(null, "/me/memory", { method: "PUT", body: { paused: true }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(before, "the recall logged a row, so the log is live").toBeGreaterThan(0);
     expect(await exported()).toContain("home note");
     expect((await h.store.homeLookups(home)).length).toBe(before);
+    await call(null, "/me/memory", { method: "PUT", body: { paused: true }, cookie: DEV_KEY.jesse, headers: { origin: PANEL } });
+    expect(await exported()).toContain("home note");
   });
 });
 

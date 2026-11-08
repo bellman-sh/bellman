@@ -396,6 +396,38 @@ public link lets other people's chats in. The truthful distinction is what is
 shared: a link shares messages and small files, not memory, and has no roles,
 canvas or approvals of actions.
 
+### BAND
+
+Checked 2026-11-08 against `band.ai` and `docs.band.ai` as published. The docs
+serve Markdown at `<page>.md` and an index at `/llms.txt`; the facts below quote
+`band.ai/`, `/pricing`, `/integrations`, `/about`, and the docs pages named.
+Thenvoi AI Ltd. d/b/a BAND.
+
+| Fact | Source |
+|---|---|
+| In its own words: "Enterprise-grade interaction infrastructure that enables real-time, multi-peer collaboration between agents and humans through a shared interaction layer with built-in governance." Two products: Band Platform ("for all your agents") and Band Desktop ("for developers") | `band.ai/` |
+| How an agent joins: under its own identity and handle, through the Band SDK (Python or TypeScript, MIT) with framework adapters (LangGraph, CrewAI, Pydantic AI, Parlant, Anthropic SDK, Google ADK, Gemini, Agno, Strands, NOOA, Vercel AI SDK, OpenAI SDK), coding-agent adapters (Claude Agent SDK, Codex, OpenCode, Copilot, Cursor CLI, OMP, Kiro), plugins (OpenClaw, NemoClaw, Hermes, NanoClaw), a Claude Code channel plugin, ACP and A2A in both directions, Band Desktop, or REST and WebSocket | `docs.band.ai/connect/choose-integration-path` |
+| MCP: `band-mcp` exposes room, participant and message operations as tools, but "an MCP client is never a live participant, so mentions do not trigger it"; the agent scope cannot read room messages, and the human scope needs Enterprise | `/connect/choose-integration-path`; `/mcp/overview` |
+| Routing: "Band routes every room message by @mention ... an agent that is not mentioned never receives it; people in the room see every message and event." A text message without a mention is rejected | `/features/routing-mentions` |
+| Approvals: a conversational checkpoint, "an instruction to the model, not a deterministic authorization check"; coding agents' native permission requests can be routed to the room by some adapters and by Band Desktop | `/features/human-in-the-loop`; `/connect/choose-integration-path` |
+| Other people: agents owned by other accounts "become reachable through an approved contact request" | `/features/contacts-discovery` |
+| Band Desktop (formerly Jam): free; macOS 10.15+, 64-bit Windows, 64-bit x86 Linux; runs Claude Code, Codex, Copilot, OpenCode, Antigravity and ACP agents in rooms, with a task board and a "Needs your response" list; version 0.4.17 on 2026-10-30 | `band.ai/`; `/band-desktop`; `/band-desktop/install` |
+| Sandboxing: a Docker Sandbox (sbx) kit (macOS) runs a Python SDK agent in a microVM with a default-deny egress allowlist; Cloudflare Sandboxes too | `/connect/choose-integration-path`; `band.ai/integrations` |
+| Memories: an API, Enterprise only | `/features/memories` |
+| Pricing: Free $0, "Single user account (personal, non-commercial use)", 20 remote agents, 250 active rooms, 20 participants a chat, "2 week data retention"; Pro $17.99/month, "Single user account (personal)", 40 agents, 500 rooms, 40 participants a chat; Enterprise by quote, "Multiple users and teams" | `band.ai/pricing` |
+| Backers: Team8, Hetz Ventures, Sierra Ventures. CEO Arick Goomanovsky, CTO Vlad Luzin | `band.ai/about` |
+| Funding amount, and dates of the Desktop launch and the Docker Sandboxes release | **unconfirmed — say nothing.** The research card cites PR Newswire; not checked here, and the page does not need them |
+| Whether claude.ai or ChatGPT can take part in a BAND room by any route other than MCP | **unconfirmed beyond the docs — say only what the docs say:** MCP clients are never live participants |
+
+**Do not claim** BAND is single-user: its plans are, but other accounts'
+agents join through contact requests and Enterprise is multi-user. **Do not
+claim** it lacks MCP or A2A, or that Band Desktop is Mac-only. **Do not claim**
+Bellman alone has human approval: BAND has a conversational checkpoint and
+routes coding agents' permission requests. The truthful distinctions are who
+can be a live member (a chat assistant can be one in Bellman, and in BAND it
+cannot) and whether a rule is enforced by the server or by the model's
+instructions.
+
 ## Page contract
 
 Eight parts, in this order. The generator emits them all or fails.
@@ -577,6 +609,38 @@ and the claims are not.
   them too.
 - **Tone:** Dray leads on personal memory, and the page says so first.
 - **Do not claim** Dray cannot involve other people. See the facts table.
+
+### `/compare/band`
+
+- **Question:** Why not just use BAND?
+- **Answer:** BAND is infrastructure for agents you *run*: each registers a
+  handle and connects through the SDK, a plugin, A2A, ACP or Band Desktop, and
+  a message reaches only the agents it @mentions. Bellman is a room for the
+  agents you already have *open*: a code pasted into claude.ai, ChatGPT, Cursor
+  or Claude Code takes a seat. BAND's MCP server acts on rooms but, by its
+  docs, never makes a client a live member. Bellman's room also holds a shared
+  canvas and server-enforced roles.
+- **Decision:** Use BAND for agents you build or run, across frameworks and
+  machines, that need to find each other, hand off by @mention and run
+  sandboxed. Use Bellman for the sessions you and your teammates already have
+  open, chat apps included.
+- **Axes:** what it is · how an agent joins · chat assistants · who an agent
+  hears · shared work · approvals · more than one person · price to start.
+- **Better at:** many more kinds of agent (a dozen framework adapters, coding
+  agents headless or in Band Desktop, A2A and ACP both ways, personal-agent
+  plugins); @mention routing for large rooms; Docker sandboxing; a free,
+  shipped desktop app on three systems; an MIT SDK. Say that Bellman has no
+  SDK, no adapters, no sandboxing and no desktop app.
+- **Pricing row:** BAND free for personal, non-commercial use, Pro $17.99 a
+  month, teams Enterprise by quote; Bellman free, Pro $12, Team $20 a seat
+  bought online. From each side's pricing page, not from memory.
+- **Tone:** BAND leads on breadth and enterprise reach, and the page says so.
+- **Do not claim** anything the facts table rules out.
+- **Homepage, with it:** the lede under "Stop copy-pasting between your AI
+  sessions." is "The agents you already have open, from any provider, in one
+  room with a shared canvas and rules the server enforces. Yours and your
+  teammates'.", and under the two ways in, "A team can buy Team today, $20 a
+  seat, with no sales call."
 
 ### `/compare/` index
 

@@ -38,7 +38,10 @@ export type DoorJoin =
   | { state: "joined"; session_id: string; member_id: string; role: string; verbs: string[] }
   | { state: "refused"; reason: string };
 
-/** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
+/**
+ * `GET /status`. `delivery` is "hook" or "queue"; "channel" is only ever reported by a bridge from before MCP
+ * 2026-07-28 retired it, which kept no inbox, so its `waiting` is empty.
+ */
 export interface DoorStatus {
   version: 1;
   delivery: "hook" | "channel" | "queue";

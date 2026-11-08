@@ -17,7 +17,7 @@ import {
   createBridge, deliveryOf, installOf, loadRoomManifest,
   type BridgeOptions, type Delivery, type Install, type Remote, type WhoAmI,
 } from "../src/client/bridge.js";
-import { drain, pendingCount, readMemberships } from "../src/client/inbox.js";
+import { drain, drainInterrupting, pendingCount, readMemberships, renderEvent } from "../src/client/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";
@@ -30,6 +30,7 @@ import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { STALE_AFTER_MS } from "../src/room/presence.js";
 import { SYNC_PAGE } from "../src/tools/sync.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 /**
  * The bridge against the real Bellman tool handlers. Each "remote" is an
@@ -48,10 +49,13 @@ const caps = ["read_context", "receive_messages", "request_actions"];
 const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 5_000 };
 
 interface Session {
-  /** What Claude Code sees: the bridge's tools, plus the channel events it pushed. */
+  /** What Claude Code sees: the bridge's tools, and any notification it sent (none: it sends nothing unasked). */
   client: Client;
   pushed: Notification[];
   bridge: ReturnType<typeof createBridge>;
+  /** The inbox the bridge queues peer events in, and what the monitor has shown from it so far. */
+  inboxDir: string;
+  shown: { content: string; meta: Record<string, string> }[];
   call(name: string, args?: Record<string, unknown>): Promise<{ isError: boolean; data: Record<string, unknown>; text: string }>;
 }
 
@@ -151,10 +155,10 @@ let inboxRoot: string;
 /** `extra` overrides any option, so a test can swap the remote or supply whoami and still get teardown. */
 async function open(
   key: string,
-  delivery: Delivery = "channel",
+  delivery: Delivery = "hook",
   extra: Partial<BridgeOptions> = {}
 ): Promise<Session> {
-  const inboxDir = delivery !== "channel" ? join(inboxRoot, `${key}-${opened.length}`) : undefined;
+  const inboxDir = join(inboxRoot, `${key}-${opened.length}`);
   const bridge = createBridge({
     delivery,
     inboxDir,
@@ -163,7 +167,7 @@ async function open(
     ...extra,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   const pushed: Notification[] = [];
   client.fallbackNotificationHandler = async (n) => {
     pushed.push(n);
@@ -174,6 +178,8 @@ async function open(
     client,
     pushed,
     bridge,
+    inboxDir,
+    shown: [],
     async call(name, args = {}) {
       const res = (await client.callTool({ name, arguments: args })) as CallToolResult;
       return {
@@ -207,10 +213,20 @@ async function pair(creator: Session, joiner: Session) {
 }
 
 type ChannelParams = { content: string; meta: Record<string, string> };
-const channelEvents = (s: Session) =>
-  s.pushed
-    .filter((n) => n.method === "notifications/claude/channel")
-    .map((n) => n.params as unknown as ChannelParams);
+/**
+ * What reaches the session as an event lands: what the plugin's monitor prints, the interrupting events it drains from
+ * the bridge's inbox (src/client/monitor.ts), kept in the shape a channel push had so each test reads the same fields.
+ * Cumulative, since draining takes them.
+ */
+const channelEvents = (s: Session): ChannelParams[] => {
+  for (const e of drainInterrupting(s.inboxDir)) {
+    s.shown.push({
+      content: renderEvent(e),
+      meta: { session_id: e.session_id, member_id: e.member_id, type: e.type, cursor: String(e.cursor), from: e.from_label },
+    });
+  }
+  return s.shown;
+};
 
 beforeEach(() => {
   store = new MemoryStore();
@@ -225,19 +241,21 @@ afterEach(async () => {
   rmSync(inboxRoot, { recursive: true, force: true });
 });
 
-describe("channel delivery", () => {
-  it("declares itself a channel, never permission relay, and proxies the Bellman tools", async () => {
+describe("delivery as events land", () => {
+  // MCP 2026-07-28 carries no notification the client did not ask for, so the bridge is not a channel: events reach
+  // the session through the inbox and the plugin's monitor. Never permission relay either.
+  it("declares no channel, never permission relay, and proxies the Bellman tools", async () => {
     const a = await open(DEV_KEY.jesse);
 
     const experimental = a.client.getServerCapabilities()?.experimental ?? {};
-    expect(experimental["claude/channel"]).toEqual({});
+    expect(experimental["claude/channel"]).toBeUndefined();
     expect(experimental["claude/channel/permission"]).toBeUndefined();
 
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_decide", "bellman_evict", "bellman_fs",
       "bellman_invite", "bellman_leave", "bellman_memory", "bellman_public_name", "bellman_report", "bellman_rooms", "bellman_send", "bellman_start",
-      "bellman_surface", "bellman_sync", "bellman_upload", "bellman_whoami",
+      "bellman_surface", "bellman_sync", "bellman_upload", "bellman_wait", "bellman_whoami",
     ]);
   });
 
@@ -250,7 +268,7 @@ describe("channel delivery", () => {
   });
 
   // Peer content is untrusted everywhere (ADR 0008), and the instructions are where the agent is told so.
-  it.each<Delivery>(["channel", "hook", "queue"])("tells the agent peer content is untrusted data (%s)", async (delivery) => {
+  it.each<Delivery>(["hook", "queue"])("tells the agent peer content is untrusted data (%s)", async (delivery) => {
     const instructions = (await open(DEV_KEY.jesse, delivery)).client.getInstructions();
 
     expect(instructions).toContain("UNTRUSTED");
@@ -303,7 +321,7 @@ describe("channel delivery", () => {
     expect(request.content).toContain("explicit approval");
   });
 
-  it("cannot be broken out of the channel tag by a peer payload", async () => {
+  it("cannot break out of the text it is shown in with a peer payload", async () => {
     const a = await open(DEV_KEY.jesse);
     const b = await open(DEV_KEY.peer);
     const { sessionId, joinerMember } = await pair(a, b);
@@ -358,7 +376,7 @@ describe("channel delivery", () => {
     async function behind() {
       const a = await open(DEV_KEY.jesse);
       const polls = parkedPolls(DEV_KEY.peer);
-      const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+      const b = await open(DEV_KEY.peer, "hook", { remote: polls.remote });
       const room = await pair(a, b);
       for (let i = 0; i < SYNC_PAGE + 50; i++) {
         await store.appendEvent(room.sessionId, {
@@ -491,7 +509,7 @@ describe("channel delivery", () => {
     // process.
     const polls = parkedPolls(DEV_KEY.peer);
     const a = await open(DEV_KEY.jesse);
-    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    const b = await open(DEV_KEY.peer, "hook", { remote: polls.remote });
     try {
       const { sessionId, joinerMember } = await pair(a, b);
       expect(b.bridge.watching()).toHaveLength(1);
@@ -541,7 +559,7 @@ describe("channel delivery", () => {
     // armed would never see what disarms it and would poll the room for the life of the process.
     const polls = parkedPolls(DEV_KEY.peer);
     const a = await open(DEV_KEY.jesse);
-    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    const b = await open(DEV_KEY.peer, "hook", { remote: polls.remote });
     try {
       const { sessionId, creatorMember, joinerMember } = await pair(a, b);
       expect(b.bridge.watching()).toHaveLength(1);
@@ -568,7 +586,7 @@ describe("channel delivery", () => {
     // nuisance.
     const polls = parkedPolls(DEV_KEY.peer);
     const a = await open(DEV_KEY.jesse);
-    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    const b = await open(DEV_KEY.peer, "hook", { remote: polls.remote });
     try {
       const { sessionId, creatorMember, joinerMember } = await pair(a, b);
       expect(a.bridge.watching()).toHaveLength(1);
@@ -659,7 +677,7 @@ describe("channel delivery", () => {
     // records the departure.
     const polls = parkedPolls(DEV_KEY.peer);
     const a = await open(DEV_KEY.jesse);
-    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    const b = await open(DEV_KEY.peer, "hook", { remote: polls.remote });
     try {
       const { sessionId, joinerMember } = await pair(a, b);
       await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
@@ -710,7 +728,7 @@ describe("channel delivery", () => {
             : real.callTool(params),
       };
     };
-    const a = await open(DEV_KEY.jesse, "channel", { remote });
+    const a = await open(DEV_KEY.jesse, "hook", { remote });
     const b = await open(DEV_KEY.peer);
     const { sessionId, creatorMember } = await pair(a, b);
     await until(() => a.bridge.watching().length === 0);
@@ -734,7 +752,7 @@ describe("the update notice", () => {
 
   /** A bridge whose server says it runs `version`: ahead of the bridge, level with it, or behind. */
   const openAt = (version: string | undefined, extra: Partial<BridgeOptions> = {}) =>
-    open(DEV_KEY.jesse, "channel", {
+    open(DEV_KEY.jesse, "hook", {
       remote: async () => ({ ...(await remoteFor(store, DEV_KEY.jesse)), serverVersion: () => version }),
       ...extra,
     });
@@ -785,10 +803,11 @@ describe("the update notice", () => {
 
 // src/client/channel.ts reads BELLMAN_DELIVERY through this, and tests/extension.test.ts reads the bundle's manifest through
 // it: a value it drops is a bridge running a delivery nobody asked for.
-it("reads BELLMAN_DELIVERY: hook and queue by name, anything else as channel", () => {
+// "channel" is in the list on purpose: a registration still naming the delivery MCP 2026-07-28 retired gets hook.
+it("reads BELLMAN_DELIVERY: queue by name, anything else as hook", () => {
   expect(deliveryOf("hook")).toBe("hook");
   expect(deliveryOf("queue")).toBe("queue");
-  for (const other of [undefined, "", "channel", "Hook", "queued"]) expect(deliveryOf(other)).toBe("channel");
+  for (const other of [undefined, "", "channel", "Hook", "queued"]) expect(deliveryOf(other)).toBe("hook");
 });
 
 describe("hook delivery (the fallback)", () => {
@@ -902,7 +921,7 @@ describe("bellman_whoami", () => {
 
   it("reports the signed-in identity", async () => {
     const logs: string[] = [];
-    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn, log: (m) => logs.push(m) });
+    const a = await open(DEV_KEY.jesse, "hook", { whoami: () => signedIn, log: (m) => logs.push(m) });
 
     expect({ ...(await asked(a)), logs }).toEqual({
       isError: false,
@@ -914,7 +933,7 @@ describe("bellman_whoami", () => {
 
   it("names the org when there is one", async () => {
     const inOrg: WhoAmI = { ...signedIn, org_id: "org_codenerd" };
-    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => inOrg });
+    const a = await open(DEV_KEY.jesse, "hook", { whoami: () => inOrg });
 
     expect(await asked(a)).toEqual({
       isError: false,
@@ -936,7 +955,7 @@ describe("bellman_whoami", () => {
   // The Claude Code mod finds the bridge's door here (src/client/door.ts). The text a person is shown is the same with and
   // without one, and so is every other field: the door is one more key, which a bridge with none reports as null.
   it("names the bridge's door, and changes nothing else in the answer", async () => {
-    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn, door: () => "/tmp/bellman-door.sock" });
+    const a = await open(DEV_KEY.jesse, "hook", { whoami: () => signedIn, door: () => "/tmp/bellman-door.sock" });
 
     expect(await asked(a)).toEqual({
       isError: false,
@@ -947,7 +966,7 @@ describe("bellman_whoami", () => {
 
   it("asks for the door on every call, because the door opens after the bridge is built", async () => {
     let path: string | null = null;
-    const a = await open(DEV_KEY.jesse, "channel", { door: () => path });
+    const a = await open(DEV_KEY.jesse, "hook", { door: () => path });
 
     expect((await asked(a)).data).toEqual({ source: "env", label: null, door: null });
     path = "/tmp/bellman-door.sock";
@@ -959,7 +978,7 @@ describe("bellman_whoami", () => {
     // "which account am I" is asked precisely so the wrong one is not signed in.
     // A whoami that connected first would start that flow to answer.
     let connects = 0;
-    const a = await open(DEV_KEY.jesse, "channel", {
+    const a = await open(DEV_KEY.jesse, "hook", {
       remote: async () => {
         connects++;
         throw new Error("bellman_whoami must not connect");
@@ -1026,7 +1045,7 @@ describe("bellman_whoami", () => {
 
     it.each(unreadable)("reports a sign-in with %s as unknown, not as a sign-in", async (_what, claim, unusable) => {
       const logs: string[] = [];
-      const a = await open(DEV_KEY.jesse, "channel", {
+      const a = await open(DEV_KEY.jesse, "hook", {
         whoami: () => ({ source: "oauth", ...claim }) as unknown as WhoAmI,
         log: (m) => logs.push(m),
       });
@@ -1041,7 +1060,7 @@ describe("bellman_whoami", () => {
 
     it("takes an absent org to mean no org", async () => {
       // A server that leaves null fields out sends an org-less user a claim with no orgId at all.
-      const a = await open(DEV_KEY.jesse, "channel", {
+      const a = await open(DEV_KEY.jesse, "hook", {
         whoami: () => ({ source: "oauth", label: "jesse@github", user_id: "u_github_4242", plan: "free", role: "member" }) as unknown as WhoAmI,
       });
 
@@ -1057,14 +1076,14 @@ describe("bellman_whoami", () => {
     ];
 
     it.each(carrying)("reports only its own fields for %s", async (_what, given, expected, text) => {
-      const a = await open(DEV_KEY.jesse, "channel", { whoami: () => given as WhoAmI });
+      const a = await open(DEV_KEY.jesse, "hook", { whoami: () => given as WhoAmI });
 
       expect(await asked(a)).toEqual({ isError: false, data: { ...expected, door: null }, text });
     });
 
     it("says unknown without complaint when the callback says so", async () => {
       const logs: string[] = [];
-      const a = await open(DEV_KEY.jesse, "channel", {
+      const a = await open(DEV_KEY.jesse, "hook", {
         whoami: () => ({ source: "unknown", label: null }),
         log: (m) => logs.push(m),
       });
@@ -1089,7 +1108,7 @@ describe("bellman_whoami", () => {
         "no absolute home directory found"],
     ])("reports unknown, and keeps the failure to the log, when the callback throws %s", async (_what, callback, message) => {
       const logs: string[] = [];
-      const a = await open(DEV_KEY.jesse, "channel", { whoami: callback, log: (m) => logs.push(m) });
+      const a = await open(DEV_KEY.jesse, "hook", { whoami: callback, log: (m) => logs.push(m) });
 
       // One object: what the person is told (the exact unknown answer, so no path in it), and
       // where the failure went instead.
@@ -1106,7 +1125,7 @@ describe("bellman_whoami", () => {
       ["a source it does not know", { source: "saml", label: "jesse@github" }],
     ])("reports %s as unknown, and logs it", async (_what, given) => {
       const logs: string[] = [];
-      const a = await open(DEV_KEY.jesse, "channel", {
+      const a = await open(DEV_KEY.jesse, "hook", {
         whoami: () => given as unknown as WhoAmI,
         log: (m) => logs.push(m),
       });
@@ -1196,7 +1215,7 @@ describe("a connection Bellman stops accepting", () => {
     const logs: string[] = [];
     let calls = 0;
     const { conns, remote } = connector(() => (calls++ === 0 ? make() : undefined));
-    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const a = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
 
     const first = await attempt(a);
     const second = await attempt(a);
@@ -1220,7 +1239,7 @@ describe("a connection Bellman stops accepting", () => {
     const logs: string[] = [];
     let calls = 0;
     const { conns, remote } = connector(() => (calls++ === 0 ? new UnauthorizedError() : undefined));
-    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const a = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
 
     const first = await a.client.listTools().then(() => "listed", () => "rejected");
     const second = (await a.client.listTools()).tools.map((t) => t.name);
@@ -1232,7 +1251,7 @@ describe("a connection Bellman stops accepting", () => {
       logs,
     }).toEqual({
       first: "rejected",
-      second: ["bellman_whoami", "bellman_upload"],
+      second: ["bellman_wait", "bellman_whoami", "bellman_upload"],
       conns: [{ closed: true, calls: ["listTools"] }, { closed: false, calls: ["listTools"] }],
       logs: [RETIRED],
     });
@@ -1241,21 +1260,25 @@ describe("a connection Bellman stops accepting", () => {
   it("retires once when several calls in flight are rejected together", async () => {
     const logs: string[] = [];
     const { conns, remote } = connector((conn) => (conn.id === 0 ? new UnauthorizedError() : undefined));
-    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const a = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
 
     const together = await Promise.all([attempt(a), attempt(a), attempt(a)]);
     const after = await attempt(a);
 
+    // How many of the three reach the first connection before the first rejection retires it is the SDK's dispatch
+    // order, not ours: at least two do. What may not vary: every call the retired connection took was rejected, it was
+    // retired once, and it was replaced once — not once per rejection.
+    const rejected = together.filter((t) => t === "rejected").length;
+    expect(rejected).toBeGreaterThanOrEqual(2);
     expect({
-      together,
       after,
-      conns: conns.map((c) => ({ closed: c.closed, calls: c.calls.length })),
+      conns: conns.map((c) => ({ closed: c.closed })),
+      firstTook: conns[0].calls.length,
       logs,
     }).toEqual({
-      together: ["rejected", "rejected", "rejected"],
       after: "answered",
-      // Three rejections, one retirement, one replacement — not three.
-      conns: [{ closed: true, calls: 3 }, { closed: false, calls: 1 }],
+      conns: [{ closed: true }, { closed: false }],
+      firstTook: rejected,
       logs: [RETIRED],
     });
   });
@@ -1290,7 +1313,7 @@ describe("a connection Bellman stops accepting", () => {
       };
     };
 
-    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
     const joiner = await open(DEV_KEY.peer);
     const { sessionId, creatorMember, joinerMember } = await pair(creator, joiner);
     await until(() => logs.some((m) => m.startsWith("stopped watching")));
@@ -1381,7 +1404,7 @@ describe("a connection Bellman stops accepting", () => {
     };
 
     try {
-      const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+      const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
       const joiner = await open(DEV_KEY.peer);
       // Nothing cached, so starting up signs in for real: one browser, the baseline.
       const { sessionId, creatorMember } = await pair(creator, joiner);
@@ -1445,7 +1468,7 @@ describe("a connection Bellman stops accepting", () => {
       };
     };
 
-    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
     const joiner = await open(DEV_KEY.peer);
     const { sessionId, joinerMember } = await pair(creator, joiner);
     const sent = await joiner.call("bellman_send", {
@@ -1511,7 +1534,7 @@ describe("a connection Bellman stops accepting", () => {
     };
 
     try {
-      const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+      const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
       const joiner = await open(DEV_KEY.peer);
       const { sessionId, creatorMember } = await pair(creator, joiner);
       const afterStartup = browserOpens.length;
@@ -1587,7 +1610,7 @@ describe("a connection Bellman stops accepting", () => {
       };
     };
 
-    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
     const joiner = await open(DEV_KEY.peer);
     await pair(creator, joiner);
 
@@ -1653,7 +1676,7 @@ describe("a connection Bellman stops accepting", () => {
       };
     };
 
-    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const creator = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
     const joiner = await open(DEV_KEY.peer);
     const { sessionId, joinerMember } = await pair(creator, joiner);
     await until(() => creator.bridge.watching().length === 1);
@@ -1700,7 +1723,7 @@ describe("a connection Bellman stops accepting", () => {
         close: async () => undefined,
       };
     };
-    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const a = await open(DEV_KEY.jesse, "hook", { remote, log: (m) => logs.push(m) });
 
     const first = await attempt(a);
     const second = await attempt(a);
@@ -1724,7 +1747,7 @@ describe("the tools the bridge lists", () => {
   // leaves a required argument out. That would leave .bellman/room.yaml, which exists so that the call CAN
   // leave it out, reachable only through hosts that ignore the schema. The SDK's own client is one of them:
   // it validates a tool's output and never its input, which is why nothing else in this file could see it.
-  it.each<Delivery>(["channel", "hook"])(
+  it.each<Delivery>(["hook", "queue"])(
     "lists bellman_start with manifest optional, and every other tool as the server sent it (%s)",
     async (delivery) => {
       const a = await open(DEV_KEY.jesse, delivery);
@@ -1757,7 +1780,7 @@ describe("the tools the bridge lists", () => {
 
   it("edits a copy, so the server's list is left as it was and listing twice says the same", async () => {
     const served = deepFreeze(structuredClone(await servedTools(DEV_KEY.jesse)));
-    const a = await open(DEV_KEY.jesse, "channel", { remote: async () => ({
+    const a = await open(DEV_KEY.jesse, "hook", { remote: async () => ({
       // The very same frozen objects every time, as a client that caches its list would hand them back.
       listTools: async () => ({ tools: served }),
       callTool: async () => { throw new Error("nothing here calls a tool"); },
@@ -2079,7 +2102,7 @@ describe("bellman_start with a room.yaml", () => {
   it("fails locally on a malformed file, before anything is sent", async () => {
     await writeRoom("room: broken\n  preset: [unclosed\n");
     const sent: string[] = [];
-    const a = await open(DEV_KEY.jesse, "channel", { remote: async () => {
+    const a = await open(DEV_KEY.jesse, "hook", { remote: async () => {
       const real = await remoteFor(store, DEV_KEY.jesse);
       return { ...real, callTool: (params) => { sent.push(params.name); return real.callTool(params); } };
     } });
@@ -2126,7 +2149,8 @@ describe("bellman_start with a room.yaml", () => {
     });
     const sent: Record<string, unknown>[] = [];
     const bridge = createBridge({
-      delivery: "channel",
+      delivery: "hook",
+      inboxDir: join(inboxRoot, "unmutated"),
       remote: async () => ({
         listTools: async () => ({ tools: [] }),
         callTool: async (params) => {

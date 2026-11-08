@@ -23,7 +23,7 @@ and carries two skills. `.claude-plugin/plugin.json` names it `bellman`, at
 ## Subdirectories & Boundaries
 
 - bridge: [`./bridge/EGM.md`](./bridge/EGM.md) - the four generated bundles
-  (`channel.mjs`, `join-hook.mjs`, `stop-hook.mjs`, `status-hook.mjs`) built
+  (`channel.mjs`, `join-hook.mjs`, `stop-hook.mjs`, `status-hook.mjs`, `monitor.mjs`) built
   from `src/` by `npm run build:plugin`, and their third-party notices.
 - canvas skill: [`./skills/canvas/SKILL.md`](./skills/canvas/SKILL.md) -
   write, arrange and read a room's working surface (`bellman_send` type

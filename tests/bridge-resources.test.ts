@@ -20,6 +20,7 @@ import { MemoryBlobStore } from "../src/files/blobs.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { member, session } from "./helpers/fixtures.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 const temps: string[] = [];
 const closers: (() => Promise<unknown>)[] = [];
@@ -50,7 +51,7 @@ async function bridged(remote: () => Promise<Remote>) {
   temps.push(inboxDir);
   const bridge = createBridge({ delivery: "hook", inboxDir, remote });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const host = new Client({ name: "host", version: "0.0.1" });
+  const host = bridgeClient("host");
   await Promise.all([bridge.serve(serverSide), host.connect(clientSide)]);
   closers.push(() => bridge.close(), () => host.close());
   return { bridge, host };
@@ -71,7 +72,7 @@ describe("the bridge and UI resources", () => {
 
     // A host that sees `resources` enumerates templates too; "Method not found"
     // there is what the Desktop bundle would show for a server that has none.
-    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
+    expect(await host.listResourceTemplates()).toMatchObject({ resourceTemplates: [] });
   });
 
   it("answers an empty list, and a not-found read, for a remote that serves no resources", async () => {
@@ -81,8 +82,8 @@ describe("the bridge and UI resources", () => {
       close: async () => undefined,
     };
     const { host } = await bridged(async () => bare);
-    expect(await host.listResources()).toEqual({ resources: [] });
-    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
+    expect(await host.listResources()).toMatchObject({ resources: [] });
+    expect(await host.listResourceTemplates()).toMatchObject({ resourceTemplates: [] });
     // A missing resource is -32602, Invalid Params: MCP 2026-07-28 requires it, and the SDK sends it on every era.
     // Clients still accept the -32002 earlier servers sent.
     await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32602 });

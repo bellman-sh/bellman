@@ -17,6 +17,7 @@ import { buildServer } from "../../src/server.js";
 import { MemoryBlobStore } from "../../src/files/blobs.js";
 import { MemoryStore } from "../../src/storage/memory-store.js";
 import { DEV_KEY, Harness } from "./harness.js";
+import { bridgeClient } from "./bridge-client.js";
 
 /** The server's tools, listed over an in-memory MCP client bound to the dev key for jesse. */
 export async function listServerTools(): Promise<Tool[]> {
@@ -58,7 +59,7 @@ export async function listBridge(delivery: Delivery): Promise<{ tools: Tool[]; i
   });
 
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-desktop", version: "0.0.1" });
+  const client = bridgeClient("claude-desktop");
   await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 
   try {

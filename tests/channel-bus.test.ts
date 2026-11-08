@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { busPath } from "../src/client/bus.js";
 import { ignoreResets } from "./helpers/upgrade-socket.js";
+import { toModern } from "./helpers/bridge-client.js";
 
 /**
  * channel.ts as Claude Code runs it, with the local bus.
@@ -157,6 +158,8 @@ function startBridge(server: Bellman, { key, userId = "u_process", busRoot, env:
   // The door is made at launch, so a bridge not given a folder of its own makes one under the real HOME.
   env.BELLMAN_DOOR_ROOT = configHome;
   env.BELLMAN_NO_BROWSER = "1";
+  // The inbox is made at launch too.
+  env.BELLMAN_INBOX_ROOT = configHome;
   delete env.BELLMAN_BUS; // a developer's own switch must not decide what these tests start
   Object.assign(env, extra);
 
@@ -171,7 +174,11 @@ function startBridge(server: Bellman, { key, userId = "u_process", busRoot, env:
     busRoot: bus,
     log: () => stderr.split("\n").filter((line) => line.startsWith("[bellman] ")).map((line) => line.slice("[bellman] ".length)),
     replies: () => stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line)),
-    send: (message) => proc.stdin!.write(`${JSON.stringify(message)}\n`),
+    // As a 2026-07-28 client sends it: the bridge refuses the 2025 handshake (see toModern).
+    send: (message) => {
+      const modern = toModern(message as Record<string, unknown>);
+      if (modern) proc.stdin!.write(`${JSON.stringify(modern)}\n`);
+    },
     exit: new Promise((resolve) => proc.on("exit", (code, signal) => resolve({ code, signal: signal as string | null }))),
   };
 }
@@ -309,7 +316,7 @@ describe("the bridge as a process, with BELLMAN_BUS", () => {
     await until(() => existsSync(path), "the bus socket to appear");
 
     // The line is the one every bridge writes: the bus being on is not news.
-    expect(bridge.log().find((l) => l.startsWith("ready:"))).toBe(`ready: channel delivery via ${server.url} (BELLMAN_KEY)`);
+    expect(bridge.log().find((l) => l.startsWith("ready:"))).toBe(`ready: hook delivery via ${server.url} (BELLMAN_KEY)`);
     expect(bridge.log().some((l) => l.includes("BELLMAN_BUS"))).toBe(false);
 
     bridge.proc.kill("SIGTERM");

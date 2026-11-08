@@ -36,11 +36,11 @@ const BANNER =
 const BRIDGE_INTRO =
   "The local bridge runs on your machine. The Claude Code plugin, the npm package's `bellman-channel` " +
   "and the Claude Desktop bundle each start one. It lists every server tool and adds the tools below. " +
-  "`bellman_wait` is listed when the bridge queues events on your machine instead of pushing them into " +
-  "the session: in hook delivery, as the plugin runs it, and in queue delivery, as the Claude Desktop " +
-  "bundle does. Channel delivery pushes, so it does not list the tool. The entry below is the hook " +
-  "delivery one. Under queue delivery nothing hands queued events over between turns, so its " +
-  "description tells the agent to call `bellman_sync` at the start of each turn.";
+  "Every bridge queues peer events on your machine and lists `bellman_wait`: in hook delivery, as the plugin and " +
+  "the npm package run it, where the plugin's monitor shows an interrupting event as it lands and the Stop hook hands " +
+  "the rest over when a turn ends, and in queue delivery, as the Claude Desktop bundle runs it. The entry below is the " +
+  "hook delivery one. Under queue delivery nothing hands queued events over between turns, so its description tells " +
+  "the agent to call `bellman_sync` at the start of each turn.";
 
 /** What a table cell says when it has nothing to say. */
 const NONE = "\u{2014}";

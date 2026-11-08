@@ -10,7 +10,7 @@ import type { CallToolResult, Notification } from "@modelcontextprotocol/client"
 import { resolveIdentity } from "../src/auth.js";
 import { busPath } from "../src/client/bus.js";
 import { createBridge, type BridgeBus, type Delivery, type Remote } from "../src/client/bridge.js";
-import { drain, readMemberships, type PeerEvent } from "../src/client/inbox.js";
+import { drain, readMemberships, type PeerEvent, drainInterrupting, renderEvent } from "../src/client/inbox.js";
 import { publicEvent } from "../src/public-event.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/files/blobs.js";
@@ -19,6 +19,7 @@ import { MemoryStore } from "../src/storage/memory-store.js";
 import { fakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 /**
  * The bridge with a local bus: what changes when `bus` is given, and what must not.
@@ -54,7 +55,9 @@ interface Session {
   bridge: ReturnType<typeof createBridge>;
   /** Every call the bridge made to Bellman, its watchers' polls included, and the agent's own too. */
   calls: Call[];
-  inboxDir?: string;
+  inboxDir: string;
+  /** What the plugin's monitor has shown from the inbox so far (see `channelEvents`). */
+  shown: { content: string; meta: Record<string, string> }[];
   call(name: string, args?: Record<string, unknown>): Promise<{ isError: boolean; data: Record<string, unknown>; text: string }>;
 }
 
@@ -139,9 +142,9 @@ interface OpenOptions {
 }
 
 async function open(key: string, options: OpenOptions = {}): Promise<Session> {
-  const delivery = options.delivery ?? "channel";
+  const delivery = options.delivery ?? "hook";
   const calls: Call[] = [];
-  const inboxDir = delivery === "hook" ? join(tmp, `inbox-${key}-${opened.length}`) : undefined;
+  const inboxDir = join(tmp, `inbox-${key}-${opened.length}`);
   const bridge = createBridge({
     delivery,
     inboxDir,
@@ -151,14 +154,14 @@ async function open(key: string, options: OpenOptions = {}): Promise<Session> {
     ...(options.bus ? { bus: busFor(key, options.bus === true ? {} : options.bus) } : {}),
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   const pushed: Notification[] = [];
   client.fallbackNotificationHandler = async (n) => {
     pushed.push(n);
   };
   await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   const session: Session = {
-    client, pushed, bridge, calls, inboxDir,
+    client, pushed, bridge, calls, inboxDir, shown: [],
     async call(name, args = {}) {
       const res = (await client.callTool({ name, arguments: args })) as CallToolResult;
       return {
@@ -262,10 +265,19 @@ function mirror(sessionId: string): FakeRoom {
 }
 
 type ChannelParams = { content: string; meta: Record<string, string> };
-const channelEvents = (s: Session) =>
-  s.pushed
-    .filter((n) => n.method === "notifications/claude/channel")
-    .map((n) => n.params as unknown as ChannelParams);
+/**
+ * What reaches the session as events land: the interrupting events the plugin's monitor drains from the bridge's inbox
+ * (src/client/monitor.ts), in the shape a channel push had. Cumulative, since draining takes them.
+ */
+const channelEvents = (s: Session): ChannelParams[] => {
+  for (const e of drainInterrupting(s.inboxDir)) {
+    s.shown.push({
+      content: renderEvent(e),
+      meta: { session_id: e.session_id, member_id: e.member_id, type: e.type, cursor: String(e.cursor), from: e.from_label },
+    });
+  }
+  return s.shown;
+};
 
 const heardText = (s: Session, text: string): boolean => channelEvents(s).some((e) => e.content.includes(text));
 

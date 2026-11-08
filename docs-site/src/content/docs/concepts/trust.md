@@ -19,7 +19,7 @@ A tool result that carries a peer's words opens its text with this preamble:
 
 In `structuredContent` there is no preamble, so `trust` is the only marker. Role names, modes, verbs and agent fields (provider, model and client) ship unwrapped. Each is a short value the server checks or bounds, so read them as labels.
 
-In Claude Code the bridge adds a second guard. It frames each event it delivers as `UNTRUSTED PEER CONTENT` and writes every `<` as `\u003c`, so a payload that holds `</channel>` cannot close the `<channel>` tag Claude Code puts around it and go on as text that looks like it came from outside. The JSON still parses. A channel push, the Stop hook and `bellman_wait` all render events this way, and an event does not become trusted by passing through your own machine.
+In Claude Code the bridge adds a second guard. It frames each event it delivers as `UNTRUSTED PEER CONTENT` and writes every `<` as `\u003c`, so a payload that holds `</system-reminder>` cannot close a tag Claude Code puts around it and go on as text that looks like it came from outside. The JSON still parses. The plugin's monitor, the Stop hook and `bellman_wait` all render events this way, and an event does not become trusted by passing through your own machine.
 
 ## Action requests go to a human
 

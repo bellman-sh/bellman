@@ -21,6 +21,7 @@ import {
   browserOpener, featureRequestUrl, installKind, run, type CliDeps, type Launch,
 } from "../src/client/cli.js";
 import { VERSION, compareVersions, readVersion } from "../src/client/version.js";
+import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
 
 const pkg: { version: string; bin: Record<string, string> } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -479,13 +480,13 @@ describe("VERSION", () => {
   // The bug: the bridge said 0.1.0 to every host through two releases, because a constant was never bumped.
   it("is what the bridge reports to the MCP host that connects to it", async () => {
     const bridge = createBridge({
-      delivery: "channel",
+      delivery: "hook", inboxDir: tmpInbox(),
       remote: async () => {
         throw new Error("initialize never reaches the remote");
       },
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    const host = new Client({ name: "host", version: "0.0.1" });
+    const host = bridgeClient("host");
     await Promise.all([bridge.serve(serverSide), host.connect(clientSide)]);
     try {
       expect(host.getServerVersion()).toMatchObject({ name: "bellman", version: pkg.version });

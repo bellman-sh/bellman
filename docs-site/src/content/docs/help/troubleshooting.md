@@ -20,8 +20,8 @@ The agent calls [`bellman_sync`](/reference/tools/bellman_sync/) from its last c
 What hands events to your session depends on the client:
 
 - **A connector in claude.ai or Claude Desktop** is never pushed to. Nothing arrives until your agent checks, so ask it to, as above. The same holds for ChatGPT, Cursor and Gemini CLI. The Claude Desktop bundle keeps a local queue, but nothing arrives unprompted there either: the agent reads the queue with `bellman_wait`.
-- **The Claude Code plugin** hands events to Claude when a turn ends. Mid-turn the agent calls [`bellman_wait`](/reference/bridge-tools/#bellman_wait) to block for a reply. It pushes nothing into an idle session.
-- **An idle session** is pushed to only by the npm package's channel, and only when you start Claude Code with `bellman-claude`. Channels are a Claude Code research preview, and `bellman-claude` adds the flag they need. Start plain `claude` and the session starts normally while nothing is ever pushed into it, which looks like Bellman being broken. On a Claude Team or Enterprise plan, the org must also turn on `channelsEnabled`.
+- **The Claude Code plugin** prints each event as it lands, through its monitor, and the Stop hook hands over the rest when a turn ends. Mid-turn the agent can call [`bellman_wait`](/reference/bridge-tools/#bellman_wait) to block for a reply. Monitors run only in interactive sessions, so a `claude -p` run gets events at the end of its turn. If nothing ever arrives mid-session, check that the plugin is enabled and on the latest release: `claude plugin update bellman@bellman`.
+- **The npm package** has no monitor. Events arrive when a turn ends, through the Stop hook, and when the agent calls `bellman_wait`. `bellman-claude` no longer adds a channel flag; it runs plain `claude`.
 
 ## Every Bellman tool is listed twice
 
@@ -68,10 +68,10 @@ On Windows the bridge also polls Bellman for each of its members itself. Bridges
 
 ## The Stop hook never fires
 
-A Stop hook that finds no queue exits quietly and lets the turn end. Three causes:
+A Stop hook that finds no queue exits quietly and lets the turn end. The plugin's monitor finds the queue the same way, so these causes stop it too:
 
 - **Claude Code did not start the bridge directly.** The bridge keys its queue by its parent process, which must be Claude Code. Register `bellman-channel` as the command itself. Run through a wrapper shell, `npx` or a script, the queue is named for that wrapper, and the hook never finds it.
-- **The bridge is not in hook delivery.** With the npm package, register it with `BELLMAN_DELIVERY=hook`, as in [the Stop-hook setup](/guides/messages/#the-npm-package-with-the-stop-hook). The plugin does this for you.
+- **The bridge is in queue delivery.** `BELLMAN_DELIVERY=queue` is for the Claude Desktop bundle. Remove it from the registration: every other bridge runs in hook delivery.
 - **The hook waits longer than its `timeout`.** `BELLMAN_HOOK_WAIT_SECONDS` makes the hook keep listening at the end of each turn while you are in a room, and it holds the terminal for that long. Keep it below the hook's `timeout` in `settings.json`.
 
 ## A join code does not work

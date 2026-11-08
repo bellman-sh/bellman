@@ -12,6 +12,7 @@ import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
 import { publicRoom, startRoom } from "./helpers/flows.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
+import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
 
 /** A swarm room, so its code still seats someone after the creator's own seat. */
 const SWARM = {
@@ -43,9 +44,9 @@ async function bridgeAsPeer() {
       close: () => upstream.close(),
     };
   };
-  const bridge = createBridge({ delivery: "channel", remote, pollWaitSeconds: 1, log: (line) => logged.push(line) });
+  const bridge = createBridge({ delivery: "hook", inboxDir: tmpInbox(), remote, pollWaitSeconds: 1, log: (line) => logged.push(line) });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   client.fallbackNotificationHandler = async () => {};
   await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {

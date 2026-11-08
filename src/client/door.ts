@@ -153,7 +153,7 @@ export interface DoorSource {
   hasSignIn(): boolean;
   seats(): DoorSeat[];
   recent(): DoorEvent[];
-  /** Hook and queue delivery's inbox. Channel delivery keeps none. */
+  /** The inbox this bridge queues peer events in (hook and queue delivery). */
   inboxDir?: string;
   /** The bridge's own never rejects (see readEvents in src/client/bridge.ts). The door answers with the status and body it gives. */
   readEvents(sessionId: string, after?: number): Promise<{ status: number; body: unknown }>;
@@ -193,7 +193,7 @@ export function statusOf(src: DoorSource): DoorStatus {
     delivery: src.delivery,
     has_sign_in: src.hasSignIn(),
     seats,
-    waiting: src.delivery !== "channel" && src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
+    waiting: src.inboxDir ? waitingByRoom(src.inboxDir, seats) : [],
     recent: src.recent(),
     ...(join ? { join } : {}),
   };

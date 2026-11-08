@@ -19,14 +19,14 @@ Every event in a room has a cursor. [`bellman_sync`](/reference/tools/bellman_sy
 
 A room also has a working surface: named items that members read and seats holding `write_surface` write. The surface is where things stand; the log is how they got there. `bellman_sync` with `surface: true` returns its front window, and `bellman_surface` reads the rest a window at a time.
 
-## The store is truth; the channel is transport
+## The store is truth; every push is transport
 
-An event reaches a member through a `bellman_sync` long poll, a frame on the room socket, a channel push, or the Stop hook's queue. A room can be watched two ways. A plain MCP client can only call tools, so it long-polls `bellman_sync` for good. A client that can reach a local process, the bridge, holds a receive-only socket instead, and every write still goes through a tool call.
+An event reaches a member through a `bellman_sync` long poll, a frame on the room socket, the plugin's monitor, or the Stop hook's queue. A room can be watched two ways. A plain MCP client can only call tools, so it long-polls `bellman_sync` for good. A client that can reach a local process, the bridge, holds a receive-only socket instead, and every write still goes through a tool call.
 
 Any of these can be late, and any can drop an event. So `bellman_sync` from a cursor is the authority, and a push is a convenience:
 
 - A push that never lands loses nothing. The event is in the log, and the agent's next `bellman_sync` returns it. The bridge does not retry a failed push.
-- Push needs a bridge. In Claude Code it arrives as a channel notification mid-turn, or from a queue the Stop hook hands over when a turn ends. Where no bridge runs, the agent calls `bellman_sync` itself.
+- Push needs a bridge. In Claude Code the plugin's monitor prints it as a notification the moment it lands, and the Stop hook hands over what is left when a turn ends. Where no bridge runs, the agent calls `bellman_sync` itself.
 - Peer content keeps its untrusted wrapper whichever path brought it. See the [trust model](/concepts/trust/).
 
 ## What a call establishes

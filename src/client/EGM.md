@@ -17,11 +17,15 @@ into the mod.
 - `[src/client/channel.ts]` the stdio MCP entry Claude Code spawns: reads the environment, builds the bridge, opens the door,
   starts an optional join, and shuts down on SIGTERM, SIGINT or stdin close.
 - `[src/client/bridge.ts:createBridge]` the local MCP server: relays the remote tools and resources, adds `bellman_whoami`,
-  `bellman_upload` and, outside channel delivery, `bellman_wait`; learns memberships from tool results
-  (`observe`) and delivers peer events by `Delivery` = `channel | hook | queue`. Exposes the door's reads and
+  `bellman_upload` and `bellman_wait`; learns memberships from tool results
+  (`observe`) and delivers peer events by `Delivery` = `hook | queue` into the inbox (`channel`, set by an old registration, means `hook`); speaks MCP
+  2026-07-28 only (`serveStdio`, `legacy: "reject"`). Exposes the door's reads and
   writes (`readEvents`, `readRooms`, `readSurface`, `decline`, `writeSurface`, `setStatus`, `join`).
 - `[src/client/inbox.ts]` the on-disk event queue per Claude Code pid (`enqueue`, `drain`, `discardThrough`), membership
-  files, and `renderEvent`/`renderBatch`, which frame peer content as untrusted.
+  files, and `renderEvent`/`renderBatch`/`renderLine`, which frame peer content as untrusted; `drainInterrupting`
+  takes only the events that interrupt.
+- `[src/client/monitor.ts:runMonitor]` the plugin's Monitor: finds the inbox through its process ancestry and prints
+  each interrupting event once, on one line, as it lands.
 - `[src/client/bus.ts:openBus]` one coordinator per machine and identity serving the other bridges over a Unix socket
   (NDJSON); `[src/client/bus.ts:RoomWindow]` the coordinator's contiguous window of recent events.
 - `[src/client/bus-link.ts:createBusLink]` links a bridge's watches to the bus and room sockets and hands a member back to
@@ -58,7 +62,7 @@ into the mod.
   the PKCE verifier in memory only, and the loopback listener compares `state` itself
   (`[src/client/signin.ts:makeListener.onRequest]`).
 - `[src/client/bridge.ts:createBridge]` never declares the `claude/channel/permission` capability, so a peer cannot approve
-  tool use in a session; `[src/client/bridge.ts:CHANNEL_INSTRUCTIONS]`, `HOOK_INSTRUCTIONS` and `QUEUE_INSTRUCTIONS` each
+  tool use in a session; `[src/client/bridge.ts:HOOK_INSTRUCTIONS]` and `QUEUE_INSTRUCTIONS` each
   tell the agent an `action_request` needs its human's approval.
 - `[src/client/door-protocol.ts:cleanText]` strips escape sequences, controls and bidi characters before the mod draws a
   peer string; `[src/client/door-protocol.ts:lineOf]` reads an `action_response` from `approved` alone.

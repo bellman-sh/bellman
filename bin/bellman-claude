@@ -1,47 +1,16 @@
 #!/bin/sh
-# Launch Claude Code with the Bellman channel enabled.
+# Launch Claude Code. Kept so that scripts and aliases that call it keep working.
 #
-# Channels are a research preview and a custom channel is not on Anthropic's
-# allowlist, so it needs --dangerously-load-development-channels on EVERY
-# launch. Forget the flag and the session starts fine but nothing is pushed
-# into it, which looks like Bellman being broken. This wrapper adds the flag
-# and passes every other argument through untouched.
+# It used to add --dangerously-load-development-channels server:bellman, so that the
+# bridge could push peer events into the session as a channel. MCP 2026-07-28 lets a
+# server send no notification the client did not ask for, and Claude Code does not
+# register a server on that revision as a channel, so the bridge stopped being one.
+# Peer events now reach the session through the Bellman plugin's monitor, which
+# prints each one as it lands, and through the Stop hook at the end of a turn.
 #
-#   bellman-claude                 # claude --dangerously-load-development-channels server:bellman
-#   bellman-claude --resume        # flags pass through
-#
-# Environment:
-#   BELLMAN_CHANNEL_SERVER  channel entry to load (default: server:bellman).
-#                           Use plugin:<name>@<marketplace> for a plugin channel.
-#   BELLMAN_CHANNEL_FLAG    default --dangerously-load-development-channels.
-#                           Switch to --channels once the channel is on your
-#                           organization's allowedChannelPlugins list.
-#   BELLMAN_DELIVERY=hook   Stop-hook delivery needs no channel flag, so this
-#                           launches Claude Code unchanged.
+#   bellman-claude            # the same as: claude
+#   bellman-claude --resume   # flags pass through
 set -eu
 
-server="${BELLMAN_CHANNEL_SERVER:-server:bellman}"
-flag="${BELLMAN_CHANNEL_FLAG:---dangerously-load-development-channels}"
-
-# npm installs this as a symlink in its bin directory, so $0 is not inside the
-# package. Resolve the link before looking for the bridge next to it.
-self="$0"
-while [ -L "$self" ]; do
-  link="$(readlink "$self")"
-  case "$link" in
-    /*) self="$link" ;;
-    *) self="$(dirname -- "$self")/$link" ;;
-  esac
-done
-# Warn, never block: this path is only a default, and the MCP entry may point
-# somewhere else on purpose.
-bridge="$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/dist/client/channel.js"
-if [ ! -f "$bridge" ]; then
-  echo "bellman-claude: no bridge at $bridge — reinstall the package, or run 'npm run build' if you are working from a clone." >&2
-fi
-
-if [ "${BELLMAN_DELIVERY:-channel}" = "hook" ]; then
-  exec claude "$@"
-fi
-
-exec claude "$flag" "$server" "$@"
+echo "bellman-claude: Bellman no longer needs a channel flag; this runs plain 'claude'. For live peer events, install the plugin: claude plugin install bellman --marketplace bellman-sh/bellman" >&2
+exec claude "$@"

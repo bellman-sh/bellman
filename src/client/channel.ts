@@ -16,9 +16,10 @@
  *                     the code to its own loopback. Over SSH, forward that
  *                     port. With no browser anywhere, set BELLMAN_KEY.
  *   XDG_CONFIG_HOME   optional. Where the credential is cached.
- *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
- *                     Launch with --dangerously-load-development-channels server:<name>.
- *                     "hook": queue them for the Bellman Stop hook and bellman_wait.
+ *   BELLMAN_DELIVERY  "hook" (default): queue peer events for the plugin's monitor, which
+ *                     prints an interrupting one as it lands, the Bellman Stop hook, and
+ *                     bellman_wait. "channel", the push delivery MCP 2026-07-28 retired,
+ *                     is read as "hook".
  *                     "queue": queue them for the agent to collect, with bellman_sync when a
  *                     turn starts and bellman_wait mid-turn, in a host that runs no Stop
  *                     hook. The Claude Desktop bundle sets it (#241).
@@ -134,8 +135,8 @@ const connect: () => Promise<Remote> = key
 /** Who peers will see. A key is unattributable here; the server resolves it per call. */
 const whoami = (): WhoAmI => (key ? { source: "env", label: null } : signedInAs(url, { log }));
 
-const inboxDir = delivery !== "channel" ? inboxDirFor(process.ppid) : undefined;
-if (inboxDir) sweepStaleInboxes();
+const inboxDir = inboxDirFor(process.ppid);
+sweepStaleInboxes();
 
 /** This bridge's door (see below), once it has one. bellman_whoami names `doorPath`; shutdown() closes `door`. */
 let doorPath: string | null = null;

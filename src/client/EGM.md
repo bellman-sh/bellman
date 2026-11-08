@@ -30,11 +30,21 @@ into the mod.
 - `[src/client/door.ts:startDoor]` an HTTP server on a Unix socket per bridge: `GET /status`, `GET /rooms`,
   `GET /rooms/<id>/events`, `GET /rooms/<id>/surface`, and the writes `POST /rooms/<id>/decline`,
   `POST /seats/status`, `PUT`/`DELETE /rooms/<id>/surface/<key>`. `[src/client/door-protocol.ts]` the runtime-free shapes
-  shared with the mod (`DOOR_VERSION = 1`, `cleanText`, `cleanBlock`, `eventLine`, `herdrTerminalOf`). `GET /status`
+  shared with the mod (`DOOR_VERSION = 1`, `cleanText`, `cleanBlock`, `eventLine`, `herdrTerminalOf`, `joinLine`). `GET /status`
   names the Herdr terminal the bridge runs in as `herdr_terminal`, from a well-formed `HC_TERMINAL_ID`, and omits it
   otherwise `[src/client/door.ts:statusOf]`.
 - Hooks: `[src/client/stop-hook.ts]` (drains the inbox, exits 2 to keep the turn going), `[src/client/status-hook.ts:statusFor]`
-  (`working` / `needs_you`), `[src/client/join-hook.ts:joinLine]`.
+  (`working` / `needs_you`), `[src/client/join-hook.ts]` (prints `[src/client/door-protocol.ts:joinLine]`; without
+  `BELLMAN_JOIN_CODE`, only for a join `from: "repo"`).
+- The join at launch, `[src/client/repo-remote.ts:launchJoin]`: `BELLMAN_JOIN_CODE` wins (`[src/client/bridge.ts:join]`);
+  else the cwd's `origin` (`[src/client/repo-remote.ts:remoteOf]`, git then `jj --ignore-working-copy git remote list`, normalized by
+  `[src/room/remote.ts:normalizeRemote]`), when `GET /me/repo-rooms` lists it (so an unbound remote never leaves the
+  machine), goes to `POST /me/repo-rooms/connect` and the token to `bellman_confirm`
+  (`[src/client/bridge.ts:joinBound]`), only after the first tools/list, so the handshake stays local. No binding, no
+  credential or a server without the route says nothing; any other outcome is `joined` with `from: "repo"`, and in
+  channel delivery the bridge pushes `joinLine` once the client has initialized. Seats taken this way are kept in
+  `boundSeats`, and `close()` leaves them (`bellman_leave` through the held connection, at most `leaveTimeoutMs`, 3 s,
+  in all) before anything else shuts; a seat joined by hand or from a code stays.
 - `[src/client/signin.ts:connectSignedIn]` browser OAuth with PKCE on a loopback callback (`CALLBACK_PORTS` 51004-51008);
   `[src/client/signin.ts:signedInAs]`. `[src/client/credentials.ts]` the credential file (`readServer`, `writeServer`,
   `acquireLock`, `busCredentials`).

@@ -1,4 +1,4 @@
-import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
+import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type RepoRoom, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId, type HomeKeyRecord, decideFsWrite, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix } from "../files/fs.js";
 import { namespaceOf } from "../files/fs-path.js";
@@ -72,6 +72,8 @@ export class MemoryStore implements BellmanStore {
   private homeKeys = new Map<string, Map<string, HomeKeyRecord>>();
   /** Home settings rows (#530), by home room; a room record is not needed for one. */
   private homeSettings = new Map<string, HomeSettings>();
+  /** `rr` rows; `purgeHome` leaves them, as SessionDO's does. */
+  private repoRooms = new Map<string, RepoRoom[]>();
   /** The lookup log (ADR 0047 decision 13), by home room, newest first. */
   private lookups = new Map<string, LookupRow[]>();
   private byJoinCode = new Map<string, string>();
@@ -705,6 +707,13 @@ export class MemoryStore implements BellmanStore {
     await this.sweepAfterClose(sessionId);
   }
 
+  async setKeptOpen(sessionId: string, kept: boolean): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.closed) return;
+    if (kept) s.keptOpen = true;
+    else delete s.keptOpen;
+  }
+
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
@@ -714,7 +723,7 @@ export class MemoryStore implements BellmanStore {
     // writes. The Durable Objects store gets it from a transaction instead. The
     // sweep that follows is after the close, so it is outside that rule.
     if (s.closed) return true;
-    if (s.members.some(isActivePerson)) return false;
+    if (s.keptOpen || s.members.some(isActivePerson)) return false;
     this.closeNow(s);
     await this.sweepAfterClose(sessionId);
     return true;
@@ -1069,6 +1078,14 @@ export class MemoryStore implements BellmanStore {
 
   async writeHomeSettings(id: string, settings: HomeSettings): Promise<void> {
     this.homeSettings.set(id, detach(settings));
+  }
+
+  async readRepoRooms(id: string): Promise<RepoRoom[]> {
+    return detach(this.repoRooms.get(id) ?? []);
+  }
+
+  async writeRepoRooms(id: string, rows: RepoRoom[]): Promise<void> {
+    this.repoRooms.set(id, detach(rows));
   }
 
   async readHomeLogged(id: string, path: string, source: LookupSource): Promise<{ paused: true } | { paused: false; file: FsRow | null }> {

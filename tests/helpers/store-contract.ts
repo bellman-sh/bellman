@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, ConfigWrite, EventBody, FsWrite, ProposalApproval, RemovalRequest, SurfaceAppend, SurfaceBatchAppend, FsPage } from "../../src/storage/store.js";
 import { type SurfaceWrite, MAX_SURFACE_ITEMS, gridSlot, surfaceCursor } from "../../src/surface/surface.js";
-import type { HomeSettings, LookupSource } from "../../src/types.js";
+import type { HomeSettings, LookupSource, RepoRoom } from "../../src/types.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/room/codes.js";
 import { ROOM_MEMBER_CEILING, resolveManifest } from "../../src/room/manifest.js";
 import { newestKey } from "../../src/files/fs.js";
@@ -1351,6 +1351,31 @@ export function describeStoreContract(
      * a room that was already closed answers true. That is what lets a retry of
      * a close that died partway finish the work, instead of reading as a no-op.
      */
+    it("closeSessionIfEmpty leaves a kept room open, until setKeptOpen(false)", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      await store.createSession(s);
+      await store.setKeptOpen(s.id, true);
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+      expect((await store.getSession(s.id))?.keptOpen).toBe(true);
+      await store.setKeptOpen(s.id, false);
+      expect((await store.getSession(s.id))?.keptOpen).toBeUndefined();
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSession still closes a kept room, and setKeptOpen is a no-op on a closed or unknown one", async () => {
+      const s = session({ members: [member()] });
+      await store.createSession(s);
+      await store.setKeptOpen(s.id, true);
+      await store.closeSession(s.id);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+      await store.setKeptOpen(s.id, false);
+      expect((await store.getSession(s.id))?.keptOpen).toBe(true);
+      await store.setKeptOpen("qs_unknown", true);
+      expect(await store.getSession("qs_unknown")).toBeUndefined();
+    });
+
     it("closeSessionIfEmpty closes a room nobody is in, and reports that it did", async () => {
       const s = session({ members: [member({ leftAt: Date.now() })] });
       (await store.createSession(s));
@@ -5036,6 +5061,28 @@ export function describeStoreContract(
         await store.writeHomeSettings(id, { capture: false, paused: false });
         expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
         expect(await store.readHomeSettings(homeRoomId("u_other"))).toEqual({ capture: false, paused: false });
+      });
+
+      it("reads repo rooms empty for a home id never written, and writes them back detached", async () => {
+        expect(await store.readRepoRooms(id)).toEqual([]);
+        const rows: RepoRoom[] = [{ remote: "github.com/a/b", sessionId: "qs_x", role: "coder", createdAt: 1 }];
+        await store.writeRepoRooms(id, rows);
+        rows[0]!.role = "mutated";
+        const read = await store.readRepoRooms(id);
+        expect(read).toEqual([{ remote: "github.com/a/b", sessionId: "qs_x", role: "coder", createdAt: 1 }]);
+        read[0]!.role = "mutated";
+        expect((await store.readRepoRooms(id))[0]!.role).toBe("coder");
+        expect(await store.readRepoRooms(homeRoomId("u_other"))).toEqual([]);
+      });
+
+      it("keeps repo rooms through writeHomeSettings and purgeHome", async () => {
+        const rows: RepoRoom[] = [{ remote: "github.com/a/b", sessionId: "qs_x", role: "coder", createdAt: 1 }];
+        await store.writeRepoRooms(id, rows);
+        await store.writeHomeSettings(id, { capture: true, paused: true });
+        await store.writeHome(id, home(), note("/a.md", { op: "write", content: "a" }), 4096);
+        await store.purgeHome(id);
+        expect(await store.readRepoRooms(id)).toEqual(rows);
+        expect(await store.readHomeSettings(id)).toEqual({ capture: false, paused: false });
       });
 
       it("reads paused false from a row written before the field existed", async () => {

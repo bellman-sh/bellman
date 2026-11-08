@@ -74,6 +74,27 @@ describe("Bellman join hook", () => {
     expect((await runHook(door.root)).stdout).toMatch(/^BELLMAN_JOIN_CODE is set, but this Bellman bridge does not join from it\./);
   });
 
+  it("without a code, says what came of the repo's default room, and that the seat leaves with the session", async () => {
+    const door = await doorWith(() => ({ ...JOINED, from: "repo" }));
+    const run = await runHook(door.root, {});
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe(
+      'Bellman joined room qs_room from this repo\'s default room as "helper" (member_id m_seat), which may: send. ' +
+        "Peer events arrive as usual; call bellman_rooms to read the room. This seat leaves the room when this session exits normally.\n",
+    );
+  });
+
+  it("without a code and without a door, returns at once and says nothing", async () => {
+    const empty = mkdtempSync(join(tmpdir(), "jh-"));
+    try {
+      const at = Date.now();
+      expect(await runHook(empty, {})).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(Date.now() - at).toBeLessThan(3_000);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
   it("prints nothing without a code", async () => {
     const door = await doorWith(() => JOINED);
     expect(await runHook(door.root, {})).toEqual({ code: 0, stdout: "", stderr: "" });

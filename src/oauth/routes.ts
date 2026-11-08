@@ -2474,6 +2474,7 @@ export async function handleOAuth(
   // ---------------------------------------- /admin/accounts/:userId/memory
   // The operator hard-deletes an account's home memory (ADR 0047 decision 14), for a deletion request the person
   // cannot make from the dash: the home room emptied, settings and lookup log included, as DELETE /me/memory does.
+  // A repo's default rooms (`rr`) stay: they are not memory.
   // On /admin/handles' gate; the segment is read as /admin/suspensions/:userId reads it.
   const memory = ADMIN_ACCOUNT_MEMORY.exec(path);
   if (memory) {

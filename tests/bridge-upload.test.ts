@@ -83,7 +83,7 @@ beforeEach(async () => {
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: "claude-code", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 });
 
 afterEach(async () => {
@@ -172,7 +172,7 @@ describe("bellman_upload", () => {
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const c = new Client({ name: "elsewhere", version: "0.0.1" });
-    await Promise.all([elsewhere.server.connect(serverSide), c.connect(clientSide)]);
+    await Promise.all([elsewhere.serve(serverSide), c.connect(clientSide)]);
     try {
       const res = (await c.callTool({
         name: "bellman_upload",
@@ -337,7 +337,7 @@ describe("bellman_upload", () => {
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const c = new Client({ name: "refreshing", version: "0.0.1" });
-    await Promise.all([through.server.connect(serverSide), c.connect(clientSide)]);
+    await Promise.all([through.serve(serverSide), c.connect(clientSide)]);
     try {
       const res = (await c.callTool({
         name: "bellman_upload",
@@ -374,7 +374,7 @@ describe("bellman_upload", () => {
     const bare = createBridge({ delivery: "channel", remote: remoteFor });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const c = new Client({ name: "bare", version: "0.0.1" });
-    await Promise.all([bare.server.connect(serverSide), c.connect(clientSide)]);
+    await Promise.all([bare.serve(serverSide), c.connect(clientSide)]);
     try {
       expect((await c.listTools()).tools.map((t) => t.name)).toContain("bellman_upload");
       const res = (await c.callTool({ name: "bellman_upload", arguments: { session_id: ROOM, member_id: "m_creator", path: file("n.md", "x"), key: "n" } })) as CallToolResult;

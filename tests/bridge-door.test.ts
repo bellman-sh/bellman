@@ -144,7 +144,7 @@ async function armedBridge(opts: Armed) {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-code", version: "0.0.1" });
   client.fallbackNotificationHandler = async () => {};
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     release();
@@ -424,7 +424,7 @@ async function roomBridge(delivery: Delivery = "channel", upload?: UploadOptions
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-code", version: "0.0.1" });
   client.fallbackNotificationHandler = async () => {};
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     release();

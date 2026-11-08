@@ -60,7 +60,6 @@
  */
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
-import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
@@ -253,7 +252,8 @@ if (joinCode) void bridge.join(joinCode, basename(process.cwd()));
 
 // Before the transport connects, so that the first bellman_whoami already names the door.
 await doorOpened;
-await bridge.server.connect(new StdioServerTransport());
+// Either era: a 2025-era initialize, or a 2026-07-28 opening that carries its own version (#571).
+bridge.serve();
 /**
  * Which of the three states this start is in, because the browser is about to
  * be the surprising part. A cached credential is reused in silence and a fresh

@@ -51,7 +51,7 @@ async function bridged(remote: () => Promise<Remote>) {
   const bridge = createBridge({ delivery: "hook", inboxDir, remote });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const host = new Client({ name: "host", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), host.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), host.connect(clientSide)]);
   closers.push(() => bridge.close(), () => host.close());
   return { bridge, host };
 }

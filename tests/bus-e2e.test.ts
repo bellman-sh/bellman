@@ -168,7 +168,7 @@ async function open(key: string, bus?: true | Partial<BridgeBus>): Promise<Sessi
   client.fallbackNotificationHandler = async (n) => {
     pushed.push(n);
   };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   const session: Session = {
     client, pushed, bridge, calls,
     async call(name, args = {}) {

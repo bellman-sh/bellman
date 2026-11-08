@@ -168,7 +168,7 @@ async function open(
   client.fallbackNotificationHandler = async (n) => {
     pushed.push(n);
   };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 
   const session: Session = {
     client,
@@ -2137,6 +2137,7 @@ describe("bellman_start with a room.yaml", () => {
       }),
     });
 
+    bridge.createServer(); // registers the handlers, as serve() does for each connection
     const handed = { brief: brief(), capabilities: caps };
     await handlers.get("tools/call")!(
       { method: "tools/call", params: { name: "bellman_start", arguments: handed } },

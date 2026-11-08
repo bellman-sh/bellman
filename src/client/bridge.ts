@@ -8,7 +8,8 @@ import { Client } from "@modelcontextprotocol/client";
 import {
   StreamableHTTPClientTransport, SdkHttpError,
 } from "@modelcontextprotocol/client";
-import { ResourceNotFoundError, Server } from "@modelcontextprotocol/server";
+import { ResourceNotFoundError, Server, type Transport } from "@modelcontextprotocol/server";
+import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
 import {
   type CallToolResult,
   type ListResourcesResult,
@@ -804,82 +805,111 @@ export function createBridge(opts: BridgeOptions) {
     return self;
   }
 
-  const server = new Server(
-    { name: "bellman", version: VERSION },
-    {
-      capabilities: delivery === "channel"
-        ? { tools: {}, resources: {}, experimental: { "claude/channel": {} } }
-        : { tools: {}, resources: {} },
-      instructions: { channel: CHANNEL_INSTRUCTIONS, hook: HOOK_INSTRUCTIONS, queue: QUEUE_INSTRUCTIONS }[delivery],
-    }
-  );
-
-  server.setRequestHandler("tools/list", async () => {
-    const { tools } = await (await remote()).listTools();
-    // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
-    const listed = tools.map(advertised);
-    const waitTool = delivery === "queue" ? QUEUE_WAIT_TOOL : WAIT_TOOL;
-    const local = queues ? [waitTool, WHOAMI_TOOL, UPLOAD_TOOL] : [WHOAMI_TOOL, UPLOAD_TOOL];
-    return { tools: [...listed, ...local] };
-  });
+  /**
+   * The instance a 2025-era connection pinned: where channel pushes go. Only that era carries a notification the
+   * client did not ask for; under MCP 2026-07-28 "the server never sends an un-requested notification type", so a
+   * connection that opened in the new era cannot be pushed to at all, and its agent reads events with bellman_sync.
+   */
+  let pushTo: Server | undefined;
+  /** Whether a connection opened in the 2026-07-28 era, and whether that has been said once. */
+  let modernOpened = false;
+  let modernSaid = false;
 
   /**
-   * The UI resource, forwarded. A host that renders MCP Apps reads the page a
-   * tool's _meta names over this same connection, and over stdio this bridge IS
-   * the connection (#28, spec D13). Nothing is cached or rewritten: the remote
-   * is the one copy of the page, as it is of every tool.
+   * One MCP server for one connection, in the era the connection opened with (#571). `serveStdio` calls it once per
+   * connection, and may call it for a `server/discover` probe it then discards; every instance answers from this
+   * bridge's one state, so which instance a request reaches does not matter, and a push goes to `pushTo`.
    */
-  server.setRequestHandler("resources/list", async () => {
-    const r = await remote();
-    return r.listResources ? r.listResources() : { resources: [] };
-  });
-
-  // A host that sees `resources` enumerates templates too. Claude Desktop does,
-  // and "Method not found" there is what the bundle would show for a server
-  // that simply has none.
-  server.setRequestHandler("resources/templates/list", async () => {
-    const r = await remote();
-    return r.listResourceTemplates ? r.listResourceTemplates() : { resourceTemplates: [] };
-  });
-
-  server.setRequestHandler("resources/read", async (request) => {
-    const r = await remote();
-    if (!r.readResource) {
-      throw new ResourceNotFoundError(request.params.uri);
-    }
-    return r.readResource({ uri: request.params.uri });
-  });
-
-  server.setRequestHandler("tools/call", async (request) => {
-    const { name } = request.params;
-    // `let`, not `const`: the bellman_start branch below reassigns it to add the manifest.
-    let args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    if (name === WHOAMI_TOOL.name) return describeSelf();
-    if (name === WAIT_TOOL.name && queues) return waitForQueued(args);
-    if (name === UPLOAD_TOOL.name) return uploadAndPlace(args);
-
-    // The one place the bridge transforms a call instead of relaying it.
-    if (name === START_TOOL && args.manifest === undefined) {
-      try {
-        const fromFile = loadRoomManifest(process.cwd());
-        if (fromFile) {
-          args = { ...args, manifest: fromFile };
-          process.stderr.write(`bellman: using room manifest from ${ROOM_FILE}\n`);
-        }
-      } catch (e) {
-        // A malformed room.yaml fails here, before anything leaves the machine.
-        return {
-          content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
-          isError: true,
-        };
+  function createServer(ctx: { era: "legacy" | "modern" } = { era: "legacy" }): Server {
+    const server = new Server(
+      { name: "bellman", version: VERSION },
+      {
+        capabilities: delivery === "channel"
+          ? { tools: {}, resources: {}, experimental: { "claude/channel": {} } }
+          : { tools: {}, resources: {} },
+        instructions: { channel: CHANNEL_INSTRUCTIONS, hook: HOOK_INSTRUCTIONS, queue: QUEUE_INSTRUCTIONS }[delivery],
       }
-    }
+    );
 
-    const connected = await remote();
-    const result = await connected.callTool({ name, arguments: args });
-    observe(name, args, result);
-    return withUpdateNotice(result, connected);
-  });
+    server.setRequestHandler("tools/list", async () => {
+      const { tools } = await (await remote()).listTools();
+      // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
+      const listed = tools.map(advertised);
+      const waitTool = delivery === "queue" ? QUEUE_WAIT_TOOL : WAIT_TOOL;
+      const local = queues ? [waitTool, WHOAMI_TOOL, UPLOAD_TOOL] : [WHOAMI_TOOL, UPLOAD_TOOL];
+      return { tools: [...listed, ...local] };
+    });
+
+    /**
+     * The UI resource, forwarded. A host that renders MCP Apps reads the page a
+     * tool's _meta names over this same connection, and over stdio this bridge IS
+     * the connection (#28, spec D13). Nothing is cached or rewritten: the remote
+     * is the one copy of the page, as it is of every tool.
+     */
+    server.setRequestHandler("resources/list", async () => {
+      const r = await remote();
+      return r.listResources ? r.listResources() : { resources: [] };
+    });
+
+    // A host that sees `resources` enumerates templates too. Claude Desktop does,
+    // and "Method not found" there is what the bundle would show for a server
+    // that simply has none.
+    server.setRequestHandler("resources/templates/list", async () => {
+      const r = await remote();
+      return r.listResourceTemplates ? r.listResourceTemplates() : { resourceTemplates: [] };
+    });
+
+    server.setRequestHandler("resources/read", async (request) => {
+      const r = await remote();
+      if (!r.readResource) {
+        throw new ResourceNotFoundError(request.params.uri);
+      }
+      return r.readResource({ uri: request.params.uri });
+    });
+
+    server.setRequestHandler("tools/call", async (request) => {
+      const { name } = request.params;
+      // `let`, not `const`: the bellman_start branch below reassigns it to add the manifest.
+      let args = (request.params.arguments ?? {}) as Record<string, unknown>;
+      if (name === WHOAMI_TOOL.name) return describeSelf();
+      if (name === WAIT_TOOL.name && queues) return waitForQueued(args);
+      if (name === UPLOAD_TOOL.name) return uploadAndPlace(args);
+
+      // The one place the bridge transforms a call instead of relaying it.
+      if (name === START_TOOL && args.manifest === undefined) {
+        try {
+          const fromFile = loadRoomManifest(process.cwd());
+          if (fromFile) {
+            args = { ...args, manifest: fromFile };
+            process.stderr.write(`bellman: using room manifest from ${ROOM_FILE}\n`);
+          }
+        } catch (e) {
+          // A malformed room.yaml fails here, before anything leaves the machine.
+          return {
+            content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
+            isError: true,
+          };
+        }
+      }
+
+      const connected = await remote();
+      const result = await connected.callTool({ name, arguments: args });
+      observe(name, args, result);
+      return withUpdateNotice(result, connected);
+    });
+    if (ctx.era === "legacy") pushTo = server;
+    else modernOpened = true;
+    return server;
+  }
+
+  /**
+   * Serve this bridge to its MCP client, in whichever era the client opens with: a 2025-era `initialize` or a
+   * 2026-07-28 request carrying its own version. Over this process's stdio unless `transport` is given (tests pass an
+   * in-memory one). The returned handle's `close` ends the connection.
+   */
+  function serve(transport?: Transport): StdioServerHandle {
+    return serveStdio(createServer, { transport, onerror: (err) => log(`MCP connection: ${err.message}`) });
+  }
 
   /**
    * The first tool result after this bridge learns its server runs a newer release carries one more line, saying so
@@ -1241,8 +1271,15 @@ export function createBridge(opts: BridgeOptions) {
       from: safeMeta(event.from_label),
     };
     if (event.ref_id) meta.ref_id = safeMeta(event.ref_id);
+    if (!pushTo) {
+      if (modernOpened && !modernSaid) {
+        modernSaid = true;
+        log("channel delivery needs a 2025-era MCP connection; this one opened in 2026-07-28, so peer events wait for bellman_sync");
+      }
+      return;
+    }
     try {
-      await server.notification({
+      await pushTo.notification({
         method: "notifications/claude/channel",
         params: { content: renderEvent(event), meta },
       });
@@ -1750,7 +1787,9 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   return {
-    server,
+    /** A server for one connection; `serve` is the usual way in. */
+    createServer,
+    serve,
     close,
     /** Memberships currently being watched — for tests and diagnostics. */
     watching: (): { session_id: string; member_id: string; delivered: number }[] =>

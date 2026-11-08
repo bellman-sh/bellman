@@ -59,7 +59,7 @@ export async function listBridge(delivery: Delivery): Promise<{ tools: Tool[]; i
 
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-desktop", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 
   try {
     const { tools } = await client.listTools();

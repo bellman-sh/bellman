@@ -106,7 +106,7 @@ async function delivered(delivery: Delivery, events: WireEnvelope[]) {
   client.fallbackNotificationHandler = async (n) => {
     if (n.method === "notifications/claude/channel") pushes.push(n as unknown as Push);
   };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     await client.close();

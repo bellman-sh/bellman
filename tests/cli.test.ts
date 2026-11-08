@@ -486,7 +486,7 @@ describe("VERSION", () => {
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const host = new Client({ name: "host", version: "0.0.1" });
-    await Promise.all([bridge.server.connect(serverSide), host.connect(clientSide)]);
+    await Promise.all([bridge.serve(serverSide), host.connect(clientSide)]);
     try {
       expect(host.getServerVersion()).toMatchObject({ name: "bellman", version: pkg.version });
     } finally {

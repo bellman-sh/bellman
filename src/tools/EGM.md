@@ -59,7 +59,8 @@ means editing `extension/manifest.json` and running `npm run docs:gen` (root `CL
   `structuredContent {error: "rate_limited", retry_after}`), `ToolResult` [src/tools/kit.ts:refusal]
 - Kit input shapes `RoomRefShape`, `roomIdOf`, `NEED_ROOM`, `BriefShape`, `AgentShape`, `CapabilitiesShape`,
   `ActionResponseShape`, `DecisionAnswerShape` (an `action_response` payload plus `hash` and `human_approved`),
-  `ProgressShape`, `OutsideAnswerShape`, `isReport` [src/tools/kit.ts:BriefShape]
+  `ProgressShape`, `OutsideAnswerShape`, `isReport` [src/tools/kit.ts:BriefShape]; `ActionResponseShape` is defined in
+  `[src/room/answer.ts:ActionResponseShape]` and re-exported
   [src/tools/kit.ts:DecisionAnswerShape]
 - `SEND_VERB` maps each `SendKind` to one `Verb`; `SEND_KINDS` re-exported [src/tools/kit.ts:SEND_VERB]
 - `FrozenError` and `appendOrFrozen`, which throws when `appendEvent` returns null [src/tools/kit.ts:appendOrFrozen]

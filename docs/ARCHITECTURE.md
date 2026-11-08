@@ -1652,6 +1652,13 @@ loud:
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
+- **In the dash, the person answers it directly.** `POST
+  /rooms/<id>/requests/<cursor>/answer` takes a signed-in dash session alone,
+  Origin checked, and refuses a bearer (`dash_session_required`), so no agent
+  token reaches it; it answers as one of the person's own seats, through
+  `answerAction`, the operation `bellman_send` runs, so the verb and the
+  first-answer rule are the same on both paths (`src/http/answer.ts`). The page
+  shows the request's payload as the peer content it is.
 - **In the terminal, the mod holds that line against the agent.** Until the
   mod, "approved by the receiving human" was an instruction to the model
   (`HOOK_INSTRUCTIONS`, `CHANNEL_INSTRUCTIONS`), and the model could send the

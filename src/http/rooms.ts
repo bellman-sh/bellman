@@ -32,6 +32,7 @@ import { checkQuery } from "../surface/search.js";
 import { configRoutes } from "./config.js";
 import { notesSharingRoutes } from "./notes-sharing.js";
 import { fileRoutes } from "./files.js";
+import { answerRoutes } from "./answer.js";
 import { JOINED_SCAN, type BellmanStore } from "../storage/store.js";
 import { isRemovedMember } from "../room/members.js";
 import type { StoredSession } from "../storage/stored-session.js";
@@ -261,6 +262,8 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (sharing) return sharing;
     const files = await fileRoutes(request, url, path, origin, deps);
     if (files) return files;
+    const answer = await answerRoutes(request, url, path, origin, deps);
+    if (answer) return answer;
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);

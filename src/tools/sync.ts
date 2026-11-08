@@ -106,7 +106,7 @@ removed: true: a creator removed you. You still get the history up to and includ
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
       const page = cut === undefined
-        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE)
+        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE, member_id)
         : (await s.eventsAfter(session_id, since_cursor, SYNC_PAGE)).filter((e) => e.cursor <= cut);
 
       // The status is the room's as it is when this poll answers, not as it was when the

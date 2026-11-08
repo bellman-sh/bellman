@@ -5816,6 +5816,80 @@ export function describeStoreContract(
       await expect(store.waitForEvents(s.id, 0, 50)).resolves.toEqual([]);
     });
 
+    // Seat names spec: a reader-aware wait (`reader`, the fifth argument) does not return for an event addressed to
+    // other seats, and returns what it saw at the timeout so the poll's cursor moves past it. Real timers, for the
+    // reason the case above gives.
+    describe("a reader-aware wait", () => {
+      const addressed = (to: string[] | null, text = "x") => ({
+        type: "message" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { text }, refId: null, ...(to ? { toMemberIds: to } : {}),
+      });
+      const settles = <T>(p: Promise<T>) => { const box = { done: false }; void p.then(() => { box.done = true; }); return box; };
+      const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      it("does not return early for an event addressed to another seat, and returns it at the timeout", async () => {
+        vi.useRealTimers();
+        const s = session();
+        (await store.createSession(s));
+        const pending = store.waitForEvents(s.id, 0, 400, undefined, "m_reader");
+        const box = settles(pending);
+        (await store.appendEvent(s.id, addressed(["m_other"])));
+        await pause(100);
+        expect(box.done, "an addressed-away event wakes nothing").toBe(false);
+        await expect(pending).resolves.toMatchObject([{ toMemberIds: ["m_other"] }]);
+      });
+
+      it("returns an addressed-away event at once when it was already there and the wait is zero", async () => {
+        const s = session();
+        (await store.createSession(s));
+        (await store.appendEvent(s.id, addressed(["m_other"])));
+        await expect(store.waitForEvents(s.id, 0, 0, undefined, "m_reader")).resolves.toHaveLength(1);
+      });
+
+      it("wakes for an event addressed to its reader", async () => {
+        vi.useRealTimers();
+        const s = session();
+        (await store.createSession(s));
+        const pending = store.waitForEvents(s.id, 0, 5_000, undefined, "m_reader");
+        const started = Date.now();
+        (await store.appendEvent(s.id, addressed(["m_reader"])));
+        await expect(pending).resolves.toHaveLength(1);
+        expect(Date.now() - started).toBeLessThan(2_000);
+      });
+
+      it("after only addressed-away events, wakes for a later unaddressed one and returns both", async () => {
+        vi.useRealTimers();
+        const s = session();
+        (await store.createSession(s));
+        const pending = store.waitForEvents(s.id, 0, 5_000, undefined, "m_reader");
+        (await store.appendEvent(s.id, addressed(["m_other"], "away")));
+        await pause(50);
+        (await store.appendEvent(s.id, addressed(null, "for all")));
+        const got = await pending;
+        expect(got.map((e) => (e.payload as { text: string }).text)).toEqual(["away", "for all"]);
+      });
+
+      it("reads and registers in the same turn: an event appended right after the call is not missed", async () => {
+        vi.useRealTimers();
+        const s = session();
+        (await store.createSession(s));
+        const started = Date.now();
+        const pending = store.waitForEvents(s.id, 0, 5_000, undefined, "m_reader");
+        void store.appendEvent(s.id, addressed(null, "now"));
+        await expect(pending).resolves.toHaveLength(1);
+        expect(Date.now() - started, "resolved by the event, not the timeout").toBeLessThan(2_000);
+      });
+
+      it("leaves a wait with no reader as it was: an addressed event wakes it", async () => {
+        vi.useRealTimers();
+        const s = session();
+        (await store.createSession(s));
+        const pending = store.waitForEvents(s.id, 0, 5_000);
+        (await store.appendEvent(s.id, addressed(["m_other"])));
+        await expect(pending).resolves.toHaveLength(1);
+      });
+    });
+
     it("waitForEvents returns synchronously for a zero wait", async () => {
       const s = session();
       (await store.createSession(s));

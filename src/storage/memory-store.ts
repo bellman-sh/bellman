@@ -1,3 +1,4 @@
+import { addressedAway } from "../room/attention.js";
 import { type ApprovedBy, type ArrivingMember, type AuditEntry, type Brief, type Member, type NewSession, type PendingConnect, type PlanGrant, type PublicView, type Session, type SessionEvent, type EventType, type SavedPreset, type SurfaceRow, type UserRecord, type OutsideCaller, type OutsideTask, type Org, type OrgIdp, type OrgInvite, type OrgPatch, type ScimToken, type ScimUser, type ScimUserPatch, type DirectoryEntry, type ConfigName, type ConfigRow, type FsRow, type HomeSettings, type RepoRoom, type LookupRow, type LookupSource, DEFAULT_HOME_SETTINGS, LOOKUP_KEEP, LOOKUP_KEEP_MS, LOOKUP_SLACK } from "../types.js";
 import { CONFIG_HISTORY, configEvent, decideConfigWrite } from "../files/config.js";
 import { FS_FIND_MAX, FS_LIST_PAGE, newMemoryId, type HomeKeyRecord, decideFsWrite, fsPrint, hiddenMemory, homeKey, newestKey, pageFs, pathMatches, resolveFsPath, underPrefix } from "../files/fs.js";
@@ -35,7 +36,7 @@ import { HOST_MEMBER_ID, NO_SOCKETS, clearSilence, creatorOf, creditReport, depa
 import { codeIsLive } from "../room/codes.js";
 import { sameEntry } from "../room/public-names.js";
 
-type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
+type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; reader?: string; limit?: number };
 
 function detach<T>(value: T): T {
   return structuredClone(value);
@@ -1959,13 +1960,17 @@ export class MemoryStore implements BellmanStore {
     sessionId: string,
     cursor: number,
     waitMs: number,
-    limit?: number
+    limit?: number,
+    reader?: string,
   ): Promise<SessionEvent[]> {
-    const s = this.sessions.get(sessionId);
-    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit)) : [];
-    if (immediate.length > 0 || waitMs <= 0) return Promise.resolve(immediate);
+    const read = () => {
+      const s = this.sessions.get(sessionId);
+      return s ? detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit)) : [];
+    };
+    const immediate = read();
+    if (wakesFor(immediate, reader) || waitMs <= 0) return Promise.resolve(immediate);
     return new Promise((resolve) => {
-      const w: Waiter = { after: cursor, resolve };
+      const w: Waiter = { after: cursor, resolve, reader, limit };
       const list = this.waiters.get(sessionId) ?? [];
       list.push(w);
       this.waiters.set(sessionId, list);
@@ -1974,7 +1979,8 @@ export class MemoryStore implements BellmanStore {
         const idx = cur.indexOf(w);
         if (idx >= 0) {
           cur.splice(idx, 1);
-          resolve([]);
+          // A reader-aware wait hands back what it waited past, so the poll's cursor moves on (seat names spec).
+          resolve(reader === undefined ? [] : read());
         }
       }, waitMs).unref?.();
     });
@@ -3027,8 +3033,15 @@ export class MemoryStore implements BellmanStore {
   private wake(s: Session): void {
     const ws = this.waiters.get(s.id);
     if (!ws || ws.length === 0) return;
-    this.waiters.set(s.id, []);
-    for (const w of ws) w.resolve(detach(s.events.filter((ev) => ev.cursor > w.after)));
+    // A reader-aware waiter stays registered until an event wakes its reader (seat names spec); every other one is
+    // resolved, as before.
+    const kept: Waiter[] = [];
+    for (const w of ws) {
+      const after = s.events.filter((ev) => ev.cursor > w.after);
+      if (w.reader !== undefined && !wakesFor(after, w.reader)) kept.push(w);
+      else w.resolve(detach(w.reader === undefined ? after : after.slice(0, w.limit)));
+    }
+    this.waiters.set(s.id, kept);
   }
 
   /**
@@ -3062,4 +3075,9 @@ export class MemoryStore implements BellmanStore {
     s.events.push(event);
     this.wake(s);
   }
+}
+
+/** Whether `events` hold one that ends `reader`'s wait: any event at all with no reader, else one not addressed away. */
+function wakesFor(events: readonly SessionEvent[], reader: string | undefined): boolean {
+  return reader === undefined ? events.length > 0 : events.some((e) => !addressedAway(e, reader));
 }

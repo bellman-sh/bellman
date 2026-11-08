@@ -1380,8 +1380,13 @@ export interface BellmanStore {
    * The events after `cursor`, or the first to arrive within `waitMs`: at most `limit`, the
    * earliest, when a limit is given. `bellman_sync` passes its page (#208), so a member far
    * behind reads a page per poll and never the whole log at once.
+   *
+   * With `reader` (seat names spec), an event addressed to other seats does not end the wait: it returns early only for
+   * an event that is not `addressedAway` for `reader`, and at the timeout it resolves with the events after `cursor`
+   * (at most `limit`), addressed-away ones included, so the caller's cursor moves past them. Without `reader`, every
+   * event ends it and the timeout resolves `[]`, as before.
    */
-  waitForEvents(sessionId: string, cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]>;
+  waitForEvents(sessionId: string, cursor: number, waitMs: number, limit?: number, reader?: string): Promise<SessionEvent[]>;
   /**
    * Every surface row of this room, sorted by key, as detached copies. An
    * unknown session answers none. One hop: the Durable Objects store reads the

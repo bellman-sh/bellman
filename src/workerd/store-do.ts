@@ -801,9 +801,10 @@ export class DurableObjectStore implements BellmanStore {
     sessionId: string,
     cursor: number,
     waitMs: number,
-    limit?: number
+    limit?: number,
+    reader?: string,
   ): Promise<SessionEvent[]> {
-    return this.session(sessionId).waitForEvents(cursor, waitMs, limit);
+    return this.session(sessionId).waitForEvents(cursor, waitMs, limit, reader);
   }
 
   async putPendingConnect(p: PendingConnect): Promise<void> {

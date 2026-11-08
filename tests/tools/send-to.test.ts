@@ -75,4 +75,30 @@ describe("bellman_send to", () => {
     expect(unaddressed.text).toMatch(/already used for a different message/);
     expect(await messages()).toHaveLength(1);
   });
+
+  it("a seat the message is not addressed to waits past it in bellman_sync, then gets it flagged ambient with the cursor past it", async () => {
+    const out = await send({ to: [hearing.name] });
+    const cursor = Number(out.data.cursor);
+    const started = Date.now();
+    const polled = await (await h.connect(DEV_KEY.outsider)).call("bellman_sync", {
+      session_id: sessionId, member_id: deaf.id, since_cursor: cursor - 1, wait_seconds: 1,
+    });
+    expect(Date.now() - started, "it waited out the poll").toBeGreaterThanOrEqual(900);
+    const events = (polled.data.events as { data: { cursor: number; ambient?: boolean; to?: { member_id: string }[] } }[]).map((e) => e.data);
+    expect(events).toEqual([expect.objectContaining({ cursor, ambient: true, to: [expect.objectContaining({ member_id: hearing.id })] })]);
+    expect(polled.data.cursor).toBe(cursor);
+  });
+
+  it("the addressee's bellman_sync returns at once, not ambient", async () => {
+    const out = await send({ to: [hearing.name] });
+    const cursor = Number(out.data.cursor);
+    const started = Date.now();
+    const polled = await (await h.connect(DEV_KEY.peer)).call("bellman_sync", {
+      session_id: sessionId, member_id: hearing.id, since_cursor: cursor - 1, wait_seconds: 5,
+    });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const [event] = (polled.data.events as { data: { ambient?: boolean } }[]).map((e) => e.data);
+    expect(event).not.toHaveProperty("ambient");
+  });
 });
+

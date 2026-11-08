@@ -1,3 +1,4 @@
+import { seatNames } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
@@ -131,6 +132,8 @@ removed: true: a creator removed you. You still get the history up to and includ
         ? (await s.getSession(session_id)) ?? session
         : session;
       const status = sessionStatus(answering);
+      // Read after the wait, so a seat that joined during it is named on its own events (seat names spec).
+      const names = seatNames(answering.members);
 
       // An answer that says `closed` is never a page (#208). Every released client stops at
       // `closed` without reading `more` (src/client/bridge.ts, src/client/bus-link.ts), and a closed room's
@@ -325,7 +328,7 @@ removed: true: a creator removed you. You still get the history up to and includ
       return ok(
         {
           events: foreign.map((e) => ({
-            ...untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e)),
+            ...untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e, { names, reader: member_id })),
             ...(toAnswer.has(e.cursor) ? { note: VOICE_NOTE } : {}),
           })),
           cursor,

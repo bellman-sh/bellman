@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ATTENTION, attentionOf, isAmbient } from "../src/room/attention.js";
+import { ATTENTION, addressedAway, attentionOf, isAmbient } from "../src/room/attention.js";
 import type { EventType } from "../src/types.js";
 
 /**
@@ -62,5 +62,15 @@ describe("attention", () => {
     expect(attentionOf("decision_closed")).toBe("interrupt");
     expect(attentionOf("decision_voter_removed")).toBe("interrupt");
     expect(attentionOf("decision_vote")).toBe("ambient");
+  });
+});
+
+describe("addressedAway (seat names spec)", () => {
+  it("is true only for a reader an addressed event does not name", () => {
+    expect(addressedAway({}, "m_a")).toBe(false);
+    expect(addressedAway({ toMemberIds: null }, "m_a")).toBe(false);
+    expect(addressedAway({ toMemberIds: ["m_a"] }, "m_a")).toBe(false);
+    expect(addressedAway({ toMemberIds: ["m_a"] }, "m_b")).toBe(true);
+    expect(addressedAway({ toMemberIds: ["m_a"] }, undefined)).toBe(false);
   });
 });

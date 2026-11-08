@@ -1,4 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
+import { seatNames } from "../room/member-names.js";
 import { DurableObject } from "cloudflare:workers";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
 import { codeIsLive } from "../room/codes.js";
@@ -1105,7 +1106,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       );
     }
     // As no one (R2), so the attachment below still takes its cursor from `missed`.
-    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e)));
+    // Seat names on every frame (seat names spec); the frame carries `to`, and the receiving side decides whether it wakes.
+    const names = seatNames(rows);
+    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e, { names })));
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -3867,7 +3870,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!att || event.cursor <= att.cursor) continue;
         if (frame === undefined) {
           const shown = readableEvent(event, members.find((m) => m.memberId === event.fromMemberId), null);
-          frame = shown === null ? null : JSON.stringify(publicEvent(shown));
+          frame = shown === null ? null : JSON.stringify(publicEvent(shown, { names: seatNames(members) }));
         }
         if (frame === null) break;
         ws.send(frame);

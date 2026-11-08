@@ -8,8 +8,9 @@
  * bellman_sync returns it, which is what makes "the poll's shape" a fact about
  * the real tool and not about a copy of it.
  */
+import { seatNames } from "../src/room/member-names.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { briefAuthors, publicEvent, readableEvent, readableEvents, seesBrief } from "../src/public-event.js";
+import { briefAuthors, publicEvent, publicReadEvent, readableEvent, readableEvents, seesBrief } from "../src/public-event.js";
 import type { Member, SessionEvent } from "../src/types.js";
 import { Harness, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
@@ -110,7 +111,11 @@ describe("the poll and the socket share one shape", () => {
     const theirs = (await h.store.eventsAfter(p.sessionId, 0))
       .filter((e) => e.fromMemberId !== p.creatorMemberId);
     expect(theirs.length, "the comparison must not be vacuous").toBeGreaterThan(0);
-    expect(envelopes(sync.data.events).map((e) => e.data)).toEqual(theirs.map(publicEvent));
+    // With the room's seat names and the poller as reader (seat names spec): one projection, the same function.
+    const names = seatNames((await h.store.getSession(p.sessionId))!.members);
+    expect(envelopes(sync.data.events).map((e) => e.data))
+      .toEqual(theirs.map((e) => publicEvent(e, { names, reader: p.creatorMemberId })));
+    expect((envelopes(sync.data.events)[0]!.data as { from: { name?: string } }).from.name, "names the sender").toMatch(/-\d+$/);
   });
 });
 
@@ -193,5 +198,35 @@ describe("readableEvent", () => {
     expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, "u_peer")).toBe(false);
     expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, null)).toBe(false);
     expect(seesBrief({ userId: AUTHOR, ...GRANT.off }, AUTHOR)).toBe(true);
+  });
+});
+
+describe("publicEvent with a view (seat names spec)", () => {
+  const names = new Map([["m_peer", "coder-2"], ["m_a", "lead-1"], ["m_b", "coder-3"]]);
+
+  it("leaves an unaddressed event read with no view exactly as before", () => {
+    expect(publicEvent(stored())).toEqual({
+      cursor: 7, type: "message", from: { member_id: "m_peer", label: "peer@laptop" },
+      payload: { text: "hi" }, ref_id: null, at: "2026-09-29T20:00:00.000Z",
+    });
+  });
+
+  it("names the sender, and lists an addressed event's seats", () => {
+    const shown = publicEvent(stored({ toMemberIds: ["m_a"] }), { names, reader: "m_a" });
+    expect(shown.from).toEqual({ member_id: "m_peer", label: "peer@laptop", name: "coder-2" });
+    expect(shown.to).toEqual([{ member_id: "m_a", name: "lead-1" }]);
+    expect(shown).not.toHaveProperty("ambient");
+  });
+
+  it("is ambient for a reader the event is not addressed to, and not for one with no reader", () => {
+    expect(publicEvent(stored({ toMemberIds: ["m_a"] }), { names, reader: "m_b" }).ambient).toBe(true);
+    expect(publicEvent(stored({ toMemberIds: ["m_a"] }), { names })).not.toHaveProperty("ambient");
+  });
+
+  it("on a public read leaves out the seat names and names the addressees by their labels, for the public numbering", () => {
+    const labels = new Map([["m_a", "a@x"]]);
+    const shown = publicReadEvent(stored({ toMemberIds: ["m_a"] }), labels)!;
+    expect(shown.from).toEqual({ member_id: "m_peer", label: "peer@laptop" });
+    expect(shown.to).toEqual([{ member_id: "m_a", label: "a@x" }]);
   });
 });

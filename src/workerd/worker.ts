@@ -33,6 +33,7 @@ import { handleStripeWebhook } from "../billing/stripe.js";
 import { billingSettings } from "../billing/config.js";
 import { hostedSeatFor } from "../host.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "../upgrade.js";
+import { OPENAI_CHALLENGE_PATH, openaiChallengeResponse } from "../http/openai-challenge.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -118,6 +119,8 @@ export interface WorkerEnv extends BellmanEnv {
   /** Read-only (Account Analytics: Read): Cloudflare's per-object usage, for the cost capture's usage half (#473). */
   CF_ANALYTICS_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  /** The token OpenAI's plugin portal asks this host to serve at /.well-known/openai-apps-challenge. Public. */
+  OPENAI_APPS_CHALLENGE?: string;
 }
 
 /**
@@ -446,6 +449,12 @@ export default {
         honourPurchases: oauth?.honourPurchases,
       });
       if (handled) return handled;
+    }
+
+    // OpenAI's plugin portal checks the MCP server's domain here (chatgpt/README.md).
+    if (request.method === "GET" && url.pathname === OPENAI_CHALLENGE_PATH) {
+      const challenge = openaiChallengeResponse(env.OPENAI_APPS_CHALLENGE);
+      if (challenge) return challenge;
     }
 
     // Bellman's own A2A card (ADR 0033): no credential, and nothing to configure.

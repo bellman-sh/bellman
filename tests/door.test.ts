@@ -164,6 +164,11 @@ describe("statusOf", () => {
     const src = source({ delivery: "hook", hasSignIn: () => false, seats: () => seats, recent: () => recent });
     expect(statusOf(src)).toEqual({ version: 1, delivery: "hook", has_sign_in: false, seats, waiting: [], recent });
   });
+
+  it("names the Herdr terminal the bridge runs in, and nothing when it runs in none", () => {
+    expect(statusOf(source({ herdrTerminal: "t7" })).herdr_terminal).toBe("t7");
+    expect(statusOf(source())).not.toHaveProperty("herdr_terminal");
+  });
 });
 
 describe("the door", () => {

@@ -64,6 +64,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
+import { herdrTerminalOf } from "./door-protocol.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
@@ -201,6 +202,7 @@ const doorOpened = (async () => {
       setStatus: bridge.setStatus,
       writeSurface: bridge.writeSurface,
       join: bridge.joinState,
+      herdrTerminal: herdrTerminalOf(process.env.HC_TERMINAL_ID),
     }, log);
     door = opened;
     doorPath = opened.path;

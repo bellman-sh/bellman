@@ -30,7 +30,9 @@ into the mod.
 - `[src/client/door.ts:startDoor]` an HTTP server on a Unix socket per bridge: `GET /status`, `GET /rooms`,
   `GET /rooms/<id>/events`, `GET /rooms/<id>/surface`, and the writes `POST /rooms/<id>/decline`,
   `POST /seats/status`, `PUT`/`DELETE /rooms/<id>/surface/<key>`. `[src/client/door-protocol.ts]` the runtime-free shapes
-  shared with the mod (`DOOR_VERSION = 1`, `cleanText`, `cleanBlock`, `eventLine`).
+  shared with the mod (`DOOR_VERSION = 1`, `cleanText`, `cleanBlock`, `eventLine`, `herdrTerminalOf`). `GET /status`
+  names the Herdr terminal the bridge runs in as `herdr_terminal`, from a well-formed `HC_TERMINAL_ID`, and omits it
+  otherwise `[src/client/door.ts:statusOf]`.
 - Hooks: `[src/client/stop-hook.ts]` (drains the inbox, exits 2 to keep the turn going), `[src/client/status-hook.ts:statusFor]`
   (`working` / `needs_you`), `[src/client/join-hook.ts:joinLine]`.
 - `[src/client/signin.ts:connectSignedIn]` browser OAuth with PKCE on a loopback callback (`CALLBACK_PORTS` 51004-51008);

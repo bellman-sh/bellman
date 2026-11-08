@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { cleanBlock, cleanText, eventLine } from "../src/client/door-protocol.js";
+import { cleanBlock, cleanText, eventLine, herdrTerminalOf } from "../src/client/door-protocol.js";
+
+describe("herdrTerminalOf", () => {
+  it("takes a terminal address as Herdr sets it in HC_TERMINAL_ID", () => {
+    expect(herdrTerminalOf("t7")).toBe("t7");
+    expect(herdrTerminalOf("vps/t12")).toBe("vps/t12");
+  });
+
+  it("takes nothing when it is unset, empty, or not an address", () => {
+    expect(herdrTerminalOf(undefined)).toBeUndefined();
+    expect(herdrTerminalOf("")).toBeUndefined();
+    expect(herdrTerminalOf("t7; rm -rf ~")).toBeUndefined();
+    expect(herdrTerminalOf("t7\n")).toBeUndefined();
+    expect(herdrTerminalOf("../t7")).toBeUndefined();
+    expect(herdrTerminalOf("t".repeat(65))).toBeUndefined();
+  });
+});
 
 /** The characters that draw nothing or turn the direction a line reads in: each one the cleaners drop. */
 const INVISIBLE = [

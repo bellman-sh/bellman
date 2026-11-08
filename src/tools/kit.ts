@@ -102,21 +102,9 @@ export const CapabilitiesShape = z
     "What you ALLOW peers to do to you. request_actions must be explicitly granted."
   );
 
-/**
- * An answer to an `action_request`. `approved` is a REQUIRED boolean, and that
- * is the whole point of the shape: the field was unvalidated, so a client could
- * send `{ approved: "false" }` and have a human's refusal read as an approval
- * on the way back out (see `verdictOf` in src/room/action-state.ts). `result` is the
- * sentence the requester is shown.
- *
- * Not strict, unlike `ProgressShape` below: an `action_response` payload is also
- * carried to the room's members as content, and a build that adds a field to it should
- * not have the whole answer refused.
- */
-export const ActionResponseShape = z.object({
-  approved: z.boolean(),
-  result: z.string().max(2_000).optional(),
-});
+/** An answer to an `action_request`; defined beside the operation that applies it. */
+export { ActionResponseShape } from "../room/answer.js";
+import { ActionResponseShape } from "../room/answer.js";
 
 /**
  * An `action_response` that answers a decision (ADR 0040, decision 8). It is a vote, so it names the hash it is bound

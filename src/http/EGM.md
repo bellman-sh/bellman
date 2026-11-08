@@ -50,6 +50,11 @@ Account, org and operator routes:
   `{path, code}`, with `retry_after` seconds when `code` is `rate_limited`, or null), 404 without a seat. Each delete
   spends one of the seat's sends, so a folder past the minute's limit stops at `rate_limited`
   [src/http/notes-sharing.ts:notesSharingRoutes]
+- `answerRoutes`: `POST /rooms/:id/requests/:cursor/answer?member_id=` `{approved, result?}` answers an action request
+  as one of the caller's seats through `answerAction`, the operation `bellman_send type: "action_response"` runs; dash
+  session only (403 `dash_session_required` to a bearer, the CSRF check), only `approved` and `result` reach the event,
+  404 for a seat that is not the caller's, 400 for a decision (voted on, never answered), and the operation's refusals
+  through `STATUS`; 200 `{cursor, room_members, applied?}` [src/http/answer.ts:answerRoutes]
 - `meRoutes`: `GET /me/rooms` returns `{rooms: liveRooms(...)}`; `GET /me/memory` returns the account's `HomeSettings`
   (`{capture, paused}`) to a bearer or a cookie, `PUT /me/memory` `{capture?, paused?}` (at least one, no other key,
   else 400) merges into it [src/http/me.ts:meRoutes]

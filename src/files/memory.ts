@@ -87,6 +87,8 @@ export async function listHome(
  * The account's home-note paths for arrival (decision 9, #528), newest first: the first page of its home room, in a
  * call of its own after the seat commits, logged as `source` (decision 13). `paused` says the account holds the notes
  * back (nothing read, nothing logged). A failed read is logged and hands back none; it never fails the join.
+ * The row logs the whole page, read and logged in one transaction; `bellman_confirm` may show fewer of them under its
+ * reply budget, so an arrival row is an upper bound on what the agent saw, never less than it.
  */
 export async function homeTitles(store: BellmanStore, actor: Identity, source: LookupSource): Promise<{ titles: string[]; paused: boolean }> {
   try {

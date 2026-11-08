@@ -30,6 +30,9 @@ operations, and the blob store interface. Runtime-free; `R2BlobStore` is in `src
 
 - Blobs: 25 MB `[src/files/blobs.ts:MAX_BLOB_BYTES]`; image
   types are kept only when `sniffImageType` agrees `[src/files/blobs.ts:storedType]`.
+- An arrival lookup row names the whole first page of home paths, logged in the read's transaction; the join reply may
+  show fewer under its budget, so the row can overstate what the agent saw and never understates it
+  `[src/files/memory.ts:homeTitles]` `[src/tools/confirm.ts:registerConfirm]`.
 
 ## Verification
 

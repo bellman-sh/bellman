@@ -3,7 +3,7 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import express, { type Express, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { a2aRoutes } from "./a2a/routes.js";
-import { resolveIdentity } from "./auth.js";
+import { ANONYMOUS, isAnonymousRequest, resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./files/blobs.js";
 import { handleRoutes } from "./http/handles.js";
 import { meRoutes } from "./http/me.js";
@@ -142,7 +142,10 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
    * shape a Durable Objects port needs, where each Bellman session becomes one DO.
    */
   app.post("/mcp", async (req, res) => {
-    const identity = resolveIdentity(req.header("authorization"));
+    // No credential at all may still list the tools; a bad one is a 401, as the Worker answers it. express.json
+    // caps the body, and one message is one listing.
+    const identity = resolveIdentity(req.header("authorization"))
+      ?? (!req.header("authorization") && isAnonymousRequest(req.body) ? ANONYMOUS : null);
     if (!identity) {
       res.status(401).json({
         jsonrpc: "2.0",
@@ -151,7 +154,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
       });
       return;
     }
-    if (await store.isSuspended(identity.userId)) {
+    if (identity !== ANONYMOUS && await store.isSuspended(identity.userId)) {
       res.status(403).json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null });
       return;
     }

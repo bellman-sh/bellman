@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { resolveIdentity } from "../auth.js";
+import { ANONYMOUS, ANONYMOUS_BODY_LIMIT, isAnonymousRequest, resolveIdentity } from "../auth.js";
+import { readCapped } from "../read-capped.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { bellmanCard, cardResponse } from "../a2a/cards.js";
 import { SERVER_CARD_CORS, SERVER_CARD_PATH, serverCard } from "../server-card.js";
@@ -228,6 +229,21 @@ async function resolveCaller(
     : null;
   if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
   return identity;
+}
+
+/**
+ * True when a request with no credential at all asks only for what anyone may read (`isAnonymousRequest`). A bad
+ * credential is never anonymous, so an expired token is a 401 and gets refreshed. At most `ANONYMOUS_BODY_LIMIT`
+ * bytes are read, so a signed-out caller cannot make the Worker buffer or parse more.
+ */
+async function anonymousListing(request: Request): Promise<boolean> {
+  if (request.headers.has("authorization")) return false;
+  const text = await readCapped(request.clone(), ANONYMOUS_BODY_LIMIT);
+  try {
+    return text !== null && isAnonymousRequest(JSON.parse(text));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -607,13 +623,13 @@ export default {
     const blocked = unconfigured(env, oauth);
     if (blocked) return blocked;
 
-    const identity = await resolveCaller(request, env, oauth, "/mcp");
+    const identity = await resolveCaller(request, env, oauth, "/mcp") ?? (await anonymousListing(request) ? ANONYMOUS : null);
     if (!identity) return unauthorized(oauth);
 
     try {
       // Inside the try: a registry that cannot say is JSON-RPC's internal error below, which an MCP
       // client can parse, and serves nobody.
-      if (await suspended(identity.userId)) {
+      if (identity !== ANONYMOUS && await suspended(identity.userId)) {
         return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
       }
       const server = buildServer(identity, store, blobs, {

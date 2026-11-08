@@ -241,12 +241,13 @@ export function keyedPlan(userId: string, keysJson?: string | null): Plan | null
 }
 
 /**
- * The methods /mcp answers with no Authorization header. Every caller gets the same tool list, so a directory or
- * scanner may read it signed out. `initialize` is not one: its 401 is what starts a client's sign-in.
+ * The methods /mcp answers with no Authorization header: the handshake and the tool list, so a directory or scanner
+ * can connect and list the tools signed out. Every caller gets the same list. A signed-out client therefore connects,
+ * and its sign-in starts at its first tool call, whose 401 carries the WWW-Authenticate challenge.
  */
-const ANONYMOUS_METHODS = new Set(["tools/list", "ping"]);
+const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
 
-/** The largest body /mcp reads with no credential. A `tools/list` request is well under it. */
+/** The largest body /mcp reads with no credential. An `initialize` or `tools/list` request is well under it. */
 export const ANONYMOUS_BODY_LIMIT = 4096;
 
 /**
@@ -257,5 +258,5 @@ export function isAnonymousRequest(body: unknown): boolean {
   return ANONYMOUS_METHODS.has((body as { method?: unknown } | null)?.method as string);
 }
 
-/** Whom /mcp builds its server for on an anonymous request. Only `tools/list` and `ping` reach it, so no tool runs as it. */
+/** Whom /mcp builds its server for on an anonymous request. Only `ANONYMOUS_METHODS` reach it, so no tool runs as it. */
 export const ANONYMOUS: Identity = { userId: "anonymous", orgId: null, plan: "free", role: "member", label: "anonymous" };

@@ -92,7 +92,7 @@ export async function meRoutes(request: Request, deps: MeRouteDeps): Promise<Res
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
     if (request.method === "GET") return json(200, await readMemorySettings(deps.store, who.identity), origin);
-    if (who.via !== "cookie") return problem(403, "forbidden", "memory settings are changed by the person signed in to the dash, never with a bearer token", origin);
+    if (who.via !== "cookie") return problem(403, "dash_session_required", "memory settings are changed by the person signed in to the dash, never with a bearer token", origin);
     const refusal = csrfRefusal(request, who.via, origin);
     if (refusal) return refusal;
     const raw: unknown = await request.json().catch(() => null);

@@ -111,7 +111,8 @@ describe("GET and PUT /me/memory", () => {
   });
 
   it("refuses the write with a bearer, without the panel's Origin, with any other body, and anonymously", async () => {
-    expect((await call(DEV_KEY.jesse, "/me/memory", { method: "PUT", body: { capture: true } })).status).toBe(403);
+    const bearer = await call(DEV_KEY.jesse, "/me/memory", { method: "PUT", body: { capture: true } });
+    expect([bearer.status, (await bodyOf(bearer)).error]).toEqual([403, "dash_session_required"]);
     expect((await dash({ capture: true }, { headers: {} })).status).toBe(403);
     for (const body of [{ capture: "yes" }, { capture: true, pause: true }, {}, [true], null]) {
       expect((await dash(body)).status, JSON.stringify(body)).toBe(400);

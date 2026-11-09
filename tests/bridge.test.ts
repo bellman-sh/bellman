@@ -17,7 +17,7 @@ import {
   createBridge, deliveryOf, installOf, loadRoomManifest,
   type BridgeOptions, type Delivery, type Install, type Remote, type WhoAmI,
 } from "../src/client/bridge.js";
-import { drain, drainInterrupting, pendingCount, readMemberships, renderEvent } from "../src/client/inbox.js";
+import { drain, drainInterrupting, enqueue, pendingCount, readMemberships, renderEvent } from "../src/client/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/files/blobs.js";
 import { type BellmanStore } from "../src/storage/store.js";
@@ -867,6 +867,27 @@ describe("hook delivery (the fallback)", () => {
     const waited = await a.call("bellman_wait", { wait_seconds: 2 });
     expect(waited.data.count).toBe(2);
     expect(waited.text).toContain("are you there");
+    expect(pendingCount(inbox)).toBe(0);
+  });
+
+  // Seat names spec: bellman_wait keeps waiting past events addressed to other seats.
+  it("bellman_wait waits past an event addressed to another seat and returns it with the next one that wakes", async () => {
+    const a = await open(DEV_KEY.jesse, "hook");
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+    const inbox = join(inboxRoot, `${DEV_KEY.jesse}-0`);
+    const base = { session_id: sessionId, member_id: creatorMember, from_member_id: joinerMember, from_label: "peer", ref_id: null, at: new Date().toISOString() };
+    // The join itself is queued and wakes; clear it so the queue holds only what this case puts there.
+    await until(() => pendingCount(inbox) >= 1);
+    drain(inbox);
+    enqueue(inbox, { ...base, cursor: 900, type: "message", payload: { text: "not yours" }, to: [{ member_id: "m_other", name: "coder-9" }] });
+    const quiet = await a.call("bellman_wait", { wait_seconds: 1 });
+    expect(quiet.text).toContain("No peer events arrived");
+    expect(pendingCount(inbox)).toBe(1);
+    enqueue(inbox, { ...base, cursor: 901, type: "message", payload: { text: "yours" } });
+    const woke = await a.call("bellman_wait", { wait_seconds: 2 });
+    expect(woke.text).toContain("not yours");
+    expect(woke.text).toContain("yours");
     expect(pendingCount(inbox)).toBe(0);
   });
 

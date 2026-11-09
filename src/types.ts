@@ -220,6 +220,11 @@ export interface SessionEvent {
   fromLabel: string;
   payload: unknown;
   refId: string | null;
+  /**
+   * The seats an addressed `message` or `artifact` names (seat names spec): it interrupts them and is ambient for every
+   * other reader, who can still read it. Absent or null for every event that is not addressed. Never set from a payload.
+   */
+  toMemberIds?: string[] | null;
   at: number;
 }
 

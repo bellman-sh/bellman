@@ -1,3 +1,4 @@
+import { seatName } from "./room/member-names.js";
 import type { Member, SeatStatus, SessionEvent, SurfaceKind, SurfaceRow, Verb, FsRow } from "./types.js";
 import { actionStates } from "./room/action-state.js";
 import { isTopicRoom, capacityOf, isPublic } from "./room/manifest.js";
@@ -54,10 +55,12 @@ export const fsFile = (r: FsRow) => untrusted(fsOrigin(r), fsFileView(r));
  * the fields it reads, so a member still arriving, with no place in the join
  * order yet, can be shown as one.
  */
-export function storedMember(m: Pick<Member, "memberId" | "label" | "orgId" | "agent" | "capabilities" | "roomRole" | "leftAt">) {
+export function storedMember(m: Pick<Member, "memberId" | "label" | "orgId" | "agent" | "capabilities" | "roomRole" | "leftAt" | "seq">) {
   return {
     member_id: m.memberId,
     label: m.label,
+    // The seat's name in this room (seat names spec): what a sender writes in `to`.
+    name: seatName(m),
     org_id: m.orgId,
     agent: m.agent,
     capabilities: m.capabilities,

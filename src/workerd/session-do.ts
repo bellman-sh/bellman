@@ -1,4 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
+import { addressedAway } from "../room/attention.js";
+import { seatNames } from "../room/member-names.js";
 import { DurableObject } from "cloudflare:workers";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "../bans.js";
 import { codeIsLive } from "../room/codes.js";
@@ -168,7 +170,7 @@ const EXPIRY_HANDLER = "expiry";
 const DECISION_HANDLER = "decision";
 
 /** A long poll: woken with the events past `after`, at most `limit` of them when the poll gave one. */
-type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?: number };
+type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?: number; reader?: string };
 
 /**
  * What a hibernating socket remembers. The runtime rejects more than 16 KB;
@@ -1105,7 +1107,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       );
     }
     // As no one (R2), so the attachment below still takes its cursor from `missed`.
-    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e)));
+    // Seat names on every frame (seat names spec); the frame carries `to`, and the receiving side decides whether it wakes.
+    const names = seatNames(rows);
+    const frames = readableEvents(missed, rows, null).map((e) => JSON.stringify(publicEvent(e, { names })));
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -3748,18 +3752,21 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * own timeout. Storage is async here, so the read is awaited FIRST and the
    * registration then runs synchronously — no await between check and push.
    */
-  async waitForEvents(cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]> {
+  async waitForEvents(cursor: number, waitMs: number, limit?: number, reader?: string): Promise<SessionEvent[]> {
     const immediate = await this.events(cursor, limit);
-    if (immediate.length > 0 || waitMs <= 0) return immediate;
+    const wakes = reader === undefined ? immediate.length > 0 : immediate.some((e) => !addressedAway(e, reader));
+    if (wakes || waitMs <= 0) return immediate;
 
     return new Promise<SessionEvent[]>((resolve) => {
-      const w: Waiter = { after: cursor, resolve, limit };
+      const w: Waiter = { after: cursor, resolve, limit, reader };
       this.waiters.push(w);
       setTimeout(() => {
         const i = this.waiters.indexOf(w);
         if (i >= 0) {
           this.waiters.splice(i, 1);
-          resolve([]);
+          // A reader-aware wait hands back what it waited past, so the poll's cursor moves on (seat names spec).
+          if (reader === undefined) resolve([]);
+          else void this.events(cursor, limit).then(resolve, () => resolve([]));
         }
       }, waitMs);
     });
@@ -3813,9 +3820,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const all: readonly SessionEvent[] = Array.isArray(events) ? events : [events as SessionEvent];
     if (all.length === 0) return;
     const last = all[all.length - 1].cursor;
-    const woken = this.waiters.filter((w) => last > w.after);
-    this.waiters = this.waiters.filter((w) => last <= w.after);
-    for (const w of woken) w.resolve(all.filter((e) => e.cursor > w.after).slice(0, w.limit));
+    // A reader-aware waiter wakes only for an event not addressed away from its reader (seat names spec), and then reads
+    // from its own cursor, so the addressed-away events it waited past come back with the one that woke it.
+    const wakes = (w: Waiter) => last > w.after
+      && (w.reader === undefined || all.some((e) => e.cursor > w.after && !addressedAway(e, w.reader)));
+    const woken = this.waiters.filter(wakes);
+    this.waiters = this.waiters.filter((w) => !wakes(w));
+    for (const w of woken) {
+      if (w.reader === undefined) w.resolve(all.filter((e) => e.cursor > w.after).slice(0, w.limit));
+      else void this.events(w.after, w.limit).then(w.resolve, () => w.resolve([]));
+    }
 
     for (const event of all) this.#sendToSockets(event, members);
   }
@@ -3867,7 +3881,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!att || event.cursor <= att.cursor) continue;
         if (frame === undefined) {
           const shown = readableEvent(event, members.find((m) => m.memberId === event.fromMemberId), null);
-          frame = shown === null ? null : JSON.stringify(publicEvent(shown));
+          frame = shown === null ? null : JSON.stringify(publicEvent(shown, { names: seatNames(members) }));
         }
         if (frame === null) break;
         ws.send(frame);

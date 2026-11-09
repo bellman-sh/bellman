@@ -1,3 +1,4 @@
+import { seatNames } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
@@ -38,7 +39,7 @@ Args:
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll; the server holds the call until an event arrives or the wait ends. Use 15-20 when expecting a reply; some clients time out slow calls.
   - surface (default false): also return the working surface's front window (frame 1, or the newest items) with frames[] and next; bellman_surface reads further. Use it after a restart, or for the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own excluded), cursor, session_status, more?, surface_cursor?, room_instructions_rev?, surface?, removed?, outstanding? }
+Returns: { events[] (untrusted envelopes, your own excluded; from.name is the sender's seat; an event addressed to other seats has to and ambient), cursor, session_status, more?, surface_cursor?, room_instructions_rev?, surface?, removed?, outstanding? }
 Always pass the returned cursor next time; an empty page can advance it.
 more: true: the page was full (at most ${SYNC_PAGE} events); call again at once with the returned cursor.
 surface_cursor: the cursor of the surface's last change, once it has changed. A surface event in events[] carries the item that changed.
@@ -105,7 +106,7 @@ removed: true: a creator removed you. You still get the history up to and includ
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
       const page = cut === undefined
-        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE)
+        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE, member_id)
         : (await s.eventsAfter(session_id, since_cursor, SYNC_PAGE)).filter((e) => e.cursor <= cut);
 
       // The status is the room's as it is when this poll answers, not as it was when the
@@ -131,6 +132,8 @@ removed: true: a creator removed you. You still get the history up to and includ
         ? (await s.getSession(session_id)) ?? session
         : session;
       const status = sessionStatus(answering);
+      // Read after the wait, so a seat that joined during it is named on its own events (seat names spec).
+      const names = seatNames(answering.members);
 
       // An answer that says `closed` is never a page (#208). Every released client stops at
       // `closed` without reading `more` (src/client/bridge.ts, src/client/bus-link.ts), and a closed room's
@@ -325,7 +328,7 @@ removed: true: a creator removed you. You still get the history up to and includ
       return ok(
         {
           events: foreign.map((e) => ({
-            ...untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e)),
+            ...untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e, { names, reader: member_id })),
             ...(toAnswer.has(e.cursor) ? { note: VOICE_NOTE } : {}),
           })),
           cursor,

@@ -34,7 +34,8 @@ test programs import these.
   `[src/room/roles.ts:denyVerb]`, `verbsOfRole`, `mustReport`.
 - Names and codes: `[src/room/codes.ts:renderJoinCode]` (`BELL-XXXX-XX-ROLE`), `generateSessionId` (`qs_`),
   `generateConnectToken` (`qct_`), `publicRoomUrl`; `[src/room/handles.ts:checkHandle]`;
-  `[src/room/public-names.ts:claimName]`, `holdsName`; `[src/room/member-names.ts:publicNames]` (`member N`, `host`).
+  `[src/room/public-names.ts:claimName]`, `holdsName`; `[src/room/member-names.ts:publicNames]` (`member N`, `host`); `[src/room/member-names.ts:seatName]` (`<role>-<seq>`),
+  `seatNames`, `resolveAddressees` (ADR 0048); `[src/room/attention.ts:addressedAway]`.
 - Sends: `[src/room/payload.ts]` (`MAX_PAYLOAD_CHARS`, `MAX_PAYLOAD_DEPTH`), `[src/room/send-limit.ts:admitAt]`,
   `[src/client/result-data.ts:resultData]`.
 - Decisions (ADR 0040): `[src/room/decision.ts:evaluate]` the rule engine (closes a decision `passed`, or `failed` as

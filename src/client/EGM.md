@@ -26,6 +26,9 @@ into the mod.
   takes only the events that interrupt.
 - `[src/client/monitor.ts:runMonitor]` the plugin's Monitor: finds the inbox through its process ancestry and prints
   each interrupting event once, on one line, as it lands.
+- An event addressed to other seats (ADR 0048) starts no turn: `[src/client/inbox.ts:wakes]` decides it,
+  `[src/client/inbox.ts:drainWaking]` leaves a queue of only such events in place for the Stop hook and `bellman_wait`,
+  the monitor's `drainInterrupting` takes none, and `pendingSummary` counts it as ambient, which keeps the mod's wake off it.
 - `[src/client/bus.ts:openBus]` one coordinator per machine and identity serving the other bridges over a Unix socket
   (NDJSON); `[src/client/bus.ts:RoomWindow]` the coordinator's contiguous window of recent events.
 - `[src/client/bus-link.ts:createBusLink]` links a bridge's watches to the bus and room sockets and hands a member back to

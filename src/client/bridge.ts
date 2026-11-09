@@ -25,7 +25,7 @@ import type {
   DoorSurfaceWritten,
 } from "./door-protocol.js";
 import {
-  discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
+  discardThrough, drainWaking, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta, wakes,
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import { resultData } from "./result-data.js";
@@ -1233,7 +1233,7 @@ export function createBridge(opts: BridgeOptions) {
     // The door reports what arrived, interrupting or not, before anything takes it from the inbox.
     recentEvents.push(event);
     if (recentEvents.length > RECENT_LIMIT) recentEvents.shift();
-    // Ambient events are queued like any other. The monitor leaves them, and the Stop hook or bellman_wait hands
+    // Ambient events are queued like any other. The monitor leaves them, and any addressed to other seats (`wakes`), and the Stop hook or bellman_wait hands
     // them over at the end of a turn or when the agent asks: skipping the enqueue here would mean a member never
     // saw a progress report at all, rather than seeing it a little later.
     enqueue(inboxDir, event);
@@ -1334,10 +1334,10 @@ export function createBridge(opts: BridgeOptions) {
       : 20;
     const deadline = Date.now() + waitSeconds * 1000;
 
-    let events = drain(inboxDir!);
+    let events = drainWaking(inboxDir!);
     while (events.length === 0 && Date.now() < deadline && !closed) {
       await sleep(250);
-      events = drain(inboxDir!);
+      events = drainWaking(inboxDir!);
     }
     return {
       content: [{ type: "text", text: events.length ? renderBatch(events) : "No peer events arrived." }],

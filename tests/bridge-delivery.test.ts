@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { InMemoryTransport } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import { createBridge, type Delivery, type Remote } from "../src/client/bridge.js";
-import { drain, drainInterrupting, fromEnvelope, renderEvent, type WireEnvelope } from "../src/client/inbox.js";
+import { drain, drainInterrupting, fromEnvelope, renderEvent, renderLine, type WireEnvelope } from "../src/client/inbox.js";
 import { bridgeClient } from "./helpers/bridge-client.js";
 
 const envelope = (over: Record<string, unknown> = {}): WireEnvelope => ({
@@ -143,5 +143,22 @@ describe("deliver", () => {
       envelope({ type: "progress", cursor: 2, ambient: undefined }), // an ambient type it did not
     ]);
     expect(drainInterrupting(inbox).map((e) => e.type)).toEqual(["progress"]);
+  });
+});
+
+describe("deliver, addressed (seat names spec)", () => {
+  const to = (member_id: string, name: string) => [{ member_id, name }];
+  it("lets the monitor take an event addressed to this seat, named, and leave one addressed to another seat", async () => {
+    const inbox = await delivered("hook", [
+      envelope({ type: "message", cursor: 1, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_other", "coder-3") }),
+      envelope({ type: "message", cursor: 2, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_me", "coder-2") }),
+    ]);
+    const shown = drainInterrupting(inbox);
+    expect(shown.map((e) => e.cursor)).toEqual([2]);
+    const line = renderLine(shown[0]!);
+    expect(line).toContain("(lead-1)");
+    expect(line).toContain("addressed to: coder-2 (you)");
+    // The one meant for another seat waits, to ride along with the end of the turn.
+    expect(drain(inbox).map((e) => e.cursor)).toEqual([1]);
   });
 });

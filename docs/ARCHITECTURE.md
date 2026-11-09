@@ -1658,6 +1658,9 @@ loud:
   `answerAction`, the operation `bellman_send` runs, so the verb and the
   first-answer rule are the same on both paths (`src/http/answer.ts`). The page
   shows the request's payload as the peer content it is.
+- **An addressed message is not private** (ADR 0048). `to` decides who is woken,
+  not who can read: the event is in the log every member reads, and in a public
+  room's public log. The server resolves `to`; a payload cannot set it.
 - **In the terminal, the mod holds that line against the agent.** Until the
   mod, "approved by the receiving human" was an instruction to the model
   (`HOOK_INSTRUCTIONS`, `QUEUE_INSTRUCTIONS`), and the model could send the
@@ -2448,7 +2451,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,525** | every request, whether or not you are in a room |
+| Tool definitions | **~11,636** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,640 | once — `connect` 746 plus `confirm` 893, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100); the `confirm` reply itself is at most 24,000 characters (ADR 0047 decision 9) |
 | Receiving a message | ~220 | each |
@@ -2480,7 +2483,8 @@ decision recorded here, not a side effect of a merge.
 | Recall on arrival: `bellman_confirm`'s `recall` block, `members` present first, the reply's 24,000-character ceiling | +55 | 11,570 | #528 (ADR 0047, 9; the ADR allotted 30) |
 | Notes sharing: `bellman_memory`'s `unshare` op | +32 | 11,602 | #538 PR 2 (ADR 0047, 7) |
 | Memory controls: `bellman_memory`'s `paused` refusal, `bellman_confirm`'s `recall.paused` | +19 | 11,621 | #531 (ADR 0047, 13) |
-| MCP SDK 2.x: no tool carries v1's `execution: {"taskSupport": "forbidden"}` (tasks left the core, SEP-2663); `$schema` names JSON Schema 2020-12 | −96 | 11,525 | (#571) |
+| Seat names: `bellman_send`'s `to`, `name` on seats and on each event's `from` | +111 | 11,732 | ADR 0048 |
+| MCP SDK 2.x: no tool carries v1's `execution: {"taskSupport": "forbidden"}` (tasks left the core, SEP-2663); `$schema` names JSON Schema 2020-12 | −96 | 11,636 | (#571) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

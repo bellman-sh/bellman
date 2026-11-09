@@ -287,7 +287,8 @@ export function roomEventFromFrame(sessionId: string, frame: unknown): RoomEvent
   if (typeof frame !== "object" || frame === null) return undefined;
   const { cursor, type, from, payload, ref_id: refId, at } = frame as Record<string, unknown>;
   if (typeof from !== "object" || from === null) return undefined;
-  const { member_id: memberId, label } = from as Record<string, unknown>;
+  const { member_id: memberId, label, name } = from as Record<string, unknown>;
+  const { to } = frame as Record<string, unknown>;
   if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 1) return undefined;
   if (typeof type !== "string" || typeof memberId !== "string" || typeof label !== "string") return undefined;
   if (typeof at !== "string") return undefined;
@@ -301,7 +302,18 @@ export function roomEventFromFrame(sessionId: string, frame: unknown): RoomEvent
     ref_id: refId ?? null,
     at,
     payload,
+    // Seat names spec: the sender's seat, and the seats an addressed event names, which decide whether it wakes a member.
+    ...(typeof name === "string" ? { from_name: name } : {}),
+    ...(Array.isArray(to) ? { to: addressees(to) } : {}),
   };
+}
+
+/** An addressed frame's `to`, kept to the two fields it is known to have; an entry without a member id is dropped. */
+function addressees(to: unknown[]): { member_id: string; name: string | null }[] {
+  return to.flatMap((t) => {
+    const { member_id: id, name } = (t ?? {}) as Record<string, unknown>;
+    return typeof id === "string" ? [{ member_id: id, name: typeof name === "string" ? name : null }] : [];
+  });
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));

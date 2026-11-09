@@ -77,6 +77,10 @@ runtime-free, so vitest, the Node build and the Workers build all import it.
 
 - Every `BellmanStore` method is async `[src/storage/store.ts:BellmanStore]`; reads return detached copies
   (`structuredClone` in `[src/storage/store.ts:detach]`, applied to `MemoryStore` reads and writes).
+- A reader-aware wait (`waitForEvents`'s `reader`, ADR 0048) is not ended by an event addressed to other seats, and at its
+  timeout returns what it waited past [src/storage/memory-store.ts:MemoryStore.waitForEvents]
+  [src/workerd/session-do.ts:SessionDO.waitForEvents]. `[src/storage/idempotency.ts:fingerprint]` covers `toMemberIds`
+  only when set.
 - Read and register in one turn. `[src/workerd/session-do.ts:SessionDO.waitForEvents]` awaits the event read, then pushes its
   waiter onto `this.waiters` synchronously; `[src/storage/memory-store.ts:MemoryStore.waitForEvents]` is not `async`, so its read
   and registration share one synchronous turn. `[src/workerd/session-do.ts:SessionDO.fetch]` (the `/ws` upgrade) does every

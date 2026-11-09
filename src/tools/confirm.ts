@@ -1,3 +1,4 @@
+import { seatName } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -44,7 +45,7 @@ Args:
 
 Your seat is the role the previewed code carried, fixed at bellman_connect: revoking the code since does not change it.
 
-Returns: { session_id, member_id, members[] (present first, each with room_role), room (as previewed), recall: { home (your home-note paths, newest first; read one with bellman_memory), home_omitted, paused (true: the account holds its notes back, and none are listed) }, briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, room_instructions? (as in bellman_connect), cursor }
+Returns: { session_id, member_id, name (your seat name), members[] (present first, each with room_role and name), room (as previewed), recall: { home (your home-note paths, newest first; read one with bellman_memory), home_omitted, paused (true: the account holds its notes back, and none are listed) }, briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes), frames, window, next }, room_instructions? (as in bellman_connect), cursor }
 surface is the front window. The whole reply is at most 24,000 characters: surface items are cut first (next pages the rest), briefs second. bellman_sync carries each later change as a surface event and returns the front window with surface: true; bellman_surface pages with next or reads a frame.
 Verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor: bellman_sync and bellman_send need them.
@@ -151,6 +152,8 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
       // and the retiring of a filled room's codes, were decided inside seatMember,
       // against the sockets then.
       const connected = await s.connectedMembers(joined.id);
+      const seat = joined.members.find((m) => m.memberId === memberId);
+      if (!seat) return fail("session no longer exists.");
 
       const joinEvent = await appendOrFrozen(s, session.id, {
         type: "member_joined",
@@ -162,7 +165,8 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
         // "present" would still read as present hours after the member was
         // reaped. Presence is derived, never stored (ARCHITECTURE.md rule 7),
         // so it belongs on live roster responses only.
-        payload: { member: storedMember({ ...member, agent: member.brief.agent }), brief },
+        // The seated row, which has the `seq` the seat's name is made from; the arriving `member` has none yet.
+        payload: { member: storedMember({ ...seat, agent: member.brief.agent }), brief },
         refId: null,
       });
       // The roster after the seat, not the one read before it: a member this seat displaced
@@ -196,6 +200,7 @@ Errors: "connect token invalid or expired": re-run bellman_connect. "your org's 
       const head: Record<string, unknown> = {
         session_id: session.id,
         member_id: memberId,
+        name: seatName(seat),
         cursor: joinEvent.cursor,
         room: roomPreview(joined, roomRole, identity.userId),
         ...(await roomInstructionsField(s, joined.id)),

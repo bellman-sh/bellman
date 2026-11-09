@@ -21,7 +21,7 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { findDoor, postSeatStatus, readDoorMemory } from "./door.js";
-import { drain, findInbox, inboxRoot, readMemberships, renderBatch } from "./inbox.js";
+import { drainWaking, findInbox, inboxRoot, readMemberships, renderBatch } from "./inbox.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -109,7 +109,7 @@ async function main(): Promise<number> {
   const input = await readStdin();
   // No inbox: no bridge in hook delivery, or one that has not made its inbox yet.
   const dir = findInbox();
-  let events = dir ? drain(dir) : [];
+  let events = dir ? drainWaking(dir) : [];
   const requested = Number(process.env.BELLMAN_HOOK_WAIT_SECONDS ?? 0);
   const waitSeconds = Number.isFinite(requested) ? Math.max(requested, 0) : 0;
 
@@ -117,7 +117,7 @@ async function main(): Promise<number> {
     const deadline = Date.now() + waitSeconds * 1000;
     while (events.length === 0 && Date.now() < deadline) {
       await sleep(500);
-      events = drain(dir);
+      events = drainWaking(dir);
     }
   }
 

@@ -175,11 +175,18 @@ describe("HTTP surface", () => {
     expect((await anonymous({ jsonrpc: "2.0", id: 2, method: "ping" })).status).toBe(200);
   });
 
+  it("lets an MCP client connect and list the tools with no bearer key, and refuses its tool calls", async () => {
+    const client = new Client({ name: "signed-out", version: "0.0.1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)));
+    expect((await client.listTools()).tools).toHaveLength(16);
+    await expect(client.callTool({ name: "bellman_rooms", arguments: {} })).rejects.toThrow(/Unauthorized/);
+    await client.close();
+  });
+
   it("rejects every other /mcp method with no bearer key, or any batch", async () => {
     const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } };
-    const init = { jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } };
     const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
-    for (const body of [call, init, [list, call], [list, list], []]) {
+    for (const body of [call, { jsonrpc: "2.0", id: 4, method: "resources/read", params: { uri: "ui://bellman" } }, [list, call], [list, list], []]) {
       const res = await anonymous(body);
       expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 401]);
       const err = await res.json() as { error: { message: string } };

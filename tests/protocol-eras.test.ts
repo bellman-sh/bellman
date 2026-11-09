@@ -87,13 +87,16 @@ describe("both protocol eras on /mcp", () => {
     await legacy.close();
   });
 
-  it("refuses either era without a key", async () => {
+  it("lets either era connect and list signed out, and refuses its first tool call", async () => {
     for (const era of ["legacy", "modern"] as const) {
       const client = new Client(
         { name: "eras-anon", version: "0.0.1" },
         era === "modern" ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : {},
       );
-      await expect(client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)))).rejects.toThrow();
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)));
+      expect((await client.listTools()).tools.map((t) => t.name), era).toContain("bellman_start");
+      await expect(client.callTool({ name: "bellman_rooms", arguments: {} }), era).rejects.toThrow();
+      await client.close();
     }
   });
 });

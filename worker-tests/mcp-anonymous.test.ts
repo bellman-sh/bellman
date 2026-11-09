@@ -31,6 +31,22 @@ describe("/mcp with no credential", () => {
     expect((await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
   });
 
+  it("answers a 2026-07-28 discovery and listing", async () => {
+    const _meta = {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" },
+      "io.modelcontextprotocol/clientCapabilities": {},
+    };
+    // 2026-07-28 repeats the version and the method in headers, and the server checks they agree with the body.
+    const modern = (method: string) => ({ "mcp-protocol-version": "2026-07-28", "mcp-method": method });
+    const discover = await post({ jsonrpc: "2.0", id: 4, method: "server/discover", params: { _meta } }, modern("server/discover"));
+    expect(discover.status).toBe(200);
+    const listed = await post({ jsonrpc: "2.0", id: 5, method: "tools/list", params: { _meta } }, modern("tools/list"));
+    expect(listed.status).toBe(200);
+    const { result } = await listed.json() as { result: { tools: { name: string }[] } };
+    expect(result.tools.map((t) => t.name)).toContain("bellman_start");
+  });
+
   it("answers a tool call, any batch and an oversized body with the 401 that points at discovery", async () => {
     const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } };
     const oversized = { ...list, params: { pad: "x".repeat(5000) } };

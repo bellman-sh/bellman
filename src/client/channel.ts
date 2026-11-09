@@ -16,9 +16,10 @@
  *                     the code to its own loopback. Over SSH, forward that
  *                     port. With no browser anywhere, set BELLMAN_KEY.
  *   XDG_CONFIG_HOME   optional. Where the credential is cached.
- *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
- *                     Launch with --dangerously-load-development-channels server:<name>.
- *                     "hook": queue them for the Bellman Stop hook and bellman_wait.
+ *   BELLMAN_DELIVERY  "hook" (default): queue peer events for the plugin's monitor, which
+ *                     prints an interrupting one as it lands, the Bellman Stop hook, and
+ *                     bellman_wait. "channel", the push delivery MCP 2026-07-28 retired,
+ *                     is read as "hook".
  *                     "queue": queue them for the agent to collect, with bellman_sync when a
  *                     turn starts and bellman_wait mid-turn, in a host that runs no Stop
  *                     hook. The Claude Desktop bundle sets it (#241).
@@ -60,7 +61,6 @@
  */
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
@@ -137,8 +137,8 @@ const connect: () => Promise<Remote> = key
 /** Who peers will see. A key is unattributable here; the server resolves it per call. */
 const whoami = (): WhoAmI => (key ? { source: "env", label: null } : signedInAs(url, { log }));
 
-const inboxDir = delivery !== "channel" ? inboxDirFor(process.ppid) : undefined;
-if (inboxDir) sweepStaleInboxes();
+const inboxDir = inboxDirFor(process.ppid);
+sweepStaleInboxes();
 
 /** This bridge's door (see below), once it has one. bellman_whoami names `doorPath`; shutdown() closes `door`. */
 let doorPath: string | null = null;
@@ -255,7 +255,8 @@ launchJoin(bridge, process.env.BELLMAN_JOIN_CODE?.trim(), process.cwd(), basenam
 
 // Before the transport connects, so that the first bellman_whoami already names the door.
 await doorOpened;
-await bridge.server.connect(new StdioServerTransport());
+// Either era: a 2025-era initialize, or a 2026-07-28 opening that carries its own version (#571).
+bridge.serve();
 /**
  * Which of the three states this start is in, because the browser is about to
  * be the surprising part. A cached credential is reused in silence and a fresh

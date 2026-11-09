@@ -1,5 +1,5 @@
 import { MAX_ADDRESSEES, resolveAddressees } from "../room/member-names.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   BriefShape, DecisionAnswerShape, OutsideAnswerShape, ProgressShape, SEND_KINDS, isReport, SEND_VERB, appendOrFrozen, fail, ok, refusal,

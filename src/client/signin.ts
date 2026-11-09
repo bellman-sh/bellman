@@ -2,19 +2,21 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join, win32 } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { Client, OAuthError, OAuthErrorCode } from "@modelcontextprotocol/client";
+import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "@modelcontextprotocol/client";
 import { remoteOf, type Remote, type WhoAmI } from "./bridge.js";
 import { VERSION } from "./version.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockHandle, type LockOptions, type ServerCredential,
 } from "./credentials.js";
+
+/** The authorization server refused a grant (a spent or revoked refresh token, a stale code): `invalid_grant`. */
+const isInvalidGrant = (err: unknown): boolean => err instanceof OAuthError && err.code === OAuthErrorCode.InvalidGrant;
 
 /**
  * The browser half of self-serve credentials: a loopback listener for the
@@ -47,14 +49,21 @@ export class SignInCancelled extends Error {
   }
 }
 
+/** What an authorization callback brought back: the code, and the issuer that sent it (RFC 9207) when it named one. */
+export interface Callback {
+  code: string;
+  iss?: string;
+}
+
 export interface Listener {
   redirectUri: string;
   /**
-   * One wait at a time. Resolves with the authorization code; rejects with a plain
-   * Error on a refusal or a timeout, and with SignInCancelled if the listener is
-   * closed first.
+   * One wait at a time. Resolves with the authorization code and the callback's `iss`; rejects with a plain
+   * Error on a refusal or a timeout, and with SignInCancelled if the listener is closed first. With `issuer`, a
+   * callback naming another issuer is refused without showing what it said: in a mix-up attack those words are
+   * the attacker's.
    */
-  waitForCode(state: string, timeoutMs: number): Promise<string>;
+  waitForCode(state: string, timeoutMs: number, issuer?: string): Promise<Callback>;
   /**
    * Stops listening and ends a pending wait with SignInCancelled. Safe to call
    * twice. The wait's promise rejects, so whoever holds it must already have a
@@ -120,7 +129,7 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
   server.on("error", (error) => log(`the sign-in listener at ${redirectUri} reported an error: ${error.message}`));
   return {
     redirectUri,
-    waitForCode(state, timeoutMs) {
+    waitForCode(state, timeoutMs, issuer) {
       // Fail closed. An empty state matches "state=", so waiting on one would
       // accept a callback from anyone who sends that; a caller that has no state
       // to check against has a bug, and it should be loud.
@@ -133,7 +142,7 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
       // One wait at a time. Two would each answer the same request; the second
       // writeHead throws ERR_HTTP_HEADERS_SENT, uncaught, and it ends the bridge.
       if (cancelPending) return Promise.reject(new Error("waitForCode is already waiting on this listener"));
-      return new Promise<string>((resolve, reject) => {
+      return new Promise<Callback>((resolve, reject) => {
         const timer = setTimeout(
           () => settle(() => reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for the sign-in to finish`))),
           timeoutMs,
@@ -193,6 +202,17 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
             return; // deliberately does NOT settle the promise
           }
 
+          /**
+           * RFC 9207: the issuer names itself on every response. The SDK checks it on a code; an error never
+           * reaches the SDK, so its words are shown here, and only when they came from our server.
+           */
+          const iss = url.searchParams.get("iss") ?? undefined;
+          if (issuer && iss !== undefined && iss !== issuer) {
+            html(400, "That sign-in came from another server", "Start it again from your terminal.");
+            settle(() => reject(new Error(`the sign-in answer named issuer ${iss}, not ${issuer}`)));
+            return;
+          }
+
           const error = url.searchParams.get("error");
           if (error) {
             const description = url.searchParams.get("error_description");
@@ -208,7 +228,7 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
             return;
           }
           html(200, "Signed in to Bellman", "You can close this tab and go back to your terminal.");
-          settle(() => resolve(code));
+          settle(() => resolve(iss === undefined ? { code } : { code, iss }));
         }
 
         server.on("request", onRequest);
@@ -420,13 +440,27 @@ class BridgeAuth implements OAuthClientProvider {
   clientInformation(): OAuthClientInformationFull | undefined {
     return this.cred.client ? ({ ...this.cred.client } as OAuthClientInformationFull) : undefined;
   }
-  async saveClientInformation(info: OAuthClientInformationFull): Promise<void> {
-    await this.set({ ...this.cred, client: { client_id: info.client_id } });
+  /**
+   * The SDK stamps `issuer` on what it saves and refuses, on read, a client or token another authorization server
+   * issued (SEP-2352). Both are kept and handed back as they came, or the SDK re-saves them to restamp, through
+   * shapes that would lose what this file adds.
+   */
+  async saveClientInformation(info: OAuthClientInformationFull & { issuer?: string }): Promise<void> {
+    await this.set({ ...this.cred, client: info.issuer ? { client_id: info.client_id, issuer: info.issuer } : { client_id: info.client_id } });
   }
 
   tokens(): OAuthTokens | undefined {
     const t = this.cred.tokens;
-    return t ? { access_token: t.access_token, refresh_token: t.refresh_token, token_type: "Bearer" } : undefined;
+    if (!t) return undefined;
+    // expires_in as what is left, so a token the SDK re-saves keeps its expiry.
+    const left = t.expires_at === undefined ? undefined : Math.max(0, Math.floor((t.expires_at - Date.now()) / 1000));
+    return {
+      access_token: t.access_token,
+      refresh_token: t.refresh_token,
+      token_type: "Bearer",
+      ...(left === undefined ? {} : { expires_in: left }),
+      ...(t.issuer ? { issuer: t.issuer } : {}),
+    } as OAuthTokens;
   }
   /**
    * Where a refresh that happens AFTER connectSignedIn returned is written.
@@ -457,14 +491,15 @@ class BridgeAuth implements OAuthClientProvider {
     await this.persist?.(this.cred);
   }
 
-  async saveTokens(tokens: OAuthTokens): Promise<void> {
+  async saveTokens(tokens: OAuthTokens & { issuer?: string }): Promise<void> {
     // No identity here: set() reads it off these tokens, and carries nothing over from the last.
     await this.set({
       ...this.cred,
       tokens: {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
-        expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
+        expires_at: tokens.expires_in !== undefined ? Date.now() + tokens.expires_in * 1000 : undefined,
+        ...(tokens.issuer ? { issuer: tokens.issuer } : {}),
       },
     });
   }
@@ -530,7 +565,7 @@ interface Attempt {
  * The provider is the point. An earlier version sent a bare Authorization
  * header and no authProvider at all, which made this path unable to refresh:
  * the transport's 401 handler is guarded on `this._authProvider`, so a 401 ten
- * minutes in became a plain StreamableHTTPError and the session was dead. Since
+ * minutes in became a plain SdkHttpError and the session was dead. Since
  * this is the path almost every window takes, that capped almost every session
  * at one access-token lifetime.
  *
@@ -571,7 +606,7 @@ async function connectCached(
     // Either the SDK reached for the browser, or a second invalid_grant escaped
     // auth()'s own retry — meaning the stored token and anything newer on disk
     // are both dead. Both need a human, and neither is this function's to do.
-    if (err instanceof InvalidGrantError) return { provider };
+    if (isInvalidGrant(err)) return { provider };
     if (err instanceof UnauthorizedError && wantsBrowser) return { provider };
     throw err;
   }
@@ -1026,7 +1061,7 @@ async function signIn(
          * process, a password manager completing the form, an authorization
          * server answering an already-approved client straight from cache.
          */
-        const waiting = listener.waitForCode(provider.state(), timeout);
+        const waiting = listener.waitForCode(provider.state(), timeout, new URL(opts.serverUrl).origin);
         /**
          * And attach a handler in the same turn. openIt() below can throw, and
          * the close() in the finally would then reject this with nobody awaiting
@@ -1035,10 +1070,10 @@ async function signIn(
          */
         waiting.catch(() => undefined);
         listenerSpent = true;
-        let code: string;
+        let callback: Callback;
         try {
           await openIt(pending);
-          code = await waiting;
+          callback = await waiting;
         } finally {
           /**
            * Nothing else will ever arrive for this wait, and a request that
@@ -1048,7 +1083,8 @@ async function signIn(
            */
           listener.close();
         }
-        await transport.finishAuth(code);
+        // The SDK checks `iss` against the issuer the server's metadata named before it redeems the code.
+        await transport.finishAuth(callback.code, callback.iss);
         /**
          * A fresh pair for the connect that follows. client.connect() calls
          * transport.start(), and a transport that has already been started
@@ -1075,7 +1111,7 @@ async function signIn(
        * Not after the listener has been waited on: it is closed by then, so a
        * second pass could not receive a callback.
        */
-      if (!retried && !listenerSpent && err instanceof InvalidGrantError) {
+      if (!retried && !listenerSpent && isInvalidGrant(err)) {
         retried = true;
         // No tokens, so no identity: the file must not go on naming an account that
         // nothing can sign in as, for however long the browser takes — or for good, if

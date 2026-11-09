@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { toModern } from "./helpers/bridge-client.js";
 
 /**
  * channel.ts as Claude Code runs it: a real process, over real stdio.
@@ -96,7 +97,7 @@ interface Options {
   uploadRoot?: string;
   /** The directory to start the process in, which is its upload root while `uploadRoot` is unset. */
   cwd?: string;
-  /** BELLMAN_DELIVERY for the process, with its inbox under a temporary BELLMAN_INBOX_ROOT. Unset, it is channel. */
+  /** BELLMAN_DELIVERY for the process. Unset, it is hook. Its inbox is under a temporary BELLMAN_INBOX_ROOT either way. */
   delivery?: string;
   /** BELLMAN_INSTALL for the process, as a package's env would set it. Unset, it is npm's. */
   install?: string;
@@ -138,11 +139,10 @@ function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoo
   env.BELLMAN_NO_BROWSER = "1";
   delete env.BELLMAN_UPLOAD_ROOT;
   if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;
-  if (delivery) {
-    env.BELLMAN_DELIVERY = delivery;
-    env.BELLMAN_INBOX_ROOT = mkdtempSync(join(tmpdir(), "bellman-inbox-"));
-    dirs.push(env.BELLMAN_INBOX_ROOT);
-  }
+  // Every delivery keeps an inbox, so every bridge here gets one of its own, never the real HOME's.
+  if (delivery) env.BELLMAN_DELIVERY = delivery;
+  env.BELLMAN_INBOX_ROOT = mkdtempSync(join(tmpdir(), "bellman-inbox-"));
+  dirs.push(env.BELLMAN_INBOX_ROOT);
   delete env.BELLMAN_INSTALL;
   if (install) env.BELLMAN_INSTALL = install;
 
@@ -161,7 +161,11 @@ function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoo
         .split("\n")
         .filter((line) => line.startsWith("[bellman] "))
         .map((line) => line.slice("[bellman] ".length)),
-    send: (message) => proc.stdin!.write(`${JSON.stringify(message)}\n`),
+    // As a 2026-07-28 client sends it: the bridge refuses the 2025 handshake (see toModern).
+    send: (message) => {
+      const modern = toModern(message as Record<string, unknown>);
+      if (modern) proc.stdin!.write(`${JSON.stringify(modern)}\n`);
+    },
     exit: new Promise((resolve) =>
       proc.on("exit", (code, signal) => resolve({ code, signal: signal as string | null }))
     ),
@@ -205,7 +209,7 @@ describe("the bridge as a process", () => {
 
     expect({ ready, log: bridge.log(), exitCode: bridge.proc.exitCode }).toEqual({
       ready: true,
-      log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
+      log: [`ready: hook delivery via ${bellman.url} (not signed in yet)`],
       // Not exit 1 with "BELLMAN_KEY is not set; refusing to start".
       exitCode: null,
     });
@@ -283,7 +287,7 @@ describe("the bridge as a process", () => {
       stopped: "exited",
       code: 0,
       signal: null,
-      log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
+      log: [`ready: hook delivery via ${bellman.url} (not signed in yet)`],
     });
   });
 
@@ -300,7 +304,7 @@ describe("the bridge as a process", () => {
     expect({ reported, log: bridge.log() }).toEqual({
       reported: true,
       log: [
-        `ready: channel delivery via ${bellman.url} (not signed in yet)`,
+        `ready: hook delivery via ${bellman.url} (not signed in yet)`,
         expect.stringMatching(/^sign-in failed: .*nope/),
       ],
     });
@@ -320,7 +324,7 @@ describe("the bridge as a process", () => {
 
     expect({ ready, log: bridge.log() }).toEqual({
       ready: true,
-      log: [`ready: channel delivery via ${bellman.url} (signed in)`],
+      log: [`ready: hook delivery via ${bellman.url} (signed in)`],
     });
   });
 
@@ -339,7 +343,7 @@ describe("the bridge as a process", () => {
       reached: true,
       authorization: "Bearer qk_dev_jesse",
       // No sign-in was attempted, so there is no sign-in failure to report either.
-      log: [`ready: channel delivery via ${bellman.url} (BELLMAN_KEY)`],
+      log: [`ready: hook delivery via ${bellman.url} (BELLMAN_KEY)`],
     });
   });
 });

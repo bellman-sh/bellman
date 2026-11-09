@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import { busPath } from "../src/client/bus.js";
 import { createBusLink, type BusConnection, type BusLink, type BusLinkOptions } from "../src/client/bus-link.js";
 import type { PeerEvent } from "../src/client/inbox.js";

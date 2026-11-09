@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { DOOR_VERSION, type DoorStatus } from "../src/client/door-protocol.js";
 import type { WireEnvelope } from "../src/client/inbox.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { modernRequest } from "./helpers/bridge-client.js";
 
 /**
  * channel.ts as Claude Code runs it, and the door it opens.
@@ -161,15 +162,11 @@ async function open(
         clearTimeout(timer);
         resolve(answer);
       });
-      proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      proc.stdin!.write(`${JSON.stringify(modernRequest(id, method, params as Record<string, unknown>))}\n`);
     });
 
-  await request("initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "channel-door-test", version: "0.0.1" },
-  });
-  proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  // A 2026-07-28 client opens with no handshake; server/discover is the request that stands in for one.
+  await request("server/discover", {});
 
   const call: Bridge["call"] = async (name, args = {}) => {
     const answer = await request("tools/call", { name, arguments: args });
@@ -238,7 +235,7 @@ describe("the bridge's door, as the process opens it", () => {
     const status = await get(door, "/status");
     expect(status.status).toBe(200);
     expect(JSON.parse(status.body)).toEqual({
-      version: DOOR_VERSION, delivery: "channel", has_sign_in: true, seats: [], waiting: [], recent: [],
+      version: DOOR_VERSION, delivery: "hook", has_sign_in: true, seats: [], waiting: [], recent: [],
     });
 
     expect(await bridge.stop()).toBe(0);
@@ -276,7 +273,7 @@ describe("the bridge's door, as the process opens it", () => {
       // would not if the failure had ended it.
       log: [
         expect.stringMatching(new RegExp(`^door unavailable: .*${notAFolder}`)),
-        expect.stringMatching(/^ready: channel delivery via /),
+        expect.stringMatching(/^ready: hook delivery via /),
       ],
     });
     expect(existsSync(join(notAFolder, `${bridge.pid}.sock`))).toBe(false);
@@ -305,9 +302,9 @@ describe("the bridge's door, as the process opens it", () => {
   // a BELLMAN_KEY is not an account the bridge can read, and it is still a credential the bridge holds.
   describe("what /status says of the process", () => {
     const cases: Array<[string, Options, Pick<DoorStatus, "delivery" | "has_sign_in">]> = [
-      ["a BELLMAN_KEY, in channel delivery", { key: DEV_KEY.jesse }, { delivery: "channel", has_sign_in: true }],
-      ["a cached sign-in, in hook delivery", { cachedSignIn: true, delivery: "hook" }, { delivery: "hook", has_sign_in: true }],
-      ["no key and no sign-in", {}, { delivery: "channel", has_sign_in: false }],
+      ["a BELLMAN_KEY, in hook delivery by default", { key: DEV_KEY.jesse }, { delivery: "hook", has_sign_in: true }],
+      ["a cached sign-in, in queue delivery", { cachedSignIn: true, delivery: "queue" }, { delivery: "queue", has_sign_in: true }],
+      ["no key and no sign-in", {}, { delivery: "hook", has_sign_in: false }],
     ];
 
     it.each(cases)("with %s", async (_what, options, expected) => {

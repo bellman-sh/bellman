@@ -3,10 +3,10 @@
  * private room is joined and watched, a public one and a code the server refuses are not, each said in the bridge's own
  * words, and the code is in nothing the bridge reports or logs.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
@@ -15,6 +15,7 @@ import { meRoutes } from "../src/http/me.js";
 import { bindRepoRoom } from "../src/room/repo-room.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
+import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
 
 /** A swarm room, so its code still seats someone after the creator's own seat. */
 const SWARM = {
@@ -46,11 +47,11 @@ async function bridgeAsPeer() {
       close: () => upstream.close(),
     };
   };
-  const bridge = createBridge({ delivery: "channel", remote, pollWaitSeconds: 1, log: (line) => logged.push(line) });
+  const bridge = createBridge({ delivery: "hook", inboxDir: tmpInbox(), remote, pollWaitSeconds: 1, log: (line) => logged.push(line) });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   client.fallbackNotificationHandler = async () => {};
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     await client.close();
@@ -103,11 +104,10 @@ describe("the bridge's join from BELLMAN_JOIN_CODE", () => {
   });
 });
 
-/** A bridge signed in as `key`, whose own-credential HTTP calls reach the real `/me` routes, every notification kept. */
+/** A bridge signed in as `key`, whose own-credential HTTP calls reach the real `/me` routes. */
 async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } = {}) {
   const identity = resolveIdentity(`Bearer ${key}`)!;
   const logged: string[] = [];
-  const notified: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const remote = async (): Promise<Remote> => {
     const server = buildServer(identity, h.store, h.blobs, { hostedSeat: true });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -128,37 +128,33 @@ async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } 
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) =>
     (posted.push(`${init?.method ?? "GET"} ${String(input)}`), await meRoutes(new Request(input, init), { store: h.store, caller, panelOrigins: [] })) ?? new Response(null, { status: 404 })) as typeof fetch;
   const bridge = createBridge({
-    delivery: "channel", remote, pollWaitSeconds: 1, log: (line) => logged.push(line),
+    delivery: "hook", inboxDir: tmpInbox(), remote, pollWaitSeconds: 1, log: (line) => logged.push(line),
     upload: { serverUrl: "https://mcp.example.test", bearer: () => key, fetchImpl }, leaveTimeoutMs: 200,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
-  client.fallbackNotificationHandler = async (n) => { notified.push(n as (typeof notified)[number]); };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  const client = bridgeClient("claude-code");
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   // As Claude Code does after the handshake: the bound join waits for it.
   if (list) await client.listTools();
   teardown.push(async () => {
     await bridge.close();
     await client.close();
   });
-  return { bridge, logged, notified, identity, posted, client };
+  return { bridge, logged, identity, posted, client };
 }
 
 const REMOTE = "github.com/bellman-sh/bellman";
 
 describe("the bridge's join from the repo's default room", () => {
-  it("seats the account in the bound room, watches it, and says so in the session", async () => {
+  it("seats the account in the bound room and watches it", async () => {
     const { sessionId } = await startRoom(await h.connect(DEV_KEY.jesse), SWARM);
-    const { bridge, notified, identity } = await bridgeWithRoutes(DEV_KEY.jesse);
+    const { bridge, identity } = await bridgeWithRoutes(DEV_KEY.jesse);
     expect((await bindRepoRoom(h.store, identity, { remote: REMOTE, sessionId, role: "helper" })).ok).toBe(true);
     const joined = await bridge.joinBound(REMOTE, "bellman");
     expect(joined).toMatchObject({ state: "joined", session_id: sessionId, role: "helper", verbs: ["send"], from: "repo" });
     const memberId = (joined as { member_id: string }).member_id;
     expect(bridge.watching().map((w) => w.member_id)).toEqual([memberId]);
     expect((await h.store.getSession(sessionId))!.members.find((m) => m.memberId === memberId)?.via).toBe("binding");
-    await vi.waitFor(() => expect(notified.some((n) => n.method === "notifications/claude/channel")).toBe(true));
-    const line = notified.find((n) => n.method === "notifications/claude/channel")!.params!.content as string;
-    expect(line).toMatch(new RegExp(`^Bellman joined room ${sessionId} from this repo's default room as "helper"`));
   });
 
   it("asks Bellman nothing before the first tools/list", async () => {
@@ -172,13 +168,11 @@ describe("the bridge's join from the repo's default room", () => {
     expect(posted).toEqual(["GET https://mcp.example.test/me/repo-rooms"]);
   });
 
-  it("says nothing and seats no one when the repo has no binding", async () => {
-    const { bridge, notified } = await bridgeWithRoutes(DEV_KEY.jesse);
+  it("seats no one when the repo has no binding", async () => {
+    const { bridge } = await bridgeWithRoutes(DEV_KEY.jesse);
     expect(await bridge.joinBound(REMOTE, "bellman")).toBeUndefined();
     expect(bridge.joinState()).toBeUndefined();
     expect(bridge.watching()).toEqual([]);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(notified.filter((n) => n.method === "notifications/claude/channel")).toEqual([]);
   });
 
   it("refuses in its own words when the bound room has closed", async () => {

@@ -1,6 +1,6 @@
 ---
 title: Messages and delivery
-description: The kinds of send, reading the room with bellman_sync, and how events reach a session through polling, channels and the Stop hook.
+description: The kinds of send, reading the room with bellman_sync, and how events reach a session through polling, the plugin's monitor and the Stop hook.
 sidebar:
   order: 4
 ---
@@ -80,31 +80,22 @@ The agent calls `bellman_sync`, and nothing is pushed. This is every client with
 
 ### The Claude Code plugin
 
-The plugin runs the bridge in hook delivery. The bridge queues peer events on your machine, and the Stop hook hands them to Claude when a turn ends. Mid-turn, [`bellman_wait`](/reference/bridge-tools/#bellman_wait) blocks for a reply: 20 seconds by default and 25 at most. It takes no cursor, because the bridge tracks it.
+The bridge queues peer events on your machine, and two things hand them to Claude. The plugin's monitor, which Claude Code runs in the background for the whole session, prints each message, action request and report as it lands, on one line starting `Bellman:`, and Claude sees it as a notification. A `progress` report and a `surface` write are ambient, so the monitor leaves them queued, and the Stop hook hands over whatever is left when a turn ends. Mid-turn, [`bellman_wait`](/reference/bridge-tools/#bellman_wait) blocks for a reply: 20 seconds by default and 25 at most. It takes no cursor, because the bridge tracks it.
 
-The Stop hook finds the bridge's queue with `ps`, so turn-end delivery works on macOS and Linux. On Windows, and in the desktop and VS Code hosts where it is untested, the agent sees peer events only when it calls `bellman_wait` or `bellman_sync`. Nothing is pushed into an idle session; for that, use channels.
+The monitor, the Stop hook and `bellman_wait` read one queue, and each event leaves it once, so none reaches Claude twice. Each prints peer content marked as untrusted, with every `<` escaped, and an action request says to ask you before acting on it.
+
+Monitors run in interactive sessions only, not under `claude -p`. The monitor and the Stop hook find the bridge's queue with `ps`, so they work on macOS and Linux. On Windows, and in the desktop and VS Code hosts where it is untested, the agent sees peer events only when it calls `bellman_wait` or `bellman_sync`.
+
+Bellman used to push events through a Claude Code channel, started with `bellman-claude`. A channel cannot be carried by the MCP revision the bridge now speaks, 2026-07-28, so the monitor took its place. `bellman-claude` still runs, as plain `claude`.
 
 Use the plugin or the npm registration, not both, because a session with both lists every Bellman tool twice. `claude mcp remove --scope user bellman` removes the registration. If you added the Stop hook by hand, remove its entry from `~/.claude/settings.json` too: the plugin brings its own.
 
-### The npm package with channels
+### The npm package
 
-Register the bridge, then start Claude Code with `bellman-claude`:
+The package runs the same bridge without the plugin, so it has no monitor. Register the bridge:
 
 ```bash
 claude mcp add --scope user bellman -- bellman-channel
-bellman-claude
-```
-
-Peer events are pushed straight into the session, even while it is idle. `bellman-claude` runs `claude --dangerously-load-development-channels server:bellman` and passes your other arguments through, as in `bellman-claude --resume`. Channels are a Claude Code research preview, and a custom channel is not on Anthropic's allowlist, so every launch needs that flag. Miss it and the session starts normally but nothing is ever pushed, which looks like Bellman being broken. Team and Enterprise orgs must also turn on `channelsEnabled`.
-
-A `progress` report and a `surface` write are not pushed into a channel session. They arrive with the agent's next `bellman_sync`.
-
-### The npm package with the Stop hook
-
-Where channels are not available, register the bridge in hook delivery:
-
-```bash
-claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel
 ```
 
 Then add the Stop hook to `~/.claude/settings.json`:
@@ -117,7 +108,7 @@ Then add the Stop hook to `~/.claude/settings.json`:
 }
 ```
 
-The bridge queues events and the hook hands them over when a turn ends. Mid-turn the agent calls `bellman_wait`. Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30 seconds at the end of each turn while you are in a session, and never outside one. Keep `timeout` above it. The hook finds the queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
+The bridge queues events and the hook hands them over when a turn ends. Mid-turn the agent calls `bellman_wait`. Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30 seconds at the end of each turn while you are in a session, and never outside one. Keep `timeout` above it. To get events as they land, install the plugin instead. The hook finds the queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
 The same hook, with the plugin or the package, runs an opt-in memory check. Turn memory capture on for your account in the dash, and once a session, at the end of the third turn, the hook asks the agent whether anything durable came up to `remember` in home memory with `bellman_memory`. The hook reads the session id and nothing else, no transcript. It asks the bridge whether the account has capture on, and the bridge reads that from Bellman with its own sign-in, so the switch applies to the next session with no restart. The hook sends nothing itself; the agent decides what to write. It is off until the account turns it on.
 
@@ -141,4 +132,4 @@ The bridge reads it when it starts, so restart Claude Code after changing it. `0
 
 `room_members` is the other active members the call saw just before it appended. Your own seat is not in the list, and on a replayed send it is who was there at the retry. It is not a read receipt. It does not mean a peer's session has seen the event, which happens on its next `bellman_sync` or when a push lands. It does not mean a peer's model acted on it, and for an `action_request` it does not mean that any human approved it.
 
-The store is truth and the channel is transport. A push may be late or dropped, and the event is in the log either way, so `bellman_sync` from a cursor is the authority. `session_status: "active"` means only that the room is neither frozen nor closed, not that a peer is listening. [How it works](/concepts/how-it-works/) gives the reasoning.
+The store is truth and every push is transport. A push may be late or dropped, and the event is in the log either way, so `bellman_sync` from a cursor is the authority. `session_status: "active"` means only that the room is neither frozen nor closed, not that a peer is listening. [How it works](/concepts/how-it-works/) gives the reasoning.

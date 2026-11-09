@@ -9,9 +9,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/client/bridge.js";
 import { buildServer } from "../src/server.js";
@@ -20,6 +20,7 @@ import { MemoryBlobStore } from "../src/files/blobs.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { member, session } from "./helpers/fixtures.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 const temps: string[] = [];
 const closers: (() => Promise<unknown>)[] = [];
@@ -50,8 +51,8 @@ async function bridged(remote: () => Promise<Remote>) {
   temps.push(inboxDir);
   const bridge = createBridge({ delivery: "hook", inboxDir, remote });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const host = new Client({ name: "host", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), host.connect(clientSide)]);
+  const host = bridgeClient("host");
+  await Promise.all([bridge.serve(serverSide), host.connect(clientSide)]);
   closers.push(() => bridge.close(), () => host.close());
   return { bridge, host };
 }
@@ -71,7 +72,7 @@ describe("the bridge and UI resources", () => {
 
     // A host that sees `resources` enumerates templates too; "Method not found"
     // there is what the Desktop bundle would show for a server that has none.
-    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
+    expect(await host.listResourceTemplates()).toMatchObject({ resourceTemplates: [] });
   });
 
   it("answers an empty list, and a not-found read, for a remote that serves no resources", async () => {
@@ -81,10 +82,11 @@ describe("the bridge and UI resources", () => {
       close: async () => undefined,
     };
     const { host } = await bridged(async () => bare);
-    expect(await host.listResources()).toEqual({ resources: [] });
-    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
-    // -32002 is the code MCP reserves for a resource that does not exist.
-    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32002 });
+    expect(await host.listResources()).toMatchObject({ resources: [] });
+    expect(await host.listResourceTemplates()).toMatchObject({ resourceTemplates: [] });
+    // A missing resource is -32602, Invalid Params: MCP 2026-07-28 requires it, and the SDK sends it on every era.
+    // Clients still accept the -32002 earlier servers sent.
+    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32602 });
   });
 
   it("arms no watcher from a bellman_rooms result", async () => {

@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
 import worker from "../src/workerd/worker.js";
 import { SERVER_VERSION } from "../src/server.js";
 

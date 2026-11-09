@@ -46,10 +46,10 @@ function event(over: Partial<PeerEvent> = {}): PeerEvent {
   };
 }
 
-/** A bridge in channel delivery, holding a sign-in, watching one member in one room, whose log reads answer 200. */
+/** A bridge in hook delivery with no inbox given, holding a sign-in, watching one member in one room, whose log reads answer 200. */
 function source(over: Partial<DoorSource> = {}): DoorSource {
   return {
-    delivery: "channel",
+    delivery: "hook",
     hasSignIn: () => true,
     seats: () => [{ session_id: "qs_room1", member_id: "m1", retrying: false }],
     recent: () => [event()],
@@ -139,7 +139,7 @@ describe("statusOf", () => {
       delivery: "queue",
       waiting: [{ session_id: "qs_room1", interrupting: 1, ambient: 0 }],
     });
-    expect(statusOf(source({ delivery: "channel", inboxDir, seats })).waiting).toEqual([]);
+    expect(statusOf(source({ delivery: "hook", inboxDir: undefined, seats })).waiting).toEqual([]);
   });
 
   it("adds up the members that sit in one room, and lists a room once", () => {

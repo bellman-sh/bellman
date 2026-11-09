@@ -65,7 +65,10 @@
     "prepublishOnly": "npm run verify && npm run typecheck:worker"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/core": "^2.4.0",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "diff": "8.0.2",
     "express": "^5.2.1",
     "yaml": "^2.9.1",

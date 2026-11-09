@@ -42,7 +42,10 @@ export type DoorJoin = (
   from?: "code" | "repo";
 };
 
-/** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
+/**
+ * `GET /status`. `delivery` is "hook" or "queue"; "channel" is only ever reported by a bridge from before MCP
+ * 2026-07-28 retired it, which kept no inbox, so its `waiting` is empty.
+ */
 export interface DoorStatus {
   version: 1;
   delivery: "hook" | "channel" | "queue";
@@ -243,8 +246,7 @@ function lineOf(e: Pick<DoorEvent, "type" | "payload"> & { ref_id?: string | nul
 }
 
 /**
- * The one line said about a join at session start: printed by the plugin's join hook, and pushed into the session by a
- * bridge in channel delivery after a join from the repo's default room. `undefined` is a bridge too old to join from a
+ * The one line said about a join at session start: printed by the plugin's join hook. `undefined` is a bridge too old to join from a
  * code. The role and verbs are the room creator's words, cleaned.
  */
 export function joinLine(join: DoorJoin | undefined): string {

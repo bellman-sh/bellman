@@ -107,7 +107,7 @@ async function captureOn(): Promise<boolean> {
 
 async function main(): Promise<number> {
   const input = await readStdin();
-  // No inbox: no bridge in hook delivery. One in channel delivery keeps none and still has a door to set idle through.
+  // No inbox: no bridge in hook delivery, or one that has not made its inbox yet.
   const dir = findInbox();
   let events = dir ? drainWaking(dir) : [];
   const requested = Number(process.env.BELLMAN_HOOK_WAIT_SECONDS ?? 0);

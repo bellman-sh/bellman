@@ -241,11 +241,12 @@ export function keyedPlan(userId: string, keysJson?: string | null): Plan | null
 }
 
 /**
- * The methods /mcp answers with no Authorization header: the handshake and the tool list, so a directory or scanner
+ * The methods /mcp answers with no Authorization header: the handshake of either protocol era (`initialize` and
+ * `notifications/initialized`, or 2026-07-28's `server/discover`) and the tool list, so a directory or scanner
  * can connect and list the tools signed out. Every caller gets the same list. A signed-out client therefore connects,
  * and its sign-in starts at its first tool call, whose 401 carries the WWW-Authenticate challenge.
  */
-const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
+const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "server/discover", "tools/list", "ping"]);
 
 /** The largest body /mcp reads with no credential. An `initialize` or `tools/list` request is well under it. */
 export const ANONYMOUS_BODY_LIMIT = 4096;

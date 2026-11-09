@@ -14,9 +14,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { MAX_BLOB_BYTES } from "../src/files/blobs.js";
 import { createBridge, readLocalFile, typeFromExtension, type Remote } from "../src/client/bridge.js";
@@ -25,6 +25,7 @@ import { PNG } from "./helpers/blob-bytes.js";
 import { fakeBellman, ISSUER, type FakeBellman } from "./helpers/fake-bellman.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
 
 const ROOM = "qs_upload";
 const jesse = resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!;
@@ -73,7 +74,7 @@ beforeEach(async () => {
   posted = [];
   sends = 0;
   bridge = createBridge({
-    delivery: "channel",
+    delivery: "hook", inboxDir: tmpInbox(),
     remote: remoteFor,
     upload: {
       serverUrl: `${ISSUER}/mcp`,
@@ -82,8 +83,8 @@ beforeEach(async () => {
     },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  client = new Client({ name: "claude-code", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  client = bridgeClient("claude-code");
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 });
 
 afterEach(async () => {
@@ -166,13 +167,13 @@ describe("bellman_upload", () => {
 
     posted = [];
     const elsewhere = createBridge({
-      delivery: "channel",
+      delivery: "hook", inboxDir: tmpInbox(),
       remote: remoteFor,
       upload: { serverUrl: "https://bellman.example.invalid:8443/mcp", bearer: () => DEV_KEY.jesse, fetchImpl: recording },
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    const c = new Client({ name: "elsewhere", version: "0.0.1" });
-    await Promise.all([elsewhere.server.connect(serverSide), c.connect(clientSide)]);
+    const c = bridgeClient("elsewhere");
+    await Promise.all([elsewhere.serve(serverSide), c.connect(clientSide)]);
     try {
       const res = (await c.callTool({
         name: "bellman_upload",
@@ -328,7 +329,7 @@ describe("bellman_upload", () => {
   // Here the connection's tools/list is what swaps the token: all the bridge can see of a refresh is the file.
   const uploadingThrough = async (bearer: () => string, onList: () => void) => {
     const through = createBridge({
-      delivery: "channel",
+      delivery: "hook", inboxDir: tmpInbox(),
       remote: async () => {
         const upstream = await remoteFor();
         return { ...upstream, listTools: () => (onList(), upstream.listTools()) };
@@ -336,8 +337,8 @@ describe("bellman_upload", () => {
       upload: { serverUrl: `${ISSUER}/mcp`, bearer, fetchImpl: recording },
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    const c = new Client({ name: "refreshing", version: "0.0.1" });
-    await Promise.all([through.server.connect(serverSide), c.connect(clientSide)]);
+    const c = bridgeClient("refreshing");
+    await Promise.all([through.serve(serverSide), c.connect(clientSide)]);
     try {
       const res = (await c.callTool({
         name: "bellman_upload",
@@ -371,10 +372,10 @@ describe("bellman_upload", () => {
   });
 
   it("fails plainly on a bridge with no upload target", async () => {
-    const bare = createBridge({ delivery: "channel", remote: remoteFor });
+    const bare = createBridge({ delivery: "hook", inboxDir: tmpInbox(), remote: remoteFor });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    const c = new Client({ name: "bare", version: "0.0.1" });
-    await Promise.all([bare.server.connect(serverSide), c.connect(clientSide)]);
+    const c = bridgeClient("bare");
+    await Promise.all([bare.serve(serverSide), c.connect(clientSide)]);
     try {
       expect((await c.listTools()).tools.map((t) => t.name)).toContain("bellman_upload");
       const res = (await c.callTool({ name: "bellman_upload", arguments: { session_id: ROOM, member_id: "m_creator", path: file("n.md", "x"), key: "n" } })) as CallToolResult;

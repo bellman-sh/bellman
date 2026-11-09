@@ -174,22 +174,22 @@ flowchart TB
     POLL -.->|"no socket: the<br/>coordinator polls"| CO
     POLL -.->|"no bus: each<br/>bridge polls"| B
 
-    B --> CH["channel notification<br/>pushed into the session"]
     B --> IQ["inbox queue on disk"]
-    IQ --> SH["Stop hook drains it<br/>at end of turn"]
+    IQ --> CH["plugin monitor prints<br/>interrupting events as they land"]
+    IQ --> SH["Stop hook drains the rest<br/>at end of turn"]
 
     POLL --> MANUAL["the agent calls bellman_sync<br/>itself, when it thinks to"]
 
-    CH -.-> NOTE1["terminal launch only:<br/>needs the development-channels flag"]
+    CH -.-> NOTE1["interactive sessions only:<br/>not under claude -p"]
     SH -.-> NOTE2["POSIX only:<br/>the hook finds the bridge with ps"]
 ```
 
 | Surface | Tools | Push | Notes |
 |---|---|---|---|
-| Claude Code, terminal | yes | **channel** | `bellman-claude` adds the flag; the best experience |
-| Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
+| Claude Code, the plugin | yes | **monitor** + Stop hook | the monitor prints each interrupting event as it lands; ambient ones wait for the Stop hook. Channel delivery is retired: MCP 2026-07-28 lets a server send no unrequested notification, and Claude Code registers no such server as a channel |
+| Claude Code, the npm package | yes | **Stop hook** | fires at end of turn; no monitor without the plugin |
 | Claude Code, terminal, with `bellman-mod` | the bridge's | **wake**, hook delivery only | the surface the person arrives on: a sidebar or band, toasts, a room pane, and a turn started when events wait ([the mod and the door](#the-mod-and-the-door)) |
-| Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
+| Claude Code, desktop or VS Code | yes | Stop hook, untested | ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync`, which the bundle's `BELLMAN_DELIVERY=queue` tells the agent to make when a turn starts; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
@@ -523,12 +523,11 @@ it does three things.
   the same text as a row to the turn that is running, once for a batch. What
   interrupts is the server's call (`ambient` on the event, `src/room/attention.ts`),
   so the mod keeps no list of types of its own, and a roster change wakes as a
-  message does, as channel delivery's push already starts a turn on one. After
+  message does. After
   `WAKE_LIMIT` (three) wakes in a row with no input from the person (a prompt
   from the composer or through Remote Control, or a press on one of the mod's
   buttons) it pauses and says so: members whose sessions all run the mod would
-  otherwise wake each other on every reply with nobody involved. A bridge in
-  channel delivery gets the view and the gate and no wake.
+  otherwise wake each other on every reply with nobody involved.
 - **A gate** on who answers an action request, in
   [section 7](#7-trust-boundaries).
 
@@ -542,7 +541,7 @@ seven routes:
 
 | Route | Answers |
 |---|---|
-| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox), the latest events it delivered, and, when it runs inside Herdr, its terminal address (`herdr_terminal`, from `HC_TERMINAL_ID`) |
+| `GET /status` | the delivery mode, whether the bridge holds a sign-in (`has_sign_in`: one cached, or a key, which is not that the server accepts it), the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken), the latest events it delivered, and, when it runs inside Herdr, its terminal address (`herdr_terminal`, from `HC_TERMINAL_ID`) |
 | `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
 | `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
 | `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
@@ -1440,8 +1439,8 @@ sequenceDiagram
     Note over W: identity comes from the bearer token#59;<br/>a sender cannot name itself
     W->>SDO: appendEvent, stamped with<br/>member, user, label, cursor
     SDO-->>BR: the room socket sends the event,<br/>or a long poll returns it
-    Note over BR: renderEvent wraps it as untrusted and escapes<br/>the less-than character, so it cannot<br/>close the channel tag
-    BR->>YA: channel notification, wrapper intact
+    Note over BR: renderEvent wraps it as untrusted and escapes<br/>the less-than character, so it cannot<br/>close a harness tag
+    BR->>YA: monitor line or Stop hook, wrapper intact
     alt type is action_request
         YA->>YH: show it, do not act
         YH-->>YA: explicit approval
@@ -1524,11 +1523,11 @@ loud:
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
   instead, so the client that reads it does the wrapping and owns this rule.
   The bridge is that client: `renderEvent` (`src/client/inbox.ts`) does the wrapping,
-  after the bus. `deliver` (`src/client/bridge.ts`) calls it for a channel push, and the
-  Stop hook and `bellman_wait` call it, through `renderBatch`, for the events
-  `deliver` queued. An event is escaped and framed as untrusted whichever path
+  after the bus. `deliver` (`src/client/bridge.ts`) queues each event, the plugin's monitor
+  renders each interrupting one with `renderLine`, and the Stop hook and
+  `bellman_wait` call it, through `renderBatch`, for the rest. An event is escaped and framed as untrusted whichever path
   brought it, and it does not become trusted by passing through a local process.
-- **`<` is escaped to `\u003c`** so a payload cannot close the `<channel>` tag
+- **`<` is escaped to `\u003c`** so a payload cannot close a tag the harness puts around it
   and impersonate the harness.
 - **A blob is served under membership, typed by the server, and never as
   HTML.** The bucket has no public URL and no presigned one; every byte leaves
@@ -1664,7 +1663,7 @@ loud:
   room's public log. The server resolves `to`; a payload cannot set it.
 - **In the terminal, the mod holds that line against the agent.** Until the
   mod, "approved by the receiving human" was an instruction to the model
-  (`HOOK_INSTRUCTIONS`, `CHANNEL_INSTRUCTIONS`), and the model could send the
+  (`HOOK_INSTRUCTIONS`, `QUEUE_INSTRUCTIONS`), and the model could send the
   `action_response` itself. Where a terminal is attached and the mod has drawn
   there (`gateShut`, `mod/src/gate.ts`), a `tool.call` hook on every tool whose
   name ends in `bellman_send`, on any server, and an `mcp.call` hook on the same
@@ -2452,7 +2451,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,732** | every request, whether or not you are in a room |
+| Tool definitions | **~11,636** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,640 | once — `connect` 746 plus `confirm` 893, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100); the `confirm` reply itself is at most 24,000 characters (ADR 0047 decision 9) |
 | Receiving a message | ~220 | each |
@@ -2485,6 +2484,7 @@ decision recorded here, not a side effect of a merge.
 | Notes sharing: `bellman_memory`'s `unshare` op | +32 | 11,602 | #538 PR 2 (ADR 0047, 7) |
 | Memory controls: `bellman_memory`'s `paused` refusal, `bellman_confirm`'s `recall.paused` | +19 | 11,621 | #531 (ADR 0047, 13) |
 | Seat names: `bellman_send`'s `to`, `name` on seats and on each event's `from` | +111 | 11,732 | ADR 0048 |
+| MCP SDK 2.x: no tool carries v1's `execution: {"taskSupport": "forbidden"}` (tasks left the core, SEP-2663); `$schema` names JSON Schema 2020-12 | −96 | 11,636 | (#571) |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

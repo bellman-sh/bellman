@@ -17,14 +17,18 @@ into the mod.
 - `[src/client/channel.ts]` the stdio MCP entry Claude Code spawns: reads the environment, builds the bridge, opens the door,
   starts an optional join, and shuts down on SIGTERM, SIGINT or stdin close.
 - `[src/client/bridge.ts:createBridge]` the local MCP server: relays the remote tools and resources, adds `bellman_whoami`,
-  `bellman_upload` and, outside channel delivery, `bellman_wait`; learns memberships from tool results
-  (`observe`) and delivers peer events by `Delivery` = `channel | hook | queue`. Exposes the door's reads and
+  `bellman_upload` and `bellman_wait`; learns memberships from tool results
+  (`observe`) and delivers peer events by `Delivery` = `hook | queue` into the inbox (`channel`, set by an old registration, means `hook`); speaks MCP
+  2026-07-28 only (`serveStdio`, `legacy: "reject"`). Exposes the door's reads and
   writes (`readEvents`, `readRooms`, `readSurface`, `decline`, `writeSurface`, `setStatus`, `join`).
 - `[src/client/inbox.ts]` the on-disk event queue per Claude Code pid (`enqueue`, `drain`, `discardThrough`), membership
-  files, and `renderEvent`/`renderBatch`, which frame peer content as untrusted.
+  files, and `renderEvent`/`renderBatch`/`renderLine`, which frame peer content as untrusted; `drainInterrupting`
+  takes only the events that interrupt.
+- `[src/client/monitor.ts:runMonitor]` the plugin's Monitor: finds the inbox through its process ancestry and prints
+  each interrupting event once, on one line, as it lands.
 - An event addressed to other seats (ADR 0048) starts no turn: `[src/client/inbox.ts:wakes]` decides it,
   `[src/client/inbox.ts:drainWaking]` leaves a queue of only such events in place for the Stop hook and `bellman_wait`,
-  `deliver` pushes none, and `pendingSummary` counts it as ambient, which keeps the mod's wake off it.
+  the monitor's `drainInterrupting` takes none, and `pendingSummary` counts it as ambient, which keeps the mod's wake off it.
 - `[src/client/bus.ts:openBus]` one coordinator per machine and identity serving the other bridges over a Unix socket
   (NDJSON); `[src/client/bus.ts:RoomWindow]` the coordinator's contiguous window of recent events.
 - `[src/client/bus-link.ts:createBusLink]` links a bridge's watches to the bus and room sockets and hands a member back to
@@ -44,8 +48,7 @@ into the mod.
   `[src/room/remote.ts:normalizeRemote]`), when `GET /me/repo-rooms` lists it (so an unbound remote never leaves the
   machine), goes to `POST /me/repo-rooms/connect` and the token to `bellman_confirm`
   (`[src/client/bridge.ts:joinBound]`), only after the first tools/list, so the handshake stays local. No binding, no
-  credential or a server without the route says nothing; any other outcome is `joined` with `from: "repo"`, and in
-  channel delivery the bridge pushes `joinLine` once the client has initialized. Seats taken this way are kept in
+  credential or a server without the route says nothing; any other outcome is `joined` with `from: "repo"`. Seats taken this way are kept in
   `boundSeats`, and `close()` leaves them (`bellman_leave` through the held connection, at most `leaveTimeoutMs`, 3 s,
   in all) before anything else shuts; a seat joined by hand or from a code stays.
 - `[src/client/signin.ts:connectSignedIn]` browser OAuth with PKCE on a loopback callback (`CALLBACK_PORTS` 51004-51008);
@@ -73,7 +76,7 @@ into the mod.
   the PKCE verifier in memory only, and the loopback listener compares `state` itself
   (`[src/client/signin.ts:makeListener.onRequest]`).
 - `[src/client/bridge.ts:createBridge]` never declares the `claude/channel/permission` capability, so a peer cannot approve
-  tool use in a session; `[src/client/bridge.ts:CHANNEL_INSTRUCTIONS]`, `HOOK_INSTRUCTIONS` and `QUEUE_INSTRUCTIONS` each
+  tool use in a session; `[src/client/bridge.ts:HOOK_INSTRUCTIONS]` and `QUEUE_INSTRUCTIONS` each
   tell the agent an `action_request` needs its human's approval.
 - `[src/client/door-protocol.ts:cleanText]` strips escape sequences, controls and bidi characters before the mod draws a
   peer string; `[src/client/door-protocol.ts:lineOf]` reads an `action_response` from `approved` alone.

@@ -1,5 +1,5 @@
 import { seatNames } from "../room/member-names.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { MAX_WAIT_SECONDS, fail, ok, roomInstructionsField, NEED_ROOM, RoomRefShape, roomIdOf, type ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";

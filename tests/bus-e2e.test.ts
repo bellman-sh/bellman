@@ -3,15 +3,15 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult, Notification } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type BridgeBus, type Remote } from "../src/client/bridge.js";
 import { busPath } from "../src/client/bus.js";
 import { createBusLink } from "../src/client/bus-link.js";
 import { busCredentials, readServer } from "../src/client/credentials.js";
-import type { PeerEvent } from "../src/client/inbox.js";
+import { drainInterrupting, renderEvent, type PeerEvent } from "../src/client/inbox.js";
 import { identityFromAccessToken, unauthorizedHeaders } from "../src/oauth/routes.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/files/blobs.js";
@@ -21,6 +21,7 @@ import { MemoryStore } from "../src/storage/memory-store.js";
 import { fakeBellman, RESOURCE, type FakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 /**
  * #43's definition of done, run together: the properties tests/bus.test.ts, tests/room-socket.test.ts,
@@ -63,6 +64,9 @@ interface Session {
   bridge: ReturnType<typeof createBridge>;
   /** Every call the bridge made to Bellman, its watchers' polls included, and the agent's own too. */
   calls: Call[];
+  /** The inbox the bridge queues peer events in, and what the plugin's monitor has shown from it so far. */
+  inboxDir: string;
+  shown: PeerEvent[];
   call(name: string, args?: Record<string, unknown>): Promise<{ isError: boolean; data: Record<string, unknown>; text: string }>;
 }
 
@@ -155,22 +159,24 @@ function busFor(key: string, over: Partial<BridgeBus> = {}): BridgeBus {
 /** `bus` is true for the machine's bus, an object for that bus with something changed, and absent for none. */
 async function open(key: string, bus?: true | Partial<BridgeBus>): Promise<Session> {
   const calls: Call[] = [];
+  const inboxDir = mkdtempSync(join(tmp, `inbox-${key}-`));
   const bridge = createBridge({
-    delivery: "channel",
+    delivery: "hook",
+    inboxDir,
     remote: () => remoteFor(key, calls),
     pollWaitSeconds: 1,
     log: (message) => logs.push(message),
     ...(bus ? { bus: busFor(key, bus === true ? {} : bus) } : {}),
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   const pushed: Notification[] = [];
   client.fallbackNotificationHandler = async (n) => {
     pushed.push(n);
   };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   const session: Session = {
-    client, pushed, bridge, calls,
+    client, pushed, bridge, calls, inboxDir, shown: [],
     async call(name, args = {}) {
       const res = (await client.callTool({ name, arguments: args })) as CallToolResult;
       return {
@@ -256,15 +262,16 @@ async function send(from: Session, sessionId: string, memberId: string, text: st
   expect(sent.isError, `${text}: ${sent.text}`).toBe(false);
 }
 
-type ChannelParams = { content: string; meta: Record<string, string> };
-
-/** The messages a session's human has been pushed, by the token each one's text carries (`evt-p1`, ...), in the order they came. */
-const heard = (s: Session): string[] =>
-  s.pushed
-    .filter((n) => n.method === "notifications/claude/channel")
-    .map((n) => n.params as unknown as ChannelParams)
-    .filter((e) => e.meta.type === "message")
-    .map((e) => /evt-[abp]\d+/.exec(e.content)?.[0] ?? `unrecognised: ${e.content}`);
+/**
+ * The messages a session's human has been shown, by the token each one's text carries (`evt-p1`, ...), in the order
+ * they came: what the plugin's monitor drains from the inbox (src/client/monitor.ts). Cumulative, since draining takes them.
+ */
+const heard = (s: Session): string[] => {
+  s.shown.push(...drainInterrupting(s.inboxDir));
+  return s.shown
+    .filter((e) => e.type === "message")
+    .map((e) => /evt-[abp]\d+/.exec(renderEvent(e))?.[0] ?? `unrecognised: ${renderEvent(e)}`);
+};
 
 const longPolls = (s: Session) => s.calls.filter((c) => c.name === "bellman_sync" && Number(c.args.wait_seconds) > 0);
 

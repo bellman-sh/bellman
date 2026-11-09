@@ -7,7 +7,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import {
   BRIDGE_PAGE, CONTENT_DIR, TOOLS_DIR, bridgePage, escapeProse, labelOf, referencePages, toolPage, typeOf,
 } from "../scripts/docs-reference.js";

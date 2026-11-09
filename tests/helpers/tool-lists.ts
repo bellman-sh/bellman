@@ -8,15 +8,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../../src/auth.js";
 import { createBridge, type Delivery, type Remote } from "../../src/client/bridge.js";
 import { buildServer } from "../../src/server.js";
 import { MemoryBlobStore } from "../../src/files/blobs.js";
 import { MemoryStore } from "../../src/storage/memory-store.js";
 import { DEV_KEY, Harness } from "./harness.js";
+import { bridgeClient } from "./bridge-client.js";
 
 /** The server's tools, listed over an in-memory MCP client bound to the dev key for jesse. */
 export async function listServerTools(): Promise<Tool[]> {
@@ -58,8 +59,8 @@ export async function listBridge(delivery: Delivery): Promise<{ tools: Tool[]; i
   });
 
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-desktop", version: "0.0.1" });
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  const client = bridgeClient("claude-desktop");
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
 
   try {
     const { tools } = await client.listTools();

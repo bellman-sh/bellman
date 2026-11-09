@@ -9,11 +9,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+import { Client } from "@modelcontextprotocol/client";
+import { SdkHttpError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, RECENT_LIMIT, type Delivery, type Remote, type UploadOptions } from "../src/client/bridge.js";
 import type { DoorRooms, DoorSurface } from "../src/client/door-protocol.js";
@@ -22,6 +22,7 @@ import { UNTRUSTED_PREAMBLE } from "../src/projections.js";
 import { buildServer } from "../src/server.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes } from "./helpers/harness.js";
+import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
 
 const S = "qs_door";
 const M = "m_door";
@@ -43,7 +44,7 @@ function envelope(cursor: number, type: string, ambient?: true): WireEnvelope {
   };
 }
 const message = (cursor: number) => envelope(cursor, "message");
-/** A canvas edit, which the server marks ambient: channel delivery does not push it. */
+/** A canvas edit, which the server marks ambient: the monitor leaves it for the end of the turn. */
 const surfaceEdit = (cursor: number) => envelope(cursor, "surface", true);
 const ENVELOPE = message(9);
 
@@ -88,8 +89,8 @@ interface Asked {
 
 /** A bridge that has relayed one bellman_start, which armed a watch on member M in the room; its long poll is the fake's. */
 async function armedBridge(opts: Armed) {
-  const delivery = opts.delivery ?? "channel";
-  const inboxDir = delivery === "hook" ? mkdtempSync(join(tmpdir(), "bellman-door-")) : undefined;
+  const delivery = opts.delivery ?? "hook";
+  const inboxDir = mkdtempSync(join(tmpdir(), "bellman-door-"));
   let syncs = 0;
   const asked: Asked[] = [];
   let answered = opts.sync === "hangs";
@@ -142,9 +143,9 @@ async function armedBridge(opts: Armed) {
   };
   const bridge = createBridge({ delivery, inboxDir, remote: connect, pollWaitSeconds: 1, upload: opts.upload });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   client.fallbackNotificationHandler = async () => {};
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     release();
@@ -208,8 +209,8 @@ describe("seats", () => {
 });
 
 describe("recent", () => {
-  it("keeps what deliver saw, newest last, ambient included, in channel delivery too", async () => {
-    const { bridge } = await armedBridge({ sync: [message(1), surfaceEdit(2)] });
+  it("keeps what deliver saw, newest last, ambient included, in queue delivery too", async () => {
+    const { bridge } = await armedBridge({ delivery: "queue", sync: [message(1), surfaceEdit(2)] });
     await until(() => bridge.recent().length === 2);
     expect(bridge.recent().map((e) => [e.cursor, e.type, e.ambient === true])).toEqual([
       [1, "message", false],
@@ -396,10 +397,10 @@ const jesse = resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!;
  * member can join the bridge's room and write to it. The watcher's long poll is parked, so that every other call the
  * server hears from the bridge is one the door made or the test did, and each of those is written down in `asked`.
  */
-async function roomBridge(delivery: Delivery = "channel", upload?: UploadOptions) {
+async function roomBridge(delivery: Delivery = "hook", upload?: UploadOptions) {
   const h = new Harness();
   const asked: Asked[] = [];
-  const inboxDir = delivery === "hook" ? mkdtempSync(join(tmpdir(), "bellman-door-")) : undefined;
+  const inboxDir = mkdtempSync(join(tmpdir(), "bellman-door-"));
   let release!: () => void;
   const parked = new Promise<void>((resolve) => {
     release = resolve;
@@ -422,9 +423,9 @@ async function roomBridge(delivery: Delivery = "channel", upload?: UploadOptions
   };
   const bridge = createBridge({ delivery, inboxDir, remote: connect, pollWaitSeconds: 1, upload });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
+  const client = bridgeClient("claude-code");
   client.fallbackNotificationHandler = async () => {};
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     release();
@@ -664,7 +665,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
   it("starts no connection of its own: a bridge with none answers 503, and 404 where it holds no seat", async () => {
     let connects = 0;
     const bridge = createBridge({
-      delivery: "channel",
+      delivery: "hook", inboxDir: tmpInbox(),
       remote: async () => {
         connects++;
         throw new Error("a sign-in would open a browser");
@@ -700,7 +701,7 @@ describe("the room routes, when the connection or the server says otherwise", ()
 
   it.each([
     ["an UnauthorizedError", () => new UnauthorizedError()],
-    ["a 401 from the transport", () => new StreamableHTTPError(401, "unauthorized")],
+    ["a 401 from the transport", () => new SdkHttpError(SdkErrorCode.ClientHttpAuthentication, "unauthorized", { status: 401 })],
   ])("reports %s as it came, and the connection it retired stays retired", async (_what, error) => {
     let connects = 0;
     const armed = await armedBridge({

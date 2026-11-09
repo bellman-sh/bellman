@@ -71,7 +71,7 @@ ok    One local bridge: MCP server "bellman" in ~/.claude.json (user scope).
 fix   The bellman marketplace is not added, so bellman-mod is not installed.
         $ claude plugin marketplace add bellman-sh/bellman
         $ claude plugin install bellman-mod@bellman
-ok    The door 2437.sock answers: channel delivery, 2 seats, signed in.
+ok    The door 2437.sock answers: hook delivery, 2 seats, signed in.
 ok    Claude Code is 2.1.310 (bellman-mod was written for 2.1.301; a build without mods skips it quietly).
 ```
 

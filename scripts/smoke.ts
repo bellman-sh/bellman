@@ -4,8 +4,8 @@
  * ChatGPT session (peer, free plan) — the cross-provider case — plus the
  * failure paths: org-restricted join, plan gating, capability gating.
  */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
   openRoomSocket, type RoomSocketState, type WebSocketConstructor, type Why,
 } from "../src/client/room-socket.js";

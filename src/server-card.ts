@@ -1,4 +1,4 @@
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
 import { SERVER_VERSION } from "./server.js";
 
 /**

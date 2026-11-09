@@ -39,7 +39,7 @@ const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 // Type-only imports are erased and would cost a bundle nothing, but they are
 // banned here too: needing one is a sign the boundary is being crossed in
 // thought, which is where it gets crossed in code next.
-const BANNED = ["@modelcontextprotocol/sdk", "cloudflare:workers"];
+const BANNED = ["@modelcontextprotocol/server", "@modelcontextprotocol/client", "@modelcontextprotocol/core", "@modelcontextprotocol/node", "@modelcontextprotocol/sdk", "cloudflare:workers"];
 
 /**
  * Every specifier a module pulls in, by any edge that runs.
@@ -128,7 +128,7 @@ describe("the projection layer stays importable from both transports", () => {
     // a fixture.
     const specs = importsOf(resolve(SRC, "workerd/worker.ts"));
     expect(specs.length).toBeGreaterThan(0);
-    expect(importsOf(resolve(SRC, "server.ts"))).toContain("@modelcontextprotocol/sdk/server/mcp.js");
+    expect(importsOf(resolve(SRC, "server.ts"))).toContain("@modelcontextprotocol/server");
   });
 
   it("resolves every local specifier it meets", () => {

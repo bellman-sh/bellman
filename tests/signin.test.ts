@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
   signedInAs, SignInCancelled, type Listener, type SignInOptions,
+  type Callback,
 } from "../src/client/signin.js";
 import type { Remote } from "../src/client/bridge.js";
 import { acquireLock, readServer, writeServer } from "../src/client/credentials.js";
@@ -147,7 +148,32 @@ describe("the loopback listener", () => {
     const res = await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("close this tab");
-    await expect(waiting).resolves.toBe("the-code");
+    await expect(waiting).resolves.toEqual({ code: "the-code" });
+  });
+
+  // RFC 9207: the issuer names itself on every answer, and a code goes to the SDK with it.
+  it("hands the callback's iss to the caller with the code", async () => {
+    const listener = track((await listen())!);
+    const waiting = listener.waitForCode("state-abc", 5_000, "https://mcp.example.test");
+    await get(`${listener.redirectUri}?code=the-code&state=state-abc&iss=${encodeURIComponent("https://mcp.example.test")}`);
+    await expect(waiting).resolves.toEqual({ code: "the-code", iss: "https://mcp.example.test" });
+  });
+
+  // A refusal never reaches the SDK, so the listener checks its issuer before showing what it says:
+  // in a mix-up attack those words are the other server's.
+  it("refuses an answer from another issuer without showing its words", async () => {
+    const listener = track((await listen())!);
+    const waiting = listener.waitForCode("state-abc", 5_000, "https://mcp.example.test");
+    const refused = expect(waiting).rejects.toThrow(/named issuer https:\/\/evil\.example/);
+    const res = await get(
+      `${listener.redirectUri}?error=access_denied&error_description=${encodeURIComponent("call +1-555-0100 to restore access")}` +
+        `&state=state-abc&iss=${encodeURIComponent("https://evil.example")}`,
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("another server");
+    expect(body).not.toContain("555-0100");
+    await refused;
   });
 
   // Review Focus 1 — the SDK does not check state for us.
@@ -253,7 +279,7 @@ describe("the loopback listener", () => {
   it("answers a request target it cannot parse, and keeps waiting", async () => {
     const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
-    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    const landed = expect(waiting).resolves.toEqual({ code: "the-code" }); // subscribe first
     // A valid URL to a browser; to `new URL(target, base)` it is a scheme-relative
     // reference with an impossible port.
     const res = await get(`http://127.0.0.1:${TEST_PORTS[0]}//evil.com:99999999/callback`, {
@@ -270,7 +296,7 @@ describe("the loopback listener", () => {
   it("marks every response uncacheable and referrer-free", async () => {
     const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
-    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    const landed = expect(waiting).resolves.toEqual({ code: "the-code" }); // subscribe first
     // The request that settles the wait goes last: after it there is no handler.
     const responses = {
       "a page refusing a forged callback": await get(`${listener.redirectUri}?code=forged&state=nope`),
@@ -300,7 +326,7 @@ describe("the loopback listener", () => {
     expect(diagnostics[0]).toContain(listener.redirectUri); // which listener, so which port
     // It is still a working listener.
     const waiting = listener.waitForCode("state-abc", 5_000);
-    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    const landed = expect(waiting).resolves.toEqual({ code: "the-code" }); // subscribe first
     await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     await landed;
   });
@@ -310,8 +336,8 @@ describe("closing the listener", () => {
   /** Ref'd timers alive right now: what keeps a process from exiting on its own. */
   const timers = () => process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
   /** How a wait ended, without an unhandled rejection in between. */
-  const outcomeOf = (waiting: Promise<string>) =>
-    waiting.then((code) => `code:${code}`, (error: Error) => `error:${error.message}`);
+  const outcomeOf = (waiting: Promise<Callback>) =>
+    waiting.then(({ code }) => `code:${code}`, (error: Error) => `error:${error.message}`);
 
   // The caller is shutting down. The wait must end now, as something a caller can
   // tell from a failure, and nothing of it may be left to keep the process alive:
@@ -373,7 +399,7 @@ describe("closing the listener", () => {
   it("refuses a second wait while one is pending, and the first still completes", async () => {
     const listener = track((await listen())!);
     const first = listener.waitForCode("state-abc", 5_000);
-    const landed = expect(first).resolves.toBe("the-code"); // subscribe first
+    const landed = expect(first).resolves.toEqual({ code: "the-code" }); // subscribe first
     const second = listener.waitForCode("state-abc", 300);
     const refused = expect(second).rejects.toThrow(/already waiting/);
     const res = await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
@@ -1632,6 +1658,7 @@ describe("connectSignedIn", () => {
         access_token: expect.stringMatching(/^opaque\./),
         refresh_token: expect.any(String),
         expires_at: expect.any(Number),
+        issuer: new URL(RESOURCE).origin, // the SDK's stamp (SEP-2352), kept verbatim
       },
     });
   });
@@ -1665,7 +1692,14 @@ describe("connectSignedIn", () => {
     await remote.listTools().catch(() => undefined); // the retry is refused as well; the write is what matters
     await remote.close();
 
-    expect(readServer(dir, RESOURCE)).toEqual({ client: mine.client, tokens: adopted, identity: theirs.identity });
+    // The SDK re-saves what it adopted with the issuer stamped on it (SEP-2352); the expiry survives that to the second.
+    const stored = readServer(dir, RESOURCE);
+    expect(stored).toEqual({
+      client: mine.client,
+      tokens: { ...adopted, expires_at: expect.any(Number), issuer: new URL(RESOURCE).origin },
+      identity: theirs.identity,
+    });
+    expect(Math.abs(stored.tokens!.expires_at! - adopted.expires_at)).toBeLessThan(1_000);
   });
 
   it("leaves no identity behind when the saved sign-in is dropped and the browser is abandoned", async () => {
@@ -1724,6 +1758,7 @@ describe("connectSignedIn", () => {
         access_token: expect.stringMatching(/^opaque\./),
         refresh_token: expect.not.stringContaining(before.tokens!.refresh_token!), // rotated: it did write
         expires_at: expect.any(Number),
+        issuer: new URL(RESOURCE).origin, // the SDK's stamp (SEP-2352), kept verbatim
       },
     });
   });

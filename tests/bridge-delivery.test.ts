@@ -2,11 +2,11 @@ import { afterEach, describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 import { createBridge, type Delivery, type Remote } from "../src/client/bridge.js";
-import { drain, fromEnvelope, renderEvent, type WireEnvelope } from "../src/client/inbox.js";
+import { drain, drainInterrupting, fromEnvelope, renderEvent, renderLine, type WireEnvelope } from "../src/client/inbox.js";
+import { bridgeClient } from "./helpers/bridge-client.js";
 
 const envelope = (over: Record<string, unknown> = {}): WireEnvelope => ({
   trust: "untrusted",
@@ -57,7 +57,6 @@ describe("fromEnvelope", () => {
  * arriving is what says this batch is finished, and that is what lets a test assert that something was
  * NOT pushed without waiting out a timeout and hoping.
  */
-type Push = { params: { content: string; meta: Record<string, string> } };
 
 async function until(check: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -72,9 +71,9 @@ afterEach(async () => {
   await Promise.all(teardown.splice(0).map((close) => close()));
 });
 
-/** A bridge in this delivery mode, once its watcher has delivered `events`: what it pushed, and what it queued. */
+/** A bridge in this delivery mode, once its watcher has delivered `events`: the inbox it queued them in. */
 async function delivered(delivery: Delivery, events: WireEnvelope[]) {
-  const inboxDir = delivery === "hook" ? mkdtempSync(join(tmpdir(), "bellman-delivery-")) : undefined;
+  const inboxDir = mkdtempSync(join(tmpdir(), "bellman-delivery-"));
   const last = events.at(-1)?.data.cursor ?? 0;
   let polls = 0;
   let release!: () => void;
@@ -101,16 +100,12 @@ async function delivered(delivery: Delivery, events: WireEnvelope[]) {
 
   const bridge = createBridge({ delivery, inboxDir, remote: async () => remote, pollWaitSeconds: 1 });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "claude-code", version: "0.0.1" });
-  const pushes: Push[] = [];
-  client.fallbackNotificationHandler = async (n) => {
-    if (n.method === "notifications/claude/channel") pushes.push(n as unknown as Push);
-  };
-  await Promise.all([bridge.server.connect(serverSide), client.connect(clientSide)]);
+  const client = bridgeClient("claude-code");
+  await Promise.all([bridge.serve(serverSide), client.connect(clientSide)]);
   teardown.push(async () => {
     await bridge.close();
     await client.close();
-    if (inboxDir) rmSync(inboxDir, { recursive: true, force: true });
+    rmSync(inboxDir, { recursive: true, force: true });
   });
 
   // Any call that names a membership arms its watcher.
@@ -119,45 +114,51 @@ async function delivered(delivery: Delivery, events: WireEnvelope[]) {
     arguments: { session_id: "qs_1", member_id: "m_me", since_cursor: 0, wait_seconds: 0 },
   });
   await until(() => polls >= 2);
-  await new Promise((r) => setTimeout(r, 0)); // a notification reaches the client a tick after it is sent
 
-  return { pushes, queued: inboxDir ? drain(inboxDir) : [] };
+  return inboxDir;
 }
 
 describe("deliver", () => {
   const tick = envelope({ type: "heartbeat", cursor: 1, ambient: undefined });
   const reply = envelope({ type: "progress", cursor: 2 });
 
-  it("pushes a tick and withholds a reply, in channel mode", async () => {
-    const { pushes } = await delivered("channel", [tick, reply]);
-    expect(pushes.map((p) => p.params.meta.type)).toEqual(["heartbeat"]);
+  it("queues both, in either delivery, because the end of a turn is not an interruption", async () => {
+    for (const delivery of ["hook", "queue"] as const) {
+      expect(drain(await delivered(delivery, [tick, reply])).map((e) => e.type)).toEqual(["heartbeat", "progress"]);
+    }
   });
 
-  // Review Focus 4 — the early return must not skip the queue.
-  it("queues both in hook mode, because end of turn is not an interruption", async () => {
-    const { queued } = await delivered("hook", [tick, reply]);
-    expect(queued.map((e) => e.type)).toEqual(["heartbeat", "progress"]);
+  // What channel delivery used to push and withhold, the plugin's monitor now prints and leaves.
+  it("lets the monitor show a tick at once and leave a reply for the end of the turn", async () => {
+    const inbox = await delivered("hook", [tick, reply]);
+    expect(drainInterrupting(inbox).map((e) => e.type)).toEqual(["heartbeat"]);
+    expect(drain(inbox).map((e) => e.type)).toEqual(["progress"]);
   });
 
   // Neither case above can tell reading the flag from naming `progress`: here the type and the flag
   // disagree, and the flag decides.
   it("goes by the server's flag and not by the type", async () => {
-    const { pushes } = await delivered("channel", [
+    const inbox = await delivered("hook", [
       envelope({ type: "message", cursor: 1 }), // an interrupting type the server marked ambient
       envelope({ type: "progress", cursor: 2, ambient: undefined }), // an ambient type it did not
     ]);
-    expect(pushes.map((p) => p.params.meta.type)).toEqual(["progress"]);
+    expect(drainInterrupting(inbox).map((e) => e.type)).toEqual(["progress"]);
   });
 });
 
 describe("deliver, addressed (seat names spec)", () => {
   const to = (member_id: string, name: string) => [{ member_id, name }];
-  it("pushes an event addressed to this seat with from_name and to, and nothing for one addressed to another seat", async () => {
-    const { pushes } = await delivered("channel", [
+  it("lets the monitor take an event addressed to this seat, named, and leave one addressed to another seat", async () => {
+    const inbox = await delivered("hook", [
       envelope({ type: "message", cursor: 1, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_other", "coder-3") }),
       envelope({ type: "message", cursor: 2, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_me", "coder-2") }),
     ]);
-    expect(pushes.map((p) => p.params.meta.cursor)).toEqual(["2"]);
-    expect(pushes[0]!.params.meta).toMatchObject({ from_name: "lead-1", to: "coder-2" });
+    const shown = drainInterrupting(inbox);
+    expect(shown.map((e) => e.cursor)).toEqual([2]);
+    const line = renderLine(shown[0]!);
+    expect(line).toContain("(lead-1)");
+    expect(line).toContain("addressed to: coder-2 (you)");
+    // The one meant for another seat waits, to ride along with the end of the turn.
+    expect(drain(inbox).map((e) => e.cursor)).toEqual([1]);
   });
 });

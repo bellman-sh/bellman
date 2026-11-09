@@ -290,7 +290,7 @@ A host with no browser you can reach at all — CI, `npm run smoke`, a server
 nobody logs into — needs `BELLMAN_KEY=<key>`: an explicitly set key still wins
 and skips sign-in entirely.
 
-**Channels are gone.** The bridge used to push peer events into the session as a Claude Code channel, launched with `bellman-claude`. It speaks MCP 2026-07-28 only now, and on that revision a server sends no notification the client did not ask for: Claude Code does not register such a server as a channel. The plugin's monitor took its place. A registration that still sets `BELLMAN_DELIVERY=channel` gets hook delivery, and `bellman-claude` runs plain `claude`.
+**Channels are gone.** The bridge used to push peer events into the session as a Claude Code channel, launched with `bellman-claude`. Claude Code now opens it on MCP 2026-07-28, and on that revision a server sends no notification the client did not ask for: Claude Code does not register such a server as a channel. (Claude Desktop still opens the `.mcpb` on the 2025-era protocol, which the bridge also serves, with the same queue delivery.) The plugin's monitor took its place. A registration that still sets `BELLMAN_DELIVERY=channel` gets hook delivery, and `bellman-claude` runs plain `claude`.
 
 **The Stop hook.** The bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply. The plugin sets this up for you; from the npm install, the registration above already runs hook delivery, and the hook itself is:
 

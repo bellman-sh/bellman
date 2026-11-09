@@ -38,7 +38,7 @@ import { compareVersions, VERSION } from "./version.js";
  * mcp.bellman.sh is a stateless HTTP server, and MCP gives it no way to push —
  * a peer's message only reaches you when your agent calls bellman_sync. This
  * process watches the room for you: to Claude Code it is a stdio MCP server,
- * spoken in MCP 2026-07-28 only; to Bellman it is an ordinary HTTP client.
+ * spoken in MCP 2026-07-28 (Claude Code) or the 2025-era protocol (Claude Desktop); to Bellman it is an ordinary HTTP client.
  *
  *   - It proxies the remote bellman_* tools unchanged, so the agent uses
  *     Bellman exactly as it would over HTTP. The one exception is
@@ -895,8 +895,9 @@ export function createBridge(opts: BridgeOptions) {
    * in-memory one). The returned handle's `close` ends the connection.
    */
   function serve(transport?: Transport): StdioServerHandle {
-    // 2026-07-28 only: a 2025-era `initialize` is answered with the unsupported-protocol-version error.
-    return serveStdio(createServer, { transport, legacy: "reject", onerror: (err) => log(`MCP connection: ${err.message}`) });
+    // Both eras, from the same factory: Claude Code opens with 2026-07-28's `server/discover`, Claude Desktop (the
+    // .mcpb) still with a 2025-era `initialize`. Delivery is hook or queue either way; no channel push comes back.
+    return serveStdio(createServer, { transport, legacy: "serve", onerror: (err) => log(`MCP connection: ${err.message}`) });
   }
 
   /**

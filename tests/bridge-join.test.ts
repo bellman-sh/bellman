@@ -16,6 +16,10 @@ import { bindRepoRoom } from "../src/room/repo-room.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 import { bridgeClient, tmpInbox } from "./helpers/bridge-client.js";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { leaveRoom } from "../src/room/rooms.js";
 
 /** A swarm room, so its code still seats someone after the creator's own seat. */
 const SWARM = {
@@ -105,7 +109,10 @@ describe("the bridge's join from BELLMAN_JOIN_CODE", () => {
 });
 
 /** A bridge signed in as `key`, whose own-credential HTTP calls reach the real `/me` routes. */
-async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } = {}) {
+async function bridgeWithRoutes(
+  key: string,
+  { list = true, hangLeave = false, seats }: { list?: boolean; hangLeave?: boolean; seats?: { file: string; alive?: (pid: number) => boolean } } = {},
+) {
   const identity = resolveIdentity(`Bearer ${key}`)!;
   const logged: string[] = [];
   const remote = async (): Promise<Remote> => {
@@ -130,6 +137,7 @@ async function bridgeWithRoutes(key: string, { list = true, hangLeave = false } 
   const bridge = createBridge({
     delivery: "hook", inboxDir: tmpInbox(), remote, pollWaitSeconds: 1, log: (line) => logged.push(line),
     upload: { serverUrl: "https://mcp.example.test", bearer: () => key, fetchImpl }, leaveTimeoutMs: 200,
+    ...(seats ? { seats: { file: seats.file, url: "https://mcp.example.test/mcp", cwd: "/work/bellman", alive: seats.alive } } : {}),
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = bridgeClient("claude-code");
@@ -217,3 +225,76 @@ describe("the bridge leaving its bound seats", () => {
     expect(Date.now() - at).toBeLessThan(2_000);
   });
 });
+
+describe("the bridge taking back a default-room seat a session left behind (#603)", () => {
+  const seatsFile = () => join(mkdtempSync(join(tmpdir(), "bellman-seats-")), "default-seats.json");
+  /** What a bridge that died holding the seat leaves in the file: the entry, under a pid that is gone. */
+  const orphan = (file: string) =>
+    writeFileSync(file, JSON.stringify(JSON.parse(readFileSync(file, "utf8")).map((s: object) => ({ ...s, pid: 4242 }))));
+  const dead = () => false;
+
+  async function boundRoom() {
+    const { sessionId } = await startRoom(await h.connect(DEV_KEY.jesse), SWARM);
+    return sessionId;
+  }
+
+  it("takes back the seat instead of joining with a new one", async () => {
+    const sessionId = await boundRoom();
+    const file = seatsFile();
+    const first = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: dead } });
+    await bindRepoRoom(h.store, first.identity, { remote: REMOTE, sessionId, role: "helper" });
+    const before = (await first.bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+    orphan(file);
+    const seated = (await h.store.getSession(sessionId))!.members.length;
+
+    const next = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: dead } });
+    const again = await next.bridge.joinBound(REMOTE, "bellman");
+
+    expect(again).toMatchObject({ state: "joined", session_id: sessionId, member_id: before.member_id, role: "helper", from: "repo" });
+    expect(next.bridge.watching().map((w) => w.member_id)).toEqual([before.member_id]);
+    expect((await h.store.getSession(sessionId))!.members.length).toBe(seated);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual([expect.objectContaining({ member_id: before.member_id, pid: process.pid })]);
+  });
+
+  it("joins with a new seat while the bridge holding the old one is still running", async () => {
+    const sessionId = await boundRoom();
+    const file = seatsFile();
+    const first = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file } });
+    await bindRepoRoom(h.store, first.identity, { remote: REMOTE, sessionId, role: "helper" });
+    const before = (await first.bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+    orphan(file);
+
+    const next = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: () => true } });
+    const again = (await next.bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+
+    expect(again.member_id).not.toBe(before.member_id);
+  });
+
+  it("joins with a new seat, and forgets the old one, when the room no longer holds it", async () => {
+    const sessionId = await boundRoom();
+    const file = seatsFile();
+    const first = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: dead } });
+    await bindRepoRoom(h.store, first.identity, { remote: REMOTE, sessionId, role: "helper" });
+    const before = (await first.bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+    orphan(file);
+    expect((await leaveRoom(h.store, first.identity, sessionId, before.member_id)).ok).toBe(true);
+
+    const next = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: dead } });
+    const again = (await next.bridge.joinBound(REMOTE, "bellman")) as { member_id: string };
+
+    expect(again).toMatchObject({ state: "joined", session_id: sessionId });
+    expect(again.member_id).not.toBe(before.member_id);
+    expect(JSON.parse(readFileSync(file, "utf8")).map((s: { member_id: string }) => s.member_id)).toEqual([again.member_id]);
+  });
+
+  it("forgets the seat when it leaves it on a clean close", async () => {
+    const sessionId = await boundRoom();
+    const file = seatsFile();
+    const { bridge, identity } = await bridgeWithRoutes(DEV_KEY.jesse, { seats: { file, alive: dead } });
+    await bindRepoRoom(h.store, identity, { remote: REMOTE, sessionId, role: "helper" });
+    await bridge.joinBound(REMOTE, "bellman");
+    await bridge.close();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual([]);
+  });
+});
+

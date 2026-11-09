@@ -2451,7 +2451,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~11,636** | every request, whether or not you are in a room |
+| Tool definitions | **~11,736** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,640 | once — `connect` 746 plus `confirm` 893, each plus the room's instructions when set (#414: at most 8 KiB, about 2,100); the `confirm` reply itself is at most 24,000 characters (ADR 0047 decision 9) |
 | Receiving a message | ~220 | each |
@@ -2485,6 +2485,7 @@ decision recorded here, not a side effect of a merge.
 | Memory controls: `bellman_memory`'s `paused` refusal, `bellman_confirm`'s `recall.paused` | +19 | 11,621 | #531 (ADR 0047, 13) |
 | Seat names: `bellman_send`'s `to`, `name` on seats and on each event's `from` | +111 | 11,732 | ADR 0048 |
 | MCP SDK 2.x: no tool carries v1's `execution: {"taskSupport": "forbidden"}` (tasks left the core, SEP-2663); `$schema` names JSON Schema 2020-12 | −96 | 11,636 | (#571) |
+| Left-behind seats: `bellman_leave` clears any seat of one's own, `bellman_evict` says which seats it refuses, `bellman_sync`'s `left` | +100 | 11,736 | #603 |
 | **Ceiling** | +1,500 | **11,840** | #416 |
 
 Each row is main measured at its merge against main at the merge before. A row is the PR that changed the

@@ -444,6 +444,21 @@ describe("delivery as events land", () => {
     expect(restarted.bridge.watching()).toHaveLength(0);
   });
 
+  it("says left: true to a handle that left of its own accord, and nothing to one still in the room (#603)", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    const still = await b.call("bellman_sync", { session_id: sessionId, member_id: joinerMember, wait_seconds: 0 });
+    expect(still.data.left).toBeUndefined();
+
+    await b.call("bellman_leave", { session_id: sessionId, member_id: joinerMember });
+    const after = await b.call("bellman_sync", { session_id: sessionId, member_id: joinerMember, wait_seconds: 0 });
+
+    expect(after.isError, after.text).toBe(false);
+    expect(after.data.left).toBe(true);
+    expect(after.data.removed).toBeUndefined();
+  });
+
   it("does not arm a watcher on a bellman_surface result: reading the surface is not a membership", async () => {
     const a = await open(DEV_KEY.jesse);
     const b = await open(DEV_KEY.peer);

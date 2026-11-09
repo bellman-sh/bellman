@@ -1036,6 +1036,12 @@ async function signIn(
     try {
       try {
         await client.connect(transport);
+        /**
+         * /mcp answers the handshake signed out (#587), so a connect with no token succeeds and draws no
+         * challenge: without this the bridge handed back a connection that only ever 401s, and never opened
+         * the browser. A resource listing is the cheapest call that needs a sign-in; its 401 starts one.
+         */
+        if (!provider.tokens()?.access_token) await client.listResources();
       } catch (err) {
         if (!(err instanceof UnauthorizedError) || !pending) throw err;
         /**

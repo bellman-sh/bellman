@@ -2,7 +2,7 @@ import http from "node:http";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 import type { Duplex } from "node:stream";
 import { ignoreResets } from "./upgrade-socket.js";
-import { resolveIdentity } from "../../src/auth.js";
+import { isAnonymousRequest, resolveIdentity } from "../../src/auth.js";
 import { MemoryBlobStore } from "../../src/files/blobs.js";
 import { roomRoutes } from "../../src/http/rooms.js";
 import {
@@ -144,11 +144,13 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
     const identity = header.toLowerCase().startsWith("bearer ")
       ? await identityFromAccessToken(header.slice(7).trim(), config)
       : null;
-    if (!identity) {
+    const body = (await request.json()) as { method?: string; id?: unknown; params?: unknown };
+    // As the real /mcp (#587): with no Authorization header at all, the handshake and the tool list are answered
+    // signed out, and everything else gets the 401 whose challenge starts a sign-in.
+    if (!identity && (header !== "" || !isAnonymousRequest(body))) {
       return new Response("unauthorized", { status: 401, headers: unauthorizedHeaders(config) });
     }
 
-    const body = (await request.json()) as { method?: string; id?: unknown; params?: unknown };
     if (body.id === undefined) return new Response(null, { status: 202 }); // a notification
     if (body.method === "initialize") initializes.push(body.params);
 

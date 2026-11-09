@@ -1186,7 +1186,9 @@ describe("connectSignedIn", () => {
   function aging(bellman: FakeBellman) {
     let armed = false;
     // The 401 a ten-minute-old access token gets, from the real server rather
-    // than faked, by dropping the header it would have rejected anyway.
+    // than faked, by presenting a token it rejects. Not by dropping the header:
+    // a request with none is answered signed out when it is a handshake or a
+    // tool listing (#587), as an expired token never is.
     const fetchImpl = (async (input, init) => {
       const isRpc = String(input).endsWith("/mcp") && init?.method === "POST";
       if (!isRpc || !armed) return bellman.fetch(input, init);
@@ -1196,7 +1198,7 @@ describe("connectSignedIn", () => {
       // which is a real protection, not something to route around.
       armed = false;
       const headers = new Headers(init?.headers as HeadersInit);
-      headers.delete("authorization");
+      headers.set("authorization", `Bearer ${STALE}`);
       return bellman.fetch(input, { ...init, headers });
     }) as typeof fetch;
     return { fetchImpl, expireOnce: () => { armed = true; } };

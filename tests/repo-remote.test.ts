@@ -59,4 +59,21 @@ describe("launchJoin", () => {
     launchJoin(none, "", "/tmp", "tmp", () => null);
     expect([none.join.mock.calls.length, none.joinBound.mock.calls.length]).toEqual([0, 0]);
   });
+
+  it("takes no default-room seat in a headless claude -p, and still joins from an explicit code (#603)", () => {
+    // Another plugin's session summary runs `claude --model haiku -p` in the repo: each run took a seat it then left behind.
+    for (const entrypoint of ["sdk-cli", "sdk-ts", "sdk-py"]) {
+      const b = bridge();
+      const find = vi.fn(() => "github.com/a/b");
+      launchJoin(b, undefined, "/repo", "repo", find, entrypoint);
+      expect(b.joinBound, entrypoint).not.toHaveBeenCalled();
+      expect(find, entrypoint).not.toHaveBeenCalled();
+    }
+    const coded = bridge();
+    launchJoin(coded, "BELL-AAAA-11-HELPER", "/repo", "repo", () => "github.com/a/b", "sdk-cli");
+    expect(coded.join).toHaveBeenCalledWith("BELL-AAAA-11-HELPER", "repo");
+    const person = bridge();
+    launchJoin(person, undefined, "/repo", "repo", () => "github.com/a/b", "cli");
+    expect(person.joinBound).toHaveBeenCalledWith("github.com/a/b", "repo");
+  });
 });

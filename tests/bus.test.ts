@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
@@ -113,6 +114,14 @@ describe("the bus path", () => {
     const base = busPath({ ...identity, root: "/r" });
     expect(busPath({ ...identity, url: "https://other.test/mcp", root: "/r" })).not.toBe(base);
     expect(busPath({ ...identity, credential: "qk_someone_else", root: "/r" })).not.toBe(base);
+  });
+
+  it("is not the bus an older release's bridges coordinate, so this release's events are never shaped by older code", () => {
+    // The coordinator builds every event its subscribers get. A 0.9.1 coordinator, still running in an old session,
+    // dropped `ambient`, and every newer bridge on its bus then woke for each status update. The path before the wire
+    // version was the bare [url, credential] digest; a bridge of this release must not find that socket.
+    const before = createHash("sha256").update(JSON.stringify([identity.url, identity.credential])).digest("hex").slice(0, 16);
+    expect(busPath({ ...identity, root: "/r" })).not.toBe(`/r/${before}.sock`);
   });
 
   it("cannot be steered by moving the boundary between the URL and the credential", () => {

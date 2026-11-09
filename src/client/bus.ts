@@ -314,10 +314,17 @@ export function busRoot(): string {
  *
  * The inputs are framed as JSON. Hashing the bare concatenation would give
  * ("a", "bc") and ("ab", "c") one digest, and so one bus.
+ *
+ * `BUS_WIRE` is in the hash too. The coordinator builds every event its subscribers
+ * get, so a bridge that joins an older release's bus gets that release's events: a
+ * 0.9.1 coordinator dropped `ambient`, and every 0.9.2 bridge behind it woke for each
+ * status update. Bump it whenever what a coordinator puts in an event changes.
  */
+export const BUS_WIRE = 2;
+
 export function busPath(o: { url: string; credential: string; root?: string }): string {
   const digest = createHash("sha256")
-    .update(JSON.stringify([o.url, o.credential]))
+    .update(JSON.stringify([BUS_WIRE, o.url, o.credential]))
     .digest("hex")
     .slice(0, 16);
   return join(o.root ?? busRoot(), `${digest}.sock`);

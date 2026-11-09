@@ -19,7 +19,7 @@ into the mod.
 - `[src/client/bridge.ts:createBridge]` the local MCP server: relays the remote tools and resources, adds `bellman_whoami`,
   `bellman_upload` and `bellman_wait`; learns memberships from tool results
   (`observe`) and delivers peer events by `Delivery` = `hook | queue` into the inbox (`channel`, set by an old registration, means `hook`); speaks MCP
-  2026-07-28 only (`serveStdio`, `legacy: "reject"`). Exposes the door's reads and
+  2026-07-28 and, for Claude Desktop, the 2025-era protocol, from one factory (`serveStdio`, `legacy: "serve"`). Exposes the door's reads and
   writes (`readEvents`, `readRooms`, `readSurface`, `decline`, `writeSurface`, `setStatus`, `join`).
 - `[src/client/inbox.ts]` the on-disk event queue per Claude Code pid (`enqueue`, `drain`, `discardThrough`), membership
   files, and `renderEvent`/`renderBatch`/`renderLine`, which frame peer content as untrusted; `drainInterrupting`

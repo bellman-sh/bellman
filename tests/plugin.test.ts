@@ -175,7 +175,24 @@ describe("the committed bridge bundle, run as plugin/.mcp.json declares it", () 
    * loopback, HOME and XDG_CONFIG_HOME are a directory deleted afterwards, and the bus,
    * which would make a socket under ~/.claude, is off.
    */
-  async function initialize(): Promise<{ _meta: Record<string, { name: string; version: string }>; instructions?: string }> {
+  /** The handshake Claude Code sends (2026-07-28), and the one Claude Desktop still sends (a 2025-era `initialize`). */
+  const DISCOVER = {
+    method: "server/discover",
+    params: {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { name: "plugin-test", version: "0.0.1" },
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    },
+  };
+  const LEGACY_INITIALIZE = {
+    method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "claude-ai", version: "0.1.0" } },
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function initialize(opening: { method: string; params: unknown } = DISCOVER): Promise<any> {
     const home = mkdtempSync(join(tmpdir(), "bellman-plugin-"));
     dirs.push(home);
     const { args, env } = json("plugin/.mcp.json").mcpServers.bellman as { args: string[]; env: Record<string, string> };
@@ -205,22 +222,10 @@ describe("the committed bridge bundle, run as plugin/.mcp.json declares it", () 
       proc.on("exit", (code) => reject(new Error(`the bundle exited ${code} before answering: ${stderr}`)));
     });
 
-    // The bridge speaks MCP 2026-07-28 only: no `initialize`, and `server/discover` answers what it did.
-    proc.stdin!.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "server/discover",
-        params: {
-          _meta: {
-            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientInfo": { name: "plugin-test", version: "0.0.1" },
-            "io.modelcontextprotocol/clientCapabilities": {},
-          },
-        },
-      })}\n`
-    );
-    return JSON.parse(await answer).result;
+    proc.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, ...opening })}\n`);
+    const reply = JSON.parse(await answer);
+    if (reply.error) throw new Error(`the bundle refused ${opening.method}: ${JSON.stringify(reply.error)}`);
+    return reply.result;
   }
 
   it("reports package.json's version", async () => {
@@ -237,5 +242,14 @@ describe("the committed bridge bundle, run as plugin/.mcp.json declares it", () 
 
     expect(instructions).toContain("Stop hook");
     expect(instructions).toContain("bellman_wait");
+  });
+
+  // Claude Desktop opens the .mcpb with a 2025-era `initialize` (its MCP log, 9 Nov). A bundle that refuses it shows no
+  // Bellman tools there at all.
+  it("answers the 2025-era initialize Claude Desktop sends, with the same server and instructions", async () => {
+    const result = await initialize(LEGACY_INITIALIZE);
+
+    expect(result.serverInfo).toMatchObject({ name: "bellman", version: pkg.version });
+    expect(result.instructions).toContain("bellman_wait");
   });
 });

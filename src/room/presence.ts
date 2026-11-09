@@ -75,7 +75,9 @@ export { NO_SOCKETS, lastSeen };
  *
  * The window is for a member that polls. A member on a live socket does not
  * depend on it: `presenceOf` is handed the members a socket vouches for, which
- * is what closed the gap #140 and #146 describe. What the window cannot cover
+ * is what closed the gap #140 and #146 describe. Since #603 that is the members
+ * the socket's bridge names, where it names them (`connectedAmong`), and not
+ * every seat its account holds in the room. What the window cannot cover
  * for a socket-fed member is the time after its socket drops. The object stops
  * listing the socket at once, `lastSeenAt` is whatever it last was (a member
  * that only listens may never have written it since joining), and the member
@@ -161,20 +163,31 @@ export const staleMembers = (
  * long, which #139 prefers to the opposite: reaping too early removes a live
  * member, and the removal is final.
  *
+ * #603 is that cost come due: one live bridge kept 106 dead seats of its account
+ * present in one room. So a socket can now say which members it is for, and
+ * `exact` is the ids of the sockets that did (`x-bellman-exact`, set by the /ws
+ * route when the client named its members). Those are read as they stand, with
+ * no widening: the bus reconnects a room's socket when the members it serves
+ * change (`BusOptions.onRoomMembers`), so a member that joins later is named on
+ * the next socket instead of being inferred from its identity. `attached` is
+ * the rest, from bridges that name nobody, and is widened as before.
+ *
  * Both stores run it inside `seatMember` and import it from here. members.ts,
  * which this module imports, does not read it, so that is no cycle.
  */
 export function connectedAmong(
   members: readonly Member[],
   attached: Iterable<string>,
+  exact: Iterable<string> = [],
 ): ReadonlySet<string> {
   const named = new Set(attached);
-  if (named.size === 0) return NO_SOCKETS;
+  const literal = new Set(exact);
+  if (named.size === 0 && literal.size === 0) return NO_SOCKETS;
   const users = new Set<string>();
   for (const m of members) if (named.has(m.memberId)) users.add(m.userId);
   const connected = new Set<string>();
   for (const m of members) {
-    if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
+    if (isActiveMember(m) && (users.has(m.userId) || literal.has(m.memberId))) connected.add(m.memberId);
   }
   return connected;
 }

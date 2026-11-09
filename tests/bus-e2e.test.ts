@@ -279,6 +279,10 @@ const socketPath = (key: string): string => busPath({ url: rooms.url, credential
 
 const texts = (...ids: string[]): string[] => ids.map((id) => `evt-${id}`);
 
+/** The members an accepted upgrade named (#603), in the order the bus has them. */
+const named = (): Array<string | null> =>
+  rooms.upgrades.filter((u) => u.answered === 101).map((u) => new URL(u.target, "http://x").searchParams.get("members"));
+
 // ---------------------------------------------------------------------------
 // The three
 // ---------------------------------------------------------------------------
@@ -290,7 +294,8 @@ describe("two bridges, one room", () => {
     const p = await open(DEV_KEY.peer);
     const { sessionId, aMember, bMember, pMember } = await room3(a, b, p);
     await until(() => a.bridge.busRole() === "coordinator" && b.bridge.busRole() === "subscriber", "one coordinator and one subscriber");
-    await until(() => rooms.sockets.length === 1, "the room's socket");
+    // The coordinator's socket names the members it serves (#603), so it is opened again once the second bridge's subscribes.
+    await until(() => named().at(-1) === `${aMember},${bMember}` && rooms.sockets.length === 1, "the room's socket, naming both");
 
     for (const n of [1, 2, 3, 4, 5]) await send(p, sessionId, pMember, `evt-p${n}`);
     await send(a, sessionId, aMember, "evt-a1");
@@ -302,8 +307,9 @@ describe("two bridges, one room", () => {
     expect(heard(b)).toEqual(texts("p1", "p2", "p3", "p4", "p5", "a1"));
     expect(heard(p)).toEqual(texts("a1", "b1"));
 
-    // One request, and it was accepted: not one connection per bridge, and not one that was refused and retried.
-    expect(rooms.upgrades.map((u) => u.answered)).toEqual([101]);
+    // One connection at a time, and every request accepted: not one connection per bridge, and not one that was refused
+    // and retried. The coordinator's, then its again naming both members.
+    expect(rooms.upgrades.map((u) => u.answered)).toEqual([101, 101]);
     expect(rooms.sockets).toHaveLength(1);
     // And neither of the two held a long poll of its own, which is what the connection replaces.
     expect(longPolls(a)).toEqual([]);
@@ -318,9 +324,9 @@ describe("two bridges, one room", () => {
     const a = await open(DEV_KEY.jesse, slow);
     const b = await open(DEV_KEY.jesse, slow);
     const p = await open(DEV_KEY.peer);
-    const { sessionId, room, pMember } = await room3(a, b, p);
+    const { sessionId, room, aMember, bMember, pMember } = await room3(a, b, p);
     await until(() => a.bridge.busRole() === "coordinator" && b.bridge.busRole() === "subscriber", "one coordinator and one subscriber");
-    await until(() => rooms.sockets.length === 1, "the room's socket");
+    await until(() => named().at(-1) === `${aMember},${bMember}` && rooms.sockets.length === 1, "the room's socket, naming both");
 
     for (const n of [1, 2, 3]) await send(p, sessionId, pMember, `evt-p${n}`);
     await until(() => heard(a).length === 3 && heard(b).length === 3, "both to hear the first three");
@@ -347,6 +353,7 @@ describe("two bridges, one room", () => {
     // Both attempts the survivor made asked from where it had got to, and not from the start or the head.
     expect(rooms.upgrades.map((u) => [u.cursor, u.answered])).toEqual([
       [expect.any(String), 101], // the first coordinator's
+      [expect.any(String), 101], // and again, naming both members (#603)
       [String(before), "stalled"],
       [String(before), 101],
     ]);

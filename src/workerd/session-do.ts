@@ -182,7 +182,9 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?
  * (#146): they find the identity that opened the socket, and every undeparted
  * member of that identity counts as connected while the socket is open, which
  * `connectedAmong` in presence.ts explains (the ids are a snapshot, so they are a
- * starting point and not the whole answer). `#closeCutSockets` is what reads it
+ * starting point and not the whole answer). `exact` is a socket whose bridge named
+ * the members it watches (#603): its ids are the whole answer, and nobody else of
+ * the identity is vouched for by it. `#closeCutSockets` is what reads it
  * to find a socket by member: on an eviction it finds the sockets naming only
  * members a creator removed and closes them (#113). A member who merely left
  * keeps its socket, so "has left" is not the predicate — "was removed" is.
@@ -197,7 +199,7 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void; limit?
  * that the Worker never forwards a caller's request, and stays for as long as
  * this field is read.
  */
-type SocketAttachment = { memberIds: string[]; cursor: number };
+type SocketAttachment = { memberIds: string[]; cursor: number; exact?: true };
 
 /**
  * WebSocket.readyState for a socket on its way out (CLOSING) or gone (CLOSED).
@@ -690,9 +692,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * other input is synchronous.
    */
   async #connected(s: StoredSession, from: RowReader = this.ctx.storage): Promise<ReadonlySet<string>> {
-    const attached = this.#attachedIds();
+    const { widened, exact } = this.#attachedIds();
     // The room's members and the ones the sockets name: a member named twice counts once.
-    return connectedAmong([...s.members, ...await this.#membersById(s, attached, from)], attached);
+    // An exact socket's departed ids are not read: only an active member counts, and those are on the record.
+    return connectedAmong([...s.members, ...await this.#membersById(s, widened, from)], widened, exact);
   }
 
   /**
@@ -910,7 +913,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * The member ids the sockets open to this room carry, from their attachments.
+   * The member ids the sockets open to this room carry, from their attachments:
+   * `exact` from the sockets whose bridge named its members (#603), `widened` from
+   * the rest, which `connectedAmong` widens to their identity.
    *
    * Synchronous, as wake() is: getWebSockets and deserializeAttachment are, so
    * seatMember can call this inside its transaction and decide against the
@@ -929,14 +934,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * (#126) and nothing outside needs this: connectedMembers is the answer a
    * caller can have.
    */
-  #attachedIds(): string[] {
-    const ids: string[] = [];
+  #attachedIds(): { widened: string[]; exact: string[] } {
+    const widened: string[] = [];
+    const exact: string[] = [];
     for (const ws of this.ctx.getWebSockets()) {
       if (!isOpen(ws)) continue;
-      const memberIds = (ws.deserializeAttachment() as Partial<SocketAttachment> | null)?.memberIds;
-      if (Array.isArray(memberIds)) ids.push(...memberIds);
+      const att = ws.deserializeAttachment() as Partial<SocketAttachment> | null;
+      if (Array.isArray(att?.memberIds)) (att.exact === true ? exact : widened).push(...att.memberIds);
     }
-    return ids;
+    return { widened, exact };
   }
 
   /**
@@ -1048,6 +1054,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const cursor = Number(url.searchParams.get("cursor"));
     const asked = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
+    // The bridge named these members, and the Worker cut them to its own (#603): read as they stand.
+    const exact = request.headers.get("x-bellman-exact") === "1";
 
     // ONE roster read answering both rechecks (#133 and #113). The Worker's
     // membersOf said open, and said who this identity holds, but that was a
@@ -1116,6 +1124,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const attachment: SocketAttachment = {
       memberIds,
       cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
+      ...(exact ? { exact: true as const } : {}),
     };
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
@@ -1217,7 +1226,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * `connectedAmong` and not the attachment's ids directly, so this stamps
    * exactly whom the socket was vouching FOR. The attachment is a snapshot taken
    * at upgrade, and a member that joined the room later is served by the same
-   * socket without being named in it — the reason that function exists.
+   * socket without being named in it — the reason that function exists. An exact
+   * socket (#603) names whom it was for, so it stamps those and no other seat.
    *
    * Closed and frozen rooms are skipped, `touchMember`'s rule (src/room/rooms.ts). A
    * closed room's record is over, and a freeze is meant to cost nobody their
@@ -1241,8 +1251,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!Array.isArray(ids) || ids.length === 0) return;
       const s = await this.stored();
       if (!s || s.closed || s.frozenAt !== null) return;
-      // The ids can name a member who has left, whose row says whose socket it was.
-      const stamped = connectedAmong([...s.members, ...await this.#membersById(s, ids)], ids);
+      // The ids can name a member who has left, whose row says whose socket it was. An exact
+      // socket's (#603) are whom it was for already, and only the active ones among them count.
+      const stamped = att?.exact === true
+        ? connectedAmong(s.members, [], ids)
+        : connectedAmong([...s.members, ...await this.#membersById(s, ids)], ids);
       if (stamped.size === 0) return;
       const now = Date.now();
       // The stamped members' rows and nothing else (ADR 0019).
@@ -3924,7 +3937,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) return;
       // The members the sockets name, read by row: a removed member has left, so it is
       // not on the record (ADR 0019).
-      const named = await this.#membersById(s, this.#attachedIds());
+      const { widened, exact } = this.#attachedIds();
+      const named = await this.#membersById(s, [...widened, ...exact]);
       const cut = new Set(named.filter(isRemovedMember).map((m) => m.memberId));
       const known = new Set(named.map((m) => m.memberId));
       for (const ws of this.ctx.getWebSockets()) {

@@ -95,6 +95,13 @@ export interface BusOptions {
   /** Coordinator only. A room lost its last subscriber: close its upstream. */
   onRoomClose?(sessionId: string): void;
   /**
+   * Coordinator only. The members subscribed to an open room changed (`members` says who they are now): one
+   * nobody here was watching it as subscribed, or the last subscription of one went while others stayed. The
+   * upstream names the members it is for, and the server vouches for those alone (#603), so it has to say so
+   * again. Not called for a room opening or closing: those are the two hooks above.
+   */
+  onRoomMembers?(sessionId: string): void;
+  /**
    * Subscriber only. How long to wait for the coordinator to acknowledge a subscribe
    * before treating the bus as unavailable. Defaults to `DEFAULT_ACK_TIMEOUT_MS`.
    *
@@ -967,10 +974,18 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
     if (sub.conn.subs.get(key) === sub) sub.conn.subs.delete(key);
     const { room } = sub;
     room.subs.delete(sub);
-    if (room.subs.size === 0 && rooms.get(room.id) === room) {
+    if (rooms.get(room.id) !== room) return;
+    if (room.subs.size === 0) {
       rooms.delete(room.id);
       hook("onRoomClose", () => opts.onRoomClose?.(room.id));
+    } else if (!watches(room, sub.memberId)) {
+      hook("onRoomMembers", () => opts.onRoomMembers?.(room.id));
     }
+  }
+
+  /** Some subscription to this room, from any connection, is this member's. */
+  function watches(room: Room, memberId: string): boolean {
+    return [...room.subs].some((s) => s.memberId === memberId);
   }
 
   /** Involuntary: this subscription cannot go on, and its owner is told why. */
@@ -1000,6 +1015,7 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
     }
     const key = subKey(sessionId, memberId);
     const prior = conn.subs.get(key);
+    const joining = !opening && !watches(room, memberId);
     const sub: Sub = { conn, room, sessionId, memberId, sentThrough: cursor, pumping: false, ended: false, send, end };
     room.subs.add(sub);
     conn.subs.set(key, sub);
@@ -1007,6 +1023,7 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
     // the room and its upstream does not close and reopen for nothing.
     if (prior) dropSub(prior);
     if (opening) hook("onRoomOpen", () => opts.onRoomOpen?.(sessionId, cursor));
+    else if (joining) hook("onRoomMembers", () => opts.onRoomMembers?.(sessionId));
     kick(sub);
     return sub;
   }

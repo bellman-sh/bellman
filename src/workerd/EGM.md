@@ -70,7 +70,9 @@ with `MemoryStore` and the Node server; what is here is storage layout, transact
   `REPLAY_LIMIT` (1,000) events were missed, so the client catches up through `bellman_sync`.
 - The room socket is receive-only: `[src/workerd/session-do.ts:SessionDO.webSocketMessage]` closes on any client frame with
   1003. `[src/workerd/worker.ts:fetch]` builds a fresh `Request` for the object carrying only the validated cursor, the
-  upgrade header and `x-bellman-members` from `membersOf`; nothing from the caller's request is forwarded.
+  upgrade header and `x-bellman-members` from `membersOf`, cut to the members the client names in `members=` when it
+  names any (then with `x-bellman-exact`, read without widening to the identity, #603); nothing from the caller's request
+  is forwarded.
 
 ### Across objects
 

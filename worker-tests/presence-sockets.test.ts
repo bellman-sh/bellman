@@ -55,16 +55,19 @@ const here = (memberId: string) =>
 const QUIET_AT = Date.now() - STALE_AFTER_MS - 60_000;
 const quiet = (memberId: string) => member({ memberId, userId: "u_jesse", lastSeenAt: QUIET_AT });
 
-/** The upgrade through the real route: auth, membersOf, then the object. */
-async function open(id: string): Promise<WebSocket> {
-  const res = await SELF.fetch(`https://bellman.test/ws?session=${id}&cursor=0`, {
-    headers: { upgrade: "websocket", authorization: `Bearer ${KEY}` },
-  });
+/** The upgrade through the real route: auth, membersOf, then the object. `members` is the list a bridge names (#603). */
+async function open(id: string, members?: string): Promise<WebSocket> {
+  const res = await upgrade(id, members);
   expect(res.status).toBe(101);
   const ws = res.webSocket!;
   ws.accept();
   return ws;
 }
+
+const upgrade = (id: string, members?: string) =>
+  SELF.fetch(`https://bellman.test/ws?session=${id}&cursor=0${members === undefined ? "" : `&members=${members}`}`, {
+    headers: { upgrade: "websocket", authorization: `Bearer ${KEY}` },
+  });
 
 /** What the object's accepted sockets carry, read from the object itself. */
 const attachments = (stub: DurableObjectStub) =>
@@ -286,5 +289,57 @@ describe("an open socket is liveness", () => {
 
     const m = (await store.getSession(id))!.members.find((x) => x.memberId === "m_quiet")!;
     expect(m.lastSeenAt).toBe(QUIET_AT); // untouched
+  });
+});
+
+/**
+ * #603. A socket vouched for its identity, so one live bridge kept every seat its
+ * account held in the room present, the dead ones too: a room filled to 113 seats of
+ * one account read every one of them present. A bridge now names the members it
+ * watches, and the socket vouches for those and nobody else.
+ */
+describe("a socket that names its members", () => {
+  it("vouches for the one it names and not the identity's other seat", async () => {
+    const { id, store, stub } = await room([quiet("m_live"), quiet("m_dead")]);
+    const ws = await open(id, "m_live");
+
+    expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_live"], exact: true })]);
+    expect([...await store.connectedMembers(id)]).toEqual(["m_live"]);
+    const presence = (await store.getSession(id))!.members
+      .map((m) => [m.memberId, presenceOf(m, Date.now(), new Set(["m_live"]))]);
+    expect(presence).toEqual([["m_live", "present"], ["m_dead", "stale"]]);
+
+    // Its close stamps whom it named, not the identity's other seats.
+    ws.close(1000, "done");
+    await vi.waitFor(async () => {
+      expect(await store.connectedMembers(id)).toEqual(new Set());
+    }, { timeout: 3000 });
+    const stamped = (await store.getSession(id))!.members.map((m) => [m.memberId, m.lastSeenAt === QUIET_AT]);
+    expect(stamped).toEqual([["m_live", false], ["m_dead", true]]);
+  });
+
+  it("does not vouch for a member of the identity that joins after it: the bridge that joined it reconnects naming it", async () => {
+    const { id, store } = await room([quiet("m_live")]);
+    await open(id, "m_live");
+    expect(await store.addMember(id, quiet("m_late"))).toBe(true);
+    expect([...await store.connectedMembers(id)]).toEqual(["m_live"]);
+  });
+
+  it("ignores a name that is not its identity's, and is refused when nothing of its own is left", async () => {
+    const { id, store, stub } = await room([here("m_other"), quiet("m_mine")]);
+    await open(id, "m_mine,m_other,m_nobody");
+    expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_mine"] })]);
+    expect([...await store.connectedMembers(id)]).toEqual(["m_mine"]);
+
+    expect((await upgrade(id, "m_other,m_nobody")).status).toBe(403);
+    expect(await attachments(stub)).toHaveLength(1);
+  });
+
+  it("vouches for the whole identity when it names nobody, as a bridge before #603 does", async () => {
+    const { id, store, stub } = await room([quiet("m_a")]);
+    await open(id);
+    expect(await attachments(stub)).toEqual([{ memberIds: ["m_a"], cursor: 0 }]);
+    expect(await store.addMember(id, quiet("m_b"))).toBe(true);
+    expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
   });
 });

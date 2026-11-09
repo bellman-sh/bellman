@@ -175,6 +175,12 @@ export interface RoomSocketOptions {
    */
   credential: string | (() => string | Promise<string>);
   sessionId: string;
+  /**
+   * The members this socket is for, read again for every attempt so that a reconnect names the set as it is
+   * then. The server vouches for these alone (#603): one socket naming nobody vouches for every seat its
+   * identity holds in the room, dead ones included. Left out, or empty, it names nobody, as before #603.
+   */
+  members?: () => readonly string[];
   /** The highest cursor already delivered. The first connection asks for what is above it. */
   cursor: number;
   /**
@@ -197,6 +203,14 @@ export interface RoomSocket {
   readonly state: RoomSocketState;
   /** Settles when this has stopped for good, with why. */
   readonly stopped: Promise<StopReason>;
+  /**
+   * End the socket that is open, or the handshake in flight, and open another at once from `cursor`, naming
+   * `members` as they are now. For a member set that changed (#603): the server reads it at the upgrade and
+   * nowhere else. The replay starts above the cursor and `onEvent`'s guard drops anything at or below it, so
+   * nothing is lost and nothing arrives twice. Nothing happens while it waits to retry: that attempt reads the
+   * members anyway.
+   */
+  reconnect(): void;
   /**
    * Idempotent. When it settles nothing of this module's will run again: no callback, no attempt,
    * no poll. A poll already in flight is cancelled through its signal, and is not waited for if
@@ -246,8 +260,10 @@ const PROBE_USER_AGENT = "bellman-room-socket/probe";
  *
  * Anything else on the URL is dropped on purpose: a query, a fragment and userinfo have no meaning at
  * /ws, and a credential in the userinfo would be sent where the Authorization header is meant to be.
+ * `members` are the ones the socket is for (#603), and named only when there are any: a list the server
+ * cuts to the caller's own, so it can narrow what the socket vouches for and never widen it.
  */
-export function roomSocketUrl(serverUrl: string, sessionId: string, cursor: number): string {
+export function roomSocketUrl(serverUrl: string, sessionId: string, cursor: number, members: readonly string[] = []): string {
   const url = new URL(serverUrl);
   if (url.protocol === "https:") url.protocol = "wss:";
   else if (url.protocol === "http:") url.protocol = "ws:";
@@ -258,6 +274,7 @@ export function roomSocketUrl(serverUrl: string, sessionId: string, cursor: numb
   url.hash = "";
   url.searchParams.set("session", sessionId);
   url.searchParams.set("cursor", String(cursor));
+  if (members.length > 0) url.searchParams.set("members", members.join(","));
   return url.toString();
 }
 
@@ -455,6 +472,7 @@ function probeStatus(
 
 type AttemptEnd =
   | { kind: "stopped" }
+  | { kind: "renewed" }
   | { kind: "unusable"; error: unknown }
   | { kind: "failed"; timedOut: boolean }
   | { kind: "ended"; heldMs: number; silent: boolean; code: number | undefined };
@@ -559,6 +577,19 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
     if (Number.isSafeInteger(answer.cursor) && answer.cursor > cursor) cursor = answer.cursor;
     return delivered;
   }
+
+  /** The caller's code, so a throw is logged and names nobody: the socket then vouches as it did before #603. */
+  function readMembers(): readonly string[] {
+    try {
+      return options.members?.() ?? [];
+    } catch (error) {
+      emit(`members threw: ${messageOf(error)}`);
+      return [];
+    }
+  }
+
+  /** Ends the attempt in progress, when there is one, so the loop opens the next at once. */
+  let renew: (() => void) | undefined;
 
   async function readCredential(): Promise<string> {
     const source = options.credential;
@@ -682,11 +713,11 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
    * a credential holding a line break, on both Nodes), which is also what stops a credential being used
    * to add a header.
    */
-  function attempt(credential: string): Promise<AttemptEnd> {
+  function attempt(credential: string, members: readonly string[]): Promise<AttemptEnd> {
     return new Promise<AttemptEnd>((resolve) => {
       let socket: WebSocketLike;
       try {
-        socket = new NodeWebSocket(roomSocketUrl(options.url, sessionId, cursor), {
+        socket = new NodeWebSocket(roomSocketUrl(options.url, sessionId, cursor, members), {
           headers: { authorization: `Bearer ${credential}` },
         });
       } catch (error) {
@@ -716,6 +747,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       function finish(end: AttemptEnd): void {
         if (over) return;
         over = true;
+        renew = undefined;
         clearTimeout(connectTimer);
         clearTimeout(idleTimer);
         clearTimeout(pongTimer);
@@ -797,6 +829,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
         finish(openedAt === undefined ? { kind: "failed", timedOut: false } : ended(false, event.code));
 
       life.signal.addEventListener("abort", onAbort, { once: true });
+      renew = () => finish({ kind: "renewed" });
       socket.addEventListener("open", onOpen);
       socket.addEventListener("message", onMessage);
       socket.addEventListener("error", onError);
@@ -859,8 +892,13 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
         continue;
       }
 
-      const end = await attempt(credential);
+      const members = readMembers();
+      const end = await attempt(credential, members);
       if (end.kind === "stopped" || life.signal.aborted) return;
+      if (end.kind === "renewed") {
+        emit("reconnecting: the members it is for have changed");
+        continue;
+      }
 
       if (end.kind === "ended") {
         failures = (end.heldMs >= stableMs ? 0 : failures) + 1;
@@ -886,7 +924,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       // ask about; anything else gets one more request, to read the status.
       const status = end.timedOut
         ? undefined
-        : await probeStatus(roomSocketUrl(options.url, sessionId, cursor), credential, life.signal, connectTimeoutMs);
+        : await probeStatus(roomSocketUrl(options.url, sessionId, cursor, members), credential, life.signal, connectTimeoutMs);
       if (life.signal.aborted) return;
 
       if (status === 409) {
@@ -953,6 +991,9 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       return state;
     },
     stopped,
+    reconnect() {
+      renew?.();
+    },
     async close() {
       stop("requested");
       await Promise.all([driverDone, pollDone]);

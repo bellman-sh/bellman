@@ -322,8 +322,33 @@ describe("through the bus", () => {
     expect(a.watched.cursors()).toEqual([1, 2, 3]);
     expect(b.watched.cursors()).toEqual([1, 2, 3]);
     expect(b.watched.events.every((e) => e.member_id === "m2")).toBe(true);
-    expect(rooms.upgrades.filter((u) => u.answered === 101)).toHaveLength(1);
+    // Two upgrades, one socket at a time: the second names m2 as well, once it subscribed (#603).
+    await until(() => rooms.upgrades.filter((u) => u.answered === 101).length === 2, "the upgrade naming both");
     expect(rooms.sockets).toHaveLength(1);
+  });
+
+  it("names the room's current watchers on its upstream, reconnecting as one joins and one leaves (#603)", async () => {
+    const r = room(R1, "m1", "m2");
+    const members = () => rooms.upgrades.filter((u) => u.answered === 101)
+      .map((u) => new URL(u.target, "http://x").searchParams.get("members"));
+    const a = await coordinatorWith(R1, "m1");
+    await until(() => rooms.sockets.length === 1, "the room's socket");
+    r.append(); // 1
+
+    const b = await subscriberWith(R1, "m2");
+    await until(() => members().length === 2 && rooms.sockets.length === 1, "the upstream again, naming both");
+    r.append(); // 2
+    await until(() => a.watched.events.length === 2 && b.watched.events.length === 2, "both to hear the next");
+
+    b.watched.stop();
+    await until(() => members().length === 3 && rooms.sockets.length === 1, "the upstream again, naming one");
+    r.append(); // 3
+    await until(() => a.watched.events.length === 3, "the one left to hear the last");
+
+    expect(members()).toEqual(["m1", "m1,m2", "m1"]);
+    expect(a.watched.cursors()).toEqual([1, 2, 3]); // three sockets, each event once
+    expect(b.watched.cursors()).toEqual([1, 2]);
+    expect(a.watched.fallbacks).toEqual([]);
   });
 
   it("keeps a socket for each room the machine watches, all of them held by the one coordinator", async () => {
@@ -369,15 +394,17 @@ describe("when the coordinator goes away", () => {
     const r = room(R1, "m1", "m2");
     const a = await coordinatorWith(R1, "m1");
     const b = await subscriberWith(R1, "m2");
+    // A's upstream again, naming m2 as well (#603), before anything is said.
+    await until(() => rooms.upgrades.filter((u) => u.answered === 101).length === 2, "the upgrade naming both");
     for (let n = 0; n < 4; n++) r.append();
     await until(() => b.watched.events.length === 4, "four events");
 
     await a.link.close();
     await until(() => b.link.role() === "coordinator", "the survivor to take over");
-    await until(() => rooms.upgrades.filter((u) => u.answered === 101).length === 2, "the survivor's own upgrade");
+    await until(() => rooms.upgrades.filter((u) => u.answered === 101).length === 3, "the survivor's own upgrade");
 
-    // The first upgrade asked from 0, the survivor's from the 4 it had reached: nothing it had was fetched twice.
-    expect(rooms.upgrades.filter((u) => u.answered === 101).map((u) => u.cursor)).toEqual(["0", "4"]);
+    // A's upgrades asked from 0, the survivor's from the 4 it had reached: nothing it had was fetched twice.
+    expect(rooms.upgrades.filter((u) => u.answered === 101).map((u) => u.cursor)).toEqual(["0", "0", "4"]);
   });
 
   it("does not subscribe a member that was stopped while the bus was being found again", async () => {
@@ -391,12 +418,14 @@ describe("when the coordinator goes away", () => {
     const member = watch(b.link, R1, "m2");
     stopTheMember = member.stop;
     await until(() => b.link.role() === "subscriber", "the second link to subscribe");
+    // A's, and A's again naming m2 as well (#603).
+    await until(() => rooms.upgrades.filter((u) => u.answered === 101).length === 2, "the upgrade naming both");
 
     await a.link.close();
     await until(() => asked === 2 && b.link.role() === "coordinator", "the survivor's election, and its win");
     await wait(80);
 
-    expect(rooms.upgrades.filter((u) => u.answered === 101)).toHaveLength(1); // A's, and none for the stopped member
+    expect(rooms.upgrades.filter((u) => u.answered === 101)).toHaveLength(2); // A's two, and none for the stopped member
     expect(rooms.sockets).toHaveLength(0);
     expect(member.fallbacks).toEqual([]);
   });

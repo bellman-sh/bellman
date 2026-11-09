@@ -86,7 +86,7 @@ Remove the member in the peer_b seat.
 Your agent calls [`bellman_evict`](/reference/tools/bellman_evict/), which also retires that seat's join code. Only the room's creator can remove a member, and not a seat their own account holds:
 
 ```text
-you cannot evict yourself; leave the room instead.
+you cannot evict yourself: that seat is your own account's. Leave it instead, with its member_id.
 ```
 
 If you joined from your own second chat, say "Leave the Bellman room" there instead. Removing someone is not a ban: any live code seats them again. [Rooms and join codes](/guides/rooms/#removing-a-member) has the details.

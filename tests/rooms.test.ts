@@ -77,6 +77,18 @@ describe("leaveRoom", () => {
     expect(r.code).toBe("forbidden");
   });
 
+  it("lets an account leave another seat of its own, as bellman_leave's description promises (#603)", async () => {
+    // A seat a session that ended left behind is cleared from another session this way; evict refuses one's own seats.
+    await store.createSession(session({
+      members: [member(), member({ memberId: "m_left_behind", userId: "u_jesse", roomRole: "peer_b" })],
+    }));
+
+    const r = await leaveRoom(store, jesse, "qs_test", "m_left_behind");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect((await store.getMember("qs_test", "m_left_behind"))?.leftAt).toEqual(expect.any(Number));
+  });
+
   it("closes the room when the last active member leaves", async () => {
     await store.createSession(session({ members: [member()] }));
 
@@ -719,7 +731,8 @@ describe("evictMember", () => {
     if (r.ok) return;
     expect(r.code).toBe("forbidden");
     expect(r.reason).toContain("cannot evict yourself");
-    expect(r.reason).toContain("leave the room");
+    expect(r.reason).toContain("its member_id");
+    expect(r.reason).toContain("Leave it instead");
     // This module serves every transport, and a panel user cannot call an MCP
     // tool: a refusal that names one hands half its callers advice they cannot act on.
     expect(r.reason).not.toContain("bellman_");

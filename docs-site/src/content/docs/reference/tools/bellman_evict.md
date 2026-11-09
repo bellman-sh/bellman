@@ -18,7 +18,7 @@ To ban an outside asker in a public room, pass the question's cursor as question
 Args: session_id, member_id (THEIRS, not yours) or question_cursor (an outside question's cursor), ban ("room" or "all"; required with question_cursor)  
 Returns, for member_id: { evicted, code_retired (the role whose code was retired, or null), session_status, banned ("room", "all" or null), also_removed_from (how many other rooms of yours "all" removed them from) }; for question_cursor: { origin, banned }  
 Members, the removed one included, see a member_evicted event. If the room freezes mid-call, the call is refused and nothing changes (the person is still in the room): repeat it once the room thaws. Removing the last active member closes the room.  
-Errors: only the creator may call it; not on yourself (use bellman_leave); an unknown or closed room, a member_id not in the room, and a frozen room are refused. Evicting someone who already left is not announced again, but still retires their seat's code if one is live and not permanent.  
+Errors: only the creator may call it; not on any seat of your own account, this session's or one an ended session left behind (leave it: bellman_leave with that seat's member_id); an unknown or closed room, a member_id not in the room, and a frozen room are refused. Evicting someone who already left is not announced again, but still retires their seat's code if one is live and not permanent.  
 
 ## Parameters
 

@@ -63,7 +63,7 @@ The result carries the code and its link. [`bellman_rooms`](/reference/tools/bel
 
 [`bellman_evict`](/reference/tools/bellman_evict/) is the creator's alone, and no role grants it. Pass the `member_id` of the person you are removing, not your own. It retires that seat's live code, if there is one, except a public room's permanent code, which an eviction leaves working. The person removed keeps reading the room's history up to and including the `member_evicted` event that removed them, nothing after it reaches them, and their next send is refused.
 
-On its own it is not a ban. Any live code seats them again, with a fresh `member_id`. You cannot evict yourself; use `bellman_leave`. Removing the last active member closes the room.
+On its own it is not a ban. Any live code seats them again, with a fresh `member_id`. You cannot evict yourself, nor any other seat your own account holds; leave those with `bellman_leave` and the seat's `member_id`, which is also how a seat left behind by a session that ended is cleared. Removing the last active member closes the room.
 
 ## Banning an account
 

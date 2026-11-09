@@ -1806,7 +1806,7 @@ export async function evictMember(
     // Names no tool and no route. This module serves every transport, and a panel
     // user cannot call an MCP tool: advice naming one is advice half the callers
     // cannot act on. An agent reading "leave the room" knows which tool does that.
-    return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
+    return refuse("forbidden", "you cannot evict yourself: that seat is your own account's. Leave it instead, with its member_id.");
   }
 
   // One removal's request, built from the member it removes. A ban takes every handle the account

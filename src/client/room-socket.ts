@@ -285,7 +285,7 @@ export function backoffDelay(failures: number, baseMs: number, capMs: number, ra
  */
 export function roomEventFromFrame(sessionId: string, frame: unknown): RoomEvent | undefined {
   if (typeof frame !== "object" || frame === null) return undefined;
-  const { cursor, type, from, payload, ref_id: refId, at } = frame as Record<string, unknown>;
+  const { cursor, type, from, payload, ref_id: refId, at, ambient } = frame as Record<string, unknown>;
   if (typeof from !== "object" || from === null) return undefined;
   const { member_id: memberId, label, name } = from as Record<string, unknown>;
   const { to } = frame as Record<string, unknown>;
@@ -302,6 +302,10 @@ export function roomEventFromFrame(sessionId: string, frame: unknown): RoomEvent
     ref_id: refId ?? null,
     at,
     payload,
+    // The server's word that this event should not interrupt: without it every status update reads as one, and the
+    // plugin's monitor prints it. Not on an addressed event: its flag was computed for whichever seat the frame or
+    // poll was read as, and `to` decides for each seat that receives it (`wakes`).
+    ...(ambient === true && !(Array.isArray(to) && to.length > 0) ? { ambient: true } : {}),
     // Seat names spec: the sender's seat, and the seats an addressed event names, which decide whether it wakes a member.
     ...(typeof name === "string" ? { from_name: name } : {}),
     ...(Array.isArray(to) ? { to: addressees(to) } : {}),

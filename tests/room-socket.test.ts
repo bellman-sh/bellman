@@ -1266,3 +1266,16 @@ describe("the bus poll fallback, addressed (whole-branch review, item 1)", () =>
     expect(wakes({ ...event, member_id: "m_poller" })).toBe(false);
   });
 });
+
+describe("roomEventFromFrame keeps the server's ambient flag (monitor noise, 9 Nov)", () => {
+  it("carries ambient: true from the frame, so the monitor leaves a status update queued", () => {
+    const frame = { cursor: 5, type: "progress", from: { member_id: "m_a", label: "a@x" }, payload: { status: "idle" }, ref_id: null, at: "2026-11-09T00:00:00.000Z", ambient: true };
+    expect(roomEventFromFrame("qs_1", frame)).toMatchObject({ ambient: true });
+  });
+
+  it("leaves ambient off an event the server did not mark, and refuses a non-boolean", () => {
+    const base = { cursor: 6, type: "message", from: { member_id: "m_a", label: "a@x" }, payload: {}, ref_id: null, at: "2026-11-09T00:00:00.000Z" };
+    expect(roomEventFromFrame("qs_1", base)).not.toHaveProperty("ambient");
+    expect(roomEventFromFrame("qs_1", { ...base, ambient: "yes" })).not.toHaveProperty("ambient");
+  });
+});

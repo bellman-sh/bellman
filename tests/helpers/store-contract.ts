@@ -3280,8 +3280,11 @@ export function describeStoreContract(
           expect((await placements(id)).z).toEqual({ x: 1080, y: 0 });
         });
 
-        /** Review Focus 5. */
-        it("places a card after 1,000 occupied slots at slot 1,000", async () => {
+        /**
+         * Review Focus 5. A thousand writes in sequence: under a full workerd run on CI it passes the default fifteen
+         * seconds (main's CI, 9 Nov), so it has its own budget, as decision-pages' thousand appends do.
+         */
+        it("places a card after 1,000 occupied slots at slot 1,000", { timeout: 60_000 }, async () => {
           const id = await room();
           for (let i = 0; i < MAX_SURFACE_ITEMS; i++) await put(id, card(`c${i}`, { placement: gridSlot(i) }));
           await put(id, card("last"));

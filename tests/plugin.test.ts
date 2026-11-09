@@ -175,7 +175,7 @@ describe("the committed bridge bundle, run as plugin/.mcp.json declares it", () 
    * loopback, HOME and XDG_CONFIG_HOME are a directory deleted afterwards, and the bus,
    * which would make a socket under ~/.claude, is off.
    */
-  async function initialize(): Promise<{ serverInfo: { name: string; version: string }; instructions?: string }> {
+  async function initialize(): Promise<{ _meta: Record<string, { name: string; version: string }>; instructions?: string }> {
     const home = mkdtempSync(join(tmpdir(), "bellman-plugin-"));
     dirs.push(home);
     const { args, env } = json("plugin/.mcp.json").mcpServers.bellman as { args: string[]; env: Record<string, string> };
@@ -205,21 +205,29 @@ describe("the committed bridge bundle, run as plugin/.mcp.json declares it", () 
       proc.on("exit", (code) => reject(new Error(`the bundle exited ${code} before answering: ${stderr}`)));
     });
 
+    // The bridge speaks MCP 2026-07-28 only: no `initialize`, and `server/discover` answers what it did.
     proc.stdin!.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "initialize",
-        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "plugin-test", version: "0.0.1" } },
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "plugin-test", version: "0.0.1" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
       })}\n`
     );
     return JSON.parse(await answer).result;
   }
 
   it("reports package.json's version", async () => {
-    const { serverInfo } = await initialize();
+    // On 2026-07-28 the server names itself in the result's _meta, as a client does in each request's.
+    const { _meta } = await initialize();
 
-    expect(serverInfo).toEqual({ name: "bellman", version: pkg.version });
+    expect(_meta["io.modelcontextprotocol/serverInfo"]).toEqual({ name: "bellman", version: pkg.version });
   });
 
   // By what only hook delivery tells the agent: the Stop hook hands events over, and

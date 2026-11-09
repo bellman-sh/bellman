@@ -1,4 +1,4 @@
-import { isAmbient } from "./room/attention.js";
+import { isAmbient, addressedAway } from "./room/attention.js";
 import type { Member, SessionEvent } from "./types.js";
 
 // Deliberately in neither server.ts nor store-do.ts. store-do.ts imports
@@ -22,17 +22,28 @@ import type { Member, SessionEvent } from "./types.js";
  * part of it. The poll adds that at the tool boundary; a socket leaves it to
  * the client (D9).
  */
-export function publicEvent(e: SessionEvent) {
+/**
+ * What a projection knows beyond the event (seat names spec): `names`, every seat's name by member id, puts `from.name`
+ * and each addressee's name on the event; `reader`, the seat reading it, makes an event addressed to other seats ambient.
+ */
+export interface EventView { names?: ReadonlyMap<string, string>; reader?: string }
+
+export function publicEvent(e: SessionEvent, view: EventView = {}) {
+  const fromName = view.names?.get(e.fromMemberId);
+  const to = Array.isArray(e.toMemberIds) && e.toMemberIds.length > 0
+    ? e.toMemberIds.map((id) => ({ member_id: id, name: view.names?.get(id) ?? null }))
+    : null;
   return {
     cursor: e.cursor,
     type: e.type,
-    from: { member_id: e.fromMemberId, label: e.fromLabel },
+    from: { member_id: e.fromMemberId, label: e.fromLabel, ...(fromName !== undefined ? { name: fromName } : {}) },
+    ...(to !== null ? { to } : {}),
     payload: e.type === "decision_opened" ? publicOpened(e.payload) : e.payload,
     ref_id: e.refId,
     at: new Date(e.at).toISOString(),
     // Only when true. Omission costs nothing for the twelve types that predate
     // #111, and a client that has never heard of `progress` keeps working.
-    ...(isAmbient(e) ? { ambient: true as const } : {}),
+    ...(isAmbient(e) || addressedAway(e, view.reader) ? { ambient: true as const } : {}),
   };
 }
 
@@ -59,11 +70,16 @@ const publicOpened = (payload: unknown) => {
  * carries the brief, the org, the agent and the capabilities, and naming the three fields means a
  * field a payload gains later is not shown by default (plan ruling R4).
  */
-export function publicReadEvent(e: SessionEvent) {
+export function publicReadEvent(e: SessionEvent, labels: ReadonlyMap<string, string> = new Map()) {
   // No room file reaches the public page (ADR 0046): not its content, which no event carries, and not its path,
   // revision or size, which for memory would name an account's notes.
   if (e.type === "brief_update" || e.type === "fs") return null;
-  const shown = publicEvent(e);
+  // No seat names on a public read (seat names spec): the page names members by number, and an addressee is named by
+  // its label, which the public routes' numbering (`byNumber`) turns into "member N" as it does every label.
+  const base = publicEvent(e);
+  const shown = base.to !== undefined
+    ? { ...base, to: base.to.map((t) => ({ member_id: t.member_id, label: labels.get(t.member_id) ?? null })) }
+    : base;
   if (e.type !== "member_joined") return shown;
   const joiner = (e.payload as { member?: Record<string, unknown> | null } | null)?.member;
   const text = (key: string) => {

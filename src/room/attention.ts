@@ -94,3 +94,11 @@ export const isAmbient = (e: Pick<SessionEvent, "type" | "payload">): boolean =>
   const members = (e.payload as { members?: unknown } | null)?.members;
   return e.type === "heartbeat" && Array.isArray(members) && members.length === 0;
 };
+
+/**
+ * An addressed event (seat names spec) that does not name `reader`: ambient for that reader, whatever its type. False
+ * for an event that is not addressed and for a projection with no reader (a socket frame, the panel), whose receiving
+ * side decides from `to`.
+ */
+export const addressedAway = (e: Pick<SessionEvent, "toMemberIds">, reader: string | undefined): boolean =>
+  reader !== undefined && Array.isArray(e.toMemberIds) && e.toMemberIds.length > 0 && !e.toMemberIds.includes(reader);

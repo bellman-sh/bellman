@@ -80,6 +80,25 @@ describe("Bellman Stop hook", () => {
     expect(pendingCount(inbox)).toBe(0);
   });
 
+  // Seat names spec: an event addressed to other seats is no reason to take a turn, and is not lost.
+  it("lets the turn end over a queue holding only events addressed to other seats, and leaves them queued", async () => {
+    enqueue(inbox, event({ to: [{ member_id: "m_other", name: "coder-3" }] }));
+    const run = await runHook(root);
+    expect(run.code).toBe(0);
+    expect(run.stderr).not.toContain("UNTRUSTED PEER CONTENT");
+    expect(pendingCount(inbox)).toBe(1);
+  });
+
+  it("hands over the whole queue, addressed-away events included, once one event wakes it", async () => {
+    enqueue(inbox, event({ cursor: 5, to: [{ member_id: "m_other", name: "coder-3" }], payload: { text: "for coder-3" } }));
+    enqueue(inbox, event({ cursor: 6, payload: { text: "for everyone" } }));
+    const run = await runHook(root);
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("for coder-3");
+    expect(run.stderr).toContain("for everyone");
+    expect(pendingCount(inbox)).toBe(0);
+  });
+
   it("listens for new events while you're in an active session", async () => {
     writeMemberships(inbox, [{ session_id: "bs_test", member_id: "m_mine" }]);
     setTimeout(() => enqueue(inbox, event({ payload: { text: "arrived while listening" } })), 700);

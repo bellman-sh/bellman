@@ -6,6 +6,10 @@ Terms whose meaning in Bellman is narrower than everyday use. Created lazily (`d
   one account.
 - **Seat**: one place in a room, with its own member id and one role. An account can hold several seats in a room.
   Code and older docs also call it a member or a handle.
+- **Seat name**: a seat's name in its room, `<role>-<seq>` (`coder-17`), derived and never reused (ADR 0048). Not a
+  handle, which is an account's public name (ADR 0021).
+- **Addressed message**: a `message` or `artifact` sent with `to`, naming seats (ADR 0048). It wakes only those seats and
+  is ambient for the rest; every member can still read it.
 - **Member**: a participant in the room, in the everyday sense. "Members" means the room's participants. Bellman
   never uses the word for "two sessions".
 - **Room file**: a text file at a path in a room (ADR 0046), stored as an `fs:` row with its last 20 revisions.

@@ -65,7 +65,9 @@ export const idempotencyKey = (memberId: string, key: string): string =>
  * nothing branches on would describe the breakage without preventing it.
  */
 export function fingerprint(e: Omit<SessionEvent, "cursor" | "at">): string {
-  return JSON.stringify([e.type, e.fromMemberId, e.refId, canonical(e.payload)]);
+  // `toMemberIds` only when set, so every print stored before seat names reads the same (seat names spec).
+  const to = e.toMemberIds && e.toMemberIds.length > 0 ? [e.toMemberIds] : [];
+  return JSON.stringify([e.type, e.fromMemberId, e.refId, canonical(e.payload), ...to]);
 }
 
 /**

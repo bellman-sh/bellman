@@ -1,3 +1,4 @@
+import { MAX_ADDRESSEES, resolveAddressees } from "../room/member-names.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -70,6 +71,7 @@ Args:
                          { items: [...] } writes up to 100 items or removals in one call: all land or none, as one send; each key once, no restores; a refusal names items[i].
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Flatten rather than nest.
   - ref_id: the cursor of the event you answer. Required for action_response. A room's host answers only replies carrying its question's cursor.
+  - to: optional, message and artifact only: up to 20 seat names ("coder-2"). Wakes only those seats; not private, every member can read it.
   - idempotency_key: optional. Retrying with the SAME key returns the original result without delivering again; use it when you cannot tell whether a call landed. Use a fresh key per new message; reusing one for different content is an error.
 
 Returns: { room_members, cursor, count?, replayed?, applied? }
@@ -85,6 +87,7 @@ Errors: a verb your role lacks is refused by name; nothing is delivered. Capabil
         payload: z.record(z.string(), z.unknown()),
         ref_id: z.string().optional(),
         idempotency_key: z.string().min(8).max(80).optional(),
+        to: z.array(z.string().min(1).max(64)).min(1).max(MAX_ADDRESSEES).optional(),
       },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
@@ -93,7 +96,9 @@ Errors: a verb your role lacks is refused by name; nothing is delivered. Capabil
     async (args): Promise<ToolResult> => {
       const session_id = roomIdOf(args);
       if (!session_id) return fail(NEED_ROOM);
-      const { member_id, type, payload, ref_id, idempotency_key } = args;
+      const { member_id, type, payload, ref_id, idempotency_key, to } = args;
+      // Seat names spec: only a message or an artifact is addressed.
+      if (to !== undefined && type !== "message" && type !== "artifact") return fail("to is only for message and artifact.");
       // The whole sequence — guards, shape, rows, append, audit — is one
       // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
       // Handled before the common guards below, which writeSurface runs itself.
@@ -242,7 +247,14 @@ Errors: a verb your role lacks is refused by name; nothing is delivered. Capabil
         return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
       }
 
-      if (type === "message" || type === "artifact") {
+      // The seats an addressed message names, resolved here and never from the payload (seat names spec). Each must
+      // allow receive_messages, which stands in for the room-wide check below: the addressees are who it is for.
+      let toMemberIds: string[] | undefined;
+      if (to !== undefined) {
+        const addressed = resolveAddressees(session, me, to);
+        if (!addressed.ok) return refusal(addressed);
+        toMemberIds = addressed.value.map((m) => m.memberId);
+      } else if (type === "message" || type === "artifact") {
         const deaf = others.filter((m) => !m.capabilities.includes("receive_messages"));
         if (deaf.length === others.length) {
           return fail(`no recipient allows receive_messages (${deaf.map((m) => m.label).join(", ")}).`);
@@ -304,6 +316,7 @@ Errors: a verb your role lacks is refused by name; nothing is delivered. Capabil
         fromLabel: identity.label,
         payload,
         refId: ref_id ?? null,
+        ...(toMemberIds !== undefined ? { toMemberIds } : {}),
       };
 
       /**

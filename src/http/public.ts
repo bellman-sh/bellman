@@ -228,8 +228,10 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
       const read = after === undefined
         ? await deps.store.recentEvents(id, MAX_EVENTS_READ)
         : await deps.store.eventsAfter(id, after, MAX_EVENTS_READ);
+      // An addressee's label, for the page's numbering (seat names spec): the page never shows seat names.
+      const labels = new Map(session.members.map((m) => [m.memberId, m.label]));
       const events = read.flatMap((e) => {
-        const shown = publicReadEvent(e);
+        const shown = publicReadEvent(e, labels);
         return shown ? [untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, shown)] : [];
       });
       // The last event read, a brief left out included, so a page of nothing but briefs still

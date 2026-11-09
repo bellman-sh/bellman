@@ -32,7 +32,7 @@ import type {
 } from "./door-protocol.js";
 import { joinLine } from "./door-protocol.js";
 import {
-  discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
+  discardThrough, drainWaking, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta, wakes,
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import { resultData } from "./result-data.js";
@@ -1252,7 +1252,7 @@ export function createBridge(opts: BridgeOptions) {
      * silence. It stays in the room's log and arrives with the next
      * bellman_sync the agent makes.
      */
-    if (event.ambient) return;
+    if (event.ambient || !wakes(event)) return;
     const meta: Record<string, string> = {
       session_id: event.session_id,
       member_id: event.member_id,
@@ -1261,6 +1261,9 @@ export function createBridge(opts: BridgeOptions) {
       from: safeMeta(event.from_label),
     };
     if (event.ref_id) meta.ref_id = safeMeta(event.ref_id);
+    // Seat names spec: the sender's seat, and the seats an addressed event names.
+    if (event.from_name) meta.from_name = safeMeta(event.from_name);
+    if (event.to && event.to.length > 0) meta.to = safeMeta(event.to.map((t) => t.name ?? t.member_id).join(","));
     try {
       await server.notification({
         method: "notifications/claude/channel",
@@ -1366,10 +1369,10 @@ export function createBridge(opts: BridgeOptions) {
       : 20;
     const deadline = Date.now() + waitSeconds * 1000;
 
-    let events = drain(inboxDir!);
+    let events = drainWaking(inboxDir!);
     while (events.length === 0 && Date.now() < deadline && !closed) {
       await sleep(250);
-      events = drain(inboxDir!);
+      events = drainWaking(inboxDir!);
     }
     return {
       content: [{ type: "text", text: events.length ? renderBatch(events) : "No peer events arrived." }],

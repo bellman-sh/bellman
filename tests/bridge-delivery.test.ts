@@ -149,3 +149,15 @@ describe("deliver", () => {
     expect(pushes.map((p) => p.params.meta.type)).toEqual(["progress"]);
   });
 });
+
+describe("deliver, addressed (seat names spec)", () => {
+  const to = (member_id: string, name: string) => [{ member_id, name }];
+  it("pushes an event addressed to this seat with from_name and to, and nothing for one addressed to another seat", async () => {
+    const { pushes } = await delivered("channel", [
+      envelope({ type: "message", cursor: 1, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_other", "coder-3") }),
+      envelope({ type: "message", cursor: 2, ambient: undefined, from: { member_id: "m_a", label: "lead@a", name: "lead-1" }, to: to("m_me", "coder-2") }),
+    ]);
+    expect(pushes.map((p) => p.params.meta.cursor)).toEqual(["2"]);
+    expect(pushes[0]!.params.meta).toMatchObject({ from_name: "lead-1", to: "coder-2" });
+  });
+});

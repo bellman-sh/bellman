@@ -16,6 +16,7 @@
  * to a status, the way rooms.ts says a route should; `RoomFailure` is a closed
  * union, so a code the table below forgets is a compile error.
  */
+import { seatNames } from "../room/member-names.js";
 import { createHash } from "node:crypto";
 import { auditRefusal } from "../orgs/audit.js";
 import { BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES, attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead, sanitizeName, storedType, type BlobRead, type BlobStore } from "../files/blobs.js";
@@ -1024,7 +1025,7 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   // next poll does not ask for it again.
   const events = await eventsFor(deps.store, sessionId, read, who.identity.userId);
   return json(200, {
-    events: events.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
+    events: events.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e, { names: seatNames(session.members) }))),
     cursor: read.at(-1)?.cursor ?? after ?? 0,
   }, origin);
 }

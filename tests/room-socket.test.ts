@@ -1,3 +1,4 @@
+import { wakes } from "../src/client/inbox.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
@@ -1239,5 +1240,29 @@ describe("close()", () => {
     await until(() => requests.length === 1, "the poll to start");
     await within(socket.close(), 1000, "close");
     expect(requests[0].signal.aborted).toBe(true);
+  });
+});
+
+describe("roomEventFromFrame, addressed (seat names spec)", () => {
+  it("carries the sender's seat name and the addressees", () => {
+    const e = roomEventFromFrame("qs_1", {
+      cursor: 3, type: "message", from: { member_id: "m_a", label: "a@x", name: "lead-1" }, payload: {}, ref_id: null,
+      at: "2026-11-08T00:00:00.000Z", to: [{ member_id: "m_b", name: "coder-2" }, { name: "no id" }],
+    });
+    expect(e).toMatchObject({ from_name: "lead-1", to: [{ member_id: "m_b", name: "coder-2" }] });
+  });
+});
+
+describe("the bus poll fallback, addressed (whole-branch review, item 1)", () => {
+  it("drops the polling seat's ambient from an addressed event, so each seat's bridge decides from to", () => {
+    // What bellman_sync hands the coordinator polling as m_poller: ambient, because the event names another seat.
+    const polled = {
+      cursor: 9, type: "message", from: { member_id: "m_a", label: "a@x", name: "lead-1" }, payload: {}, ref_id: null,
+      at: "2026-11-08T00:00:00.000Z", ambient: true, to: [{ member_id: "m_addressee", name: "coder-17" }],
+    };
+    const event = roomEventFromFrame("qs_1", polled)!;
+    expect(event).not.toHaveProperty("ambient");
+    expect(wakes({ ...event, member_id: "m_addressee" })).toBe(true);
+    expect(wakes({ ...event, member_id: "m_poller" })).toBe(false);
   });
 });

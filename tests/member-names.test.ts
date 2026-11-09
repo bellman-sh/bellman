@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { HOST_LABEL, hostMember } from "../src/host.js";
-import { publicNames } from "../src/room/member-names.js";
+import { MAX_ADDRESSEES, publicNames, resolveAddressees, seatName, seatNames } from "../src/room/member-names.js";
 import { MemoryStore } from "../src/storage/memory-store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
@@ -55,5 +55,35 @@ describe("publicNames", () => {
     await store.createSession(session({ manifest: m, members: [member({ label: "jesse@mcfearsome.dev" }), hostMember(m, Date.now())] }));
     const names = await publicNames(store, "qs_test", ["jesse@mcfearsome.dev", HOST_LABEL, "nobody@x"]);
     expect(names).toEqual(new Map([["jesse@mcfearsome.dev", "member 1"], [HOST_LABEL, "host"]]));
+  });
+});
+
+describe("seatName and resolveAddressees (seat names spec)", () => {
+  const me = member({ memberId: "m_me", roomRole: "coder", seq: 1 });
+  const two = member({ memberId: "m_two", roomRole: "coder", seq: 2, capabilities: ["receive_messages"] });
+  const deaf = member({ memberId: "m_deaf", roomRole: "planner", seq: 3, capabilities: ["read_context"] });
+  const gone = member({ memberId: "m_gone", roomRole: "coder", seq: 4, leftAt: 1 });
+  const room = { members: [me, two, deaf, gone] };
+
+  it("names a seat <role>-<seq>, a hyphenated role included", () => {
+    expect(seatName({ roomRole: "coder", seq: 17 })).toBe("coder-17");
+    expect(seatName({ roomRole: "lead-dev", seq: 3 })).toBe("lead-dev-3");
+    expect(seatNames([me, two]).get("m_two")).toBe("coder-2");
+  });
+
+  it("resolves names case-insensitively, once each, in the order given", () => {
+    const out = resolveAddressees(room, me, ["Coder-2", "coder-2"]);
+    expect(out).toEqual({ ok: true, value: [two] });
+  });
+
+  it("refuses an unknown name, a departed seat, yourself, a seat without receive_messages, and too many, naming each", () => {
+    const refusal = (names: string[]) => resolveAddressees(room, me, names);
+    expect(refusal(["coder-9"])).toMatchObject({ ok: false, code: "invalid", reason: expect.stringContaining("coder-9") });
+    expect(refusal(["coder-4"])).toMatchObject({ ok: false, code: "invalid", reason: expect.stringContaining("coder-4") });
+    expect(refusal(["coder-1"])).toMatchObject({ ok: false, code: "invalid", reason: "you cannot address yourself (coder-1)." });
+    expect(refusal(["planner-3"])).toMatchObject({ ok: false, code: "invalid", reason: "planner-3 does not allow receive_messages." });
+    expect(refusal(Array.from({ length: MAX_ADDRESSEES + 1 }, (_, i) => `coder-${i}`)))
+      .toMatchObject({ ok: false, code: "invalid", reason: `at most ${MAX_ADDRESSEES} addressees.` });
+    expect(MAX_ADDRESSEES).toBe(20);
   });
 });

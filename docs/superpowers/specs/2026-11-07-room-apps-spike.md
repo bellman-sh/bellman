@@ -7,12 +7,12 @@
 
 Every question but one clears Artifacts and Dynamic Workers for ADR B. The exception is purge: Cloudflare does not
 say whether, or when, it deletes the copies of a repo it keeps in object storage and snapshots after the repo is
-deleted. The spec says an answer that rules Artifacts out moves app source to `fs:` rows (Alternative C) behind the
-same `TreeStore` seam.
+deleted. The owner ruled to proceed as if it does (below).
 
-**Recommendation:** ADR B goes ahead with the `TreeStore` seam as designed, and PR 5 starts on Artifacts only once
-Cloudflare answers in writing that a deleted repo's snapshots are deleted, and when. Without that answer, PR 5
-builds Alternative C. Asking Cloudflare is an owner action.
+**Ruling (owner, 2026-11-09):** proceed on the assumption that Cloudflare deletes a deleted repo's object-storage
+copies and snapshots. ADR B goes ahead with the `TreeStore` seam as designed, and PR 5 builds the Artifacts
+implementation. ADR B records the assumption as an accepted risk, and the purge promise in Bellman's docs names it.
+If Cloudflare later says otherwise, app source moves to `fs:` rows (Alternative C) behind the same seam.
 
 | # | Question | Answer | How we know |
 |---|---|---|---|
@@ -95,8 +95,8 @@ for snapshots. The only retention statement is that repos "remain stored until y
 says the snapshots are deleted, or when.
 
 **Why it matters.** A room's purge and an account's deletion must remove app source, because an agent may write
-peer content or memory-adjacent text into it. Until Cloudflare states snapshot deletion and its timeline, Bellman
-cannot promise that.
+peer content or memory-adjacent text into it. Bellman can promise that the repo is gone at once; that the snapshots go
+too rests on the owner's ruling above, not on a Cloudflare statement.
 
 ## 5. Sockets
 

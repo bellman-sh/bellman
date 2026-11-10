@@ -292,14 +292,16 @@ export function drainInterrupting(dir: string): PeerEvent[] {
 }
 
 /**
- * `drain`, but only when something queued would start a turn (seat names spec): a queue holding only events addressed
- * to other seats is left in place, to ride along with the next event that wakes, and `[]` comes back. Read without
- * claiming; an event that lands between the look and the drain is taken by the drain.
+ * `drain`, but only when something queued would start a turn (seat names spec): a queue holding only ambient events
+ * (status updates and the like) or events addressed to other seats is left in place, to ride along with the next
+ * event that wakes, and `[]` comes back. Read without claiming; an event that lands between the look and the drain is
+ * taken by the drain.
  */
 export function drainWaking(dir: string): PeerEvent[] {
   const any = queuedNames(dir).some((name) => {
     try {
-      return wakes(JSON.parse(readFileSync(join(dir, name), "utf8")) as PeerEvent);
+      const queued = JSON.parse(readFileSync(join(dir, name), "utf8")) as PeerEvent;
+      return queued.ambient !== true && wakes(queued);
     } catch {
       return true; // claimed since the listing, or corrupt: let drain decide, as it always has
     }

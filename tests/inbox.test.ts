@@ -306,6 +306,15 @@ describe("addressed events (seat names spec)", () => {
     expect(pendingCount(dir)).toBe(0);
   });
 
+  it("drainWaking leaves a queue of ambient events in place, and takes the whole queue once one wakes", () => {
+    enqueue(dir, event({ cursor: 1, type: "progress", ambient: true, payload: { status: "idle" } }));
+    expect(drainWaking(dir)).toEqual([]);
+    expect(pendingCount(dir)).toBe(1);
+    enqueue(dir, event({ cursor: 2 }));
+    expect(drainWaking(dir).map((e) => e.cursor)).toEqual([1, 2]);
+    expect(pendingCount(dir)).toBe(0);
+  });
+
   it("names the sender's seat and the addressees, marking this member", () => {
     const text = renderEvent(event({ from_name: "lead-1", to: [{ member_id: "m_mine", name: "coder-2" }, { member_id: "m_x", name: "coder-5" }] }));
     expect(text.split("\n")[0]).toContain('from "peer@codenerd" (lead-1)');

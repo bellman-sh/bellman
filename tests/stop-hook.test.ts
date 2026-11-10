@@ -99,6 +99,23 @@ describe("Bellman Stop hook", () => {
     expect(pendingCount(inbox)).toBe(0);
   });
 
+  it("lets the turn end over a queue holding only ambient events, and leaves them queued", async () => {
+    enqueue(inbox, event({ type: "progress", ambient: true, payload: { status: "idle" } }));
+    const run = await runHook(root);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(pendingCount(inbox)).toBe(1);
+  });
+
+  it("hands queued ambient events over with an interrupting one", async () => {
+    enqueue(inbox, event({ cursor: 4, type: "progress", ambient: true, payload: { status: "working" } }));
+    enqueue(inbox, event());
+    const run = await runHook(root);
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("2 peer events arrived");
+    expect(pendingCount(inbox)).toBe(0);
+  });
+
   it("listens for new events while you're in an active session", async () => {
     writeMemberships(inbox, [{ session_id: "bs_test", member_id: "m_mine" }]);
     setTimeout(() => enqueue(inbox, event({ payload: { text: "arrived while listening" } })), 700);

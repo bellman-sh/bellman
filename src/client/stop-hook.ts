@@ -3,9 +3,10 @@
  * Bellman Stop hook — delivery for Claude Code sessions without channels, and the opt-in memory check (#530).
  *
  * Runs when a turn ends. If the bridge (in BELLMAN_DELIVERY=hook mode) queued
- * peer events, print them to stderr and exit 2: Claude Code blocks the stop and
- * hands them to Claude, which keeps working. Otherwise exit 0 and let the turn
- * end.
+ * an event that wakes (`drainWaking`), print every queued event to stderr and
+ * exit 2: Claude Code blocks the stop and hands them to Claude, which keeps
+ * working. Otherwise exit 0 and let the turn end; ambient events and events
+ * addressed to other seats wait in the queue.
  *
  * BELLMAN_HOOK_WAIT_SECONDS (default 0): while you are in an active Bellman
  * session, keep listening this long for new events before letting the turn end.

@@ -723,6 +723,29 @@ function metadataDocumentNotice(clientId: string, redirectUri: string): string {
 const isLoopback = (url: URL) => url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
 
 /**
+ * Whether `uri` is one of the client's registered redirects: exactly, or (RFC 8252 §7.3) a loopback one with only the
+ * port differing, since a native app listens on a port the OS picks at sign-in. Host, path and query stay exact.
+ */
+function registeredRedirect(registered: readonly string[], uri: string): boolean {
+  if (registered.includes(uri)) return true;
+  let asked: URL;
+  try {
+    asked = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (!isLoopback(asked)) return false;
+  return registered.some((r) => {
+    try {
+      const listed = new URL(r);
+      return isLoopback(listed) && listed.hostname === asked.hostname && listed.pathname === asked.pathname && listed.search === asked.search;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * OpenClaw often runs on a server, so the browser that signed in cannot reach its loopback callback and
  * shows "can't be reached". Its CLI takes the code by hand instead, so its sign-in ends on this page,
  * which offers both. The code shown is no more exposed than in the address bar, and PKCE binds it.
@@ -1499,7 +1522,7 @@ export async function handleOAuth(
     if (!client) {
       return html(`<h1>Unknown client</h1><p>This application is not registered with Bellman.</p>`, 400);
     }
-    if (!redirectUri || !client.redirect_uris.includes(redirectUri)) {
+    if (!redirectUri || !registeredRedirect(client.redirect_uris, redirectUri)) {
       return html(
         `<h1>Redirect not registered</h1><p><code>${escape(redirectUri || "(none)")}</code> is not a registered redirect for this client.</p>`,
         400

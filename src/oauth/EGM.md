@@ -79,8 +79,9 @@ Primitives:
 - Access tokens are HS256 JWTs with no revocation list; `verifyJwt` needs a valid signature, a future `exp` and
   exact `iss` and `aud`, and returns null rather than throwing [src/oauth/tokens.ts:verifyJwt]
 - PKCE accepts S256 only, verifier 43-128 characters [src/oauth/tokens.ts:verifyPkce]
-- `/authorize` shows errors as HTML until `client_id` and an exactly registered `redirect_uri` are known; redirect
-  URIs must be https or http on loopback [src/oauth/routes.ts:usableRedirect]
+- `/authorize` shows errors as HTML until `client_id` and a registered `redirect_uri` are known: exact, except that a
+  loopback one may differ in port alone (RFC 8252 §7.3) [src/oauth/routes.ts:registeredRedirect]; redirect URIs must
+  be https or http on loopback [src/oauth/routes.ts:usableRedirect]
 - A `client_id` that is an https URL on a public DNS name, with a path and no port, credentials, query, fragment or dot
   segment, is a Client ID Metadata Document; any other is a registration. The document is fetched with no redirects
   followed, 5 s, 5 KiB and a JSON type; it must name itself as `client_id`, carry `client_name` and usable

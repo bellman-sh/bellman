@@ -237,6 +237,25 @@ describe("signing in with a document client", () => {
     expect(page).toContain("Continue only if you just started connecting Bellman");
   });
 
+  it("takes any port on a loopback redirect the document lists, as RFC 8252 asks, and nothing else beside it", async () => {
+    // Codex's document lists http://127.0.0.1/callback and listens on a port the OS picks.
+    served = doc({ redirect_uris: ["http://127.0.0.1/callback"] });
+    expect((await authorize("http://127.0.0.1:52341/callback")).status).toBe(200);
+    for (const other of [
+      "http://127.0.0.1:52341/other",
+      "http://localhost:52341/callback",
+      "http://127.0.0.1:52341/callback?x=1",
+      "https://127.0.0.1:52341/callback",
+    ]) {
+      expect((await authorize(other)).status, other).toBe(400);
+    }
+  });
+
+  it("keeps an https redirect's port exact", async () => {
+    served = doc({ redirect_uris: ["https://app.example.com/cb"] });
+    expect((await authorize("https://app.example.com:8443/cb")).status).toBe(400);
+  });
+
   it("shows an error page, and redirects nowhere, for a redirect the document does not list or a bad document", async () => {
     const unlisted = await authorize("https://evil.example.com/cb");
     expect(unlisted.status).toBe(400);

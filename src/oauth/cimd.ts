@@ -154,9 +154,11 @@ export async function resolveCimdClient(
   if (cached) return { client: cached };
   if (!cache.admitFetch(new URL(clientId).hostname, now)) return { error: "too many metadata fetches for this host; try again in a minute" };
 
+  // Called unbound: workerd's global fetch throws "Illegal invocation" when called as a method of `deps`.
+  const fetchImpl = deps.fetchImpl;
   let res: Response;
   try {
-    res = await deps.fetchImpl(clientId, {
+    res = await fetchImpl(clientId, {
       method: "GET",
       redirect: "manual",
       headers: { accept: "application/json" },

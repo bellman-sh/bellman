@@ -143,6 +143,15 @@ describe("fetching a document", () => {
     });
   });
 
+  it("calls fetch with no receiver, as workerd's global fetch requires", async () => {
+    // workerd throws "Illegal invocation" when its fetch is called as a method of another object.
+    const workerdFetch = function (this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(serve(doc()));
+    } as unknown as typeof fetch;
+    expect(await resolveCimdClient(DOC_URL, { fetchImpl: workerdFetch, usable, cache, now: () => 1_000 })).toHaveProperty("client");
+  });
+
   it("stops fetching from a host past its minute's allowance", async () => {
     for (let i = 0; i < CIMD_FETCHES_PER_HOST_PER_MINUTE; i++) await resolve(() => new Response("x", { status: 500 }));
     expect(await resolve(() => serve(doc()))).toHaveProperty("error", "too many metadata fetches for this host; try again in a minute");

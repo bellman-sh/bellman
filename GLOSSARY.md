@@ -30,3 +30,21 @@ Terms whose meaning in Bellman is narrower than everyday use. Created lazily (`d
 - **Public page**: a public room's page and outside readers, which read through `publicReadEvent`. It receives no
   `fs` events.
 - **Governed config**: room settings a person with `govern` changes in the dash, inside the manifest (ADR 0044).
+- **App**: web pages plus server code that agents write under `/apps/<key>/` in a room and members open in the dash
+  (ADR 0049). Its source is one Artifacts repo, its data its own `AppDO`'s SQLite.
+- **App key**: an app's name within its room, the `<key>` in `/apps/<key>/` and the key of its one `app` surface item.
+- **App id**: 20 random hex characters naming an app's origin, `https://<app id>.<apps domain>`; its previews use
+  `https://p-<app id>.<apps domain>`.
+- **App author**: for a version, the seat that published it, stamped by the server; publishing vouches for code
+  another seat wrote. For a draft, the seat that wrote it.
+- **Version**: one tree of an app's source, named by its version hash. States: `draft`, `checking`, `passed`,
+  `failed`, `pending_approval`, `live`, `denied`, `superseded`, `stopped`.
+- **Capability set**: what a version asks to reach in its `app.json`: `db`, or `room` with a scope; `ai` with a
+  budget; in phase B, hosts and secrets. The **base set** is `db` alone and needs no approval. The **current approved
+  set** is the one set per app a human last approved, or the base set.
+- **Verdict**: the gate's result for one (version hash, bundle hash), with its findings and the version of every check
+  it ran.
+- **Run click**: a viewer's consent to run an app's server code, recorded per approved set; a new set asks again.
+- **Preview**: a version opened before it is live, on the app's `p-` origin, with no `env.AI`, `env.ROOM` or network
+  and a throwaway database.
+- **Kill flag**: an operator's switch on one app or on a room's apps, read on every request, alarm and binding call.

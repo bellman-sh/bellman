@@ -633,6 +633,13 @@ The room cost capture (#473) does not count home rooms: they have no `rooms` row
 the account's, reported to it alone (#531), never a room's or an org's. #526 ruled it; a per-account count is its own
 issue if billing ever needs one.
 
+**Room apps (ADR 0049, proposed)** keep their record in the room's `SessionDO` as `app:<key>`: the head version, the
+current approved set, verdicts, version states and kill flags. Everything else is per app. An `AppDO` makes every
+commit to the app's Artifacts repo, runs the gate from its alarm, and holds the app's SQLite database (`env.DB`), its
+log rings and its counters. Built bundles are R2 objects at `apps/<room>/<key>/<bundle hash>`, and `RegistryDO` maps
+`appid:<app id>` to the room and key. The apps Worker serves an app with one `SessionDO` read per request and writes
+nothing there except `env.ROOM` writes.
+
 ```mermaid
 flowchart LR
     BS["BellmanStore<br/>src/storage/store.ts<br/>every method async"]
@@ -1785,6 +1792,16 @@ human watching) or an outside caller, and every agent read of it leaves a lookup
 in the untrusted envelope, since an agent may have copied peer text into one. A room fact is written only when a seat
 holding `write_surface` approves a proposal that names its source, and a direct write under `/facts/` is refused.
 
+**An app acts as viewer ∩ author ∩ scope, and only a person widens its reach (ADR 0049, proposed).** App code that
+agents wrote runs in a Dynamic Worker on the apps domain, a separate site, framed by the dash. It sees no raw
+Cloudflare binding, no user id and no `Identity`: each request carries a 60-second token naming the viewer's seat, and
+every `env.ROOM` call must be allowed for the viewer, for the version's author and by the approved scope, with the
+memory rule applied to both seats and no own-account exemption. What an app may reach is a capability set a person
+approves from a dash session through a seat holding `govern`; an agent's tokens are refused there, and an action
+request or a vote cannot approve. The gate's LLM review is advisory against that boundary, never part of it. The
+viewer's session is a partitioned `__Host-` cookie the apps Worker strips before app code sees the request, and the
+apps Worker sets the CSP, refuses service workers, and drops every cookie without the `__Host-` prefix.
+
 **Room settings are written by people and read by agents as peer text (ADR 0044).** Governed config, room
 instructions first, is written only through `PUT /rooms/:id/config/:name` with a dash session cookie (a bearer token
 is refused even on a seat that holds `govern`), the request's Origin checked, and the caller's own seat holding
@@ -2359,6 +2376,14 @@ drop. Rolling forward again moves what the older build wrote into the table,
 appended after the rows already there with fresh seqs, so the object still
 wakes ([audit trail spec](superpowers/specs/2026-10-09-audit-trail-design.md),
 D5).
+
+**An app write spans two objects: commit, then record (ADR 0049, proposed).** The app's `AppDO` commits and pushes
+naming the head it expects, so Artifacts refuses a push whose branch moved; then `SessionDO` records the new head with
+its `fs` event and audit rows in one transaction. If the second step is lost, the next write finds a head the record
+does not name and adopts it from the `Bellman-Seat`, `Bellman-Base` and `Bellman-Change` trailers Bellman wrote, since
+only Bellman writes the repo; a head without them marks the app `diverged` for an operator. Publishing goes the other
+way and stays in one object: `publishApp` compares the verdict, the version and the approved set inside one `SessionDO`
+transaction.
 
 **Where it is not applied.** `DurableObjectStore.createSession` writes three
 registry indexes after the session commits, all outside the outbox and all

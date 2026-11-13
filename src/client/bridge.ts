@@ -29,6 +29,7 @@ import {
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import { resultData } from "./result-data.js";
+import { advance as advanceSeat, claim as claimSeat, hold as holdSeat, release as releaseSeat } from "./default-seats.js";
 import type { EventType } from "../types.js";
 import { compareVersions, VERSION } from "./version.js";
 
@@ -217,6 +218,12 @@ export interface BridgeOptions {
   bus?: BridgeBus;
   /** The upload target for bellman_upload. Absent, the tool is listed and refuses with a message. */
   upload?: UploadOptions;
+  /**
+   * Where this machine's bridges record the seats they take from repos' default rooms (src/client/default-seats.ts,
+   * #603), and where this one was started: a seat taken here by a bridge that is gone is taken back rather than a new
+   * one joined. Absent, every launch joins with a new seat, as before.
+   */
+  seats?: { file: string; url: string; cwd: string; alive?: (pid: number) => boolean };
   log?: (message: string) => void;
 }
 
@@ -1014,6 +1021,8 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   function persistMemberships(): void {
+    // A default-room seat's cursor, so a bridge that takes it back after this one is gone pages forward from here.
+    if (opts.seats) for (const id of boundSeats) advanceSeat(opts.seats.file, id, watches.get(id)?.delivered ?? 0);
     if (!inboxDir) return;
     writeMemberships(
       inboxDir,
@@ -1757,6 +1766,8 @@ export function createBridge(opts: BridgeOptions) {
       return undefined;
     }
     if (!(mine.read.repo_rooms ?? []).some((r) => r.remote === remoteUrl)) return undefined;
+    const back = await takeBack(remoteUrl);
+    if (back) return back;
     const got = await readOwn<{ connect_token?: unknown }>("/me/repo-rooms/connect", { remote: remoteUrl });
     let outcome: DoorJoin | undefined;
     if ("read" in got) {
@@ -1772,8 +1783,62 @@ export function createBridge(opts: BridgeOptions) {
       if (got.code !== "no_binding") log(`repo default room not read: ${got.status} ${got.code ?? ""}`.trim());
       return undefined;
     }
-    if (outcome.state === "joined") boundSeats.add(outcome.member_id);
+    if (outcome.state === "joined") {
+      boundSeats.add(outcome.member_id);
+      if (opts.seats) {
+        holdSeat(opts.seats.file, {
+          url: opts.seats.url, remote: remoteUrl, cwd: opts.seats.cwd, session_id: outcome.session_id,
+          member_id: outcome.member_id, role: outcome.role, verbs: outcome.verbs,
+          cursor: watches.get(outcome.member_id)?.delivered ?? 0, pid: process.pid,
+        });
+      }
+    }
     return outcome;
+  }
+
+  /**
+   * Take back the seat a bridge started here before this one left behind (#603): one recorded for this server, repo
+   * and directory whose bridge is gone. It is synced from its recorded cursor until the room has nothing newer, which
+   * arms it there as any bellman_sync does (`observe`), so what happened while no session held it is not delivered:
+   * a new seat would not have had it either. A seat the room no longer holds (left, removed, or the room closed) is
+   * forgotten, and the bridge joins with a new one. It never rejects.
+   */
+  async function takeBack(remoteUrl: string): Promise<DoorJoin | undefined> {
+    if (!opts.seats) return undefined;
+    const { file, url, cwd, alive } = opts.seats;
+    const seat = claimSeat(file, { url, remote: remoteUrl, cwd }, process.pid, alive);
+    if (!seat) return undefined;
+    try {
+      const connected = await remote();
+      let cursor = seat.cursor;
+      for (let page = 0; page < 200; page++) {
+        const args = { session_id: seat.session_id, member_id: seat.member_id, since_cursor: cursor };
+        const got = await connected.callTool({ name: "bellman_sync", arguments: args });
+        const out = (got.structuredContent ?? {}) as { cursor?: unknown; more?: unknown; removed?: unknown; left?: unknown; session_status?: unknown };
+        if (got.isError || out.removed === true || out.left === true || out.session_status === "closed") {
+          releaseSeat(file, seat.member_id);
+          return undefined;
+        }
+        cursor = Number(out.cursor ?? cursor);
+        if (out.more !== true) {
+          observe("bellman_sync", { ...args, since_cursor: cursor }, got);
+          break;
+        }
+      }
+    } catch (err) {
+      log(`taking back ${seat.member_id} failed, joining with a new seat: ${(err as Error).message}`);
+      releaseSeat(file, seat.member_id);
+      return undefined;
+    }
+    if (!watches.has(seat.member_id)) {
+      releaseSeat(file, seat.member_id);
+      return undefined;
+    }
+    boundSeats.add(seat.member_id);
+    log(`took back ${seat.member_id}, the seat a session started here before left in ${seat.session_id}`);
+    return (joined = {
+      state: "joined", session_id: seat.session_id, member_id: seat.member_id, role: seat.role, verbs: seat.verbs, from: "repo",
+    });
   }
 
   /**
@@ -1794,6 +1859,7 @@ export function createBridge(opts: BridgeOptions) {
           w.active = false;
           watches.delete(w.memberId);
           boundSeats.delete(w.memberId);
+          if (opts.seats) releaseSeat(opts.seats.file, w.memberId);
         }
       } catch (err) {
         log(`leaving ${w.memberId} at shutdown failed: ${(err as Error).message}`);

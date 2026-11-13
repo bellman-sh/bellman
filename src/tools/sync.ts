@@ -39,13 +39,14 @@ Args:
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll; the server holds the call until an event arrives or the wait ends. Use 15-20 when expecting a reply; some clients time out slow calls.
   - surface (default false): also return the working surface's front window (frame 1, or the newest items) with frames[] and next; bellman_surface reads further. Use it after a restart, or for the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own excluded; from.name is the sender's seat; an event addressed to other seats has to and ambient), cursor, session_status, more?, surface_cursor?, room_instructions_rev?, surface?, removed?, outstanding? }
+Returns: { events[] (untrusted envelopes, your own excluded; from.name is the sender's seat; an event addressed to other seats has to and ambient), cursor, session_status, more?, surface_cursor?, room_instructions_rev?, surface?, removed?, left?, outstanding? }
 Always pass the returned cursor next time; an empty page can advance it.
 more: true: the page was full (at most ${SYNC_PAGE} events); call again at once with the returned cursor.
 surface_cursor: the cursor of the surface's last change, once it has changed. A surface event in events[] carries the item that changed.
 room_instructions_rev: the room instructions' revision, once set. A page whose events[] holds their config_changed also carries room_instructions (untrusted envelope, as bellman_connect).
 outstanding: open action requests, present only when there are any. Each { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. mine: true is one YOU sent; mine: false waits on YOUR human: show it to them. An entry leaves when answered, declined, or expired (30 minutes after it was sent). An entry with decision: { kind, key, hash } is an open decision your seat votes on: ask your human, then answer it (bellman_decide vote, or action_response with hash and human_approved); it leaves once your human's vote is cast. It is not re-announced as an event.
-removed: true: a creator removed you. You still get the history up to and including the member_evicted event that removed you, and nothing after it; wait_seconds does not hold the request then. Stop polling this room. A removed member sees only surface items changed at or before its cut, and its surface_cursor is the last of those.`,
+removed: true: a creator removed you. You still get the history up to and including the member_evicted event that removed you, and nothing after it; wait_seconds does not hold the request then. Stop polling this room. A removed member sees only surface items changed at or before its cut, and its surface_cursor is the last of those.
+left: true: this handle is no longer in the room (it left, or its seat was reclaimed). Its feed still reads; it cannot send.`,
       inputSchema: {
         ...RoomRefShape,
         member_id: z.string().min(4),
@@ -385,6 +386,10 @@ removed: true: a creator removed you. You still get the history up to and includ
           // why among it. It rides the page that reaches the cut, and every poll
           // after, which is still every poll from past it.
           ...(cut !== undefined && !more ? { removed: true as const } : {}),
+          // A handle no longer in the room that a creator did not remove: it left, or its seat was reclaimed. Its feed
+          // still reads (R2), so nothing else in the answer says so, and a bridge taking back a seat a session left
+          // behind (#603) has to know it is not a seat any more.
+          ...(cut === undefined && !isActiveMember(me) ? { left: true as const } : {}),
           // Last, after the fields that say whether the feed has ended: `removed` is
           // the one field a client must never miss, and `surface` is the one block
           // that can be large (a window of at most SURFACE_PAGE, 64, items of up to

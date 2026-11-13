@@ -33,6 +33,11 @@ export function remoteOf(cwd: string, exec: Run = run): string | null {
 /**
  * The join at launch: from `BELLMAN_JOIN_CODE` when one is set, which wins; else from the cwd's repo's default room,
  * when it has a remote. Not awaited by the caller: a sign-in either may wait on must not hold up the handshake.
+ *
+ * Not from the default room in a headless Claude Code (`claude -p` and the Agent SDK set `CLAUDE_CODE_ENTRYPOINT` to
+ * `sdk-…`): that is a script, not a person's session. Another plugin's session summary runs `claude --model haiku -p`
+ * in the repo, and each run took a seat in the room and, exiting at once, left it behind (#603). A code is still
+ * honoured there: setting one is asking for the join.
  */
 export function launchJoin(
   bridge: { join(code: string, project: string): Promise<unknown>; joinBound(remote: string, project: string): Promise<unknown> },
@@ -40,11 +45,13 @@ export function launchJoin(
   cwd: string,
   project: string,
   find: (cwd: string) => string | null = remoteOf,
+  entrypoint: string | undefined = process.env.CLAUDE_CODE_ENTRYPOINT,
 ): void {
   if (code) {
     void bridge.join(code, project);
     return;
   }
+  if (entrypoint?.startsWith("sdk-")) return;
   const remote = find(cwd);
   if (remote) void bridge.joinBound(remote, project);
 }

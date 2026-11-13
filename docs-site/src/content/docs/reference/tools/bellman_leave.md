@@ -9,6 +9,8 @@ description: "Leave a Bellman session"
 
 Leave the room; members get a departure event. The room closes when its last member leaves.  
 
+member_id is any seat your account holds in the room, not only this session's: a seat a session that ended left behind is cleared this way (bellman_evict refuses your own seats).  
+
 Args: session_id, member_id  
 Returns: { left: true, session_status }  
 

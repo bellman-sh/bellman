@@ -215,7 +215,7 @@ describe("bellman_evict", () => {
   describe("what a refusal says", () => {
     // The wording lives in evictMember, which serves every transport, and the
     // handler only relays it. A tool name appended here would be advice that only
-    // an MCP caller can act on; an agent reading "leave the room" already knows
+    // an MCP caller can act on; an agent reading "Leave it instead" already knows
     // which tool does that.
     it("tells a creator removing themselves to leave, in words that name no tool", async () => {
       const s = await pairUp(h);
@@ -226,7 +226,7 @@ describe("bellman_evict", () => {
       });
 
       expect(out.isError).toBe(true);
-      expect(out.text).toContain("leave the room");
+      expect(out.text).toContain("Leave it instead");
       expect(out.text).not.toContain("bellman_");
       // Refused means nothing was written: they are still in.
       const room = await h.store.getSession(s.sessionId);

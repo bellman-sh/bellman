@@ -61,6 +61,7 @@
  */
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
+import { seatsFile } from "./default-seats.js";
 import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { doorOwnerPathFor, doorPathFor, linkDoor, startDoor, unlinkDoor } from "./door.js";
@@ -166,6 +167,8 @@ const bridge = createBridge({
    * BELLMAN_BUS off it is never asked for: no option at all is what a bridge had before the bus.
    */
   ...(busOn ? { bus: { url, ...busCredentials(url, key) } } : {}),
+  /** A repo default room's seat, taken back on the next launch here if this bridge dies holding it (#603). */
+  seats: { file: seatsFile(), url, cwd: process.cwd() },
   log,
 });
 

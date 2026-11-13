@@ -516,6 +516,15 @@ export default {
      * that list (see SocketAttachment in session-do.ts), and this is what keeps
      * it trustworthy: a list a client could write would keep any member it
      * named out of every seat reclaim.
+     *
+     * A client may name the members it watches (`members=m_a,m_b`, #603), and
+     * that is not a list it writes: it is cut to what membersOf answered, so it
+     * can narrow the identity's members and never add one. Without it a socket
+     * vouched for every seat its account held in the room, so one live bridge
+     * kept that account's dead seats present for good (113 of them, in one
+     * room). A named list goes to the object marked exact, and is read as it
+     * stands; no list (a bridge before #603) is the identity's whole roster, as
+     * it always was.
      */
     if (url.pathname === "/ws") {
       // A handshake is a GET (RFC 6455 section 4.1). Given any other method,
@@ -568,10 +577,15 @@ export default {
       if (refused) return new Response(SUSPENDED, { status: 403 });
 
       const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
-      const { memberIds, closed } = await stub.membersOf(identity.userId);
+      const owned = await stub.membersOf(identity.userId);
+      const { closed } = owned;
+      const named = url.searchParams.get("members");
+      const watched = named === null ? null : new Set(named.split(","));
+      const memberIds = watched === null ? owned.memberIds : owned.memberIds.filter((id) => watched.has(id));
       // An unknown room and a closed one both come back closed from membersOf,
       // so a caller who owns no member here cannot tell them apart: both are
-      // 404. An open room it owns nothing in is 403.
+      // 404. An open room it owns nothing in is 403, and so is one where it
+      // named only members that are not its own.
       if (memberIds.length === 0) {
         return new Response(closed ? "Not found" : "Forbidden", { status: closed ? 404 : 403 });
       }
@@ -585,7 +599,11 @@ export default {
       // room to a stranger, and not upgrading a caller who owns nothing here.
       return stub.fetch(
         new Request(`https://session/ws?cursor=${cursor}`, {
-          headers: { upgrade: "websocket", "x-bellman-members": memberIds.join(",") },
+          headers: {
+            upgrade: "websocket",
+            "x-bellman-members": memberIds.join(","),
+            ...(watched === null ? {} : { "x-bellman-exact": "1" }),
+          },
         })
       );
     }

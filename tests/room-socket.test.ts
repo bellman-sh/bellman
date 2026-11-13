@@ -163,6 +163,12 @@ describe("roomSocketUrl", () => {
   ])("%s, room %s, cursor %i: %s", (server, session, cursor, expected) => {
     expect(roomSocketUrl(server, session, cursor)).toBe(expected);
   });
+
+  it("names the members it watches, when it has any, so the socket vouches for those alone (#603)", () => {
+    expect(roomSocketUrl("https://h.example/mcp?members=m_x", "qs_1", 1, ["m_a", "m_b"]))
+      .toBe("wss://h.example/ws?session=qs_1&cursor=1&members=m_a%2Cm_b");
+    expect(roomSocketUrl("https://h.example/mcp?members=m_x", "qs_1", 1, [])).toBe("wss://h.example/ws?session=qs_1&cursor=1");
+  });
 });
 
 describe("backoffDelay", () => {
@@ -276,6 +282,28 @@ describe("the upgrade (D2)", () => {
       authorization: "Bearer qk_test_me",
       answered: 101,
     });
+  });
+
+  it("names the members it watches as they are at each attempt, and reconnects when asked to (#603)", async () => {
+    let members = ["m_a"];
+    const { socket, events } = open({ members: () => members });
+    await until(() => socket.state === "open", "the socket to open");
+    room.append();
+    await until(() => events.length === 1, "the first event");
+
+    members = ["m_a", "m_b"];
+    socket.reconnect();
+    await until(() => rooms.upgrades.length === 2 && rooms.sockets.length === 1 && socket.state === "open", "the second socket");
+    room.append();
+    room.append();
+    await until(() => events.length === 3, "the events after it");
+
+    expect(rooms.upgrades.map((u) => u.target)).toEqual([
+      "/ws?session=qs_room1&cursor=0&members=m_a",
+      "/ws?session=qs_room1&cursor=1&members=m_a%2Cm_b",
+    ]);
+    expect(cursors(events)).toEqual([1, 2, 3]); // the second asked from where the first got to: nothing twice, nothing lost
+    expect(socket.state).toBe("open");
   });
 
   it("says it is open once the handshake completes, and not before", async () => {

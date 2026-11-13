@@ -205,7 +205,7 @@ describe("GET /ws", () => {
   // request. If the field stops being read, this can go with it.
   it("hands the object a request built here, carrying no client header", async () => {
     const { call, asked } = await world({ memberIds: ["m1", "m3"], closed: false });
-    await call("https://b/ws?session=qs_1&cursor=7&members=m_someone_else", {
+    await call("https://b/ws?session=qs_1&cursor=7", {
       ...AUTH,
       // A caller trying to claim a membership it was not granted.
       "x-bellman-members": "m_someone_else",
@@ -222,6 +222,28 @@ describe("GET /ws", () => {
     // The two named above are the ones this case thought of. This is the rest:
     // whatever else the caller sent, the object sees what the Worker decided.
     expect([...sent.headers.keys()].sort()).toEqual(["upgrade", "x-bellman-members"]);
+  });
+
+  // #603. One live bridge vouched for every seat its account held in the room, the dead ones
+  // included, so a client may now say which members it watches. It can only narrow: the list
+  // is cut to what membersOf answered, and what is left is all the object is handed.
+  it("vouches only for the members the client names, of those its identity owns (#603)", async () => {
+    const { call, asked, reached } = await world({ memberIds: ["m1", "m3"], closed: false });
+    expect((await call("https://b/ws?session=qs_1&cursor=0&members=m3,m_someone_else", AUTH)).status).toBe(101);
+    expect(asked[0].headers.get("x-bellman-members")).toBe("m3");
+    expect(asked[0].headers.get("x-bellman-exact"), "a named list is read as it stands").toBe("1");
+
+    expect((await call("https://b/ws?session=qs_1&cursor=0&members=m_someone_else", AUTH)).status).toBe(403);
+    expect(reached, "naming only another's member is owning nothing here").toEqual([
+      "membersOf qs_1 u1", "fetch qs_1", "membersOf qs_1 u1",
+    ]);
+  });
+
+  it("vouches for every member the identity owns when the client names none, as a bridge before #603 does", async () => {
+    const { call, asked } = await world({ memberIds: ["m1", "m3"], closed: false });
+    expect((await call(ROOM, AUTH)).status).toBe(101);
+    expect(asked[0].headers.get("x-bellman-members")).toBe("m1,m3");
+    expect(asked[0].headers.get("x-bellman-exact")).toBeNull();
   });
 
   it("asks about the identity it authenticated, and refuses another on the same room", async () => {

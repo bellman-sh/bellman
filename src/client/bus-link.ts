@@ -301,6 +301,10 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
         url: opts.url,
         credential: opts.bearer,
         sessionId,
+        // Who the socket is for, as the bus has them at each attempt (#603): the server vouches for these and
+        // no other seat of the identity, so a session that died stops reading present when its member goes
+        // from the bus. A departed handle is left out, as `pollFor` leaves it out.
+        members: () => coordinator.members(sessionId).filter((memberId) => !opts.departed(memberId)),
         cursor,
         onEvent: (event) => coordinator.ingest(event),
         poll: pollFor(slot, sessionId),
@@ -364,6 +368,7 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
         syncFrom,
         onRoomOpen: (sessionId, cursor) => openUpstream(slot, sessionId, cursor),
         onRoomClose: (sessionId) => closeUpstream(slot, sessionId),
+        onRoomMembers: (sessionId) => slot.upstreams.get(sessionId)?.reconnect(),
         root: opts.root,
         platform: opts.platform,
         ackTimeoutMs: opts.ackTimeoutMs,

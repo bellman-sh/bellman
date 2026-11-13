@@ -978,6 +978,30 @@ describe.each(["coordinator", "subscriber"] as const)("delivery through a %s", (
     expect(coord.stats().rooms).toEqual({});
   });
 
+  it("says when the members watching an open room change, and not when they do not (#603)", async () => {
+    const changes: string[] = [];
+    const closes: string[] = [];
+    const { coord, via } = await rig(role, {
+      onRoomMembers: (session) => changes.push(`${session} ${coord.members(session).join(",")}`),
+      onRoomClose: (session) => closes.push(session),
+    });
+    const a = via.subscribe(ROOM, "m_a", 0, recorder().handlers);
+    await vi.waitFor(() => expect(coord.stats().rooms[ROOM]?.subscribers).toBe(1));
+    expect(changes).toEqual([]); // the room opening is onRoomOpen's, not this
+
+    via.subscribe(ROOM, "m_b", 0, recorder().handlers);
+    await vi.waitFor(() => expect(changes).toEqual([`${ROOM} m_a,m_b`]));
+    const b = via.subscribe(ROOM, "m_b", 0, recorder().handlers); // the same member again: nobody new
+    await pause();
+    expect(changes).toHaveLength(1);
+
+    a.unsubscribe();
+    await vi.waitFor(() => expect(changes).toEqual([`${ROOM} m_a,m_b`, `${ROOM} m_b`]));
+    b.unsubscribe();
+    await vi.waitFor(() => expect(closes).toEqual([ROOM]));
+    expect(changes).toHaveLength(2); // the last one out closes the room, which says so itself
+  });
+
   it("replaces an earlier subscription for the same member, without ending it and without a second room", async () => {
     const opens: Array<[string, number]> = [];
     const closes: string[] = [];

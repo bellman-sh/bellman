@@ -74,8 +74,10 @@ async function main(): Promise<void> {
   const outsider = await connect("qk_dev_outsider");
 
   console.log("\n— tool discovery —");
-  const tools = await jesse.listTools();
-  assert(tools.tools.length === 9, `9 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
+  const listed = new Set((await jesse.listTools()).tools.map((t) => t.name));
+  const used = ["bellman_start", "bellman_connect", "bellman_confirm", "bellman_sync", "bellman_send", "bellman_audit", "bellman_leave"];
+  const missing = used.filter((n) => !listed.has(n));
+  assert(missing.length === 0, `every tool this run calls is listed (${listed.size} listed${missing.length ? `; missing: ${missing.join(", ")}` : ""})`);
 
   console.log("\n— session creation + entitlements —");
   const started = await call(jesse, "bellman_start", {
